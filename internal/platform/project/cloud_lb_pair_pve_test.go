@@ -16,6 +16,7 @@ func TestLBPairStatus(t *testing.T) {
 	down := func(id, reason string) lbAppliance {
 		return lbAppliance{ServerID: id, State: lbAppDown, Reason: reason, HAProxyHash: "h"}
 	}
+	building := lbAppliance{ServerID: "2", State: lbAppBuilding, Reason: "it is installing HAProxy and keepalived"}
 	for _, c := range []struct {
 		name   string
 		apps   []lbAppliance
@@ -35,8 +36,32 @@ func TestLBPairStatus(t *testing.T) {
 		{"first build past the limit", []lbAppliance{{ServerID: "1", State: lbAppBuilding}, {ServerID: "2", State: lbAppBuilding}}, true, lbStatusError, "keepalived"},
 		{"only one appliance in the row (replace)", []lbAppliance{up("1", true)}, false, lbStatusDegraded, "no standby"},
 	} {
-		status, msg := lbPairStatus(c.apps, c.stuck)
+		status, msg := lbPairStatus(c.apps, c.stuck, false)
 		if status != c.status || !strings.Contains(msg, c.says) {
+			t.Errorf("%s: %s %q", c.name, status, msg)
+		}
+	}
+	// The remedy fits the cause (drill N2-5): Replace appliances is named only when an appliance is missing. A stopped
+	// service, a stopped VM and a first build are put right by the platform, and nothing is missing.
+	for _, c := range []struct {
+		name      string
+		apps      []lbAppliance
+		replacing bool
+		says, not string
+	}{
+		{"keepalived stopped", []lbAppliance{up("1", true), down("2", "keepalived is stopped")}, false, "appliance 2: keepalived is stopped). The platform puts the other one right", "missing"},
+		{"HAProxy stopped", []lbAppliance{up("1", true), down("2", "HAProxy is not running")}, false, "appliance 2: HAProxy is not running). The platform puts", "missing"},
+		{"HAProxy runs another config", []lbAppliance{up("1", true), down("2", "HAProxy does not serve its configuration")}, false, "does not serve its configuration", "missing"},
+		{"VM stopped", []lbAppliance{up("1", true), down("2", "its VM is stopped; starting it")}, false, "starting it). The platform puts", "missing"},
+		{"the second still installs", []lbAppliance{up("1", true), building}, false, "still being prepared", "Replace appliances"},
+		{"one gone", []lbAppliance{up("1", true), {ServerID: "2", State: lbAppGone, Reason: "its VM is gone"}}, false, "builds the missing one again", "next pass"},
+		{"one appliance in the row", []lbAppliance{up("1", true)}, false, "builds the missing one again", "next pass"},
+		// During a replace (drill N2-7: the row read ACTIVE with one appliance listed).
+		{"replace took the old one out", []lbAppliance{up("1", true)}, true, "while the other is being replaced.", "Replace appliances"},
+		{"replace: the new one boots", []lbAppliance{up("1", true), {ServerID: "2", State: lbAppBuilding, Reason: "it is booting"}}, true, "being replaced (appliance 2: it is booting)", "Replace appliances"},
+	} {
+		status, msg := lbPairStatus(c.apps, false, c.replacing)
+		if status != lbStatusDegraded || !strings.Contains(msg, c.says) || strings.Contains(msg, c.not) {
 			t.Errorf("%s: %s %q", c.name, status, msg)
 		}
 	}

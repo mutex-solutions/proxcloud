@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-22: a load balancer's config is recorded only when the appliance serves it
+
+**What changed:** no new component, container or relation. Inside `internal/cloud/pve` the appliance's apply
+(`haproxyReload`, `lbKeepalivedApply`) now proves what it did before it answers: HAProxy is started when stopped and
+reloaded through its master socket in every case, and every `bind` of the pushed file must be a listening socket of
+HAProxy (`lbServingFn`); keepalived must run after its change; files the guest agent wrote get root and 0644 (scripts
+0755). An appliance is ready when dpkg reports the packages installed, no package manager runs and the units exist
+(`lbReadyScript`). `ReadVRRPState` and the new `HAProxyServing` report whether HAProxy listens on every bind of its
+config, and `LBHealth` the listeners and members the running HAProxy does not hold. In `internal/platform/project`
+the converge (`lbApplyLocked`, `lbApplyPair`) asks every appliance with a recorded hash what it runs and pushes again
+where a service is stopped or runs another config than its file, and records the pair's own hash only when an appliance is up with
+the config; `lbPairStatus` names the cause and its remedy; `lbTakeOut` and `lbPutIn` state the row's status again
+during a replace.
+
+**Why:** the drill of v0.11.0-rc.1 (findings N2-2, N2-5, N2-6, N2-7): a pair refused every connection for 458 s after
+Replace appliances while its row read `ACTIVE`, because the first config push met the haproxy package's own first
+start and its hash was recorded without HAProxy ever loading the file.
+
+**Diagrams:** none (the C4.2a table's rows of `PushHAProxy`, `lbApplyPair` and `lbReplace`).
+
 ## 2026-11-21: new clusters are offered the product load balancer
 
 **What changed:** no new component, container or relation. The platform BOM pins cluster chart 0.1.17 for tenant

@@ -160,17 +160,19 @@ func TestRenderKeepalived(t *testing.T) {
 
 func TestParseVRRPState(t *testing.T) {
 	for out, want := range map[string]VRRPState{
-		"MASTER 1 1\n":  {State: "MASTER", HAProxy: true, HoldsVIP: true},
-		"BACKUP 1 0":    {State: "BACKUP", HAProxy: true},
-		"FAULT 0 0":     {State: "FAULT"},
-		"STOP 1 0":      {State: "STOPPED", HAProxy: true},
-		"STOPPED 1 1":   {State: "STOPPED", HAProxy: true, HoldsVIP: true},
-		"UNKNOWN 1 0":   {State: "UNKNOWN", HAProxy: true},
-		"weird 1 1":     {State: "UNKNOWN", HAProxy: true, HoldsVIP: true},
-		"":              {State: "UNKNOWN"},
-		"MASTER 1 1 x":  {State: "UNKNOWN"},
-		"MASTER\n1\n1":  {State: "MASTER", HAProxy: true, HoldsVIP: true},
-		"BACKUP 0 1\n ": {State: "BACKUP", HoldsVIP: true},
+		"MASTER 1 1 1\n":  {State: "MASTER", HAProxy: true, HoldsVIP: true, Serving: true},
+		"MASTER 1 1 0\n":  {State: "MASTER", HAProxy: true, HoldsVIP: true}, // the drill's appliance: a worker, the address, no listener
+		"BACKUP 1 0 1":    {State: "BACKUP", HAProxy: true, Serving: true},
+		"FAULT 0 0 0":     {State: "FAULT"},
+		"STOP 1 0 1":      {State: "STOPPED", HAProxy: true, Serving: true},
+		"STOPPED 1 1 1":   {State: "STOPPED", HAProxy: true, HoldsVIP: true, Serving: true},
+		"UNKNOWN 1 0 1":   {State: "UNKNOWN", HAProxy: true, Serving: true},
+		"weird 1 1 1":     {State: "UNKNOWN", HAProxy: true, HoldsVIP: true, Serving: true},
+		"":                {State: "UNKNOWN"},
+		"MASTER 1 1":      {State: "UNKNOWN"}, // an answer without the serving word is no answer
+		"MASTER 1 1 1 x":  {State: "UNKNOWN"},
+		"MASTER\n1\n1\n1": {State: "MASTER", HAProxy: true, HoldsVIP: true, Serving: true},
+		"BACKUP 0 1 0\n ": {State: "BACKUP", HoldsVIP: true},
 	} {
 		if got := ParseVRRPState(out); got != want {
 			t.Errorf("%q = %+v, want %+v", out, got, want)

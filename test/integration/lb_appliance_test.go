@@ -1,0 +1,357 @@
+//go:build integration
+
+package integration
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+)
+
+// guestAgent is the Proxmox guest agent API of one VM, served by a container that runs systemd as the appliance's
+// image does: exec runs the command in the guest, file-write creates the file with mode 0666 as the real agent does
+// (drill N2-6), and exec-status answers when the command ended. Nothing of the guest is modelled: HAProxy, keepalived,
+// systemd, dpkg and ss are the distribution's own.
+type guestAgent struct {
+	t    *testing.T
+	c    testcontainers.Container
+	mu   sync.Mutex
+	runs map[int]*guestRun
+}
+
+type guestRun struct {
+	done     bool
+	code     int
+	out, err string
+}
+
+// sh runs a command in the guest and answers its exit code, stdout and stderr.
+func (g *guestAgent) sh(ctx context.Context, tag string, args ...string) (int, string, string) {
+	errFile := "/tmp/agent-" + tag + ".err"
+	code, r, err := g.c.Exec(ctx, append([]string{"sh", "-c", `"$@" 2>"$0"`, errFile}, args...), tcexec.Multiplexed())
+	if err != nil {
+		return -1, "", err.Error()
+	}
+	out, _ := io.ReadAll(r)
+	_, r, err = g.c.Exec(ctx, []string{"cat", errFile}, tcexec.Multiplexed())
+	stderr := []byte{}
+	if err == nil {
+		stderr, _ = io.ReadAll(r)
+	}
+	return code, string(out), string(stderr)
+}
+
+// run is a test's own command in the guest; it must succeed.
+func (g *guestAgent) run(ctx context.Context, cmd string) string {
+	g.t.Helper()
+	code, out, stderr := g.sh(ctx, "test", "sh", "-c", cmd)
+	if code != 0 {
+		g.t.Fatalf("%s: exit %d\n%s\n%s", cmd, code, out, stderr)
+	}
+	return strings.TrimSpace(out)
+}
+
+func (g *guestAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	write := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
+	const base = "/api2/json/nodes/n1/qemu/100/agent/"
+	switch r.Method + " " + strings.TrimPrefix(r.URL.Path, base) {
+	case "POST exec":
+		g.mu.Lock()
+		pid := len(g.runs) + 1
+		run := &guestRun{}
+		g.runs[pid] = run
+		g.mu.Unlock()
+		args := r.Form["command"]
+		go func() {
+			code, out, stderr := g.sh(context.Background(), strconv.Itoa(pid), args...)
+			g.mu.Lock()
+			run.done, run.code, run.out, run.err = true, code, out, stderr
+			g.mu.Unlock()
+		}()
+		write(map[string]any{"pid": pid})
+	case "GET exec-status":
+		pid, _ := strconv.Atoi(r.Form.Get("pid"))
+		g.mu.Lock()
+		run := *g.runs[pid]
+		g.mu.Unlock()
+		if !run.done {
+			write(map[string]any{"exited": 0})
+			return
+		}
+		write(map[string]any{"exited": 1, "exitcode": run.code, "out-data": run.out, "err-data": run.err})
+	case "POST file-write":
+		if err := g.c.CopyToContainer(r.Context(), []byte(r.Form.Get("content")), r.Form.Get("file"), 0o666); err != nil {
+			g.t.Errorf("file-write %s: %v", r.Form.Get("file"), err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		write(nil)
+	default:
+		g.t.Errorf("reached PVE: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotImplemented)
+	}
+}
+
+const (
+	// lbPackageConfig stands for the config the haproxy package ships: no proxy of anyone's.
+	lbPackageConfig = "global\n  stats socket /run/haproxy/admin.sock mode 660 level admin\n\ndefaults\n  mode http\n  timeout connect 5s\n  timeout client 50s\n  timeout server 50s\n"
+	// lbPackageStart puts HAProxy where the package's own first start has it while dpkg still configures the package
+	// (drill N2-2, d5-diag-127.txt): the process has read the package's config, and the unit is still "activating".
+	lbPackageStart = `systemctl stop haproxy
+cat > /etc/haproxy/haproxy.cfg <<'EOF'
+` + lbPackageConfig + `EOF
+mkdir -p /etc/systemd/system/haproxy.service.d
+printf '[Service]\nExecStartPost=/bin/sleep 6\n' > /etc/systemd/system/haproxy.service.d/slow.conf
+systemctl daemon-reload
+systemctl start --no-block haproxy
+n=0; until [ -S /run/haproxy-master.sock ] && [ "$(systemctl is-active haproxy)" = activating ]; do n=$((n+1)); [ $n -lt 50 ] || exit 1; sleep 0.1; done`
+	// lbRC1Apply is the apply of v0.11.0-rc.1, the control: on a start that is under way it answers 0 and HAProxy
+	// keeps the package's config.
+	lbRC1Apply = `set -e
+F=/etc/haproxy/haproxy.cfg
+haproxy -c -q -f $F.new
+cp $F $F.old
+mv $F.new $F
+swap() {
+  systemctl is-active -q haproxy || { systemctl start haproxy; return; }
+  out=$(printf 'reload\n' | socat -t30 - /run/haproxy-master.sock)
+  case "$out" in Success=1*) ;; *) echo "$out" | grep ALERT >&2; return 1 ;; esac
+}
+swap || { mv $F.old $F; swap; exit 1; }`
+	lbListening = `ss -Hltnp | awk '/"haproxy"/{print $4}' | sort -u | tr '\n' ' '`
+)
+
+// An appliance's config is recorded only when the running HAProxy serves it. The guest is a real one of each image an
+// appliance is built from, with the distribution's systemd, dpkg, HAProxy and keepalived; the product's own calls
+// (PushKeepalived, PushPairHAProxy, PushHAProxy, ReadVRRPState, HAProxyServing, LBHealth) reach it through the guest
+// agent API. Shown: the first push through the product's own install, never taken before dpkg is done; the package's
+// first start still under way, where the apply of v0.11.0-rc.1 answered success with nothing listening; a stopped
+// HAProxy and a stopped keepalived on a running guest; an apply whose proof fails; the single appliance's config; and
+// the mode of every file the agent wrote.
+func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
+	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
+		t.Run(image, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+			defer cancel()
+			// systemd as PID 1, and no policy-rc.d: on a VM a package's postinst starts its service.
+			c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+				ContainerRequest: testcontainers.ContainerRequest{
+					Image:      image,
+					Cmd:        []string{"sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd-sysv procps >/dev/null 2>&1 && rm -f /usr/sbin/policy-rc.d && exec /sbin/init"},
+					Privileged: true,
+					Tmpfs:      map[string]string{"/run": "", "/run/lock": ""},
+				},
+				Started: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.Terminate(context.Background()) })
+			g := &guestAgent{t: t, c: c, runs: map[int]*guestRun{}}
+			for deadline := time.Now().Add(5 * time.Minute); ; time.Sleep(2 * time.Second) {
+				if code, out, _ := g.sh(ctx, "boot", "systemctl", "is-system-running"); code == 0 || strings.TrimSpace(out) == "degraded" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("systemd did not come up in the container")
+				}
+			}
+			srv := httptest.NewServer(g)
+			defer srv.Close()
+			ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			self, err := c.ContainerIP(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The peer does not exist, so this appliance takes the address by itself. The public side is lo, as in
+			// TestLBPairConfigsPassTheirChecks: the container has one interface.
+			const vip = "203.0.113.10"
+			peer := self[:strings.LastIndexByte(self, '.')] + ".250"
+			keepalived, err := pve.RenderKeepalived(pve.LBKeepalived{RouterID: 42, Self: self, Peer: peer, TenantIface: "eth0", PublicIface: "lo",
+				VIPs: []string{vip}, Prefix: 24, Gateway: "203.0.113.1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := func(ports ...int) pve.LBSpec {
+				s := pve.LBSpec{Pools: []pve.LBPool{{Name: "web", Protocol: "http", Algorithm: "roundrobin",
+					Members: []pve.LBMember{{ServerID: "101", Port: 8080, Weight: 1, Address: "10.0.0.11"}}}}}
+				for _, p := range ports {
+					s.Listeners = append(s.Listeners, pve.LBListener{Port: p, Pool: "web"})
+				}
+				return s
+			}
+			pair := pve.RenderHAProxyOn(spec(80), []string{vip})
+			state := func() pve.VRRPState {
+				t.Helper()
+				st, err := ps.ReadVRRPState(ctx, "n1", 100, vip)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return st
+			}
+			listens := func(when, want string) {
+				t.Helper()
+				if got := g.run(ctx, lbListening); got != want {
+					t.Fatalf("%s: HAProxy listens on %q, want %q", when, got, want)
+				}
+			}
+
+			// 1. The first push, through the product's own install line. Asked as fast as the agent answers, so the
+			// push lands as early as the ready check lets it. Every refusal while the binaries already exist is one
+			// the check of v0.11.0-rc.1 (command -v) would have let through, into dpkg's configure.
+			early := 0
+			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(200 * time.Millisecond) {
+				err := ps.PushKeepalived(ctx, "n1", 100, keepalived, "lo")
+				if err == nil {
+					err = ps.PushPairHAProxy(ctx, "n1", 100, pair)
+				}
+				if err == nil {
+					break
+				}
+				if !errors.Is(err, pve.ErrLBNotReady) {
+					t.Fatalf("first push: %v", err)
+				}
+				if code, _, _ := g.sh(ctx, "early", "sh", "-c", "command -v haproxy && command -v socat && command -v keepalived"); code == 0 {
+					early++
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the appliance did not become ready: %v", err)
+				}
+			}
+			t.Logf("%s; %s; refused %d times while the binaries were already there",
+				g.run(ctx, "haproxy -v | head -1"), g.run(ctx, "keepalived --version 2>&1 | head -1"), early)
+			listens("after the first push", vip+":80")
+			if st := state(); !st.HAProxy || !st.Serving {
+				t.Fatalf("after the first push: %+v", st)
+			}
+			if got := g.run(ctx, "dpkg-query -W -f='${Status}' haproxy"); got != "install ok installed" {
+				t.Fatalf("pushed while dpkg said %q", got)
+			}
+
+			// 2. The drill's race, held still: the package's own start has read the package's config and is not done.
+			// The control first: rc.1's apply answers 0, nothing listens, and the state read now says so.
+			g.run(ctx, lbPackageStart)
+			if err := g.c.CopyToContainer(ctx, []byte(pair), "/etc/haproxy/haproxy.cfg.new", 0o666); err != nil {
+				t.Fatal(err)
+			}
+			if code, _, stderr := g.sh(ctx, "rc1", "sh", "-c", lbRC1Apply); code != 0 {
+				t.Fatalf("control: rc.1's apply failed, so this is not the drill's case: %s", stderr)
+			}
+			listens("control: after rc.1's apply", "")
+			if st := state(); !st.HAProxy || st.Serving {
+				t.Fatalf("control: a master with a worker and no listener must read as running and not serving: %+v", st)
+			}
+			if _, notLoaded, err := ps.LBHealth(ctx, "n1", 100, spec(80)); err != nil || len(notLoaded) != 1 || notLoaded[0] != "80" {
+				t.Fatalf("control: health of an appliance on the package's config: %q %v", notLoaded, err)
+			}
+			// The same start, and the product's apply: it waits for the start, reloads, and listens.
+			g.run(ctx, lbPackageStart)
+			if err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
+				t.Fatalf("push during the package's start: %v", err)
+			}
+			listens("after a push during the package's start", vip+":80")
+			if got := g.run(ctx, `echo "show proc" | socat - /run/haproxy-master.sock | awk '$2=="master"{print $3}'`); got == "0" {
+				t.Fatalf("HAProxy's master counts no reload: it runs what it started with")
+			}
+			g.run(ctx, "rm /etc/systemd/system/haproxy.service.d/slow.conf && systemctl daemon-reload")
+
+			// 3. A service stopped on a running guest: the state read says which, the same push starts it.
+			g.run(ctx, "systemctl stop haproxy")
+			if st := state(); st.HAProxy || st.Serving {
+				t.Fatalf("HAProxy stopped: %+v", st)
+			}
+			if err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
+				t.Fatalf("push with HAProxy stopped: %v", err)
+			}
+			listens("after a push with HAProxy stopped", vip+":80")
+			g.run(ctx, "systemctl stop keepalived")
+			if st := state(); st.State != "STOPPED" {
+				t.Fatalf("keepalived stopped: %+v", st)
+			}
+			if err := ps.PushKeepalived(ctx, "n1", 100, keepalived, "lo"); err != nil {
+				t.Fatalf("push with keepalived stopped: %v", err)
+			}
+			for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+				if st := state(); st.State == "MASTER" && st.HoldsVIP && st.HAProxy && st.Serving {
+					break
+				} else if time.Now().After(deadline) {
+					t.Fatalf("keepalived did not take the address again: %+v", st)
+				}
+			}
+
+			// 4. The proof fails: HAProxy answers the reload and does not run the pushed file (here it is started on
+			// another one). Not applied, said why, and the file in use before is back.
+			g.run(ctx, "cp /etc/haproxy/haproxy.cfg /etc/haproxy/other.cfg && echo CONFIG=/etc/haproxy/other.cfg >> /etc/default/haproxy && systemctl restart haproxy")
+			err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8081), []string{vip}))
+			if err == nil || errors.Is(err, pve.ErrLBNotReady) || !strings.Contains(err.Error(), "does not listen on "+vip+":8081") {
+				t.Fatalf("push HAProxy does not load: %v", err)
+			}
+			if got := g.run(ctx, "grep -c 8081 /etc/haproxy/haproxy.cfg || true"); got != "0" {
+				t.Fatalf("the file that was not loaded stayed in place")
+			}
+			g.run(ctx, "sed -i '/^CONFIG=/d' /etc/default/haproxy && systemctl restart haproxy")
+			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8081), []string{vip})); err != nil {
+				t.Fatalf("push once HAProxy loads its file again: %v", err)
+			}
+			listens("after the second listener", vip+":80 "+vip+":8081")
+			health, notLoaded, err := ps.LBHealth(ctx, "n1", 100, spec(80, 8081))
+			if err != nil || len(notLoaded) != 0 || len(health) != 1 || health[0].Status == "" || health[0].Status == pve.LBNotLoaded {
+				t.Fatalf("health of a serving appliance: %+v %q %v", health, notLoaded, err)
+			}
+
+			// 5. A single appliance's config binds every address.
+			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
+				t.Fatalf("single appliance: %v", err)
+			}
+			listens("single appliance", "0.0.0.0:80")
+			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100); err != nil || !ok {
+				t.Fatalf("single appliance serving: %v %q %v", ok, why, err)
+			}
+			g.run(ctx, "systemctl stop haproxy")
+			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100); err != nil || ok || why != "HAProxy is not running" {
+				t.Fatalf("single appliance stopped: %v %q %v", ok, why, err)
+			}
+			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
+				t.Fatalf("single appliance, HAProxy stopped: %v", err)
+			}
+			listens("single appliance started again", "0.0.0.0:80")
+
+			// 6. The agent made every file 0666 (the control; /tmp is a mount docker cp does not reach); what the
+			// product left is root's, 0644, scripts 0755.
+			if err := g.c.CopyToContainer(ctx, []byte("x"), "/root/agent-wrote", 0o666); err != nil {
+				t.Fatal(err)
+			}
+			if got := g.run(ctx, "stat -c %a /root/agent-wrote"); got != "666" {
+				t.Fatalf("control: the agent's file has mode %s", got)
+			}
+			want := map[string]string{
+				"/etc/haproxy/haproxy.cfg": "644", "/etc/haproxy/haproxy.cfg.old": "644", "/etc/keepalived/keepalived.conf": "644",
+				"/etc/sysctl.d/90-proxcloud-lb.conf": "644", "/etc/systemd/system/keepalived.service.d/proxcloud.conf": "644",
+				"/usr/local/sbin/proxcloud-lb-check": "755", "/usr/local/sbin/proxcloud-lb-notify": "755",
+			}
+			for path, mode := range want {
+				if got := g.run(ctx, "stat -c %a:%U:%G "+path); got != fmt.Sprintf("%s:root:root", mode) {
+					t.Errorf("%s is %s", path, got)
+				}
+			}
+		})
+	}
+}
