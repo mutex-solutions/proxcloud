@@ -463,7 +463,8 @@ parts ([managed-services.md](managed-services.md#upgrade-to-kubernetes-1366)). N
 product changed since its tag (the three `git diff` commands above print nothing on its commit),
 so the BOM needs no new chart version, and no third-party chart or provider moves: cert-manager
 v1.20.2 and Cilium 1.18.16 are then outside the Kubernetes versions their own documents list,
-accepted as "to be proven by the lab drill". The app chart, the installer pin and
+accepted as "to be proven by the lab drill" (cert-manager moves to v1.21.3, which lists 1.36, in the
+BOM after 0.10.1). The app chart, the installer pin and
 `DEFAULT_VERSION` stay on `v0.10.0`, and the installer's k3s and Kubernetes pins stay at 1.35.10.
 Its tag is on the commit `dd14e17c`; the `docker` and `helm` runs of the tag succeeded on the first
 attempt, and the GitHub Release is a prerelease while the latest stays `v0.10.0` (read on
@@ -659,7 +660,8 @@ hash. Its goldens equal the current goldens at the tag, file for file (`cmp`).
 `bom_verify.py --release` printed `all pins match` on the ten previous BOMs on
 2026-11-20. It sorts before `0.8.0` too. It keeps cert-manager v1.20.2 and
 Cilium 1.18.16 on Kubernetes 1.36, outside the versions their own documents
-list: accepted as "to be proven by the lab drill", and not proven yet.
+list: accepted as "to be proven by the lab drill", and not proven yet. The BOM
+on `main` moves cert-manager to v1.21.3, which lists 1.36 (2026-11-21).
 
 `0.10.1-rc.2` has the Kubernetes pins of `0.10.1-rc.1` and cluster chart 0.1.16
 where that one has 0.1.15, for `pc-platform` and for `tenantCharts.kubernetes`
@@ -794,13 +796,18 @@ What a release must do when it changes a pin, before its tag:
    `PlanFor` in a test.
 
 The pairs of the BOM on `main` today (the eleven below and 0.10.1 to it). `main` has the pins of the release
-`v0.10.1`, so the pair from 0.10.1 differs in the release line alone: `Classify` gives one change, the release,
-record only, with no seed part and no machine replaced. The eleven older pairs are the ones the release had, below.
-`TestUpgradeRollsNoMachine` compares all twelve and passes, nine of them at step 0 of a roll, and
-`TestPreviousBOMsMoveAsTheirPinsDiffer` holds each pair to its split (2026-11-21). A development BOM carries nothing:
+`v0.10.1` but cert-manager, v1.21.3 on both entries with `upgradeFrom: ["v1.20.2"]` (the chart mirror's
+`charts-mirror-v2` run, digest `sha256:0f159f17f9ed152737a96aa113f042c43ce1b28061660d14aef7d5c6c2a88600`). So
+`Classify` gives, with no seed part and no machine replaced: from 0.10.1 and 0.10.1-rc.2 three changes, the release
+(record only) and `seed/cert-manager` and `workload/cert-manager` (chart, wave 1); from 0.10.1-rc.1 the same and
+`tenantCharts.kubernetes` and `pc-platform` 0.1.15 to 0.1.16, five. The nine BOMs on Kubernetes 1.35.10 are refused:
+the pair moves k3s, Kubernetes and the node image too, and both cert-manager rows carry the pair gate's sentence.
+`TestPreviousBOMsMoveCertManager` states each answer by name; `TestUpgradeRollsNoMachine` compares the three allowed
+pairs and passes, `TestCertManagerMoveRenders` pulls both cert-manager versions from the mirror by digest and
+passes, and `TestPreviousBOMsMoveAsTheirPinsDiffer` holds each allowed pair to its split (2026-11-21). A development BOM carries nothing:
 on a build of `main`, an installation that stands in the replacement of its machines toward 0.10.1-rc.1,
 0.10.1-rc.2 or 0.10.1 goes on to that target with a Retry, by the kept file, with nothing to confirm
-(`TestRollTowardAKeptCandidateGoesOn`). Only `-dev` refuses the twelve pairs on `main`.
+(`TestRollTowardAKeptCandidateGoesOn`). Only `-dev` refuses the three allowed pairs on `main`.
 
 The pairs of the BOM of the release `v0.10.1` (the ten below and 0.10.1-rc.2 to it). It has the pins of the
 candidate `v0.10.1-rc.2`, so the pair from 0.10.1-rc.2 differs in the release line alone: `PlanFor` gives one change,
@@ -1147,6 +1154,12 @@ order (the first one: cert-manager v1.20.2 to v1.21.3):
    whatever the tests tie to the BOM (step 4 of the order of use above).
    `bom-verify` compares the digest with the registry. The manifest and the BOM
    are then equal again.
+
+For cert-manager v1.21.3: the manifest pull request was #409, the tag
+`charts-mirror-v2` is on its merge commit `de2ef75d`, and the run's digest
+`sha256:0f159f17f9ed152737a96aa113f042c43ce1b28061660d14aef7d5c6c2a88600` is
+pinned in both BOM entries; `bom_verify.py` printed `all pins match` for it,
+anonymously, on 2026-11-21.
 
 The old version stays published. The script only pulls and pushes, the
 workflow has no step that deletes a package version, and a version that

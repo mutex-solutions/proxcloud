@@ -274,8 +274,11 @@ class PinTests(unittest.TestCase):
         self.assertIn("ControlPlaneProvider kubeadm", types)
         # cert-manager is never baked: a missing one fails on this path instead of a GitHub download.
         self.assertFalse(any("cert-manager" in path for path in baked))
-        self.assertTrue(config["cert-manager"]["url"].startswith("/opt/clusterctl/repository/cert-manager/"))
-        self.assertEqual(config["cert-manager"]["version"], VERSIONS["cert_manager_chart"])
+        # The url names the version the config states. That version may trail the chart pin (cert_manager_chart):
+        # clusterctl skips a cert-manager that answers, whatever its version, and the image follows at its next
+        # rebuild, since an upgrade refuses to change images.clusterctl.
+        version = config["cert-manager"]["version"]
+        self.assertEqual(config["cert-manager"]["url"], "/opt/clusterctl/repository/cert-manager/%s/cert-manager.yaml" % version)
 
     def test_runtime_is_offline_and_non_root(self):
         self.assertIn("\nUSER 65532:65532\n", DOCKERFILE)

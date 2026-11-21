@@ -228,7 +228,8 @@ type certManagerRead struct {
 
 // certManagerUpstream is the index digest (the sha256 of the archive) of a version no BOM pins yet: the test takes it
 // from upstream, where the chart mirror takes it (deploy/platform/charts-mirror.yaml), until a BOM pins it from the mirror.
-var certManagerUpstream = map[string]string{"v1.21.3": "sha256:9ec67938b2981d8b333af61b3fcf53e26b4f6f5deb7ccda3de4ea116bb373a17"}
+// Empty while every version of certManagerReads is pinned: both come from the mirror by the BOM's digest.
+var certManagerUpstream = map[string]string{}
 
 // The check a release makes of a cert-manager move, as TestUpgradeRollsNoMachine does of the cluster chart: every
 // cert-manager row a BOM pair allows is a move the release read (certManagerReads), and each read move renders with the

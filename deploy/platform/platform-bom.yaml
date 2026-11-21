@@ -65,7 +65,8 @@ components:
     cluster: seed
     wave: 1
     namespace: cert-manager
-    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: cert-manager, version: v1.20.2, digest: "sha256:a10e0fef5726140f26b035603dbd4ead0d7b8aa970e7030bb303e09eeaedb31b"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: cert-manager, version: v1.21.3, digest: "sha256:0f159f17f9ed152737a96aa113f042c43ce1b28061660d14aef7d5c6c2a88600"}
+    upgradeFrom: ["v1.20.2"]
     values: {crds: {enabled: true}}  # = stage 40's Application (installer/playbooks/templates/apps-operators.yml.j2)
   - name: capi
     cluster: seed
@@ -90,7 +91,8 @@ components:
     cluster: workload
     wave: 1
     namespace: cert-manager
-    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: cert-manager, version: v1.20.2, digest: "sha256:a10e0fef5726140f26b035603dbd4ead0d7b8aa970e7030bb303e09eeaedb31b"}
+    chart: {repo: ghcr.io/mutex-solutions/charts-mirror, name: cert-manager, version: v1.21.3, digest: "sha256:0f159f17f9ed152737a96aa113f042c43ce1b28061660d14aef7d5c6c2a88600"}
+    upgradeFrom: ["v1.20.2"]
     group: system
   - name: metallb
     cluster: workload

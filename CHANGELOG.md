@@ -29,6 +29,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The platform BOM pins cert-manager v1.21.3 from the chart mirror, on the seed and on the platform cluster**
+  (`deploy/platform/platform-bom.yaml`: digest `sha256:0f159f17f9ed152737a96aa113f042c43ce1b28061660d14aef7d5c6c2a88600`,
+  the manifest digest the `charts-mirror-v2` run pushed, read again anonymously by `bom_verify.py` and `helm pull`;
+  both entries list `upgradeFrom: ["v1.20.2"]`). v1.21.3 lists Kubernetes 1.33 to 1.36, which closes the caution that
+  v1.20.2 runs outside its list on 1.36. The upgrade from the BOM of 0.10.1 or 0.10.1-rc.2 plans three rows: the
+  release (record only) and cert-manager on the seed and on the platform cluster (chart, wave 1); from 0.10.1-rc.1
+  also `pc-platform` 0.1.15 to 0.1.16 and `tenantCharts.kubernetes`; no seed row, no machine replaced, no Proxmox
+  write. Every BOM on Kubernetes 1.35.10 (0.8.0 to 0.10.0 and their candidates) is refused by the pair gate: such a
+  platform upgrades to 0.10.1 with the `v0.10.1` build first. `TestPreviousBOMsMoveCertManager` states each answer
+  by name; `TestCertManagerMoveRenders` now pulls both versions from the mirror by the BOM's digest. **The installer
+  moves too** (`versions.yml` `cert_manager_chart: v1.21.3`): stage 40 upgrades the management cluster's cert-manager
+  at `make upgrade`, and the services cluster's moves at the next `make install` (stage 50), where plugin-barman-cloud
+  also uses it; no drill covers the installer path ([install.md](docs/install.md)). The `cert-manager` file of
+  `images.clusterctl` stays at v1.20.2 until the image's next rebuild: clusterctl skips a cert-manager that answers,
+  whatever its version, so `test_clusterctl_image.py` now checks only that its url names the version it states. Not
+  moved: the tenant cluster chart's cert-manager addon (off by default). Not run on a lab.
 - **The chart mirror's manifest names cert-manager v1.21.3** (`deploy/platform/charts-mirror.yaml`, upstream
   https://charts.jetstack.io, index digest `sha256:9ec67938b2981d8b333af61b3fcf53e26b4f6f5deb7ccda3de4ea116bb373a17`,
   which is the sha256 of the downloaded `.tgz`). The BOM still pins v1.20.2: the next `charts-mirror-v<n>` tag
@@ -43,11 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aec05ea60e6bfd12d73bab3d45a6a2aae8a3f62f3a41d3f43737aa8ef1d74e3b`). The `v0.10.1` release commit left the BOM at
   `0.10.1`, and the release gate refuses only `-dev`. A platform installed by `v0.10.1`, moved to its BOM, or standing
   in the replacement of its machines with that BOM as its target (what a Retry on the release's build records) is not
-  refused (`bom_unsupported`) under a later build while the file is carried. Its pins are those of `main`, so the plan
-  from it has one change, the release, record only. `TestUpgradeRollsNoMachine` compares twelve previous BOMs with the
-  BOM on `main`, nine of them at step 0 of a roll, and `TestRollTowardAKeptCandidateGoesOn` now also takes an
-  installation on `0.10.0` in a replacement toward `0.10.1` on to `0.10.1` with a Retry, nothing to confirm. No apply
-  on such a platform was run on a lab by this change.
+  refused (`bom_unsupported`) under a later build while the file is carried. Its pins were those of `main`, so the
+  plan from it had one change, the release, record only, and `TestUpgradeRollsNoMachine` compared twelve previous
+  BOMs with the BOM on `main`, nine of them at step 0 of a roll (until the cert-manager pin above: since then three,
+  none of them rolling). `TestRollTowardAKeptCandidateGoesOn` now also takes an installation on `0.10.0` in a
+  replacement toward `0.10.1` on to `0.10.1` with a Retry, nothing to confirm. No apply on such a platform was run on
+  a lab by this change.
 
 ## [0.10.1] - 2026-11-21
 

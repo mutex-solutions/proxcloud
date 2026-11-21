@@ -10,6 +10,8 @@ providers:
   - {name: helm, type: AddonProvider, url: /opt/clusterctl/repository/addon-helm/v0.6.4/addon-components.yaml}
 # Not baked on purpose: cert-manager is an ArgoCD Application of an earlier wave, and clusterctl skips one that
 # answers. Without it, init fails on this missing file instead of downloading cert-manager from GitHub.
+# The version may trail cert_manager_chart (installer versions.yml, the BOM): clusterctl skips a cert-manager that
+# answers whatever its version, and an upgrade refuses to change images.clusterctl, so this follows at the next rebuild.
 cert-manager:
   url: /opt/clusterctl/repository/cert-manager/v1.20.2/cert-manager.yaml
   version: v1.20.2

@@ -9,7 +9,7 @@ pc_versions:
   argocd_chart: 10.14.0        # argo-cd; stage 40 from oci://ghcr.io/mutex-solutions/charts-mirror, stage 50 from upstream
   cnpg_chart: 0.29.1           # https://cloudnative-pg.github.io/charts
   rabbitmq_operator: v2.23.2   # historical pin only; stage 40 never installs/upgrades/removes it
-  cert_manager_chart: v1.20.2  # ingress TLS and CSI gateway certificates; retained without RabbitMQ; stage 40 from the chart mirror
+  cert_manager_chart: v1.21.3  # ingress TLS and CSI gateway certificates; retained without RabbitMQ; stage 40 from the chart mirror
   keycloak: "26.8.2"
   # Chart + image tag of ProxCloud itself, with images.build=false. It must be a published release.
   # Stable broker-free release v0.10.1 (after v0.10.0); its tag publishes its chart and images. Keep

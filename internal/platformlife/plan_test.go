@@ -111,6 +111,63 @@ func TestPreviousBOMsMoveAsTheirPinsDiffer(t *testing.T) {
 	}
 }
 
+// The answer for each previous BOM by name, now that this build's BOM moves cert-manager v1.20.2 -> v1.21.3 (the test
+// above skips refused pairs): a BOM on this build's Kubernetes, k3s and node image plans exactly the rows named here,
+// cert-manager as class chart on both clusters; every BOM on Kubernetes 1.35.10 is refused by the pair gate on both
+// cert-manager rows, because that pair also moves k3s, Kubernetes and the node image. A newly kept BOM needs its line.
+func TestPreviousBOMsMoveCertManager(t *testing.T) {
+	cur := embedded(t)
+	prev, err := Previous()
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string][]string{
+		"0.10.1-rc.1": {"/release", "/tenantCharts.kubernetes", "seed/cert-manager", "seed/pc-platform", "workload/cert-manager"},
+		"0.10.1-rc.2": {"/release", "seed/cert-manager", "workload/cert-manager"},
+		"0.10.1":      {"/release", "seed/cert-manager", "workload/cert-manager"},
+	}
+	gate := "not supported by this release: a third-party chart moves only in an upgrade that changes no k3s, Kubernetes " +
+		"version or node image, and this one also changes kubernetes.version, kubernetes.nodeImage, seed.k3s. First finish an " +
+		"upgrade to a release with this one's Kubernetes version (" + cur.Kubernetes.Version + "), k3s (" + cur.Seed.K3s.Version +
+		") and node image (" + cur.Kubernetes.NodeImage.Tag + "), with that release's build, then start this one"
+	seen := 0
+	for _, b := range prev {
+		var rows, refused []string
+		for _, c := range Classify(b.BOM, cur) {
+			row := c.Cluster + "/" + c.Name
+			rows = append(rows, row)
+			if c.Blocking != "" {
+				refused = append(refused, row)
+				if c.Name != "cert-manager" || c.Blocking != gate {
+					t.Errorf("%s: %s refused with %q, want only cert-manager refused with the pair gate's sentence", b.Release, row, c.Blocking)
+				}
+			}
+			if c.Name == "cert-manager" && (c.From != "v1.20.2" || c.To != "v1.21.3") {
+				t.Errorf("%s: %s moves %s to %s", b.Release, row, c.From, c.To)
+			}
+			if c.Name == "cert-manager" && c.Blocking == "" && c.Class != ClassChart {
+				t.Errorf("%s: %s is class %s, want chart", b.Release, row, c.Class)
+			}
+		}
+		if want, ok := allowed[b.Release]; ok {
+			seen++
+			if !slices.Equal(rows, want) || len(refused) != 0 {
+				t.Errorf("%s to %s plans %q (refused %q), want %q allowed", b.Release, cur.Release, rows, refused, want)
+			}
+			continue
+		}
+		if b.Kubernetes.Version != "1.35.10" {
+			t.Errorf("%s (Kubernetes %s) has no stated answer: add its rows to allowed", b.Release, b.Kubernetes.Version)
+		}
+		if !slices.Equal(refused, []string{"seed/cert-manager", "workload/cert-manager"}) {
+			t.Errorf("%s to %s refuses %q, want both cert-manager rows (the plan is %q)", b.Release, cur.Release, refused, rows)
+		}
+	}
+	if seen != len(allowed) {
+		t.Errorf("%d of the %d BOMs named in allowed are embedded", seen, len(allowed))
+	}
+}
+
 // nextRelease makes the build under test a release 0.9.0 whose BOM is the 0.8.1 BOM with edit applied, and answers the
 // embedded 0.8.1 BOM: the pair an upgrade moves between. It starts from 0.8.1's file, not from the BOM on main, so
 // the pair stays the same when main's pins move.
