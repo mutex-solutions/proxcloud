@@ -534,8 +534,20 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 	config := pve.RenderHAProxy(lb.LBSpec)
 	hash := lbHash(config)
 	if hash == lb.AppliedHash {
-		lb.Status, lb.StatusMessage = lbStatusActive, ""
-		return nil
+		// The recorded hash is the product's word that the appliance serves this config, so ask it. One that does
+		// not (HAProxy stopped, or running the package's own config) is pushed again below, which starts HAProxy
+		// with the config: it is the product's own service. No answer says nothing new.
+		serving, why, err := ps.HAProxyServing(ctx, vm.Node, vm.VMID)
+		switch {
+		case err != nil:
+			slog.Warn("load balancer: state", "project", proj.ID, "lb", lb.ID, "err", err)
+			return nil
+		case serving:
+			lb.Status, lb.StatusMessage = lbStatusActive, ""
+			return nil
+		}
+		slog.Warn("load balancer: the appliance does not serve what its row records; pushing it again", "project", proj.ID, "lb", lb.ID, "why", why)
+		lb.Status, lb.StatusMessage = lbStatusDown, why+". The platform is loading the configuration again."
 	}
 	if err := ps.SetLBRules(ctx, vm.Node, vm.VMID, pve.LBListenerRules(lb.Listeners, nil)); err != nil {
 		return err
@@ -548,7 +560,7 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 			lb.Status, lb.StatusMessage = lbStatusError, "The load balancer's VM did not become ready. Its image needs the guest agent, and HAProxy and socat installed or reachable from its repositories."
 		case lb.AppliedHash == "":
 			lb.Status, lb.StatusMessage = lbStatusBuild, ""
-		default:
+		case hash != lb.AppliedHash: // the last config is served meanwhile; one found not served keeps its message
 			lb.StatusMessage = "A change is waiting for the load balancer's VM"
 		}
 		return nil
@@ -623,13 +635,15 @@ func (h *Handler) pveLoadBalancerAction(w http.ResponseWriter, r *http.Request, 
 			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's VM cannot be reached"))
 			return true
 		}
-		health, err := ps.LBHealth(ctx, vm.Node, vm.VMID, lb.LBSpec)
+		health, notLoaded, err := ps.LBHealth(ctx, vm.Node, vm.VMID, lb.LBSpec)
 		if err != nil {
 			slog.Warn("load balancer: health", "project", proj.ID, "lb", cr.ExternalID, "err", err)
 			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's VM did not answer"))
 			return true
 		}
-		httpx.OK(w, map[string]any{"result": health})
+		out := map[string]any{"result": health}
+		lbHealthNotLoaded(out, notLoaded)
+		httpx.OK(w, out)
 		return true
 	}
 	return false

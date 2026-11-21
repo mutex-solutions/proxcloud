@@ -74,6 +74,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A load balancer's config is recorded only when its appliance serves it** (`internal/cloud/pve/lb.go`,
+  `lbpair.go`, `internal/platform/project/cloud_lb_pve.go`, `cloud_lb_pair_pve.go`). The drill of `0.11.0-rc.1`
+  replaced a pair's appliances and the address refused every connection for 458 seconds while the row read
+  `ACTIVE`: the first config push met the haproxy package's own first start. The readiness check passed as soon as
+  the binaries existed, the apply found HAProxy "activating", joined that start and answered success, and HAProxy
+  kept the package's config; the hash was stored, so nothing was pushed again. A single appliance had the same
+  check and the same apply. Now:
+  - an appliance is ready when dpkg reports every package `install ok installed`, no `apt-get`, `apt` or `dpkg`
+    runs and the units exist;
+  - the apply starts HAProxy when it does not run and reloads it through its master socket in every case, wants
+    `Success=1`, and then wants every `bind` of the pushed file to be a socket HAProxy listens on. If any of it
+    fails the old file goes back, the row says `ERROR` with the reason, no hash is recorded and the next pass
+    pushes again. keepalived's apply wants keepalived running after the change;
+  - a recorded hash is checked on every pass: each appliance is asked whether HAProxy listens on every bind of its
+    config. One that does not is not `up` (the pair is `DEGRADED` or `DOWN`, a single appliance `DOWN`, with the
+    reason) and is pushed again in that pass;
+  - `GET_HEALTH` says so too: a member the stored config holds and the running HAProxy does not has status
+    `NOT LOADED` (it was `""`, which reads as nothing wrong), and the answer carries `notLoaded` and `message`.
+
+  A single appliance that is in line is asked once per pass and not pushed; its config and its hash are what they
+  were. `iproute2` joins the install line (the listen check uses `ss`; stock cloud images have it).
+  `test/integration/lb_appliance_test.go` runs the product's pushes and reads against a guest of Debian 13 and of
+  Ubuntu 26.04 with the distribution's systemd, dpkg, HAProxy and keepalived, including a push while the package's
+  start is under way, where the apply of `0.11.0-rc.1` answers success with nothing listening. Not run on a lab.
+- **A stopped keepalived or HAProxy on a running appliance is started by the next pass**, and the message of a
+  `DEGRADED` pair names the cause and what puts it right. It said "Replace appliances builds the missing one again"
+  for a stopped service, a stopped VM and an appliance still installing, where nothing is missing; that sentence
+  now appears only when an appliance is gone.
+- **Files written on an appliance through the guest agent are root's, mode 0644, the two scripts 0755** (they were
+  0666: the agent creates a file with that mode). The apply sets and checks the mode. An appliance built before
+  gets it with its next config change or with Replace appliances.
+- **During Replace appliances the row no longer reads `ACTIVE` with one appliance listed**: it is `DEGRADED`, "One
+  appliance carries the traffic while the other is being replaced", until both are up.
 - **A load balancer appliance whose build failed no longer stays behind**: a VM the failed build could not remove
   is destroyed before the next try (pair create, replace, a cluster's pair).
 - **The VM inventory no longer treats an address owned by a load balancer as an orphan**: such a row (no VM lists

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -77,18 +78,32 @@ func TestRenderHAProxyNoInjection(t *testing.T) {
 	}
 }
 
+// A member the stored config holds and the running HAProxy does not is said so, and so is its listener: "" would
+// read as nothing wrong (drill N2-2: HAProxy ran the package's config, every member read ""). A member the config
+// leaves out, as its server left, keeps "".
 func TestParseHAProxyStat(t *testing.T) {
-	spec := LBSpec{Pools: []LBPool{{Name: "web", Members: []LBMember{{ServerID: "101", Port: 80}, {ServerID: "102", Port: 80}, {ServerID: "103", Port: 80}}}}}
+	spec := LBSpec{
+		Listeners: []LBListener{{Port: 80, Pool: "web"}, {Port: 443, Pool: "web"}, {Port: 80, Pool: "web", VIP: "203.0.113.11"}, {Port: 81, Pool: "none"}},
+		Pools: []LBPool{{Name: "web", Members: []LBMember{{ServerID: "101", Port: 80, Address: "10.0.0.1"}, {ServerID: "102", Port: 80, Address: "10.0.0.2"},
+			{ServerID: "103", Port: 80, Address: "10.0.0.3"}, {ServerID: "104", Port: 80, Address: "10.0.0.4", Missing: true}}}}}
 	out := "# pxname,svname,status,weight\nl80,FRONTEND,OPEN,\np0,m101p80,UP,1\np0,m102p80,DOWN,1\np0,BACKEND,UP,1\n"
-	got, err := ParseHAProxyStat(out, spec)
+	got, notLoaded, err := ParseHAProxyStat(out, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"UP", "DOWN", ""}
+	want := []string{"UP", "DOWN", LBNotLoaded, ""}
 	for i, h := range got {
 		if h.Status != want[i] || h.Pool != "web" {
 			t.Errorf("member %d: %+v", i, h)
 		}
+	}
+	if !slices.Equal(notLoaded, []string{"443", "203.0.113.11:80"}) {
+		t.Errorf("listeners not loaded: %q", notLoaded)
+	}
+	// The package's own config, as the drill's appliance ran it: no proxy at all.
+	got, notLoaded, err = ParseHAProxyStat("# pxname,svname,status,weight\n", spec)
+	if err != nil || len(notLoaded) != 3 || got[0].Status != LBNotLoaded {
+		t.Errorf("default config: %+v %q %v", got, notLoaded, err)
 	}
 }
 

@@ -50,8 +50,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 
 	ext := lbClusterExternalID("c1")
 	id := ext[len("lb-"):]
-	f := &pairWire{t: t, tag: pve.LBTag(id), rules: map[string][]pve.FirewallRule{}, sets: map[string][]string{},
-		vrrp: map[string]string{"301": "BACKUP 1 0", "302": "MASTER 1 1"}, runs: map[int]string{}}
+	f := newPairWire(t, pve.LBTag(id))
 	srv := httptest.NewServer(f)
 	defer srv.Close()
 	ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
