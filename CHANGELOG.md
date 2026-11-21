@@ -7,6 +7,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-21
+
+The release after `v0.10.1`. Its BOM moves cert-manager from `v1.20.2` to `v1.21.3` on the seed and on the platform
+cluster of a managed-services platform, by one upgrade run that replaces no machine, and nothing else. It was
+prepared by the release candidate `v0.10.2-rc.1`, whose section below is kept; everything it held is in this
+section. The entries under Added and Changed were written when each change merged, before the drill: where one says
+"Not run on a lab", the two lists below are the current state.
+
+- **cert-manager moves from `v1.20.2` to `v1.21.3`** on the seed and on the platform cluster, from the BOM `0.10.1`:
+  the first third-party chart an upgrade moves (Added, Changed). There is no way back.
+- **A security fix.** `v1.20.2` is affected by GHSA-8rvj-mm4h-c258 (high: a direct ACME Challenge could bypass an
+  Issuer's DNS01 solver policy and use a ClusterIssuer's DNS credentials), fixed upstream since `v1.20.3`; `v1.21.3`
+  has the fix.
+- **Inside its support table again.** cert-manager 1.21 lists Kubernetes 1.33 to 1.36, which covers the platform's
+  1.36.6 and the installer's 1.35.10.
+- **A light run.** No machine is replaced, nothing is written on Proxmox and no seed backup is asked for. On the lab
+  the run took 3 minutes 8 seconds and issued no Certificate again.
+- **The Check row `certificates`** names a cert-manager Deployment that is not available or a Certificate that is not
+  Ready. A warning only (Added).
+- **The installer path moves too** (`cert_manager_chart: v1.21.3`): stage 40 at `make upgrade`, stage 50 at the next
+  `make install`. Not drilled.
+- **The guide and the notes give what a production site showed on `v0.10.1`**: databases made before database chart
+  0.5.2 must be moved to it before a platform part, the figures of a one-node roll, a transient "Error deleting Node"
+  and the mode of a seed backup on an NFS store (Changed).
+
+The platform BOM of this release is `0.10.2`. It pins what the candidate `0.10.2-rc.1` pins, and the two BOMs differ
+in the `release` line alone: the pins of `0.10.1` but cert-manager, `v1.21.3` on the seed and on the platform cluster
+at the chart mirror's digest `sha256:0f159f17f9ed152737a96aa113f042c43ce1b28061660d14aef7d5c6c2a88600`, with
+`upgradeFrom: ["v1.20.2"]`. No k3s, Kubernetes version, node image, chart of the product, Cluster API provider or
+clusterctl image moves. The release carries the BOMs of `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1`, `0.9.0-rc.2`,
+`0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.1` and `0.10.2-rc.1` for the platforms
+those builds installed.
+
+Upgrading from `v0.10.1`. From an older release, read the sections of `v0.10.1` and `v0.10.0` as well: their steps
+still apply.
+
+- **A platform on a BOM before `0.10.1`** (0.8.0 to 0.10.0 and their candidates, all on Kubernetes 1.35.10) is
+  refused by this build: both cert-manager rows say to finish an upgrade to a release with this one's Kubernetes
+  version, k3s and node image first. Keep the portal on `v0.10.1` and move the platform to `0.10.1`, both parts,
+  first. What a production site of one Proxmox node showed on that move (2026-11-20): a database made before
+  database chart 0.5.2 (one instance, with a PodDisruptionBudget) blocks the part "platform" with `drain_blocked`;
+  move it to 0.5.2 first with the operator route `POST /api/v1/admin/service/{id}/db-clusters/{clusterId}/bump-chart`
+  (on CloudNativePG 1.30.1 it did not restart the database). With the node image already a published template there
+  was no import; each clone took 6 to 8 seconds on NVMe; the platform API was away 67 seconds at the hand-over, the
+  tenant API 104 seconds in the `kamaji` unit and the database 75 seconds in the `dbaas` unit. Cluster API's text
+  "DeletingNode: Error deleting Node" showed for about 50 seconds during the control plane's hand-over and cleared
+  by itself. A seed backup (`vzdump`) to an NFS store came out mode 777: `chmod 600` the archive and its log.
+- **Portal first.** On the Docker Compose host check out the tag and run `./proxcloud-up.sh upgrade v0.10.2`
+  (`deploy/compose/README.md`, "Upgrade"). The script takes its backup first. `compose.yaml` did not change since
+  `v0.10.1`: on the lab the upgrade to the candidate took 24 seconds and PostgreSQL, Keycloak and Traefik kept their
+  containers. The platform stays on its BOM until an operator starts the move.
+- **Before the move:** back up the cert-manager resources on the seed and on the platform cluster (upstream's
+  advice; there is no way back): `kubectl get certificates,issuers,clusterissuers -A -o yaml > cert-manager-backup.yaml`
+  with each cluster's kubeconfig. Read the Check row `certificates`: it should be `ok`.
+- **The run**, phrase `upgrade <name> to 0.10.2`, one action with no parts. From `0.10.1` or `0.10.1-rc.2` the plan
+  has three rows: the release (record only) and `cert-manager` on the seed (stage `seed-platform`) and on the platform
+  cluster (stage `workload-platform`), class chart, wave 1. ArgoCD applies the CRDs in place (`v1` stays the only
+  version), removes the Role and RoleBinding `cert-manager-tokenrequest`, and rolls the controller, cainjector and
+  webhook Deployments together, each keeping its old pod until the new one is Ready. The wave waits until ArgoCD
+  reports the three Deployments rolled and the sync, the chart's `startupapicheck` Job included, Succeeded. On the
+  lab (one sample): 3 minutes 8 seconds, `seed-platform` 98 seconds, `workload-platform` 84 seconds, the new pods Ready
+  20 to 53 seconds after their ReplicaSet, every Deployment with a Ready pod at every look, none of the 11
+  Certificates issued again, no webhook refusal, no failed look of a tenant API or a database. A seed of one VM
+  answered slowly for about 30 seconds while it pulled the new images; nothing was refused.
+- **From other BOMs** (`PlanFor`): from `0.10.2-rc.1` one change, the release, record only; from `0.10.1-rc.1` five,
+  the three above, the tenant chart (record only) and `pc-platform` 0.1.15 to 0.1.16, no machine replaced; from the
+  nine BOMs on 1.35.10 refused (21, 22 or 25 rows). A platform that stands in the replacement of its machines toward
+  `0.10.1` or one of its candidates goes on to that BOM with a Retry first. Only the move from `0.10.1` (to the
+  candidate) was drilled.
+- **A site installed with the Ansible installer**: stage 40 moves the management cluster's cert-manager at `make
+  upgrade` (its wait can pass on the old Deployment: read the Application `cert-manager` for Synced and Healthy at
+  `v1.21.3`), stage 50 the services cluster's at the next `make install`, where plugin-barman-cloud also has two
+  Certificates and an Issuer. Back up the cert-manager resources first. Not drilled.
+- The app chart is `0.10.2` with appVersion `v0.10.2`, and `pc_versions.proxcloud` and `DEFAULT_VERSION` of
+  `proxcloud-up.sh` name `v0.10.2`. The installer's k3s and Kubernetes pins stay at 1.35.10.
+
+Verified on a lab. One drill on the published images of the candidate `v0.10.2-rc.1` (2026-11-21), on one lab with a
+seed of one VM and a platform cluster of four nodes on 1.36.6, checked afterwards by a read-only audit:
+
+- The portal upgrade from `v0.10.1` to `v0.10.2-rc.1` by the script, in 24 seconds, with PostgreSQL, Keycloak and
+  Traefik kept.
+- The plan from `0.10.1` (three rows, no parts, no seed backup asked) and the Check row `certificates`.
+- The run from `0.10.1` to `0.10.2-rc.1` in 3 minutes 8 seconds with no retry (`seed-platform` 98 seconds,
+  `workload-platform` 84 seconds).
+- cert-manager `v1.21.3` on the seed and on the platform cluster: the CRDs moved in place (`v1` only, storedVersions
+  `[v1]`), the tokenrequest Role and RoleBinding removed, the three Deployments rolled with a Ready pod at every look,
+  and the `startupapicheck` Job in both syncs.
+- No Certificate issued again (11 of 11), no webhook refusal (cert-manager's and Cluster API's), the CA bundles
+  unchanged, and no self-heal loop in ArgoCD.
+- A tenant cluster at 1.36.6 and a database with no failed look, no tenant pod restarted, no machine replaced and
+  nothing written on Proxmox.
+- After the move: a new Certificate in about 1 second, a renewal in 1.5 to 1.7 seconds with the new CA on the webhooks
+  within 3.4 seconds, and a new tenant cluster and database created and deleted.
+
+Not verified on a lab:
+
+- The installer path: stage 40 and stage 50, new installs, and the services cluster's barman plugin with `v1.21.3`.
+- The moves from `0.10.1-rc.1` and `0.10.1-rc.2`: their plans were read, not run.
+- The refusal on a real platform on a BOM from `0.8.0` to `0.10.0`: a unit test only.
+- A site that already has the `v1.21.3` images: the `startupapicheck` Job may then test the old webhook; the gate on
+  the Deployments rolled still holds.
+- A failed `startupapicheck`, the path to `component_unhealthy` and the Retry after it.
+- A seed of more than one node, and a production site of one node: the figures are one lab's.
+- Any way back.
+
+Where an entry below says the BOM on `main` is `0.11.0-dev`, that was the state at that merge: this release's BOM
+is `0.10.2`, and the change after its tag sets `main` back to a `-dev` one.
+
 ### Added
 
 - **An upgrade may move cert-manager, the first third-party chart it moves.** On the seed and on the platform
@@ -74,12 +182,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestPreviousBOMsMoveCertManager` states that answer, and `TestUpgradeRollsNoMachine` compares four of the thirteen
   previous BOMs with the BOM on `main`, none of them rolling. No apply on such a platform was run on a lab by this
   change.
+- **The plan's impact text of a cert-manager row gives the drill's figures** (`internal/platformlife/plan.go`, the
+  goldens): in place of "not measured on a lab yet", one lab's sample (a run of 3 minutes 8 seconds, about a minute
+  and a half per cluster, no Certificate issued again, no webhook refusal, a seed of one VM slow for about half a
+  minute), and what holds the wave: ArgoCD reports the three Deployments rolled (Healthy against the new chart) and
+  the sync, the `startupapicheck` Job included, Succeeded. On the lab ArgoCD created that Job before the new webhook
+  pod was Ready on both clusters, so the old text ("the Job checks the webhook, and the wave waits for it") said more
+  than the Job proves. The guide's "A cert-manager move" gives the drill's figures and what it did not show.
+- **The guide gives what a production site showed on `v0.10.1`** (2026-11-20, one Proxmox node, the move from
+  `0.10.0` to `0.10.1`; docs/managed-services.md, docs/managed-dbaas.md). A database made before database chart 0.5.2
+  (one instance, with a PodDisruptionBudget) blocks the part "platform" with `drain_blocked` until it is moved to 0.5.2
+  with the operator route `bump-chart`; on CloudNativePG 1.30.1 the bump removed the budget without restarting the
+  database. The one-node figures of the roll: no image import when the node image is already a published template,
+  clones of 6 to 8 seconds on NVMe, the platform API away 67 seconds at the hand-over, the tenant API 104 seconds in
+  the `kamaji` unit, the database 75 seconds in the `dbaas` unit. Cluster API's "DeletingNode: Error deleting Node"
+  shows for about 50 seconds during the control plane's hand-over and clears by itself. A seed backup to an NFS store
+  came out mode 777: the guide says to `chmod 600` the archive and its log after each one.
+- **The platform BOM's release is `0.10.2`** (`deploy/platform/platform-bom.yaml`), with the pins of `0.10.2-rc.1`:
+  the two BOMs differ in the `release` line alone, and no chart of the product changed since its tag
+  (`proxmox-kamaji-cluster-v0.1.16`, `database-cluster-v0.5.2`, `proxcloud-platform-v0.1.3`), so no chart tag is
+  needed. The release gate passes on it and on the thirteen previous BOMs. The plan from each previous BOM
+  (`PlanFor`, one control plane machine and one machine per group): from 0.10.2-rc.1 one change, the release, record
+  only; from 0.10.1 and 0.10.1-rc.2 three, allowed, no part, phrase `upgrade <name> to 0.10.2`; from 0.10.1-rc.1 five;
+  from the nine BOMs on Kubernetes 1.35.10 (21, 22 or 25 rows) refused by the pair gate on both cert-manager rows.
+  An installation on 0.10.0 that stands in the replacement of its machines toward 0.10.1-rc.1, 0.10.1-rc.2, 0.10.1 or
+  0.10.2-rc.1 goes on to that BOM with a Retry, because the move from 0.10.0 to 0.10.2 is refused by the same gate;
+  `TestRollTowardAKeptCandidateGoesOn` now takes the pair gate from 0.10.0 as the reason, not a cert-manager row
+  between the kept BOM and this one (0.10.2-rc.1 and 0.10.2 differ in the release alone). The app chart,
+  `pc_versions.proxcloud` and `DEFAULT_VERSION` of `proxcloud-up.sh` move to `0.10.2` / `v0.10.2`; the installer's
+  `cert_manager_chart` stays at `v1.21.3`, its k3s and Kubernetes pins at 1.35.10.
+  `deploy/platform/previous/0.10.2.yaml` is added by the change after the tag.
+
+### Known issues
+
+- **There is no way back.** cert-manager documents no downgrade, and a platform does not go back to a BOM. Back up
+  the cert-manager resources before the run.
+- **Platforms on a BOM before `0.10.1` cannot take this move.** They upgrade to `0.10.1` with the `v0.10.1` build
+  first, and a database made before database chart 0.5.2 blocks that move's part "platform" until it is moved to 0.5.2.
+- **The installer path is not drilled.** Stage 40's wait can pass before ArgoCD has synced the new version: read the
+  Application yourself.
+- **A seed of one VM is slow for about half a minute** while it pulls the new images (one lab: answers up to 3.1
+  seconds, one client timeout of 4 seconds, nothing refused).
+- **A seed backup by hand on an NFS store is readable by everyone** (mode 777 on one site): `chmod 600` the archive
+  and its log after each backup.
+- **Cilium is still outside its own support matrix on 1.36.** Cilium `1.18.16` lists Kubernetes 1.30 to 1.33. This
+  release does not move it.
+- **The tenant cluster chart's cert-manager addon stays at `v1.20.2`.** It is off by default; it moves with a later
+  tenant chart version.
+- **cert-manager 1.20 reaches end of life when 1.22 is released.** A platform that has not made this move stays on
+  `v1.20.2`. 1.22 comes in a later release, from `v1.21.3`.
+- The known issues of 0.10.1 still hold, except the one about cert-manager outside its support matrix, which this
+  move closes for a platform that makes it.
 
 ## [0.10.2-rc.1] - 2026-11-21
 
 The first release candidate of 0.10.2, published as a prerelease and never as `latest`. It is not the release:
 `v0.10.1` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
-still name it. It holds what is under Unreleased above (#407, #408, #409, #410), and it exists so that a lab can run
+still name it. It holds what is under 0.10.2 above (#407, #408, #409, #410), and it exists so that a lab can run
 the first upgrade that moves a third-party chart, cert-manager `v1.20.2` to `v1.21.3`: nothing of it had run on a
 lab when it was tagged. The entries above are not repeated here. Not for a production site.
 

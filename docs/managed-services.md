@@ -14,7 +14,7 @@ are in [ADR 0009](adr/0009-managed-services-platform-lifecycle.md); the routes a
 > there and what was not is in [Not verified on a lab yet](#not-verified-on-a-lab-yet). It is off
 > by default. v0.8.0 is the first release that carries it; one install was made on its published
 > images (a lab, 2026-11-18) and one on those of the candidate v0.9.0-rc.2 (the same lab,
-> 2026-11-19), none on those of v0.8.1, v0.8.2, v0.9.0, v0.9.1, v0.10.0 or v0.10.1: see [Not implemented yet](#not-implemented-yet).
+> 2026-11-19), none on those of v0.8.1, v0.8.2, v0.9.0, v0.9.1, v0.10.0, v0.10.1 or v0.10.2: see [Not implemented yet](#not-implemented-yet).
 
 Code: `internal/platformlife` (the installation model, the preflight, the runner and its stages, the
 renderers), `internal/platform/admin/platform.go` (the routes), `internal/cloud/pve/access.go` and
@@ -1645,8 +1645,11 @@ times). Change the seven days to your own rule. Not run on a lab: the scheduled 
 > world-readable, and it must not be a shared export that other tenants or VMs can mount. `vzdump`
 > does not protect the file: on the lab it wrote the archive with its default mode, 644, on an NFS
 > export open to a whole subnet, so every user of the nodes and every client of that export could
-> read it. Check the mode of the files and who can mount the store before the first backup, and
-> again after a backup by hand. Nothing in ProxCloud checks the store you choose.
+> read it. On a production site's NFS store (2026-11-20) it wrote the archive mode 777 and its log
+> mode 644. Check the mode of the files and who can mount the store before the first backup, and
+> after every backup by hand make the archive and its log readable by root only, as root on the node:
+> `chmod 600 <archive> <archive's .log>`, then `ls -l` both. Nothing in ProxCloud checks the store
+> you choose.
 
 Choose a backup store that is not the boot, ISO or import store of the settings,
 and whose archives no API token other than your own (the operator's) can read. Proxmox lets a token
@@ -2123,20 +2126,24 @@ and a fake Cluster API: **no such upgrade has run on a lab or on a site.** No th
 no Cluster API provider moves with it; two of the charts are then outside the Kubernetes versions
 their own documents list.
 
-The BOM after 0.10.1 moves cert-manager from v1.20.2 to v1.21.3 on the seed and on the platform
-cluster (both entries list v1.20.2 in `upgradeFrom`), and nothing else: v1.21.3 lists Kubernetes
-1.33 to 1.36. From the BOM of 0.10.1 or of 0.10.1-rc.2 the plan has three rows: the release
-(record only) and `cert-manager` on the seed and on the platform cluster (chart, wave 1), with no
-seed, machines or site row. From 0.10.1-rc.1 it also has `pc-platform` 0.1.15 to 0.1.16 and
-`tenantCharts.kubernetes`, as the move to 0.10.1 had. From every BOM on Kubernetes 1.35.10 (0.8.0 to
-0.10.0 and their candidates) the upgrade is refused: it would move k3s and Kubernetes too, and both
-cert-manager rows carry the sentence of [A cert-manager move](#a-cert-manager-move). Such a platform
-upgrades to 0.10.1 with the `v0.10.1` build first, both parts, then with this one. The plans are
-`TestPreviousBOMsMoveCertManager`'s; no such move has run on a lab. The candidate `v0.10.2-rc.1` is
-the first release that carries this BOM, as `0.10.2-rc.1`, for that drill
-([ci-release.md](ci-release.md#release-candidates)). It carries no unfinished replacement of the
-machines: an installation that stands in one toward 0.10.1 or a candidate of it goes on to that BOM
-with a Retry, and the move to this one is refused until the replacement is finished.
+The BOM of 0.10.2 (the release `v0.10.2`) moves cert-manager from v1.20.2 to v1.21.3 on the seed
+and on the platform cluster (both entries list v1.20.2 in `upgradeFrom`), and nothing else: v1.21.3
+lists Kubernetes 1.33 to 1.36. From the BOM of 0.10.1 or of 0.10.1-rc.2 the plan has three rows: the
+release (record only) and `cert-manager` on the seed and on the platform cluster (chart, wave 1),
+with no part and no seed, machines or site row; phrase `upgrade <name> to 0.10.2`. From 0.10.1-rc.1
+it also has `pc-platform` 0.1.15 to 0.1.16 and `tenantCharts.kubernetes`, as the move to 0.10.1 had
+(five rows). From the BOM of the candidate `0.10.2-rc.1`, which has the same pins, one row, the
+release, record only. From every BOM on Kubernetes 1.35.10 (0.8.0 to 0.10.0 and their candidates)
+the upgrade is refused: it would move k3s and Kubernetes too, and both cert-manager rows carry the
+sentence of [A cert-manager move](#a-cert-manager-move). Such a platform upgrades to 0.10.1 with the
+`v0.10.1` build first, both parts, then with this one. The plans are `PlanFor`'s and
+`TestPreviousBOMsMoveCertManager`'s. The candidate `v0.10.2-rc.1` carried these pins first, as
+`0.10.2-rc.1`; its drill on one lab (2026-11-21) ran the move from 0.10.1
+([A cert-manager move](#a-cert-manager-move) has its figures); the moves from 0.10.1-rc.1 and
+0.10.1-rc.2 were read, not run ([ci-release.md](ci-release.md#release-candidates)). Neither carries
+an unfinished replacement of the machines: an installation that stands in one toward 0.10.1 or a
+candidate of it goes on to that BOM with a Retry, and the move to this one is refused until the
+replacement is finished.
 
 "Moves" means that the Application's target is the new chart version and ArgoCD has compared the
 cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is
@@ -2181,9 +2188,47 @@ more, and when that one fails too the stage fails `component_unhealthy` with wha
 Retry walks the waves again; cert-manager is recorded at its new version (`status.components`) only
 after its wave passed.
 
-Tested against a fake seed and a fake platform cluster only: the run's ArgoCD sync, the server-side
-apply of the CRDs, the `startupapicheck` Job and the rolling update are ArgoCD's and Kubernetes', and
-have not run on a lab. Whether a move issues any Certificate again is not measured.
+**What holds the wave.** ArgoCD creates the chart's `startupapicheck` Job when the sync's hooks
+start, not once the new webhook pod is Ready. On the lab it was created before the new webhook pod
+was Ready on both clusters (on the seed 36 seconds before), and it checked the new webhook only
+because its own image pull took longer. On a site that already has the v1.21.3 images the Job may
+check the old webhook. The wave holds anyway: it waits until ArgoCD reports the three Deployments
+rolled (the Application Healthy against the new chart, compared with the new source) and the sync,
+the Job included, Succeeded.
+
+**On a lab, one sample.** The drill of the candidate `v0.10.2-rc.1` (2026-11-21: one lab, a seed of
+one VM, a platform cluster of four nodes on 1.36.6, one tenant cluster at 1.36.6 and one database,
+probed every 2 seconds) moved a platform from the BOM of 0.10.1:
+
+- **One run of 3 minutes 8 seconds**, no retry: stage `seed-platform` 98 seconds, stage
+  `workload-platform` 84 seconds, every other stage under 4.1 seconds.
+- **The rollout.** On each cluster the three new ReplicaSets appeared 9 to 11 seconds after ArgoCD's
+  operation began, and their pods were Ready 20 to 53 seconds later (the images pulled from
+  quay.io). Each Deployment kept a Ready pod in every look. The `startupapicheck` Job took 32 to 47
+  seconds from created to succeeded. The CRDs stayed `v1` only (storedVersions `[v1]`), and the
+  Role and RoleBinding `cert-manager-tokenrequest` were removed.
+- **No Certificate issued again.** Each of the 11 (5 on the seed, 6 on the platform cluster) kept
+  its revision, its Secret's serial and its notBefore, and was Ready in every look.
+- **No webhook gap.** No server-side dry run against the webhooks of cert-manager or of Cluster API
+  was refused, the CA bundles stayed as they were, and ArgoCD did not loop on Kamaji's Applications.
+- **Tenants.** The tenant API and the database failed no look; no tenant pod restarted, no machine
+  was replaced and nothing was written on Proxmox.
+- **After the move.** A new Certificate was Ready in about 1 second on each cluster. A renewal of
+  `capi-serving-cert` (`cmctl renew`) issued a new certificate in 1.5 to 1.7 seconds, and the
+  cainjector put the new CA on Cluster API's webhook configuration and CRD within 3.4 seconds. A new
+  tenant cluster and a new database were created and deleted.
+
+**A seed of one VM is slow for about half a minute.** While the seed pulled and started the new
+images its API answered every call slowly for about 30 seconds, cert-manager's and every other's
+(up to 3.1 seconds, one client timeout of 4 seconds); nothing was refused. The platform cluster's
+answers stayed under 1.1 seconds.
+
+**Not drilled.** The installer path (stage 40 at `make upgrade`, stage 50 at the next `make
+install`, and the two Certificates and the Issuer of plugin-barman-cloud on the services cluster);
+the moves from 0.10.1-rc.1 and 0.10.1-rc.2; the refusal on a real platform on a BOM from 0.8.0 to
+0.10.0 (a unit test only); a site that already has the v1.21.3 images; a failed `startupapicheck`,
+`component_unhealthy` and the Retry after it; a seed of more than one node and a production site.
+The figures are one lab's. There is no way back to try.
 
 The rest of this subsection is the record of the moves to the BOM of 0.10.0 and the ones before
 it, none of which replaced a machine. The plan to the BOM with Kubernetes 1.36.6 holds the same
@@ -2235,7 +2280,7 @@ to it. The release notes of such a release must say so.
 
 ### Upgrade to Kubernetes 1.36.6
 
-**Run in part on one lab, on no site.** The candidate `v0.10.1-rc.1` was the first release with
+**Run on one lab, and on one production site of one Proxmox node.** The candidate `v0.10.1-rc.1` was the first release with
 this BOM ([ci-release.md](ci-release.md#release-candidates)). Its drill on 2026-11-20 (three Proxmox
 nodes on one shared lab disk, one control plane machine, one tenant cluster and one database under a
 write loop) ran part "seed" to the end and the control plane's unit of part "platform", and stopped
@@ -2249,10 +2294,15 @@ after the control plane's unit) got out with one Retry, replaced the units `syst
 `dbaas` with one more machine first, was paused once and resumed, and ended with every machine on
 1.36.6 and no Node left behind. The release `v0.10.1` has the BOM `0.10.1`, with the pins of
 `0.10.1-rc.2`; its code differs from that candidate's in the wait for the tenants between two
-units, corrected after the second drill and not run on a lab. Everything else is what the plan,
-the code and its tests say, and is **not measured**: a unit replaced delete-first, stages 8 to 11 as figures, a control plane of
-three, a site with one Proxmox node, and the wait for the tenants between two units as corrected
-after that drill ([The platform cluster's machines](#the-platform-clusters-machines), point 5).
+units, corrected after the second drill. One production site moved on `v0.10.1` (2026-11-20: one
+Proxmox node, the platform's disks and its node template on one NVMe pool, one control plane
+machine, one machine per group, one tenant cluster and one database of one instance); its figures
+are below, marked "one-node site", and the corrected wait held there (after the `kamaji` unit the
+run named the tenant control plane's Deployment while its TenantControlPlane still read Ready, and
+stored the next step 33 seconds after the tenant API answered). Everything else is what the plan,
+the code and its tests say, and is **not measured**: a unit replaced delete-first, stages 8 to 11 as
+figures, a control plane of three, and the wait for the tenants between two units on a lab
+([The platform cluster's machines](#the-platform-clusters-machines), point 5).
 
 **What the BOM changes.** `kubernetes.version` 1.35.10 to 1.36.6, `kubernetes.nodeImage` to the
 image built for 1.36.6 (`ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4`, from the same source
@@ -2286,25 +2336,49 @@ seed's k3s is at `v1.36.6+k3s1`, then phrase `upgrade <name> to <release> and re
 Only the move from 0.10.0 is drilled on a lab; the plans from the eight other BOMs were read
 (`PlanFor`), not run.
 
+**Before the platform part: databases made before database chart 0.5.2.** A database of one
+instance on chart 0.5.1 or older has a PodDisruptionBudget that allows no eviction, and the plan's
+part `platform` is then blocked with `drain_blocked`, which names it ("PodDisruptionBudget
+<namespace>/<name>-primary allows no disruption ..."): Cluster API could never drain its machine. A
+database keeps its chart when the provider's pin moves, so one made before 0.10.0 still has it
+after the upgrades to 0.9.0 and 0.10.0 (seen on the production site, 2026-11-20). Read the platform
+part's `blocking` before you start the seed part, and move each such database to 0.5.2 first with
+the operator route ([managed-dbaas.md](managed-dbaas.md#chart-pin--platform-update)):
+
+```text
+# {id}: the Databases provider; {clusterId}: the database's Application name, as GET .../db-clusters lists it
+POST /api/v1/admin/service/{id}/db-clusters/{clusterId}/bump-chart   # one database
+POST /api/v1/admin/service/{id}/db-clusters/bump-chart               # every database of the provider
+```
+
+Then read the plan again. The bump changes only `enablePDB` to `false` for one instance: on
+CloudNativePG 1.30.1 it removed the budget without restarting the database (the same pod, the same
+postmaster start, no failed look), and `drain_blocked` left the plan at once. The database is still
+down while its machine is replaced in the `dbaas` unit: take a backup of it first.
+
 **What it does and what stops, step by step.** The sentences are the plan's; the sections
 [The seed's k3s](#the-seeds-k3s) and [The platform cluster's machines](#the-platform-clusters-machines)
 have the detail.
 
 | Step | What the run does | What stops serving | How long |
 |---|---|---|---|
-| Part "seed", stage 2 | Imports the 1.36.6 node image as a template on every Proxmox node the cluster uses (a download of about 2.4 GiB), one node after another: the file is uploaded through the Proxmox API node, written to the import store, and imported into the node's boot store | Nothing by design. On a slow disk, or one the seed or the control plane shares with the import, the upload and the disk import can stall the etcd of the seed and of the platform cluster's control plane for seconds: the lab saw the seed's k3s restart once (39 s without its API), the platform API fail for up to 30 s, and single tenant API looks time out, all inside the minutes of an upload or import; the database port never failed. Choose a quiet hour | 11 to 19 minutes per node, 41 minutes for three nodes; the 19 include two uploads Proxmox answered with an error, which the import tried again by itself (the stage's item says which try runs) (one lab's sample, 2026-11-20) |
+| Part "seed", stage 2 | Imports the 1.36.6 node image as a template on every Proxmox node the cluster uses (a download of about 2.4 GiB), one node after another: the file is uploaded through the Proxmox API node, written to the import store, and imported into the node's boot store | Nothing by design. On a slow disk, or one the seed or the control plane shares with the import, the upload and the disk import can stall the etcd of the seed and of the platform cluster's control plane for seconds: the lab saw the seed's k3s restart once (39 s without its API), the platform API fail for up to 30 s, and single tenant API looks time out, all inside the minutes of an upload or import; the database port never failed. Choose a quiet hour | 11 to 19 minutes per node, 41 minutes for three nodes; the 19 include two uploads Proxmox answered with an error, which the import tried again by itself (the stage's item says which try runs) (one lab's sample, 2026-11-20). **No import when the node already has the BOM's node image as a published template** of Template updates: on the one-node site the stage took 0.08 seconds and wrote nothing on Proxmox |
 | Part "seed", stage 5a | Saves an etcd snapshot on the seed, writes the k3s config drop-in that turns leader election off in three components, replaces the k3s binary, restarts k3s. k3s moves its bundled containerd from 2.2 to 2.3 with it | The seed's API. Reconciliation only: no machine is repaired, the seed's ArgoCD syncs nothing, no platform run goes on. The platform cluster, tenant clusters, tenant API servers and databases keep serving | The stage took 2 minutes 1 second and the seed's API was away for 43 seconds (one lab's sample, 2026-11-20) |
 | Part "seed", stage 6 | The seed's charts are compared again, now on k3s 1.36 | Nothing | Not measured |
-| Part "platform", step 1: control plane (one machine) | A second machine is cloned from the 1.36.6 template and joins; the old one is removed. etcd moves from 3.6.6 to 3.6.8 with the machine | The platform cluster's API, from the removal of the old etcd member until the new machine holds the API address: no tenant cluster or database operation, no repair, no failover, stale status in the consoles. Running tenant API servers, workloads and databases keep answering. **On a node whose disk the control plane shares with the clone, the API can be away during the clone too, before anything has joined** | Clone 6 minutes 5 seconds; the platform API away for up to 2 minutes 21 seconds during the clone on the control plane's own node (kube-vip let the address go, the API server restarted), then for 65 seconds at the hand-over, from the removal of the old etcd member until the new machine held the address (the kube-vip lease is 60 seconds); about 11 minutes for the whole unit. Tenant API: single looks failed, 13 seconds at most. Database: no failed look, no failed insert (one lab's sample, 2026-11-20) |
+| Part "platform", step 1: control plane (one machine) | A second machine is cloned from the 1.36.6 template and joins; the old one is removed. etcd moves from 3.6.6 to 3.6.8 with the machine | The platform cluster's API, from the removal of the old etcd member until the new machine holds the API address: no tenant cluster or database operation, no repair, no failover, stale status in the consoles. Running tenant API servers, workloads and databases keep answering. **On a node whose disk the control plane shares with the clone, the API can be away during the clone too, before anything has joined** | Clone 6 minutes 5 seconds; the platform API away for up to 2 minutes 21 seconds during the clone on the control plane's own node (kube-vip let the address go, the API server restarted), then for 65 seconds at the hand-over, from the removal of the old etcd member until the new machine held the address (the kube-vip lease is 60 seconds); about 11 minutes for the whole unit. Tenant API: single looks failed, 13 seconds at most. Database: no failed look, no failed insert (one lab's sample, 2026-11-20). One-node site: clone 8 seconds, the platform API away 67 seconds at the hand-over and never during the clone, the unit 3 minutes 46 seconds |
 | Step 2: `system` | The machine is replaced | The platform's operators (ArgoCD, Cluster API for tenants, CloudNativePG, MetalLB's controller, cert-manager, the CSI controller, CoreDNS) while they start on the new machine and pull their images; a MetalLB address may move | The operators were away for 3 to 5 minutes; the service addresses moved to another node in seconds, with no failed look at the platform API, a tenant API or the database. 8 minutes 50 seconds for the whole unit (one lab's sample, 2026-11-20) |
-| Step 3: `kamaji` (one machine) | The machine is replaced; kamaji-etcd's disk follows | **Every tenant API server.** Tenant workloads keep running | **Tenant API servers away for 6 minutes 54 seconds.** During the unit's clone, on the node that also holds the control plane, single looks at the platform API and the tenant API failed for up to 10 seconds. Clone 6 minutes 7 seconds; 10 minutes 21 seconds for the whole unit (one lab's sample, 2026-11-20) |
-| Step 4: `dbaas` | The machine is replaced; each database's disk follows | **Every database with one instance** on the machine | **The database away for 4 minutes 8 seconds**: a writer that inserted every 2 seconds failed 53 times and lost no row. 11 minutes 20 seconds for the whole unit (one lab's sample, 2026-11-20) |
+| Step 3: `kamaji` (one machine) | The machine is replaced; kamaji-etcd's disk follows | **Every tenant API server.** Tenant workloads keep running | **Tenant API servers away for 6 minutes 54 seconds.** During the unit's clone, on the node that also holds the control plane, single looks at the platform API and the tenant API failed for up to 10 seconds. Clone 6 minutes 7 seconds; 10 minutes 21 seconds for the whole unit (one lab's sample, 2026-11-20). One-node site: clone 7 seconds, the tenant API away 104 seconds |
+| Step 4: `dbaas` | The machine is replaced; each database's disk follows | **Every database with one instance** on the machine | **The database away for 4 minutes 8 seconds**: a writer that inserted every 2 seconds failed 53 times and lost no row. 11 minutes 20 seconds for the whole unit (one lab's sample, 2026-11-20). One-node site: clone 6 seconds, the database away 75 seconds |
 | Stages 8 to 11 | The platform cluster's charts are compared on 1.36, the providers are written, the record moves | Nothing | Not measured |
 
 The figures are from two drills on one lab of three Proxmox nodes with one machine per unit
 (`v0.10.1-rc.1` for the seed and the control plane, `v0.10.1-rc.2` for the three node groups), every
-unit replaced with one more machine first. Another site's disks and image pulls give other figures:
-announce more than these.
+unit replaced with one more machine first. On the one-node site (2026-11-20, `v0.10.1`) the node
+image was already a published template, each clone took 6 to 8 seconds (a full clone on the same
+NVMe pool), the `system` unit had no gap, each unit took 2 minutes 44 seconds to 3 minutes 46
+seconds and the whole part 13 minutes 14 seconds: the gaps were 67 seconds (platform API), 104
+seconds (tenant API) and 75 seconds (database), and a clone stalled nothing. Another site's disks
+and image pulls give other figures: announce more than these.
 
 **Why the two stateful gaps are minutes, not seconds (known issue).** A new machine counts as Ready,
 and Cluster API drains the old one, before the CSI node plugin of the new node has registered: the
@@ -2356,7 +2430,12 @@ new privilege) and only while the Node's uid is the one that was read. The stage
 Node deleted (`node/<name>`, state `deleted`) and keep the item until the run ends, whatever the
 stage writes afterwards, and the audit log has one entry per Node (action `DELETE` on the
 installation, by the run, with the Node's name and the reason). The Check row `nodes` warns about
-one before a run starts. **A site that stands there after the control plane's unit** (the lab did,
+one before a run starts. **"Error deleting Node" during the hand-over is expected.** While the
+platform API is away at the control plane's hand-over, the stage's item can read "<machine> (no VM):
+old machine being removed: DeletingNode: Error deleting Node, please check controller logs for
+errors": Cluster API's own condition, passed through. On the one-node site it showed for about 50
+seconds and cleared by itself; once the API answered, Cluster API deleted the Node and the run had
+none to delete. Do not delete that Node by hand. **A site that stands there after the control plane's unit** (the lab did,
 on `v0.10.1-rc.1`: installation `failed`, `roll.step` 1, five Nodes) **gets out with one Retry** on
 a release from `0.10.1-rc.2` on: the lab's Retry carried the unfinished roll to the new BOM, put
 the timeout on the machines without replacing one, deleted the Node 41 seconds after the request
@@ -2386,17 +2465,17 @@ moves no third-party chart, so both stay at their pin:
 
 - **cert-manager v1.20.2** (seed and platform cluster): its release table lists Kubernetes 1.32 to
   1.35. The first cert-manager that lists 1.36 is 1.21. This is new with the BOM of 0.10.1.
-  **Closed by the BOM after 0.10.1**, which moves it to v1.21.3 (lists 1.33 to 1.36) in an upgrade
+  **Closed by the BOM of 0.10.2**, which moves it to v1.21.3 (lists 1.33 to 1.36) in an upgrade
   of its own, after the one to 1.36.6 ([What this release moves](#what-this-release-moves-and-what-it-refuses)).
   A platform stays outside until it has made that move.
 - **Cilium 1.18.16** (the platform cluster's CNI): its compatibility page lists 1.30 to 1.33, and
   says that other versions depend on Kubernetes' own compatibility. It was outside the list on
   1.35.10 already; 1.36 is one minor further. The first Cilium that lists 1.36 is 1.20.
 
-No source says either breaks on 1.36, and neither was run on 1.36. Both are accepted as "to be
-proven by the lab drill": cert-manager issuing a certificate on the seed and on the platform
-cluster after their moves, Cilium agents Ready on every new node with traffic between nodes. If one
-of them fails there, stop before the next part or unit: an upgrade to 1.36.6 cannot move either
+No source says either breaks on 1.36. cert-manager v1.21.3 issued a new certificate and renewed
+one on 1.36, on the seed and on the platform cluster, on the lab after its move (2026-11-21); v1.20.2
+issued none there. Cilium 1.18.16 ran on every new node of the lab and of the one-node site, with
+no fault seen. If one of them fails on your site, stop before the next part or unit: an upgrade to 1.36.6 cannot move either
 chart (Cilium moves in no upgrade, cert-manager only in one that changes no k3s, Kubernetes version
 or node image). Argo CD 3.6, Cluster API v1.14 (as management and as workload cluster) and
 CloudNativePG 1.30 list 1.36. The Proxmox provider, the in-cluster IPAM provider, the Helm addon
@@ -2931,7 +3010,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1` (`main` carries a `-dev` one between releases, now `0.11.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2` and `v0.10.2-rc.1` carry `0.10.0-rc.1`, `0.10.1-rc.1`, `0.10.1-rc.2` and `0.10.2-rc.1`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well, and `main` keeps that of v0.10.1 and that of the candidate `v0.10.2-rc.1` too). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1`, that of v0.10.2 is `0.10.2` (`main` carries a `-dev` one between releases; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2` and `v0.10.2-rc.1` carry `0.10.0-rc.1`, `0.10.1-rc.1`, `0.10.1-rc.2` and `0.10.2-rc.1`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well, and v0.10.2 keeps that of v0.10.1 and that of the candidate `v0.10.2-rc.1` too). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
