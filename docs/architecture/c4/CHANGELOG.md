@@ -14,7 +14,7 @@ HAProxy (`lbServingFn`); keepalived must run after its change; files the guest a
 (`lbReadyScript`). `ReadVRRPState` and the new `HAProxyServing` report whether HAProxy listens on every bind of its
 config, and `LBHealth` the listeners and members the running HAProxy does not hold. In `internal/platform/project`
 the converge (`lbApplyLocked`, `lbApplyPair`) asks every appliance with a recorded hash what it runs and pushes again
-where a service is stopped or runs another config, and records the pair's own hash only when an appliance is up with
+where a service is stopped or runs another config than its file, and records the pair's own hash only when an appliance is up with
 the config; `lbPairStatus` names the cause and its remedy; `lbTakeOut` and `lbPutIn` state the row's status again
 during a replace.
 
