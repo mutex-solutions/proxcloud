@@ -212,11 +212,11 @@ func (j *Job) releaseOrphanIPs(ctx context.Context, ps *pve.Service, serviceID, 
 // pmxcfs grace), or, for a public NIC, its row is younger than the allocation, which means the vmid
 // was reused, since a public NIC is normally attached to a VM that already has a row. A net0 address,
 // and a public NIC plugged during the VM's build (BeforeRow), do not get that second check: they are
-// allocated before the row exists.
+// allocated before the row exists. A load balancer pair's VIP has no VM to judge it by and is never an orphan here.
 func orphanIPs(allocs []project.PublicIP, listed map[string]bool, rows map[string]*cloud.CloudResource, now time.Time) []project.PublicIP {
 	var out []project.PublicIP
 	for _, a := range allocs {
-		if a.CreatedAt == nil || a.NIC == project.ReservedNIC {
+		if a.CreatedAt == nil || a.NIC == project.ReservedNIC || a.OwnedByLB() {
 			continue
 		}
 		row := rows[a.ServerID]

@@ -222,6 +222,12 @@ func (c *Client) AddVMIPSetEntry(ctx context.Context, node string, vmid int, nam
 	return c.post(ctx, vmFirewallPath(node, vmid)+"/ipset/"+url.PathEscape(name), formVals{"cidr": cidr}.values(), nil)
 }
 
+// DeleteVMIPSetEntry removes one entry, named as PVE lists it (a host without /32).
+// ponytail: a network entry would put its "/" in the path; only host entries are removed this way.
+func (c *Client) DeleteVMIPSetEntry(ctx context.Context, node string, vmid int, name, cidr string) error {
+	return c.delete(ctx, vmFirewallPath(node, vmid)+"/ipset/"+url.PathEscape(name)+"/"+url.PathEscape(cidr), nil, nil)
+}
+
 // GetVMFirewallOptions reads the VM firewall options (absent keys are PVE's defaults).
 func (c *Client) GetVMFirewallOptions(ctx context.Context, node string, vmid int) (map[string]any, error) {
 	out := map[string]any{}

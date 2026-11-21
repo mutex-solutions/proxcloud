@@ -461,6 +461,66 @@ func (s *Service) SetIPFilter(ctx context.Context, node string, vmid int, nic st
 	return nil
 }
 
+// AddIPFilterEntries adds to the VM's ipfilter-<nic> set the hosts it lacks, making the set when there is none, and
+// answers the hosts it holds that are not in hosts. Sets of a load balancer pair change entry by entry and are never
+// dropped: an address answers only while it is in both appliances' sets (spike, 2026-11-21), so a dropped and rebuilt
+// set would cut every address of the balancer for the time it takes. Entries are host addresses.
+func (s *Service) AddIPFilterEntries(ctx context.Context, node string, vmid int, nic string, hosts []string) (extra []string, err error) {
+	name := "ipfilter-" + nic
+	sets, err := s.C.ListVMIPSets(ctx, node, vmid)
+	if err != nil {
+		return nil, err
+	}
+	var have []string
+	if slices.ContainsFunc(sets, func(set IPSet) bool { return set.Name == name }) {
+		entries, err := s.C.ListVMIPSetEntries(ctx, node, vmid, name)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			have = append(have, strings.TrimSuffix(e.CIDR, "/32"))
+		}
+	} else if err := s.C.CreateVMIPSet(ctx, node, vmid, name, "proxcloud anti-spoof"); err != nil {
+		return nil, err
+	}
+	want := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		want = append(want, strings.TrimSuffix(h, "/32"))
+	}
+	for _, h := range want {
+		if !slices.Contains(have, h) {
+			if err := s.C.AddVMIPSetEntry(ctx, node, vmid, name, h); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, h := range have {
+		if !slices.Contains(want, h) {
+			extra = append(extra, h)
+		}
+	}
+	return extra, nil
+}
+
+// RemoveIPFilterEntries takes hosts out of the VM's ipfilter-<nic> set, one entry at a time.
+func (s *Service) RemoveIPFilterEntries(ctx context.Context, node string, vmid int, nic string, hosts []string) error {
+	for _, h := range hosts {
+		if err := s.C.DeleteVMIPSetEntry(ctx, node, vmid, "ipfilter-"+nic, strings.TrimSuffix(h, "/32")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetIPFilterEntries makes the set hold exactly hosts: AddIPFilterEntries, then the rest removed.
+func (s *Service) SetIPFilterEntries(ctx context.Context, node string, vmid int, nic string, hosts []string) error {
+	extra, err := s.AddIPFilterEntries(ctx, node, vmid, nic, hosts)
+	if err != nil {
+		return err
+	}
+	return s.RemoveIPFilterEntries(ctx, node, vmid, nic, extra)
+}
+
 // DefaultSecurityGroupName is the per-project group attached when a server is
 // created without an explicit choice.
 const DefaultSecurityGroupName = "default"

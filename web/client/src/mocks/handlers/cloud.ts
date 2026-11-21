@@ -252,6 +252,16 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     case "ENABLE_WEBSITE": return ok({ enabled: true, indexDocument: "index.html" })
     case "DISABLE_WEBSITE": return ok({ enabled: false })
 
+    // Load balancers: the members as the appliance holding the address sees them, and a replace that starts.
+    case "GET_HEALTH":
+      return { data: {
+        result: (r?.data?.loadbalancer?.pools ?? []).flatMap((p: any) => (p.members ?? []).map((m: any) => ({ pool: p.name, serverId: m.serverId, port: m.port, status: "UP" }))),
+        appliances: r?.data?.loadbalancer?.appliances ?? [],
+      } }
+    case "REPLACE_APPLIANCES":
+      if (r?.data?.loadbalancer) r.data.loadbalancer.replacing = new Date().toISOString()
+      return { data: r }
+
     // Networks / routers / ports / security groups
     case "GET_SERVERS": return ok(db.cloud.filter((x) => x.type === "SERVER"))
     case "UPDATE": return ok()

@@ -116,7 +116,9 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 // no security group (its firewall rules are its listeners), and a step before first boot.
 type pveAppliance struct {
 	loadBalancerID string
-	beforeBoot     func(ctx context.Context, ps *pve.Service, node string, vmid int) error
+	// node pins the VM to one node ("" = the scheduler's pick): a pair's second appliance on a simple zone.
+	node       string
+	beforeBoot func(ctx context.Context, ps *pve.Service, node string, vmid int) error
 	// left is set when the build failed and its VM may still exist: the answer to the tenant cannot say so.
 	left *pve.VMLeftError
 }
@@ -221,6 +223,13 @@ func (h *Handler) pveBuildServer(ctx context.Context, u *user.User, proj *Projec
 	pl, herr := pvePlacement(tpl, pve.TemplateShared(tplCfg, caps), profileSlug, profiles, caps)
 	if herr != nil {
 		return nil, herr
+	}
+	if ap != nil && ap.node != "" {
+		if pl.allowed == nil || pl.allowed[ap.node] {
+			pl.allowed = map[string]bool{ap.node: true}
+		} else {
+			return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("Image %q cannot be created on node %s, where this appliance must run: its network is a simple zone, whose traffic stays on one node", tpl.Name, ap.node))
+		}
 	}
 	// Scheduler: capacity-ranked node pick over the live cluster snapshot.
 	nodes, nerr := ps.C.Nodes(ctx)

@@ -102,6 +102,8 @@ func TestOrphanIPs(t *testing.T) {
 		alloc("104", "net0", time.Minute), // allocated before its VM's row: never a reuse
 		// A load balancer's public NIC, plugged during the build: same. Lab: this released a live address.
 		{ServerID: "105", NIC: "net1", BeforeRow: true, CreatedAt: at(-time.Minute)},
+		// A load balancer pair's VIP: owned by the balancer, no VM lists it, never an orphan (C1).
+		{ServerID: project.LBAddressOwner("abc"), NIC: "net1", CreatedAt: at(-time.Hour)},
 	}
 	listed := map[string]bool{"100": true, "103": true, "104": true, "105": true}
 	rows := map[string]*cloud.CloudResource{

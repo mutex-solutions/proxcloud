@@ -186,6 +186,24 @@ export function seedCloudResources(): CloudResource[] {
   return [
     ...servers,
 
+    // A load balancer on two appliances, both on node pve1 (a one-node site): it survives an appliance failure, not
+    // the loss of the node.
+    res("LOAD_BALANCER", "web-lb", {
+      loadbalancer: {
+        id: "a1b2c3d4e5f6", name: "web-lb", status: "ACTIVE", ha: true, serverId: "301", networkId: "v1", publicNetworkId: "vmbr1",
+        publicIp: "203.0.113.10", privateIp: "10.0.0.41", vips: ["203.0.113.10"],
+        appliances: [
+          { serverId: "301", node: "pve1", privateIp: "10.0.0.41", role: "BACKUP", state: "up" },
+          { serverId: "302", node: "pve1", privateIp: "10.0.0.42", role: "MASTER", holdsVip: true, state: "up" },
+        ],
+        listeners: [{ port: 80, pool: "web", sourceRanges: ["198.51.100.0/24"] }],
+        pools: [{
+          name: "web", protocol: "http", algorithm: "roundrobin", healthCheck: { type: "http", path: "/healthz" },
+          members: [{ serverId: webExt, port: 8080, weight: 1, address: "10.0.0.11" }],
+        }],
+      },
+    }),
+
     // Three workers placed on three hosts: scaling to two empties one host.
     k8s("pc-c-healthy", "prod", {
       status: "READY",

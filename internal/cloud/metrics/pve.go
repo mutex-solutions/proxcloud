@@ -99,7 +99,9 @@ func (f *PVEFetcher) SearchInstanceInterfaces(ctx context.Context, vmid string) 
 	return out, nil
 }
 
-// sample folds the running VM's counters in (a stopped VM has none: nothing moved).
+// sample folds the running VM's counters in (a stopped VM has none: nothing moved). An appliance of a load balancer
+// pair carries the balancer's VIPs on its net1, all on one tap: it gets one counter for the balancer however many
+// VIPs it serves, so the tap is counted once (the two appliances' counters add up to the balancer's traffic).
 func (f *PVEFetcher) sample(ctx context.Context, row *cloud.CloudResource) error {
 	fips, err := f.cloud.FindByServiceProjectAndType(ctx, f.svc.ServiceID, row.ProjectID, cloud.TypeFloatingIP)
 	if err != nil {
@@ -107,12 +109,7 @@ func (f *PVEFetcher) sample(ctx context.Context, row *cloud.CloudResource) error
 	}
 	var st *pve.VMStatus
 	month := f.now().UTC().Format("2006-01")
-	for i := range fips {
-		fip, _ := fips[i].Data["floatingIp"].(map[string]any)
-		nic, _ := fip["nic"].(string)
-		if server, _ := fip["server_id"].(string); server != row.ExternalID || nic == "" {
-			continue
-		}
+	for _, t := range trafficTaps(row, fips) {
 		if st == nil {
 			vm, err := f.vm(ctx, row.ExternalID)
 			if err != nil {
@@ -125,11 +122,11 @@ func (f *PVEFetcher) sample(ctx context.Context, row *cloud.CloudResource) error
 				return err
 			}
 		}
-		tap, sample, ok := tapSample(row.ExternalID, nic, st.NICs)
+		tap, sample, ok := tapSample(row.ExternalID, t.nic, st.NICs)
 		if !ok {
 			continue
 		}
-		id := row.ID + "/" + fips[i].ExternalID
+		id := row.ID + "/" + t.key
 		c := NICCounter{ID: id, ResourceID: row.ID, NIC: tap}
 		if _, err := f.counters.Get(ctx, id, &c); err != nil {
 			return err
@@ -140,6 +137,31 @@ func (f *PVEFetcher) sample(ctx context.Context, row *cloud.CloudResource) error
 		}
 	}
 	return nil
+}
+
+// trafficTap is one counter a VM's traffic goes to: key names it under the VM's row, nic is the NIC it reads.
+type trafficTap struct{ key, nic string }
+
+// trafficTaps lists the counters of a VM: one per public address it holds itself, and one for the load balancer
+// pair it is an appliance of, whatever the number of that balancer's VIPs.
+func trafficTaps(row *cloud.CloudResource, fips []cloud.CloudResource) []trafficTap {
+	srv, _ := row.Data["server"].(map[string]any)
+	lbID, _ := srv["loadBalancerId"].(string)
+	var out []trafficTap
+	lbCounted := false
+	for i := range fips {
+		fip, _ := fips[i].Data["floatingIp"].(map[string]any)
+		nic, _ := fip["nic"].(string)
+		server, _ := fip["server_id"].(string)
+		switch {
+		case server == row.ExternalID && nic != "":
+			out = append(out, trafficTap{key: fips[i].ExternalID, nic: nic})
+		case lbID != "" && server == "lb:"+lbID && !lbCounted:
+			lbCounted = true
+			out = append(out, trafficTap{key: "lb:" + lbID, nic: "net1"})
+		}
+	}
+	return out
 }
 
 // tapSample maps a config NIC ("net1") to its tap ("tap<vmid>i1") and that tap's counters.
