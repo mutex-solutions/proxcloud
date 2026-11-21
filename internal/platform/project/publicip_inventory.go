@@ -16,7 +16,7 @@ import (
 // The external-id lock also used by cloud.Upsert/InsertIfAbsent keeps a new cache
 // generation from appearing between the absence check and allocation deletion.
 func (r *PublicIPRepo) ReleaseIfUnchanged(ctx context.Context, expected PublicIP, expectedServer *cloud.CloudResource) (bool, error) {
-	if expectedServer == nil || expectedServer.ID == "" || expectedServer.ServiceID != expected.ServiceID || expectedServer.ProjectID != expected.ProjectID || expectedServer.ExternalID != expected.ServerID || expected.BeforeRow || expected.NIC == ReservedNIC {
+	if expectedServer == nil || expectedServer.ID == "" || expectedServer.ServiceID != expected.ServiceID || expectedServer.ProjectID != expected.ProjectID || expectedServer.ExternalID != expected.ServerID || expected.BeforeRow || expected.NIC == ReservedNIC || expected.OwnedByLB() {
 		return false, nil
 	}
 	db := r.col.DB()

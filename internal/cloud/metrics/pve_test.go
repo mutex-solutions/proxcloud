@@ -1,8 +1,10 @@
 package metrics
 
 import (
+	"slices"
 	"testing"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
@@ -54,5 +56,23 @@ func TestIsPublicTrafficSourceClassified(t *testing.T) {
 	}
 	if isPublicTraffic(Resource{Name: "tap105i1", Public: &no}, nil, nil) {
 		t.Fatal("the source said private")
+	}
+}
+
+// An appliance of a pair gets one counter for its balancer however many VIPs it carries (C2), next to the counters
+// of addresses it holds itself.
+func TestTrafficTaps(t *testing.T) {
+	fip := func(ext, server, nic string) cloud.CloudResource {
+		return cloud.CloudResource{ExternalID: ext, Data: map[string]any{"floatingIp": map[string]any{"server_id": server, "nic": nic}}}
+	}
+	fips := []cloud.CloudResource{fip("a", "lb:abc", "net1"), fip("b", "lb:abc", "net1"), fip("c", "lb:other", "net1"), fip("d", "201", "net2"), fip("e", "202", "net1")}
+	row := &cloud.CloudResource{ExternalID: "201", Data: map[string]any{"server": map[string]any{"loadBalancerId": "abc"}}}
+	got := trafficTaps(row, fips)
+	want := []trafficTap{{key: "lb:abc", nic: "net1"}, {key: "d", nic: "net2"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("taps = %+v, want %+v", got, want)
+	}
+	if got := trafficTaps(&cloud.CloudResource{ExternalID: "203"}, fips); len(got) != 0 {
+		t.Fatalf("a server with no address of its own and no balancer: %+v", got)
 	}
 }

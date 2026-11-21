@@ -80,6 +80,16 @@ func (r *PublicIPRepo) ForProject(ctx context.Context, serviceID, projectID stri
 	return r.find(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID})
 }
 
+// LBAddressOwner is the owner of a load balancer pair's public address (its VIP): the balancer, not a VM, since
+// the address moves between the two appliances.
+func LBAddressOwner(lbID string) string { return lbOwnerPrefix + lbID }
+
+const lbOwnerPrefix = "lb:"
+
+// OwnedByLB: the address is a load balancer pair's VIP. No VM holds it, so no VM inventory can prove it orphaned:
+// it goes with the balancer's delete or the project's teardown.
+func (p PublicIP) OwnedByLB() bool { return strings.HasPrefix(p.ServerID, lbOwnerPrefix) }
+
 // IsPublic: a public NIC's address, the billed kind. A net0 row is an address on the project's own
 // vnet (zones without DHCP) and costs nothing.
 func (p PublicIP) IsPublic() bool { return p.NIC == publicNIC }

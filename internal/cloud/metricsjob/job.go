@@ -142,6 +142,15 @@ func serversWithPublicIP(fips []cloud.CloudResource) map[string]bool {
 	return out
 }
 
+// pairAddressOwner is the owner of the VIPs an appliance of a load balancer pair carries ("" for other servers).
+func pairAddressOwner(server *cloud.CloudResource) string {
+	srv, _ := server.Data["server"].(map[string]any)
+	if id, _ := srv["loadBalancerId"].(string); id != "" {
+		return "lb:" + id
+	}
+	return ""
+}
+
 func (j *Job) processServer(ctx context.Context, server *cloud.CloudResource, ports []cloud.CloudResource, public map[string]bool, run *pass) {
 	es, err := j.externalService(ctx, run.services, server.ServiceID)
 	if err != nil {
@@ -154,7 +163,7 @@ func (j *Job) processServer(ctx context.Context, server *cloud.CloudResource, po
 	if source == externalservice.MetricsSourceNone || !run.only(source) {
 		return
 	}
-	if source == externalservice.MetricsSourcePVE && !public[server.ExternalID] {
+	if source == externalservice.MetricsSourcePVE && !public[server.ExternalID] && !public[pairAddressOwner(server)] {
 		return
 	}
 	key := es.ID + "/" + server.Region

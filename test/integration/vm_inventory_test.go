@@ -826,3 +826,45 @@ func TestVMInventoryDurableUnknownAndRestoreVetoes(t *testing.T) {
 		})
 	}
 }
+
+// C1 (v0.11.0 plan): a load balancer pair's VIP is owned by the balancer ("lb:<id>"), not by a VM. The orphan sweep
+// must neither release it nor stop at it: on main it read the owner as a vmid, found no VM, reported the inventory
+// untrusted and skipped the project's FLOATING_IP reconcile, so the VIP was never billed and every other address
+// change of the project stopped reaching its rows.
+func TestVMInventoryLBAddressIsNoOrphanAndIsBilled(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	repo := cloud.NewRepo(db)
+	old := vmCached(t, db, cloud.TypeServer)
+	f := &vmInventoryWire{mode: "empty", full: true}
+	s := vmTestService(t, f)
+	mustInsert(t, db, "project", pgdoc.M{"_id": "p", "name": "fixture", "status": "ENABLED", "services": []any{pgdoc.M{"serviceId": "s"}}})
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "s", "name": "fixture", "type": "CLOUD", "status": "PUBLIC", "config": pgdoc.M{"provider": "proxmox", "region": "r"}})
+	ips := project.NewPublicIPRepo(db)
+	past := old.CreatedAt
+	vip := project.PublicIP{ID: "s/pub/198.51.100.9", ServiceID: "s", ProjectID: "p", ServerID: project.LBAddressOwner("abc"), NetworkID: "pub", IP: "198.51.100.9", Prefix: 24, NIC: "net1", CreatedAt: past}
+	orphan := project.PublicIP{ID: "s/pub/198.51.100.3", ServiceID: "s", ProjectID: "p", ServerID: "101", NetworkID: "pub", IP: "198.51.100.3", NIC: "net1", CreatedAt: past}
+	for _, a := range []project.PublicIP{vip, orphan} {
+		if _, err := db.C("pvePublicIp").InsertOne(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	es := externalservice.NewService(externalservice.NewRepo(db), textcrypt.New("k"))
+	j := syncjob.New(project.NewRepo(db), es, repo, nil).WithProxmoxFactory(func(*externalservice.ExternalService) (*pve.Service, error) { return s, nil }).WithPublicIPs(ips.ForProject, func(context.Context, string, string, string) error { return nil }).WithPublicIPInventory(ips)
+	for round := 0; round < 2; round++ {
+		if _, err := j.RunPVEState(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held, err := ips.ForProject(ctx, "s", "p")
+	if err != nil || len(held) != 1 || held[0].ID != vip.ID {
+		t.Fatalf("held after two syncs = %+v (%v), want only the VIP: the orphan released, the VIP kept", held, err)
+	}
+	fips, err := repo.FindByServiceProjectAndType(ctx, "s", "p", cloud.TypeFloatingIP)
+	if err != nil || len(fips) != 1 {
+		t.Fatalf("FLOATING_IP rows = %d (%v), want the VIP's", len(fips), err)
+	}
+	if fip, _ := fips[0].Data["floatingIp"].(map[string]any); fip["server_id"] != "lb:abc" || fip["floating_ip_address"] != "198.51.100.9" {
+		t.Fatalf("FLOATING_IP row = %+v", fips[0].Data)
+	}
+}
