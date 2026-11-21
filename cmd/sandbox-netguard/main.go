@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/ciliumcni"
 )
 
 type config struct {
@@ -97,13 +99,18 @@ func request(client *http.Client, token, method, u string, body any, out any) er
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("API status %d", res.StatusCode)
+		return statusError(res.StatusCode)
 	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(res.Body, 4<<20)).Decode(out)
 	}
 	return nil
 }
+
+type statusError int
+
+func (e statusError) Error() string { return fmt.Sprintf("API status %d", int(e)) }
+
 func process(b []byte) error {
 	var c config
 	if err := json.Unmarshal(b, &c); err != nil {
@@ -224,12 +231,8 @@ func install() error {
 	if e != nil {
 		return e
 	}
-	var cm struct{ Data map[string]string }
-	if e := request(client, token, "GET", check.API+"/api/v1/namespaces/kube-system/configmaps/cilium-config", nil, &cm); e != nil {
+	if e := ciliumLeavesConf(client, token, check.API, os.Getenv("NODE_NAME")); e != nil {
 		return e
-	}
-	if cm.Data["custom-cni-conf"] != "true" || cm.Data["write-cni-conf-when-ready"] != "" {
-		return errors.New("Cilium still owns CNI config; wait for customConf rollout")
 	}
 	path := "/host/etc/cni/net.d/05-cilium.conflist"
 	b, err := os.ReadFile(path)
@@ -298,6 +301,36 @@ func install() error {
 		return err
 	}
 	return publishGuard()
+}
+
+// ciliumLeavesConf: the cluster-wide cilium-config (the sandbox cluster) or a CiliumNodeConfig
+// that selects this node (sandbox nodes of a shared cluster) must leave the conflist to us.
+func ciliumLeavesConf(client *http.Client, token, api, node string) error {
+	var cm struct{ Data map[string]string }
+	if e := request(client, token, "GET", api+"/api/v1/namespaces/kube-system/configmaps/cilium-config", nil, &cm); e != nil {
+		return e
+	}
+	// No CRD (404) or an older RBAC without ciliumnodeconfigs (403): the ConfigMap alone decides, as before.
+	var ncs struct{ Items []ciliumcni.NodeConfig }
+	var se statusError
+	if e := request(client, token, "GET", api+"/apis/cilium.io/v2/namespaces/kube-system/ciliumnodeconfigs", nil, &ncs); e != nil && !(errors.As(e, &se) && (se == 403 || se == 404)) {
+		return e
+	}
+	var n struct {
+		Metadata struct{ Labels map[string]string }
+	}
+	if len(ncs.Items) > 0 {
+		if node == "" {
+			return errors.New("NODE_NAME required")
+		}
+		if e := request(client, token, "GET", api+"/api/v1/nodes/"+node, nil, &n); e != nil {
+			return e
+		}
+	}
+	if !ciliumcni.CustomConf(cm.Data, ncs.Items, n.Metadata.Labels) {
+		return errors.New("Cilium still owns CNI config on this node; wait for customConf rollout (cluster-wide, or a CiliumNodeConfig with custom-cni-conf \"true\" and write-cni-conf-when-ready \"\")")
+	}
+	return nil
 }
 
 func publishGuard() error {

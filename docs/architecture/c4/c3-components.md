@@ -365,6 +365,7 @@ flowchart LR
   sbx --> k8s
   guard -->|"TBF before untrusted pod start"| sbxc
   guard -->|"nodes/stats GET only"| telemetry
+  guard -->|"cilium-config, CiliumNodeConfigs, own Node: read"| sbxc
   safety -->|"read + UID ownership join"| telemetry
   safety --> auditSafety
   safety -->|"empty + cordoned + durable start fence"| rotationMD

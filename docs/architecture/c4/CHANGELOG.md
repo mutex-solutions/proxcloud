@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-21: sandbox-netguard reads per-node Cilium config
+
+**What changed:** no new component or container. `sandbox-netguard -install` (node-setup on every sandbox node) now
+reads, besides `kube-system/cilium-config`, the `CiliumNodeConfig` list of `kube-system` and its own Node's labels,
+with its own service account (`sandbox-system/sandbox-netguard`: `get nodes`, `get`/`list ciliumnodeconfigs`,
+`deploy/sandbox-cluster/telemetry.yaml`). The network-guard gate (`internal/cloud/sandbox/netguard.go`) reads the same
+list with the portal's sandbox identity through the existing `kube-system` Role. Both decide per node with the shared
+`internal/ciliumcni` (the agent's merge: ConfigMap, then matching `CiliumNodeConfig`s by name).
+
+**Why:** v0.12.0 sandbox plan, spike changes 2 and 3 (`run-1/v0120-sandbox-plan.md`): in shared mode only the sandbox
+nodes of the platform cluster hand the CNI config to netguard, through a `CiliumNodeConfig`; the cluster-wide check
+kept node-setup from ever becoming Ready there.
+
+**Diagrams:** C3 (a read edge from sandbox-netguard to the sandbox cluster).
+
 ## 2026-11-21: new clusters are offered the product load balancer
 
 **What changed:** no new component, container or relation. The platform BOM pins cluster chart 0.1.17 for tenant
