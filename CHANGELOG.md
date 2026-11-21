@@ -66,6 +66,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replacement toward `0.10.1` on to `0.10.1` with a Retry, nothing to confirm. No apply on such a platform was run on
   a lab by this change.
 
+## [0.10.2-rc.1] - 2026-11-21
+
+The first release candidate of 0.10.2, published as a prerelease and never as `latest`. It is not the release:
+`v0.10.1` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
+still name it. It holds what is under Unreleased above (#407, #408, #409, #410), and it exists so that a lab can run
+the first upgrade that moves a third-party chart, cert-manager `v1.20.2` to `v1.21.3`: nothing of it had run on a
+lab when it was tagged. The entries above are not repeated here. Not for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.10.2-rc.1`** (`deploy/platform/platform-bom.yaml`), with the pins `main` had:
+  those of `0.10.1` but cert-manager, `v1.21.3` on the seed and on the platform cluster
+  (`sha256:0f159f17f9ed152737a96aa113f042c43ce1b28061660d14aef7d5c6c2a88600`, `upgradeFrom: ["v1.20.2"]`). No chart
+  of the product changed since its tag (`git diff proxmox-kamaji-cluster-v0.1.16 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster` and
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` print nothing), so no chart tag is
+  needed. It is a release BOM, and the release gate passes on it and on the twelve previous BOMs.
+- **The plan from each previous BOM** (`PlanFor`, one control plane machine and one machine per group). From 0.10.1
+  and 0.10.1-rc.2, three changes, allowed, with no part, no seed row and no machine replaced: the release, record
+  only, and `cert-manager` on the seed (class chart, stage `seed-platform`, wave 1) and on the platform cluster
+  (class chart, stage `workload-platform`, wave 1). Phrase `upgrade <name> to 0.10.2-rc.1`. From 0.10.1-rc.1, five:
+  those, `tenantCharts.kubernetes` 0.1.15 to 0.1.16, record only, and `pc-platform` 0.1.15 to 0.1.16 (class chart,
+  stage `cluster`, wave 3). From the nine BOMs on Kubernetes 1.35.10 (21 changes from 0.10.0 and 0.10.0-rc.1, 22 from
+  0.9.0, 0.9.1 and the candidates of 0.9.0, 25 from the three 0.8.x BOMs) the upgrade is refused: both cert-manager
+  rows carry the pair gate's sentence. Such a platform upgrades to 0.10.1 with the `v0.10.1` build first.
+- **This BOM carries no unfinished replacement.** An installation on 0.10.0 that stands in the replacement of its
+  machines toward 0.10.1-rc.1, 0.10.1-rc.2 or 0.10.1 goes on to that BOM with a Retry (this build carries the three
+  files); the move to 0.10.2-rc.1 is offered as `replacement` and refused by the pair gate until the replacement is
+  finished. `TestRollTowardAKeptCandidateGoesOn` now states it: under a release BOM that moves cert-manager, as under
+  the development BOM, the Retry goes on to the kept BOM itself.
+- **The run.** ArgoCD moves cert-manager in the component's wave on each cluster: CRDs in place (`v1` stays the only
+  version), the tokenrequest Role and RoleBinding removed, the controller, cainjector and webhook Deployments rolling
+  together, each keeping its old pod until the new one is Ready; the wave waits for the sync, the chart's
+  `startupapicheck` hook included, to have Succeeded. No machine is replaced, nothing is written on Proxmox and no
+  seed backup is asked for. There is no way back; the notes give upstream's backup command
+  (`kubectl get certificates,issuers,clusterissuers -A -o yaml`, on the seed and on the platform cluster).
+- **Security.** `v1.20.2` is affected by GHSA-8rvj-mm4h-c258 (high: a direct ACME Challenge could bypass an Issuer's
+  DNS01 solver policy and use a ClusterIssuer's DNS credentials), fixed upstream since `v1.20.3`; `v1.21.3` has the
+  fix. cert-manager 1.21 lists Kubernetes 1.33 to 1.36, so the platform's 1.36.6 and the installer's 1.35.10 are
+  inside its table.
+- **The installer path moves too** (`cert_manager_chart: v1.21.3`): stage 40 at `make upgrade`, stage 50 at the next
+  `make install`, where plugin-barman-cloud also uses cert-manager. No drill covers it.
+- **A candidate moves nothing a final moves.** The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION` stay
+  on `v0.10.1`; the installer's k3s and Kubernetes pins stay at 1.35.10.
+
+### Verified on a lab
+
+Nothing. The candidate exists for the drill.
+
+### Not verified
+
+- The cert-manager move, entirely, on a lab and on a site with tenants: ArgoCD's sync of the new chart, the
+  server-side apply of the CRDs, the rolling Deployments, the `startupapicheck` Job, whether any Certificate is issued
+  again, the webhooks of cert-manager, Cluster API and Kamaji through the move, its duration.
+- A new or renewed Certificate on Kubernetes 1.36.
+- The Check row `certificates` on a real cluster.
+- The installer path (stage 40 and stage 50 with `v1.21.3`).
+- The moves from 0.10.1-rc.1 and 0.10.1-rc.2 (plans read, not run).
+- The candidate's images and its tag's workflows: they do not exist before the tag.
+
 ## [0.10.1] - 2026-11-21
 
 The release after `v0.10.0`, and the first whose BOM moves Kubernetes: the seed's k3s from `v1.35.10+k3s1` to
