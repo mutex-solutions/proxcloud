@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The platform BOM on `main` is `0.11.0-dev` again, and the build carries the BOM of `0.10.2`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.10.2.yaml`, sha256
+  `78dbc9a79150ea71d77d460e8679ba94d1d7484c82e6f6bdcbcbf4560cdf3dee`, the file of the tag byte for byte). The `v0.10.2` release
+  commit left the BOM at `0.10.2`, and the release gate refuses only `-dev`. A platform installed by `v0.10.2` or
+  moved to its BOM is not refused (`bom_unsupported`) under a later build while the file is carried. Its pins are
+  those of `main`, so the plan from it has one change, the release, record only. `TestPreviousBOMsMoveCertManager`
+  states that answer, and `TestUpgradeRollsNoMachine` compares five of the fourteen previous BOMs with the BOM on
+  `main`, none of them rolling. No apply on such a platform was run on a lab by this change.
+
 ## [0.10.2] - 2026-11-21
 
 The release after `v0.10.1`. Its BOM moves cert-manager from `v1.20.2` to `v1.21.3` on the seed and on the platform
