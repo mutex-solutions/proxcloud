@@ -98,6 +98,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   states that answer, and `TestUpgradeRollsNoMachine` compares five of the fourteen previous BOMs with the BOM on
   `main`, none of them rolling. No apply on such a platform was run on a lab by this change.
 
+## [0.11.0-rc.1] - 2026-11-21
+
+The first release candidate of 0.11.0, published as a prerelease and never as `latest`. It is not the release:
+`v0.10.2` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
+still name it. It holds what is under Unreleased above (#415, #416, #417, #418): a load balancer on a pair of
+appliances, the load balancer controller for managed Kubernetes clusters, the Compose gateway listener and the two
+billing fixes. It exists so that a lab can run the drill of those: none of them has run on a lab on this code. The
+entries above are not repeated here. Not for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.11.0-rc.1`** (`deploy/platform/platform-bom.yaml`), with the pins `main` had:
+  those of `0.10.2` but `tenantCharts.kubernetes`, cluster chart `proxmox-kamaji-cluster` 0.1.17
+  (`sha256:dfdccf67de36238f4ae7e7914035f99f394fb6f45ed80540d6e1a2bf5076e914`, published from the tag
+  `proxmox-kamaji-cluster-v0.1.17`). No chart of the product changed since its tag
+  (`git diff proxmox-kamaji-cluster-v0.1.17 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster` and
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` print nothing), so no chart tag is
+  needed. It is a release BOM, and the release gate passes on it and on the fourteen previous BOMs.
+- **The plan from each previous BOM** (`PlanFor`, one control plane machine and one machine per group). From 0.10.2
+  and 0.10.2-rc.1, two changes, allowed, with no part, no seed row and no machine replaced: the release and
+  `tenantCharts.kubernetes` 0.1.16 to 0.1.17, both record only (the run writes the chart on the Kubernetes provider;
+  new tenant clusters get it, an existing one keeps its chart). Phrase `upgrade <name> to 0.11.0-rc.1`. From 0.10.1
+  and 0.10.1-rc.2, four: those and `cert-manager` on the seed and on the platform cluster (chart, wave 1), as the
+  move to 0.10.2 had. From 0.10.1-rc.1, five: those and `pc-platform` 0.1.15 to 0.1.16. From the nine BOMs on
+  Kubernetes 1.35.10 (21 changes from 0.10.0 and 0.10.0-rc.1, 22 from 0.9.0, 0.9.1 and the candidates of 0.9.0, 25
+  from the three 0.8.x BOMs) the upgrade is refused: both cert-manager rows carry the pair gate's sentence. Such a
+  platform upgrades to 0.10.1 with the `v0.10.1` build first, then to 0.10.2 or to this BOM.
+- **This BOM carries no unfinished replacement**, as 0.10.2's: an installation on 0.10.0 that stands in the
+  replacement of its machines toward 0.10.1-rc.1, 0.10.1-rc.2 or 0.10.1 goes on to that BOM with a Retry (this build
+  carries the files); `TestRollTowardAKeptCandidateGoesOn` passes under it unchanged.
+- **What the upgrade does not do.** The platform cluster stays on cluster chart 0.1.16, no tenant cluster changes
+  chart, mode or MetalLB, and no load balancer of a tenant is rebuilt. The pair and the controller come from the
+  portal's code: the pair for new balancers as soon as the portal runs this release, the controller for clusters
+  created after the platform's upgrade on a Kubernetes provider with `config.cluster.loadBalancer`, and by the
+  operator's **Enable load balancer controller** (class-only) on an existing one.
+- **A candidate moves nothing a final moves.** The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION` stay
+  on `v0.10.2`. `--cluster-gateway` takes `v0.11.0-rc.1` (the script compares the version without its `-rc.N`).
+
+### Verified on a lab
+
+Only the spike that preceded the code, not this candidate: on 2026-11-21, on the lab portal of `v0.10.2-rc.1`, two
+tenant servers on one node set up by hand as a pair (keepalived over SSH, the VRRP rule and the address's filter
+entries written by hand and removed after) measured the failover the code is built on: a stopped master 0.7 to
+0.8 s, a hard-reset (dead) master 3.1 to 3.5 s, keepalived stopped 0.7 to 0.9 s, HAProxy stopped and left down 2.0
+to 2.6 s, a killed HAProxy restarted by systemd with no switch; adding an address with a keepalived reload and three
+HAProxy reloads lost no request.
+
+### Not verified
+
+- Everything in this candidate's code, on a lab: the pair as the product builds it (create, status, apply, replace,
+  delete), the VRRP rule and filter entries the product writes, the gateway, the controller, chart 0.1.17 on a
+  tenant cluster, the enable action, the Compose gateway listener, the consoles.
+- A pair on a public network, across two nodes, through the loss of a node, and open connections across a switch.
+- The two billing fixes on a real site: covered by tests only.
+- Any upgrade to the BOM `0.11.0-rc.1` (plans read, not run).
+- The candidate's images and its tag's workflows: they do not exist before the tag.
+
 ## [0.10.2] - 2026-11-21
 
 The release after `v0.10.1`. Its BOM moves cert-manager from `v1.20.2` to `v1.21.3` on the seed and on the platform
