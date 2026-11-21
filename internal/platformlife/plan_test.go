@@ -113,10 +113,10 @@ func TestPreviousBOMsMoveAsTheirPinsDiffer(t *testing.T) {
 
 // The answer for each previous BOM by name, now that this build's BOM moves cert-manager v1.20.2 -> v1.21.3 (the test
 // above skips refused pairs): a BOM on this build's Kubernetes, k3s and node image plans exactly the rows named here,
-// cert-manager as class chart on both clusters (none from 0.10.2-rc.1, 0.10.2 or 0.11.0-rc.1, which pin v1.21.3
-// already), and the tenant chart 0.1.16 -> 0.1.17 record only (none from 0.11.0-rc.1, which pins 0.1.17 already);
-// every BOM on Kubernetes 1.35.10 is refused by the pair gate on both cert-manager rows, because that pair also moves
-// k3s, Kubernetes and the node image. A newly kept BOM needs its line.
+// cert-manager as class chart on both clusters (none from 0.10.2-rc.1, 0.10.2, 0.11.0-rc.1 or 0.11.0-rc.2, which pin
+// v1.21.3 already), and the tenant chart 0.1.16 -> 0.1.17 record only (none from 0.11.0-rc.1 or 0.11.0-rc.2, which
+// pin 0.1.17 already); every BOM on Kubernetes 1.35.10 is refused by the pair gate on both cert-manager rows,
+// because that pair also moves k3s, Kubernetes and the node image. A newly kept BOM needs its line.
 func TestPreviousBOMsMoveCertManager(t *testing.T) {
 	cur := embedded(t)
 	prev, err := Previous()
@@ -130,6 +130,7 @@ func TestPreviousBOMsMoveCertManager(t *testing.T) {
 		"0.10.2-rc.1": {"/release", "/tenantCharts.kubernetes"},
 		"0.10.2":      {"/release", "/tenantCharts.kubernetes"},
 		"0.11.0-rc.1": {"/release"},
+		"0.11.0-rc.2": {"/release"},
 	}
 	gate := "not supported by this release: a third-party chart moves only in an upgrade that changes no k3s, Kubernetes " +
 		"version or node image, and this one also changes kubernetes.version, kubernetes.nodeImage, seed.k3s. First finish an " +
