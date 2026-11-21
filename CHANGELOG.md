@@ -194,6 +194,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous BOMs with the BOM on `main`, none of them rolling. No apply on such a platform was run on a lab by this
   change.
 
+## [0.11.0-rc.2] - 2026-11-22
+
+The second release candidate of 0.11.0, published as a prerelease and never as `latest`. It is not the release:
+`v0.10.2` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
+still name it. It holds what is under Unreleased above: the corrections of the full lab drill of `v0.11.0-rc.1`
+(#424, #425) and the sandbox node fix (#420) next to what that candidate held (#415 to #418). It exists so that the
+lab can run the drill again on the corrected code: none of the corrections had run on a lab when it was tagged. The
+entries above are not repeated here. Not for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.11.0-rc.2`** (`deploy/platform/platform-bom.yaml`), with the pins of
+  `0.11.0-rc.1`: those of `0.10.2` but `tenantCharts.kubernetes`, cluster chart `proxmox-kamaji-cluster` 0.1.17
+  (`sha256:dfdccf67de36238f4ae7e7914035f99f394fb6f45ed80540d6e1a2bf5076e914`). No chart of the product changed
+  since its tag (`git diff proxmox-kamaji-cluster-v0.1.17 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster` and
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` print nothing), so no chart tag is
+  needed. It is a release BOM, and the release gate passes on it and on the fifteen previous BOMs.
+- **The plan from each previous BOM** (`PlanFor`, one control plane machine and one machine per group). From
+  0.11.0-rc.1 one change, the release, record only, allowed, with no part, no seed row and no machine replaced;
+  phrase `upgrade <name> to 0.11.0-rc.2`. From the fourteen older BOMs the answers of `0.11.0-rc.1`: two changes
+  from 0.10.2 and 0.10.2-rc.1 (the release and `tenantCharts.kubernetes` 0.1.16 to 0.1.17, both record only), four
+  from 0.10.1 and 0.10.1-rc.2 (those and `cert-manager` on the seed and on the platform cluster), five from
+  0.10.1-rc.1 (also `pc-platform` 0.1.15 to 0.1.16), and a refusal by the pair gate from the nine BOMs on
+  Kubernetes 1.35.10 (21, 22 or 25 changes). This BOM carries no unfinished replacement
+  (`TestRollTowardAKeptCandidateGoesOn` passes under it unchanged).
+- **What rc.1's drill showed** (one lab, 2026-11-21; a nested three-node Proxmox cluster, every appliance on one
+  node, a public test range on a plain bridge, Ubuntu 26.04 appliances with packages from apt through the lab's
+  router). It passed: a pair made by a tenant (`ACTIVE` 8 min 16 s after the request), 15 failovers of that pair,
+  every one under its target (guest shutdown 0.8 s; VM stopped hard 2.8 to 3.2 s; keepalived stopped 0.7 s; HAProxy
+  stopped 2.2 to 2.7 s; paused and resumed 3.2 to 3.5 s), the `vrrp` rule written back by the sync, one floating IP
+  row per address and one traffic counter per appliance, `ha: false`, a new cluster in default mode (ready after
+  7 min 42 s; first Service's address after 4 min 22 s, answering from outside after 6 min 7 s), class
+  `proxcloud.io/internal` on MetalLB, UDP, no node port, `loadBalancerIP` and the sixth address refused or warned
+  with Events, PROXY v2, policy Local, members following the workers (8 s for a new one), a dead master of the
+  cluster's pair (3.1 to 3.4 s), an idle connection of 330 s, a node outside the workers and a rotated credential
+  refused, a suspended project, the gateway down during a Service's delete, the clean-up at a Service's and a
+  cluster's delete, and the enable of an existing cluster in class-only mode with its MetalLB address unchanged. It
+  failed twice. Replace appliances left the address refusing every connection for 458 s while the row read
+  `ACTIVE`: the first config push met the HAProxy package's own first start. And a stopped master appliance was
+  started again by the services sync in 1 of 6 tries, with the row still `ACTIVE`: the sync had cached the pair's
+  address in the appliance's SERVER row, and left out its load balancer pass and the provider passes of every
+  tenant while the VM was down. It also found the 20-minute cluster lock (24.7 minutes without a converge after an
+  API restart), a full pass on every controller call (96 Proxmox calls a minute per cluster), stopped services
+  never started, files of mode 0666, and refused credentials without a trace.
+- **What rc.2 changes** (in detail under Unreleased, Fixed): a config is recorded only when the appliance serves
+  it, a recorded hash is checked on every pass, stopped services are started, file modes are set, the row is
+  stated during a Replace (#424); the services sync keeps running when an appliance is down, the cluster lock is
+  a one-minute lease, an unchanged controller call starts no pass, a refused credential is logged and audited
+  (#425). One consequence: a stopped appliance of a cluster's pair is started within about 70 seconds, where the
+  drill measured 2 to 6.
+- **A candidate moves nothing a final moves.** The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION`
+  stay on `v0.10.2`.
+
+### Verified on a lab
+
+On `v0.11.0-rc.1` only, as listed above and in `docs/releases/v0.11.0-rc.2.md`; nothing was run again on this
+candidate. Also on rc.1: the portal upgrade from `v0.10.2-rc.1` (28 s), the platform run 0.10.2-rc.1 to 0.11.0-rc.1
+(two record-only rows, 39.6 s, no Proxmox write) and `--cluster-gateway` on and off (14 s each, six switches).
+
+### Not verified
+
+- The corrections of this candidate (#424, #425), on a lab: tested against the distributions' systemd, dpkg,
+  HAProxy and keepalived in a container and against a fake Proxmox. The second drill comes next.
+- A port added to or removed from a live Service; an outside address refused by a listener's source ranges.
+- Two nodes: VRRP between nodes, placement on two nodes, the loss of a node, open connections across a switch.
+- The consoles (the drill used the API), a production site, the default Debian 13 appliance image on a lab, a
+  balancer made before 0.11.0 under this code, NGINX Gateway Fabric in default mode, the installer path, the
+  sandbox node fix (#420).
+- Any move to the BOM `0.11.0-rc.2` (plans read, not run), and the candidate's images and its tag's workflows:
+  they do not exist before the tag.
+
+### Known issues
+
+- A UDP port is refused and no listener terminates TLS: both are planned for the next release, "complete layer 4".
+- One pair per cluster, shared by all its Services.
+- An in-cluster client of a Service with `ipMode: VIP` is answered inside the cluster and never passes the pair.
+- The built-in project quota is five public addresses (`floatingIps: 5`): the sixth Service or Gateway waits with
+  `QuotaExceeded` until the quota is raised.
+
 ## [0.11.0-rc.1] - 2026-11-21
 
 The first release candidate of 0.11.0, published as a prerelease and never as `latest`. It is not the release:
