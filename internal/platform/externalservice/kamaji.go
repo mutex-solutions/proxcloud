@@ -259,7 +259,7 @@ func kamajiDefaultCIDRs(cl map[string]any) []string {
 func KamajiConfigNotes(cfg map[string]any) []string {
 	var out []string
 	for _, p := range KamajiClusterProblems(cfg) {
-		out = append(out, "Stored value ignored, the default applies (1800 s, 1 machine, firewall off) until it is corrected: "+p)
+		out = append(out, "Stored value ignored, the default applies (1800 s, 1 machine, firewall off, no load balancer) until it is corrected: "+p)
 	}
 	cl, _ := cfg["cluster"].(map[string]any)
 	if err := cloud.StrictCIDRs(strList(cl["allowedCidrs"]), nil); err != nil {

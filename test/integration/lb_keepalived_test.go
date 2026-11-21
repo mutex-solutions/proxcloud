@@ -72,6 +72,18 @@ func TestLBPairConfigsPassTheirChecks(t *testing.T) {
 				t.Fatal(err)
 			}
 			run("mkdir -p /run/haproxy && haproxy -c -f /tmp/h.cfg")
+			// A cluster's: one address per Service, two Services on port 80, workers by address, an hour's idle timeout.
+			workers := []pve.LBMember{{Node: true, Address: "10.0.0.250", Port: 30080}, {Node: true, Address: "10.0.0.249", Port: 30080}}
+			cluster := pve.LBSpec{
+				Listeners: []pve.LBListener{{Port: 80, Pool: "s0-0", VIP: "203.0.113.10"}, {Port: 80, Pool: "s1-0", VIP: "203.0.113.11", SourceRanges: []string{"198.51.100.0/24"}}},
+				Pools: []pve.LBPool{{Name: "s0-0", Protocol: "tcp", Algorithm: "roundrobin", Members: workers},
+					{Name: "s1-0", Protocol: "tcp", Algorithm: "roundrobin", ProxyProtocol: true, Members: workers,
+						HealthCheck: &pve.LBHealthCheck{Type: "http", Port: 32000, Path: "/"}}},
+			}
+			if err := c.CopyToContainer(ctx, []byte(pve.RenderClusterHAProxy(cluster, []string{"203.0.113.10", "203.0.113.11"})), "/tmp/c.cfg", 0o644); err != nil {
+				t.Fatal(err)
+			}
+			run("haproxy -c -f /tmp/c.cfg")
 			for _, n := range []int{0, 1, 50} {
 				var vips []string
 				for i := range n {

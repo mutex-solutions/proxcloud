@@ -257,3 +257,26 @@ func TestKamajiAllowedCIDRs(t *testing.T) {
 		t.Errorf("notes of a canonical list: %q", notes)
 	}
 }
+
+// config.cluster.loadBalancer: absent or incomplete is off; a block of another shape is refused on save.
+func TestKamajiLoadBalancer(t *testing.T) {
+	es := func(lb any) *ExternalService {
+		return &ExternalService{Config: map[string]any{"provider": "kamaji", "cluster": map[string]any{"loadBalancer": lb}}}
+	}
+	if n, f, ok := es(map[string]any{"publicNetworkId": "vmbr1", "flavorId": "lb-small"}).KamajiLoadBalancer(); !ok || n != "vmbr1" || f != "lb-small" {
+		t.Fatalf("set: %q %q %v", n, f, ok)
+	}
+	for _, off := range []any{nil, map[string]any{"publicNetworkId": "vmbr1"}, "vmbr1"} {
+		if _, _, ok := es(off).KamajiLoadBalancer(); ok {
+			t.Errorf("%v reads as on", off)
+		}
+	}
+	for _, bad := range []any{"vmbr1", map[string]any{"publicNetworkId": "vmbr1"}, map[string]any{"publicNetworkId": "vmbr1", "flavorId": "x", "vip": "203.0.113.9"}} {
+		if p := KamajiClusterProblems(es(bad).Config); len(p) != 1 || !strings.Contains(p[0], "config.cluster.loadBalancer") {
+			t.Errorf("%v: %q", bad, p)
+		}
+	}
+	if p := KamajiClusterProblems(es(map[string]any{"publicNetworkId": "vmbr1", "flavorId": "lb-small"}).Config); len(p) != 0 {
+		t.Errorf("a valid block: %q", p)
+	}
+}
