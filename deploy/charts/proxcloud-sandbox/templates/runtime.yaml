@@ -4,11 +4,12 @@ the cluster-wide guardrail of deploy/sandbox-cluster/network-policy.yaml (equal 
 empty; comments on each rule are there).
 */ -}}
 {{- $shared := include "sbx.shared" . }}
+{{- $p := include "sbx.placement" . | fromJson }}
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata: {name: {{ .Values.runtimeClass.name }}}
 handler: gvisor
-{{- with .Values.runtimeClass.scheduling }}
+{{- with $p.scheduling }}
 scheduling: {{ toJson . }}
 {{- end }}
 ---
@@ -25,7 +26,7 @@ metadata:
   namespace: kube-system
 spec:
   nodeSelector:
-    matchLabels: {{ toJson (required "cilium.nodeSelector is required in mode shared" .Values.cilium.nodeSelector) }}
+    matchLabels: {{ toJson (required "cilium.nodeSelector must not be empty in mode shared" $p.cilium) }}
   defaults:
     custom-cni-conf: "true"
     write-cni-conf-when-ready: ""

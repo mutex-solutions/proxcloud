@@ -6,7 +6,7 @@ deploy/sandbox-cluster/node-setup.yaml's, byte for byte (internal/cloud/sandbox/
 there.
 */ -}}
 {{- $ns := .Release.Namespace }}
-{{- $sel := .Values.sandboxNodes.nodeSelector }}
+{{- $sel := (include "sbx.placement" . | fromJson).sandboxNodes }}
 apiVersion: v1
 kind: Namespace
 metadata: {name: sandbox-telemetry}

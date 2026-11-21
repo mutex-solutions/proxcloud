@@ -11,33 +11,36 @@
 # every node (the cluster chart's sandboxBandwidth). The pod policy and the rest are the same in both.
 mode: shared
 
+# Placement: null = the mode's default (templates/_helpers.tpl sbx.placement); a value replaces the default whole.
+
 # -- Node-side DaemonSets (node-setup, telemetry, template prepull): only the nodes that run sandboxes. node-setup
-# installs runsc and restarts containerd, so a selector that matches a platform node changes that node. Separate:
-# {} (every node of the sandbox cluster, as the installer; the network guard gate counts every node there).
+# installs runsc and restarts containerd, so a selector that matches a platform node changes that node. Shared:
+# {node-restriction.kubernetes.io/proxcloud-node-group: sandbox}. Separate: {} (every node of the sandbox cluster, as
+# the installer; the network guard gate counts every node there).
 sandboxNodes:
-  nodeSelector: {node-restriction.kubernetes.io/proxcloud-node-group: sandbox}
+  nodeSelector: null
 
 # -- System-side pods (sandbox-proxy, the agent-sandbox controller), {nodeSelector, tolerations} as the platform's
 # placementValues. Never a sandbox node: the proxy holds the wildcard key, and a kubelet can read the Secrets of the
-# pods on its node.
+# pods on its node. Shared: the group system. Separate: node-restriction.kubernetes.io/proxcloud-system=true and the
+# toleration of proxcloud.io/sandbox-system (installer template sandbox-cluster.yml.j2).
 system:
-  nodeSelector: {node-restriction.kubernetes.io/proxcloud-node-group: system}
-  tolerations: []
+  nodeSelector: null
+  tolerations: null
 
 # -- RuntimeClass of every sandbox pod. scheduling is merged by Kubernetes into every pod that names the class, and a
 # pod whose own selector conflicts is refused: so every gVisor pod lands on a sandbox node and nowhere else. ONE
 # toleration, proxcloud.io/sandbox: never proxcloud.io/unsecured, which keeps sandboxes off a node whose VM firewall
-# is not written yet. Separate: no scheduling (the system group's own taint keeps sandboxes off it), as the installer.
+# is not written yet. Shared: nodeSelector node-restriction.kubernetes.io/proxcloud-node-group=sandbox and that
+# toleration. Separate: none (the system group's own taint keeps sandboxes off it), as the installer.
 runtimeClass:
   name: gvisor
-  scheduling:
-    nodeSelector: {node-restriction.kubernetes.io/proxcloud-node-group: sandbox}
-    tolerations: [{key: proxcloud.io/sandbox, operator: Exists, effect: NoSchedule}]
+  scheduling: null
 
 # -- Shared only: the nodes whose Cilium agent chains the network guard (CiliumNodeConfig). A kubelet label, present
-# when the agent starts, not the CAPI one, which arrives after it.
+# when the agent starts, not the CAPI one, which arrives after it. Shared: proxcloud.io/node-group=sandbox.
 cilium:
-  nodeSelector: {proxcloud.io/node-group: sandbox}
+  nodeSelector: null
 
 # -- The node label the firewall identity may patch (shared only): the CAPI label of the sandbox group.
 sandboxNodeLabel: {key: node-restriction.kubernetes.io/proxcloud-node-group, value: sandbox}

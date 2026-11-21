@@ -4,12 +4,13 @@ there; its README has the upstream checksum and the licence): every document ver
 which gets the system-side placement. The CRDs are too large for a client-side apply annotation: the Application syncs
 with ServerSideApply.
 */ -}}
+{{- $sys := (include "sbx.placement" . | fromJson).system }}
 {{- range $doc := regexSplit "\n---\n" ($.Files.Get "files/agent-sandbox/sandbox-with-extensions.yaml") -1 }}
 {{- if regexMatch "(?m)^kind: Deployment$" $doc }}
 {{- $d := fromYaml $doc }}
 {{- $spec := $d.spec.template.spec }}
-{{- $_ := set $spec "nodeSelector" $.Values.system.nodeSelector }}
-{{- with $.Values.system.tolerations }}{{ $_ := set $spec "tolerations" . }}{{ end }}
+{{- $_ := set $spec "nodeSelector" $sys.nodeSelector }}
+{{- with $sys.tolerations }}{{ $_ := set $spec "tolerations" . }}{{ end }}
 ---
 {{ toYaml $d }}
 {{- else }}

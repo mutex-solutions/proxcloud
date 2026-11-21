@@ -1,16 +1,7 @@
 # Mode separate: the platform-owned cluster pc-sandbox (the cluster chart's addons.sandbox installs the chart there),
 # with the node groups of installer template sandbox-cluster.yml.j2: workers `sandbox`, and `sandbox-system` labelled
-# node-restriction.kubernetes.io/proxcloud-system and tainted proxcloud.io/sandbox-system.
+# node-restriction.kubernetes.io/proxcloud-system and tainted proxcloud.io/sandbox-system. Placement is the mode's default.
 mode: separate
-sandboxNodes:
-  nodeSelector: {}
-system:
-  nodeSelector: {node-restriction.kubernetes.io/proxcloud-system: "true"}
-  tolerations: [{key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}]
-runtimeClass:
-  scheduling: null
-cilium:
-  nodeSelector: null
 guardrail:
   extraDeny: [192.0.2.0/24]
 prepull:

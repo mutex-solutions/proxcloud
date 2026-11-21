@@ -6,6 +6,7 @@ sandbox-proxy-wake (PROXCLOUD_WAKE_TOKEN) into this namespace; never through val
 certificate does not come from another cluster here.
 */ -}}
 {{- $ns := .Release.Namespace }}
+{{- $sys := (include "sbx.placement" . | fromJson).system }}
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: sandbox-proxy-config, namespace: {{ $ns }}}
@@ -44,8 +45,8 @@ spec:
       labels: {app: sandbox-proxy}
     spec:
       serviceAccountName: sandbox-proxy
-      nodeSelector: {{ toJson (required "system.nodeSelector is required: the proxy must never land on a sandbox node" .Values.system.nodeSelector) }}
-      {{- with .Values.system.tolerations }}
+      nodeSelector: {{ toJson (required "system.nodeSelector must not be empty: the proxy must never land on a sandbox node" $sys.nodeSelector) }}
+      {{- with $sys.tolerations }}
       tolerations: {{ toJson . }}
       {{- end }}
       topologySpreadConstraints:
