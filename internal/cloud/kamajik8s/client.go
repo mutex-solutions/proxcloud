@@ -490,6 +490,19 @@ func (c *Client) GetService(ctx context.Context, ns, name string) (map[string]an
 	return c.get(ctx, fmt.Sprintf(pathServices, ns), name)
 }
 
+// PatchService applies a JSON merge patch to a Service: the load balancer controller's finalizer, guarded by the
+// metadata.resourceVersion it names (409 when the Service changed since it was read; a merge patch replaces a list whole).
+func (c *Client) PatchService(ctx context.Context, ns, name string, patch map[string]any) error {
+	_, err := c.do(ctx, http.MethodPatch, fmt.Sprintf(pathServices, ns)+"/"+url.PathEscape(name), nil, patch, "application/merge-patch+json")
+	return err
+}
+
+// PatchServiceStatus applies a JSON merge patch to a Service's status subresource: its load balancer address.
+func (c *Client) PatchServiceStatus(ctx context.Context, ns, name string, patch map[string]any) error {
+	_, err := c.do(ctx, http.MethodPatch, fmt.Sprintf(pathServices, ns)+"/"+url.PathEscape(name)+"/status", nil, patch, "application/merge-patch+json")
+	return err
+}
+
 // GetVPA returns an autoscaling.k8s.io/v1 VerticalPodAutoscaler, or nil when absent (also nil
 // when the VPA CRD is not installed — the 404 shape is identical). Read-only: the dbaas
 // autoscale tick consumes .status.recommendation; the VPA runs in updateMode Off and never
