@@ -485,7 +485,10 @@ func lbPairStatus(apps []lbAppliance, stuck bool) (string, string) {
 	case up == 2:
 		return lbStatusDegraded, "Neither appliance holds the address yet: they are choosing which one does."
 	case up == 1:
-		return lbStatusDegraded, "One appliance carries the traffic, with no standby (" + why + "). Replace appliances builds the missing one again."
+		if why != "" {
+			why = " (" + why + ")"
+		}
+		return lbStatusDegraded, "One appliance carries the traffic, with no standby" + why + ". Replace appliances builds the missing one again."
 	case gone == len(apps):
 		return lbStatusError, "Both appliances are gone. Replace appliances builds them again, or delete this load balancer."
 	}
@@ -585,16 +588,18 @@ func (h *Handler) pveLBReplace(ctx context.Context, u *user.User, es *externalse
 	return nil
 }
 
-// lbEdit changes a pair's row under its lock; edit answers false to leave it as it is.
-func (h *Handler) lbEdit(ctx context.Context, es *externalservice.ExternalService, externalID string, edit func(*loadBalancer) bool) (*loadBalancer, error) {
-	release, ok, err := h.sdnLock.Wait(ctx, "lb-"+externalID, lbLockMaxFor, lbLockMaxFor)
-	if err != nil {
-		return nil, err
+// lbEdit changes a pair's row under its lock; edit nil only reads it.
+func (h *Handler) lbEdit(ctx context.Context, es *externalservice.ExternalService, externalID string, edit func(*loadBalancer)) (*loadBalancer, error) {
+	if edit != nil {
+		release, ok, err := h.sdnLock.Wait(ctx, "lb-"+externalID, lbLockMaxFor, lbLockMaxFor)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("load balancer %s stayed locked", externalID)
+		}
+		defer release()
 	}
-	if !ok {
-		return nil, fmt.Errorf("load balancer %s stayed locked", externalID)
-	}
-	defer release()
 	cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, externalID)
 	if err != nil || cr == nil {
 		return nil, fmt.Errorf("load balancer %s is gone", externalID)
@@ -603,7 +608,8 @@ func (h *Handler) lbEdit(ctx context.Context, es *externalservice.ExternalServic
 	if err != nil {
 		return nil, err
 	}
-	if edit(lb) {
+	if edit != nil {
+		edit(lb)
 		if err := h.lbSave(ctx, cr, lb); err != nil {
 			return nil, err
 		}
@@ -620,12 +626,11 @@ func (h *Handler) lbReplace(ctx context.Context, u *user.User, es *externalservi
 	defer cancel()
 	fail := ""
 	defer func() {
-		if _, err := h.lbEdit(context.WithoutCancel(ctx), es, externalID, func(lb *loadBalancer) bool {
+		if _, err := h.lbEdit(context.WithoutCancel(ctx), es, externalID, func(lb *loadBalancer) {
 			lb.Replacing = ""
 			if fail != "" {
 				lb.StatusMessage = "Replacing the appliances stopped: " + fail
 			}
-			return true
 		}); err != nil {
 			slog.Warn("load balancer: end replace", "lb", externalID, "err", err)
 		}
@@ -635,7 +640,7 @@ func (h *Handler) lbReplace(ctx context.Context, u *user.User, es *externalservi
 		fail = err.Error()
 		return
 	}
-	lb, err := h.lbEdit(ctx, es, externalID, func(*loadBalancer) bool { return false })
+	lb, err := h.lbEdit(ctx, es, externalID, nil)
 	if err != nil {
 		fail = err.Error()
 		return
@@ -675,7 +680,7 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 		if err != nil {
 			return err.Error()
 		}
-		lb, err := h.lbEdit(ctx, es, externalID, func(*loadBalancer) bool { return false })
+		lb, err := h.lbEdit(ctx, es, externalID, nil)
 		if err != nil {
 			return err.Error()
 		}
@@ -688,9 +693,8 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 				time.Sleep(2 * time.Second)
 			}
 		}
-		if _, err := h.lbEdit(ctx, es, externalID, func(lb *loadBalancer) bool {
+		if _, err := h.lbEdit(ctx, es, externalID, func(lb *loadBalancer) {
 			lb.Appliances = slices.DeleteFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID == old })
-			return true
 		}); err != nil {
 			return err.Error()
 		}
@@ -700,7 +704,7 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 			}
 		}
 	}
-	lb, err := h.lbEdit(ctx, es, externalID, func(*loadBalancer) bool { return false })
+	lb, err := h.lbEdit(ctx, es, externalID, nil)
 	if err != nil {
 		return err.Error()
 	}
@@ -708,9 +712,8 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 	if err != nil {
 		return "a new appliance could not be built: " + err.Error()
 	}
-	if _, err := h.lbEdit(ctx, es, externalID, func(lb *loadBalancer) bool {
+	if _, err := h.lbEdit(ctx, es, externalID, func(lb *loadBalancer) {
 		lb.Appliances = append(lb.Appliances, *app)
-		return true
 	}); err != nil {
 		// The balancer went meanwhile: the new VM is nobody's.
 		if derr := h.lbDestroyVM(ctx, es, proj, app.ServerID); derr != nil {
@@ -726,7 +729,7 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 		if status == "" {
 			return "the load balancer was deleted"
 		}
-		lb, err := h.lbEdit(ctx, es, externalID, func(*loadBalancer) bool { return false })
+		lb, err := h.lbEdit(ctx, es, externalID, nil)
 		if err == nil {
 			if i := slices.IndexFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID == app.ServerID }); i >= 0 && lb.Appliances[i].State == lbAppUp {
 				return ""
