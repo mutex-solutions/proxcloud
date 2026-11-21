@@ -461,6 +461,49 @@ func (s *Service) SetIPFilter(ctx context.Context, node string, vmid int, nic st
 	return nil
 }
 
+// SetIPFilterEntries makes the VM's ipfilter-<nic> set hold exactly hosts, entry by entry: missing ones go in first,
+// extra ones leave after, and the set is never dropped. A load balancer pair's public sets change this way: an
+// address answers only while it is in both appliances' sets (spike, 2026-11-21), so a rebuilt set would cut every
+// address of the balancer for the time it takes. Entries are host addresses.
+func (s *Service) SetIPFilterEntries(ctx context.Context, node string, vmid int, nic string, hosts []string) error {
+	name := "ipfilter-" + nic
+	sets, err := s.C.ListVMIPSets(ctx, node, vmid)
+	if err != nil {
+		return err
+	}
+	var have []string
+	if slices.ContainsFunc(sets, func(set IPSet) bool { return set.Name == name }) {
+		entries, err := s.C.ListVMIPSetEntries(ctx, node, vmid, name)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			have = append(have, strings.TrimSuffix(e.CIDR, "/32"))
+		}
+	} else if err := s.C.CreateVMIPSet(ctx, node, vmid, name, "proxcloud anti-spoof"); err != nil {
+		return err
+	}
+	want := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		want = append(want, strings.TrimSuffix(h, "/32"))
+	}
+	for _, h := range want {
+		if !slices.Contains(have, h) {
+			if err := s.C.AddVMIPSetEntry(ctx, node, vmid, name, h); err != nil {
+				return err
+			}
+		}
+	}
+	for _, h := range have {
+		if !slices.Contains(want, h) {
+			if err := s.C.DeleteVMIPSetEntry(ctx, node, vmid, name, h); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // DefaultSecurityGroupName is the per-project group attached when a server is
 // created without an explicit choice.
 const DefaultSecurityGroupName = "default"
