@@ -61,6 +61,13 @@ type loadBalancer struct {
 	PrivateIP       string `json:"privateIp,omitempty"`
 	PrivatePrefix   int    `json:"privatePrefix,omitempty"`
 	AppliedHash     string `json:"appliedHash,omitempty"`
+	// HA: the balancer runs on two appliances (cloud_lb_pair_pve.go). A row without it is a single appliance.
+	HA         bool          `json:"ha,omitempty"`
+	NetworkRef string        `json:"networkRef,omitempty"` // the NETWORK the tenant picked, for a rebuild
+	FlavorID   string        `json:"flavorId,omitempty"`
+	VIPs       []string      `json:"vips,omitempty"` // public addresses, owned by the balancer (LBAddressOwner)
+	Appliances []lbAppliance `json:"appliances,omitempty"`
+	Replacing  string        `json:"replacing,omitempty"` // when REPLACE_APPLIANCES started, RFC 3339
 	pve.LBSpec
 }
 
@@ -171,6 +178,10 @@ func (h *Handler) pveCreateLoadBalancer(w http.ResponseWriter, r *http.Request, 
 	bridge := h.pveResolveBridge(ctx, es, proj, map[string]any{"networkIds": []any{strAny(data["networkId"])}})
 	if bridge == "" {
 		h.fail(w, httpx.BadRequest("Select one of this project's networks for the load balancer"))
+		return
+	}
+	if ha, set := data["ha"].(bool); ha || !set { // a new balancer gets the pair unless the tenant says no
+		h.pveCreateLBPair(w, r, u, proj, es, data, pn, bridge)
 		return
 	}
 	if herr := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{FloatingIPs: 1}); herr != nil {
@@ -444,6 +455,9 @@ func (h *Handler) pveLBApply(ctx context.Context, es *externalservice.ExternalSe
 }
 
 func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, lb *loadBalancer) error {
+	if lb.HA {
+		return h.lbApplyPair(ctx, es, proj, cr, lb)
+	}
 	ps, err := h.pveFor(es)
 	if err != nil {
 		return err
@@ -504,11 +518,7 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 		lb.Status, lb.StatusMessage = lbStatusActive, ""
 		return nil
 	}
-	ports := make([]int, 0, len(lb.Listeners))
-	for _, l := range lb.Listeners {
-		ports = append(ports, l.Port)
-	}
-	if err := ps.SetVMInboundPorts(ctx, vm.Node, vm.VMID, ports); err != nil {
+	if err := ps.SetLBRules(ctx, vm.Node, vm.VMID, pve.LBListenerRules(lb.Listeners, nil)); err != nil {
 		return err
 	}
 	if err := ps.PushHAProxy(ctx, vm.Node, vm.VMID, config); err != nil {
@@ -548,10 +558,32 @@ func (h *Handler) pveLoadBalancerAction(w http.ResponseWriter, r *http.Request, 
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, fresh)
 		httpx.OK(w, *fresh)
 		return true
+	case "REPLACE_APPLIANCES":
+		if herr := h.pveLBReplace(ctx, u, es, proj, cr); herr != nil {
+			h.fail(w, herr)
+			return true
+		}
+		fresh, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, cr.ExternalID)
+		if err != nil || fresh == nil {
+			h.fail(w, httpx.NotFound("Resource not found"))
+			return true
+		}
+		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, fresh)
+		httpx.OK(w, *fresh)
+		return true
 	case "GET_HEALTH":
 		lb, err := lbOfRow(cr)
 		if err != nil {
 			h.fail(w, err)
+			return true
+		}
+		if lb.HA {
+			out, herr := h.lbPairHealth(ctx, es, proj, lb)
+			if herr != nil {
+				h.fail(w, herr)
+				return true
+			}
+			httpx.OK(w, out)
 			return true
 		}
 		if lb.AppliedHash == "" {
@@ -638,7 +670,7 @@ func (h *Handler) pveLBUpdateConfig(ctx context.Context, es *externalservice.Ext
 			m.Address, m.Stamp = addr, stamp
 		}
 	}
-	if len(pve.RenderHAProxy(spec)) > pve.LBMaxConfig {
+	if len(pve.RenderHAProxyOn(spec, lb.VIPs)) > pve.LBMaxConfig {
 		return httpx.BadRequest("This configuration is too large for a load balancer. Use fewer members")
 	}
 	lb.LBSpec = spec
@@ -653,9 +685,13 @@ func (h *Handler) pveDeleteLoadBalancer(ctx context.Context, es *externalservice
 		return err
 	}
 	// No server saved yet: the create is still running, and a delete now would find no VM or miss it, then leave the
-	// create to finish a VM with no balancer. A create that died frees the row once it cannot be running any more.
-	if lb.Status == lbStatusBuild && lb.ServerID == "" && !lbStuck(cr) {
+	// create to finish a VM with no balancer. A create that died frees the row once it cannot be running any more. A
+	// pair's create is running until it has both appliances.
+	if lb.Status == lbStatusBuild && (lb.ServerID == "" || (lb.HA && len(lb.Appliances) < 2)) && !lbStuck(cr) {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, "This load balancer is still being created. Try again when it has its VM")
+	}
+	if lb.HA && lbReplacing(lb, time.Now().UTC()) {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, "The appliances of this load balancer are being replaced. Try again when that is done")
 	}
 	if h.pveFor == nil {
 		return fmt.Errorf("proxmox service not configured")
@@ -672,6 +708,12 @@ func (h *Handler) pveDeleteLoadBalancer(ctx context.Context, es *externalservice
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, "This load balancer is being changed. Try again in a moment")
 	}
 	defer release()
+	return h.lbDestroy(ctx, ps, es, proj, lb)
+}
+
+// lbDestroy destroys every VM carrying the balancer's tag in the project's pool, then gives its addresses back and
+// drops their rows. The caller holds the balancer's lock, or is the create that failed.
+func (h *Handler) lbDestroy(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, lb *loadBalancer) error {
 	vms, err := lbVMs(ctx, ps)
 	if err != nil {
 		return err
@@ -680,26 +722,26 @@ func (h *Handler) pveDeleteLoadBalancer(ctx context.Context, es *externalservice
 	if vm, ok := vms[lb.ServerID]; ok && vm.Pool == pool && vm.NodeDown {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, "The host of this load balancer is down. Try again when it is back")
 	}
+	for _, a := range lb.Appliances {
+		if vm, ok := vms[a.ServerID]; ok && vm.Pool == pool && vm.NodeDown && pve.LBOfTags(vm.Tags) == lb.ID {
+			return httpx.NewError(http.StatusConflict, http.StatusConflict, "The host of an appliance of this load balancer is down. Try again when it is back")
+		}
+	}
 	for id, vm := range vms {
 		if vm.Pool != pool || vm.Template == 1 || pve.LBOfTags(vm.Tags) != lb.ID {
 			continue
 		}
-		row, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, id)
-		if err != nil {
+		if err := h.lbDestroyVM(ctx, es, proj, id); err != nil {
 			return err
 		}
-		owned := row != nil && row.ProjectID == proj.ID && row.Type == cloud.TypeServer
-		if !owned { // built, and no row yet
-			row = &cloud.CloudResource{ExternalID: id, ProjectID: proj.ID, ServiceID: es.ID, Type: cloud.TypeServer}
-		}
-		if err := h.pveDeleteResource(ctx, es, proj, row, true); err != nil {
+	}
+	if lb.HA {
+		// The VIPs are the balancer's, not a VM's: they go with it.
+		owner := LBAddressOwner(lb.ID)
+		if err := h.publicIPs.ReleaseServer(ctx, es.ID, owner); err != nil {
 			return err
 		}
-		if owned {
-			if err := h.cloud.DeleteAndArchive(ctx, row, time.Now().UTC()); err != nil {
-				return err
-			}
-		}
+		return h.lbDropAddressRows(ctx, es, proj, owner)
 	}
 	// A VM someone else destroyed left its address behind, and the public address's row bills until the
 	// next sample unless it goes now. A vmid another VM has since taken is that VM's.
@@ -716,15 +758,22 @@ func (h *Handler) pveDeleteLoadBalancer(ctx context.Context, es *externalservice
 				break
 			}
 		}
-		fips, err := h.cloud.FindByServiceProjectAndType(ctx, es.ID, proj.ID, cloud.TypeFloatingIP)
-		if err != nil {
-			return err
-		}
-		for i := range fips {
-			if fip, _ := fips[i].Data["floatingIp"].(map[string]any); strAny(fip["server_id"]) == lb.ServerID {
-				if err := h.cloud.DeleteAndArchive(ctx, &fips[i], time.Now().UTC()); err != nil {
-					return err
-				}
+		return h.lbDropAddressRows(ctx, es, proj, lb.ServerID)
+	}
+	return nil
+}
+
+// lbDropAddressRows archives the FLOATING_IP rows of the addresses owner held, which would bill until the next
+// sample otherwise.
+func (h *Handler) lbDropAddressRows(ctx context.Context, es *externalservice.ExternalService, proj *Project, owner string) error {
+	fips, err := h.cloud.FindByServiceProjectAndType(ctx, es.ID, proj.ID, cloud.TypeFloatingIP)
+	if err != nil {
+		return err
+	}
+	for i := range fips {
+		if fip, _ := fips[i].Data["floatingIp"].(map[string]any); strAny(fip["server_id"]) == owner {
+			if err := h.cloud.DeleteAndArchive(ctx, &fips[i], time.Now().UTC()); err != nil {
+				return err
 			}
 		}
 	}
@@ -776,6 +825,12 @@ func (h *Handler) pveApplianceGuard(ctx context.Context, es *externalservice.Ext
 	return nil
 }
 
+// owns: id is the balancer's VM, one of its appliances, or the owner of its VIPs.
+func (lb *loadBalancer) owns(id string) bool {
+	return id == lb.ServerID || (lb.HA && id == LBAddressOwner(lb.ID)) ||
+		slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID == id })
+}
+
 // lbOwnerOf names the balancer a VM belongs to. The VM's row carries its tag from the first sample on, before the
 // balancer's row knows its VM. A row without the tag on a vmid a balancer still names is a new server on the reused
 // vmid. With no row yet, the balancer's own record is all there is.
@@ -787,7 +842,7 @@ func lbOwnerOf(server *cloud.CloudResource, serverID string, balancers []loadBal
 	}
 	for i := range balancers {
 		lb := &balancers[i]
-		if lb.ID == tag || (server == nil && lb.ServerID == serverID) {
+		if lb.ID == tag || (server == nil && lb.owns(serverID)) {
 			return lb
 		}
 	}
