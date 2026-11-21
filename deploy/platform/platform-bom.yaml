@@ -39,7 +39,7 @@ capi:
   seed:     {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kubeadm:v1.14.4", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1"}
   workload: {core: "cluster-api:v1.14.4", bootstrap: "kubeadm:v1.14.4", controlPlane: "kamaji:v0.22.0", infrastructure: "proxmox:v0.9.2", ipam: "in-cluster:v1.1.1", addon: "helm:v0.6.4"}
 tenantCharts:                      # what the providers pin for new tenant clusters and databases
-  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.16, digest: "sha256:2a58fa81b5a96fd7b23c76b06418af5a477586f151ec8e9eab1bad1536e6f000"}
+  kubernetes: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.17, digest: "sha256:dfdccf67de36238f4ae7e7914035f99f394fb6f45ed80540d6e1a2bf5076e914"}
   database:   {repo: ghcr.io/mutex-solutions/charts, name: database-cluster, version: 0.5.2, digest: "sha256:8cd4be2e57f0b548767fe8fcb802240e78d23258b78c556031d8cb63c94a939c"}
 # Per component: cluster seed | workload; wave: applied and health-gated in ascending order per cluster (also the
 # upgrade order); install: application (default) | helmchart (the seed's ArgoCD only, the bootstrap exception);
