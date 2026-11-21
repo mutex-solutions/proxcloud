@@ -192,6 +192,16 @@ spec:
     message: tenant pods may mount no hostPath but the runtime directory /opt/proxcloud-sandbox/bin
   - expression: '!has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || variables.ctrs.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly))))'
     message: the runtime directory must be mounted read-only
+  # The volume types Pod Security restricted allows, and the hostPath above: none the kubelet mounts from the network
+  # on the node itself (nfs, iscsi and the like).
+  - expression: '!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.hostPath) || has(v.emptyDir) || has(v.configMap) || has(v.secret) || has(v.projected) || has(v.downwardAPI) || has(v.persistentVolumeClaim) || has(v.ephemeral) || has(v.csi) || has(v.image))'
+    message: tenant pods may use only the volume types of Pod Security restricted
+  - expression: 'variables.ctrs.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))'
+    message: tenant containers may not use hostPort
+  # The RuntimeClass adds proxcloud.io/sandbox; a pod of its own may not tolerate proxcloud.io/unsecured (a node whose
+  # VM firewall is not written yet) or every taint at once.
+  - expression: '!has(object.spec.tolerations) || object.spec.tolerations.all(t, has(t.key) && t.key != "" && t.key != "proxcloud.io/unsecured")'
+    message: tenant pods may not tolerate proxcloud.io/unsecured or every taint
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

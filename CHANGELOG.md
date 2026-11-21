@@ -23,7 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ValidatingAdmissionPolicies narrow it: namespaces `sb-*` with `proxcloud.io/tenant=true`, RoleBindings of that role
   to itself only, the firewall identity's node writes on sandbox nodes only, and every pod of a tenant namespace
   (both modes) on RuntimeClass `gvisor` with no privilege, added capability, host namespace, `nodeName` at create or
-  hostPath but `/opt/proxcloud-sandbox/bin` read-only, ephemeral containers included. No Pod Security label: baseline
+  hostPath but `/opt/proxcloud-sandbox/bin` read-only, no hostPort, no volume type outside Pod Security restricted and
+  no toleration of `proxcloud.io/unsecured` or of every taint, ephemeral containers included. In shared mode the chart
+  refuses to render with an empty sandbox node selector or RuntimeClass scheduling. No Pod Security label: baseline
   refuses the runtime hostPath of every sandbox. The firewall identity may get RuntimeClass `gvisor` (the fence gate),
   the network guard and the portal may read CiliumNodeConfigs. Images by digest (proxy and runtime of `v0.11.0-rc.1`,
   busybox, pause). Tests: goldens of both modes, the node-setup script, guardrail, telemetry and agent-sandbox equal

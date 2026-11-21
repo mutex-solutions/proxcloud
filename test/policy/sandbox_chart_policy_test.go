@@ -189,6 +189,18 @@ func TestSandboxTenantPodPolicy(t *testing.T) {
 		{"second hostPath volume", func(p *corev1.Pod) {
 			p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{Name: "etcd", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/etcd"}}})
 		}},
+		{"nfs volume", func(p *corev1.Pod) {
+			p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{Name: "n", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "10.0.0.1", Path: "/"}}})
+		}},
+		{"hostPort", func(p *corev1.Pod) {
+			p.Spec.Containers[0].Ports = []corev1.ContainerPort{{ContainerPort: 80, HostPort: 80}}
+		}},
+		{"tolerates proxcloud.io/unsecured", func(p *corev1.Pod) {
+			p.Spec.Tolerations = append(p.Spec.Tolerations, corev1.Toleration{Key: "proxcloud.io/unsecured", Operator: corev1.TolerationOpExists})
+		}},
+		{"tolerates every taint", func(p *corev1.Pod) {
+			p.Spec.Tolerations = append(p.Spec.Tolerations, corev1.Toleration{Operator: corev1.TolerationOpExists})
+		}},
 	} {
 		pod := base.DeepCopy()
 		c.mut(pod)

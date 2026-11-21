@@ -35,5 +35,10 @@ values.yaml (not null) replaces the mode's default whole: Helm would merge a map
 {{- if not (kindIs "invalid" $v.system.tolerations) }}{{ $_ := set $d.system "tolerations" $v.system.tolerations }}{{ end -}}
 {{- if not (kindIs "invalid" $v.runtimeClass.scheduling) }}{{ $_ := set $d "scheduling" $v.runtimeClass.scheduling }}{{ end -}}
 {{- if not (kindIs "invalid" $v.cilium.nodeSelector) }}{{ $_ := set $d "cilium" $v.cilium.nodeSelector }}{{ end -}}
+{{- /* Shared: an empty selector would put node-setup (runsc, a containerd restart) on every platform node, and an empty
+scheduling would let gVisor pods land beside kamaji-etcd. */ -}}
+{{- if and (include "sbx.shared" .) (or (empty $d.sandboxNodes) (empty $d.scheduling)) -}}
+{{- fail "mode shared: sandboxNodes.nodeSelector and runtimeClass.scheduling must not be empty" -}}
+{{- end -}}
 {{- toJson $d -}}
 {{- end -}}
