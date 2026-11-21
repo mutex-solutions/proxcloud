@@ -13,6 +13,7 @@ const (
 	InterfaceAdminArea   = "ADMIN_AREA"
 	InterfaceSystemJob   = "SYSTEM_JOB"
 	InterfaceCSIGateway  = "CSI_GATEWAY"
+	InterfaceLBGateway   = "LB_GATEWAY"
 
 	ContextOrganization = "ORGANIZATION"
 	ContextProject      = "PROJECT"
@@ -39,6 +40,7 @@ const (
 	ResourceSuspension       = "SUSPENSION"
 	ResourceProjectInvite    = "PROJECT_INVITE"
 	ResourceCSIVolume        = "CSI_VOLUME"
+	ResourceLoadBalancer     = "LOAD_BALANCER"
 
 	OutcomeSuccess = "SUCCESS"
 	OutcomeFailure = "FAILURE"

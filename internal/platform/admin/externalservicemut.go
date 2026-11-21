@@ -35,6 +35,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
@@ -117,6 +118,78 @@ func kamajiClusterErr(cfg map[string]any, storedCluster any) *httpx.HTTPError {
 	return nil
 }
 
+// kamajiLoadBalancerErr checks config.cluster.loadBalancer when a save sets or changes it: an active flavor, and a
+// public network with a gateway on a plain bridge (two appliances cannot share an address on an SDN vnet) on the
+// workers' compute provider: config.cluster.proxmoxServiceId, or every Proxmox provider that lists it when that is
+// empty. A block the save leaves as stored is not checked again.
+func (h *Handler) kamajiLoadBalancerErr(ctx context.Context, cfg map[string]any, storedCluster any) *httpx.HTTPError {
+	if cfg["provider"] != "kamaji" {
+		return nil
+	}
+	cl, _ := cfg["cluster"].(map[string]any)
+	lb, _ := cl["loadBalancer"].(map[string]any)
+	old, _ := storedCluster.(map[string]any)
+	if lb == nil || reflect.DeepEqual(lb, old["loadBalancer"]) {
+		return nil
+	}
+	bad := func(msg string) *httpx.HTTPError { return httpx.BadRequest("config.cluster.loadBalancer: " + msg) }
+	netID, flavorID := str(lb["publicNetworkId"]), str(lb["flavorId"])
+	if h.pveFlavors != nil {
+		if fl, err := h.pveFlavors.Get(ctx, flavorID); err != nil || fl == nil || !fl.Active {
+			return bad("flavor " + flavorID + " is not an active flavor")
+		}
+	}
+	if h.esSvc == nil {
+		return nil
+	}
+	var computes []externalservice.ExternalService
+	if id := str(cl["proxmoxServiceId"]); id != "" {
+		es, err := h.esSvc.Get(ctx, id)
+		if err != nil {
+			return bad("the compute provider " + id + " cannot be read: " + err.Error())
+		}
+		computes = append(computes, *es)
+	} else {
+		all, err := h.esSvc.List(ctx)
+		if err != nil {
+			return bad("the providers cannot be read: " + err.Error())
+		}
+		computes = all
+	}
+	found := false
+	for i := range computes {
+		es := &computes[i]
+		if !es.IsProxmox() {
+			continue
+		}
+		for _, pn := range es.PVENetworkConfig().PublicNetworks {
+			if pn.ID != netID {
+				continue
+			}
+			found = true
+			if pn.Gateway == "" {
+				return bad("public network " + netID + " of provider " + es.ID + " has no gateway, which a load balancer's address needs")
+			}
+			if h.pveFor == nil {
+				continue
+			}
+			ps, err := h.pveFor(es)
+			if err != nil {
+				return bad("provider " + es.ID + " cannot be reached to check public network " + netID + ": " + err.Error())
+			}
+			if _, vnet, err := ps.SDNZoneOf(ctx, pn.ID); err != nil {
+				return bad("provider " + es.ID + " cannot be reached to check public network " + netID + ": " + err.Error())
+			} else if vnet {
+				return bad("public network " + netID + " is an SDN vnet on provider " + es.ID + ", and the two appliances of a balancer cannot share an address there: use a plain bridge")
+			}
+		}
+	}
+	if !found {
+		return bad("no Proxmox provider of the workers has public network " + netID)
+	}
+	return nil
+}
+
 // externalServiceCreate persists the operator-supplied doc (secret encrypted). Only a PUBLIC ceph-s3 row is checked
 // live (checkPublicCeph); others are exercised by the detail page's Test connection and the live provider reads.
 func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +245,9 @@ func (h *Handler) createExternalService(ctx context.Context, body map[string]any
 		return nil, herr
 	}
 	if herr := kamajiClusterErr(cfg, nil); herr != nil {
+		return nil, herr
+	}
+	if herr := h.kamajiLoadBalancerErr(ctx, cfg, nil); herr != nil {
 		return nil, herr
 	}
 	if cfg["provider"] == "proxmox" {
@@ -335,6 +411,9 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 				return herr
 			}
 			if herr := kamajiClusterErr(cfg, storedCluster); herr != nil {
+				return herr
+			}
+			if herr := h.kamajiLoadBalancerErr(req.Context(), cfg, storedCluster); herr != nil {
 				return herr
 			}
 		}

@@ -25,6 +25,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/csigw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metricsjob"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
@@ -382,6 +383,11 @@ func run() error {
 	csiStore := csigw.NewStore(pg)
 	gwPVE, gwPortal := csigw.ProviderClients(esSvc.Get)
 	csiGateway := &project.CSIGateway{Reg: csiStore, GW: gwPVE}
+	if cfg.CSIGateway.SelfSigned {
+		if err := csigw.EnsureSelfSigned(cfg.CSIGateway.TLSCert, cfg.CSIGateway.TLSKey, cfg.CSIGateway.URL); err != nil {
+			return fmt.Errorf("csi gateway self-signed certificate: %w", err)
+		}
+	}
 	if cfg.CSIGateway.URL != "" {
 		ca, err := os.ReadFile(cfg.CSIGateway.CAFile)
 		if err != nil {
@@ -390,9 +396,13 @@ func run() error {
 		csiGateway.Endpoint = csigw.Endpoint{URL: cfg.CSIGateway.URL, CA: string(ca)}
 	}
 	projectH.SetCSIGateway(csiGateway)
+	// Load balancers of clusters' Services: the credentials and states always (a release revokes and deletes what a
+	// cluster has), the call itself on the gateway listener below.
+	lbStore := lbgw.NewStore(pg)
+	projectH.SetLBGateway(lbStore)
 	kamajiFactory := project.KamajiFactory(esSvc, cloudRepo, func(es *externalservice.ExternalService) (*pve.Service, error) {
 		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
-	}, publicIPRepo, csiGateway)
+	}, publicIPRepo, csiGateway, projectH.LBReleaseCluster)
 	projectH.SetKamaji(kamajiFactory)
 	projectH.SetSeeds(project.NewSeedRepo(pg, enc))
 
@@ -1505,8 +1515,10 @@ func run() error {
 	// one (/debug/* there has no auth). Off unless an address is configured.
 	var csiSrv *http.Server
 	if cfg.CSIGateway.Addr != "" {
-		csiSrv = csigw.NewServer(cfg.CSIGateway.Addr, &csigw.Handler{Reg: csiStore, PVE: gwPVE, Portal: gwPortal,
-			Quota: projectH.CSIDiskQuota, Audit: auditSvc.LogAsync, Log: log})
+		// /lb/v1/ is the load balancer controllers' one call (internal/cloud/lbgw); every other path is the CSI gateway's.
+		csiSrv = csigw.NewServer(cfg.CSIGateway.Addr, lbgw.Split(
+			&lbgw.Handler{Reg: lbStore, Portal: projectH, Audit: auditSvc.LogAsync, Log: log},
+			&csigw.Handler{Reg: csiStore, PVE: gwPVE, Portal: gwPortal, Quota: projectH.CSIDiskQuota, Audit: auditSvc.LogAsync, Log: log}))
 		getCert, err := certfile.Files(cfg.CSIGateway.TLSCert, cfg.CSIGateway.TLSKey)
 		if err != nil {
 			return fmt.Errorf("csi gateway certificate: %w", err)

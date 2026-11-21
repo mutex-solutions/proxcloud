@@ -17,6 +17,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -98,6 +99,8 @@ type Handler struct {
 	// csiGW gives new Kubernetes clusters block volumes through the CSI gateway (SetCSIGateway; nil = none, except
 	// on sharedWorkers).
 	csiGW *CSIGateway
+	// lbGW holds the credentials and states of the clusters' load balancers (SetLBGateway; nil = no cluster balancer).
+	lbGW *lbgw.Store
 	// sandboxFor builds the sandbox service for a sandbox provider (sandbox-cluster client from
 	// the provider's kubeconfig). SetSandbox; nil = sandbox provisioning and writes are off.
 	sandboxFor func(es *externalservice.ExternalService) (*sandbox.Service, error)

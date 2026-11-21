@@ -165,6 +165,10 @@ type Config struct {
 		// tenant-side one. Independent of Addr: the replica that creates a cluster need not serve the gateway.
 		URL    string
 		CAFile string
+		// SelfSigned makes the API create an ECDSA key and a self-signed certificate for the URL's host in TLSKey and
+		// TLSCert when they do not exist, and trust it as the CA (CAFile defaults to TLSCert). For a site with no
+		// certificate of its own, such as Docker Compose (proxcloud-up.sh --cluster-gateway).
+		SelfSigned bool
 	}
 	LogLevel string
 }
@@ -302,6 +306,10 @@ func Load() (*Config, error) {
 	c.CSIGateway.TLSKey = envOr("PROXCLOUD_CSI_GATEWAY_TLS_KEY", k.String("proxcloud.csi-gateway.tls-key"))
 	c.CSIGateway.URL = envOr("PROXCLOUD_CSI_GATEWAY_URL", k.String("proxcloud.csi-gateway.url"))
 	c.CSIGateway.CAFile = envOr("PROXCLOUD_CSI_GATEWAY_CA_FILE", k.String("proxcloud.csi-gateway.ca-file"))
+	c.CSIGateway.SelfSigned = boolEnv("PROXCLOUD_CSI_GATEWAY_SELF_SIGNED") || k.Bool("proxcloud.csi-gateway.self-signed")
+	if c.CSIGateway.SelfSigned && c.CSIGateway.CAFile == "" {
+		c.CSIGateway.CAFile = c.CSIGateway.TLSCert
+	}
 
 	c.LogLevel = strings.ToUpper(firstNonEmpty(k.String("logging.level.root"), "INFO"))
 
@@ -352,6 +360,9 @@ func (c *Config) Validate() error {
 	}
 	if c.CSIGateway.Addr != "" && (c.CSIGateway.TLSCert == "" || c.CSIGateway.TLSKey == "") {
 		missing = append(missing, "PROXCLOUD_CSI_GATEWAY_TLS_CERT and PROXCLOUD_CSI_GATEWAY_TLS_KEY (required with PROXCLOUD_CSI_GATEWAY_ADDR)")
+	}
+	if c.CSIGateway.SelfSigned && (c.CSIGateway.URL == "" || c.CSIGateway.TLSCert == "" || c.CSIGateway.TLSKey == "") {
+		missing = append(missing, "PROXCLOUD_CSI_GATEWAY_URL, PROXCLOUD_CSI_GATEWAY_TLS_CERT and PROXCLOUD_CSI_GATEWAY_TLS_KEY (required with PROXCLOUD_CSI_GATEWAY_SELF_SIGNED)")
 	}
 	if c.CSIGateway.URL != "" && (c.CSIGateway.CAFile == "" || !strings.HasPrefix(c.CSIGateway.URL, "https://")) {
 		missing = append(missing, "PROXCLOUD_CSI_GATEWAY_CA_FILE and an https:// PROXCLOUD_CSI_GATEWAY_URL (required together)")
