@@ -1720,8 +1720,18 @@ not this per-sandbox rule, bounds their aggregate. IPv6 remains unsupported by t
 The console shows each pod's effective annotation; old pre-SB10 pods show legacy and must be recreated. Resume/fork
 re-resolves the current cap (never trusts the captured annotation). Network-policy changes do not remove the cap.
 
+Cilium must leave the conflist to node-setup. On the sandbox cluster that is cluster-wide (`cilium-config`
+`custom-cni-conf: "true"`, no `write-cni-conf-when-ready`). On a cluster that also runs other workloads it can be the
+sandbox nodes only: a `CiliumNodeConfig` in `kube-system` selecting them with `custom-cni-conf: "true"` **and**
+`write-cni-conf-when-ready: ""` (left out, the ConfigMap's path stays and Cilium rewrites the file without the chain;
+lab spike 2026-11-21). `sandbox-netguard -install` and the gate compute each node's config as the agent does (the
+ConfigMap, then every matching `CiliumNodeConfig` in name order, a later name winning), so `-install` reads its own
+Node's labels and the `CiliumNodeConfig` list (RBAC in `telemetry.yaml`). The agent applies a `CiliumNodeConfig` only
+when its pod is re-created.
+
 The network-guard release gate reads fresh (90 s) installation heartbeats from every schedulable node. It refuses
-new usage on old installations until stage 55 installs the chain. A compromised host can lie about this heartbeat;
+new usage on old installations until stage 55 installs the chain. It also refuses a schedulable node whose Cilium config still
+writes the conflist. A compromised host can lie about this heartbeat;
 this does not protect against a node-root attacker. Node replacement reduces residence time, not proof of eradication.
 
 ### 10.2 Sustained CPU with inactivity: triage, not a verdict

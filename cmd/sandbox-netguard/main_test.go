@@ -3,6 +3,9 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -62,5 +65,54 @@ func TestHostOwnedTBFNoCiliumFilterClobber(t *testing.T) {
 	run = func(string, ...string) ([]byte, error) { return nil, errors.New("tc missing") }
 	if police("/run/netns/a", 1) == nil {
 		t.Fatal("must fail closed")
+	}
+}
+
+// fakeCiliumAPI serves cilium-config, the CiliumNodeConfig list (status ncsStatus when not 200) and Node n1.
+func fakeCiliumAPI(t *testing.T, cm, ncs string, ncsStatus int) string {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/namespaces/kube-system/configmaps/cilium-config":
+			fmt.Fprintf(w, `{"data":%s}`, cm)
+		case "/apis/cilium.io/v2/namespaces/kube-system/ciliumnodeconfigs":
+			if ncsStatus != 200 {
+				w.WriteHeader(ncsStatus)
+				return
+			}
+			fmt.Fprintf(w, `{"items":%s}`, ncs)
+		case "/api/v1/nodes/n1":
+			fmt.Fprint(w, `{"metadata":{"labels":{"proxcloud.io/node-group":"sandbox"}}}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	t.Cleanup(s.Close)
+	return s.URL
+}
+
+func TestInstallWaitsForCiliumToLeaveTheConflist(t *testing.T) {
+	platform := `{"custom-cni-conf":"false","write-cni-conf-when-ready":"/host/etc/cni/net.d/05-cilium.conflist"}`
+	cnc := func(defaults string) string {
+		return `[{"metadata":{"name":"sandbox-nodes"},"spec":{"nodeSelector":{"matchLabels":{"proxcloud.io/node-group":"sandbox"}},"defaults":` + defaults + `}}]`
+	}
+	for _, c := range []struct {
+		name, cm, ncs string
+		status        int
+		ok            bool
+	}{
+		{"cluster-wide", `{"custom-cni-conf":"true"}`, `[]`, 200, true},
+		{"cluster-wide, CRD absent", `{"custom-cni-conf":"true"}`, ``, 404, true},
+		{"cluster-wide, RBAC without ciliumnodeconfigs", `{"custom-cni-conf":"true"}`, ``, 403, true},
+		{"per-node", platform, cnc(`{"custom-cni-conf":"true","write-cni-conf-when-ready":""}`), 200, true},
+		{"neither", platform, `[]`, 200, false},
+		{"neither, RBAC without ciliumnodeconfigs", platform, ``, 403, false},
+		{"per-node without write-cni-conf-when-ready", platform, cnc(`{"custom-cni-conf":"true"}`), 200, false},
+		{"list error", `{"custom-cni-conf":"true"}`, ``, 500, false},
+	} {
+		err := ciliumLeavesConf(http.DefaultClient, "t", fakeCiliumAPI(t, c.cm, c.ncs, c.status), "n1")
+		if (err == nil) != c.ok {
+			t.Errorf("%s: err=%v", c.name, err)
+		}
 	}
 }

@@ -22,6 +22,10 @@ rules:
   - apiGroups: [""]
     resources: [nodes/stats]
     verbs: [get]
+  # -install reads its own Node's labels to tell which CiliumNodeConfig selects it (shared cluster).
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -31,6 +35,10 @@ rules:
     resources: [configmaps]
     resourceNames: [cilium-config]
     verbs: [get]
+  # A CiliumNodeConfig may hand the CNI config to netguard on the sandbox nodes only (shared cluster).
+  - apiGroups: [cilium.io]
+    resources: [ciliumnodeconfigs]
+    verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
