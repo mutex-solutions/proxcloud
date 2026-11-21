@@ -137,6 +137,10 @@ func MergeAddonValues(chartVersion string, current map[string]any, picks map[str
 // PatchAddons validates the actual live Application pin and picks in the same read/mutate closure.
 // It cannot silently re-pin an old cluster or delete a legacy ingress release.
 func validateAddonChartTransition(app map[string]any, target string) error {
+	// A chart without the controller would drop it, and every Service it holds would stay Terminating on its finalizer.
+	if digStr(app, "spec", "source", "helm", "valuesObject", "loadBalancer", "secretName") != "" && !ChartHasLBController(target) {
+		return fmt.Errorf("kamaji: cannot move a cluster with a load balancer controller below chart %s", LBControllerChartVersion)
+	}
 	raw := dig(app, "spec", "source", "helm", "valuesObject", "addons")
 	if raw == nil {
 		return nil

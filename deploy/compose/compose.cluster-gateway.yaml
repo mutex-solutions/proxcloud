@@ -3,6 +3,8 @@
 # It is published on that address only, which the platform cluster's nodes must reach; nothing else needs to.
 # The API makes its own key and self-signed certificate for the address on its first start, in the gateway volume,
 # and the clusters trust that certificate: keep the volume (backup and uninstall without --purge keep it).
+# PROXCLOUD_LB_CONTROLLER_IMAGE is the image the clusters' load balancer controllers run (on the platform cluster): this
+# API's own, so a controller runs the portal's version from its cluster's create or chart bump on.
 services:
   api:
     environment:
@@ -11,6 +13,7 @@ services:
       PROXCLOUD_CSI_GATEWAY_SELF_SIGNED: "true"
       PROXCLOUD_CSI_GATEWAY_TLS_CERT: /var/lib/proxcloud/gateway/tls.crt
       PROXCLOUD_CSI_GATEWAY_TLS_KEY: /var/lib/proxcloud/gateway/tls.key
+      PROXCLOUD_LB_CONTROLLER_IMAGE: ghcr.io/mutex-solutions/proxcloud-api:${PROXCLOUD_VERSION:?run ./proxcloud-up.sh}
     ports:
       - "${CLUSTER_GATEWAY_ADDRESS:?run ./proxcloud-up.sh}:8444:8444"
     volumes:

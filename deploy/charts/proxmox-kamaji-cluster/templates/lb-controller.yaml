@@ -1,0 +1,96 @@
+{{- /*
+The cluster's load balancer controller (from chart 0.1.17), on the services cluster next to its control plane, as the
+proxmox-csi controller is: it reads the tenant API through the Kamaji admin kubeconfig (in-cluster address, so the API
+allowlist does not apply) and PUTs the cluster's Services of type LoadBalancer to the portal's gateway with the cluster's
+own credential, from the Secret the portal writes (never in this document). The binary is the second one of the portal's
+proxcloud-api image (cmd/lb-controller). It reads objects the tenant writes from inside the cluster that also holds
+kamaji-etcd, so its NetworkPolicy lets it reach DNS, the control planes of its namespace and the gateway, nothing else.
+*/ -}}
+{{- $lb := .Values.loadBalancer | default dict }}
+{{- if and $lb.secretName (not (include "pkc.kubeadm" .)) }}
+{{- $u := urlParse (required "loadBalancer.gatewayURL is required with loadBalancer.secretName" $lb.gatewayURL) }}
+{{- if ne $u.scheme "https" }}{{- fail "loadBalancer.gatewayURL must be https://<host>:<port>" }}{{- end }}
+{{- $hostPort := splitList ":" $u.host }}
+{{- $gwHost := first $hostPort }}
+{{- $gwPort := ternary (last $hostPort) "443" (eq (len $hostPort) 2) }}
+{{- $sc := dict "allowPrivilegeEscalation" false "readOnlyRootFilesystem" true "capabilities" (dict "drop" (list "ALL")) "seccompProfile" (dict "type" "RuntimeDefault") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-lb-controller
+  labels:
+    app.kubernetes.io/name: proxcloud-lb-controller
+    proxcloud.io/cluster-id: {{ .Release.Name }}
+spec:
+  replicas: 1
+  # One controller at a time: two would PUT the same state, Recreate skips the overlap.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: proxcloud-lb-controller
+      proxcloud.io/cluster-id: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: proxcloud-lb-controller
+        proxcloud.io/cluster-id: {{ .Release.Name }}
+    spec:
+      # Nothing here talks to the services cluster's own API.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532}
+      containers:
+        - name: lb-controller
+          image: {{ required "loadBalancer.image is required with loadBalancer.secretName" $lb.image | quote }}
+          command: ["/usr/local/bin/lb-controller"]
+          args: [{{ printf "--gateway-url=%s" $lb.gatewayURL | quote }}, {{ printf "--default=%t" (eq (toString $lb.default) "true") | quote }},
+                 "--kubeconfig=/etc/tenant/kubeconfig", "--gateway-dir=/etc/lb-gateway"]
+          securityContext: {{ toJson $sc }}
+          resources: {requests: {cpu: 10m, memory: 32Mi}}
+          volumeMounts:
+            - {name: gateway, mountPath: /etc/lb-gateway, readOnly: true}
+            - {name: tenant, mountPath: /etc/tenant, readOnly: true}
+      volumes:
+        - name: gateway
+          secret:
+            secretName: {{ $lb.secretName }}
+            items: [{key: token, path: token}, {key: ca.crt, path: ca.crt}]
+        - name: tenant
+          secret:
+            secretName: {{ required "loadBalancer.kubeconfigSecretName is required with loadBalancer.secretName" $lb.kubeconfigSecretName }}
+            # The control plane's in-cluster address; admin.conf names the LoadBalancer, which the API allowlist guards.
+            items: [{key: admin.svc, path: kubeconfig}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-lb-controller
+  labels:
+    proxcloud.io/cluster-id: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: proxcloud-lb-controller
+      proxcloud.io/cluster-id: {{ .Release.Name }}
+  # Nothing calls it; it calls DNS, the tenant API servers of its namespace and the gateway.
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    # The Kamaji control planes of this namespace (the project's clusters), on the API server's port. The admin kubeconfig
+    # is this cluster's only.
+    - to:
+        - podSelector: {}
+      ports:
+        - {port: 6443, protocol: TCP}
+    - ports:
+        - {port: {{ int $gwPort }}, protocol: TCP}
+      {{- if regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" $gwHost }}
+      to:
+        - ipBlock: {cidr: {{ printf "%s/32" $gwHost }}}
+      {{- end }}
+{{- end }}

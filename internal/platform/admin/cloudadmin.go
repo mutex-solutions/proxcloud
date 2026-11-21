@@ -38,6 +38,7 @@ func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Get("/service/{id}/k8s-clusters/{clusterId}/machines", h.kamajiClusterMachines)
 	r.Post("/service/{id}/k8s-clusters/{clusterId}/machines/{machine}/replace", h.kamajiClusterMachineReplace)
 	r.Post("/service/{id}/k8s-clusters/{clusterId}/csi-gateway", h.kamajiClusterCSIGateway)
+	r.Post("/service/{id}/k8s-clusters/{clusterId}/load-balancer", h.kamajiClusterLoadBalancer)
 	r.Get("/service/{id}/k8s-clusters/{clusterId}/worker-firewall", h.kamajiClusterWorkerFirewall)
 	r.Post("/service/{id}/k8s-clusters/{clusterId}/worker-firewall", h.kamajiClusterWorkerFirewall)
 	r.Delete("/service/{id}/k8s-clusters/{clusterId}/worker-firewall", h.kamajiClusterWorkerFirewall)

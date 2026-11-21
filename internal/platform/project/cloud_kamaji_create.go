@@ -18,6 +18,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/csigw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/truenas"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
@@ -230,6 +231,12 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	if err != nil {
 		return sec, err
 	}
+	// The load balancer controller, in default mode, when every gate holds; otherwise the cluster is made as before
+	// (MetalLB alone). Read before anything is reserved; minted after.
+	lbGate := "the Kubernetes provider cannot be read"
+	if k8s, kerr := h.esSvc.Get(ctx, ks.ServiceID()); kerr == nil && k8s != nil {
+		lbGate = h.kamajiLBGate(ks.Config(), k8s, compute, proj)
+	}
 	classes = kamajiTenantClasses(gatewayCSI, d, classes)
 	in := kamaji.ClusterInfra{Region: compute.PVERegion(), Storage: storage, StorageClasses: classes, CSIGateway: gatewayCSI}
 
@@ -281,6 +288,17 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	in.Addresses = addrs[:kamajiWorkerAddrs]
 	for _, ip := range addrs[kamajiWorkerAddrs:] {
 		in.LBAddresses = append(in.LBAddresses, ip+"/32") // MetalLB takes no bare address
+	}
+	if lbGate == "" {
+		// A failed create revokes it with the rest (KamajiReleaseCluster's lb part, Handler.LBReleaseCluster).
+		cred := lbgw.Credential{ID: spec.ID, ProjectID: proj.ID, ComputeServiceID: compute.ID, KubernetesServiceID: ks.ServiceID(),
+			NetworkID: spec.NetworkID, Vnet: in.Bridge}
+		if sec.LBGateway, err = h.lbControllerSecret(ctx, cred); err != nil {
+			return sec, err
+		}
+		in.LoadBalancer = &kamaji.LBController{Image: ks.Config().LBControllerImage, GatewayURL: h.csiGW.Endpoint.URL, Default: true}
+	} else {
+		slog.Info("kamaji: cluster made without the load balancer controller", "cluster", spec.ID, "because", lbGate)
 	}
 	spec.Infra = in
 	// The workers' security group goes first: the provider sync puts each worker behind it once CAPMOX has started
@@ -506,8 +524,9 @@ func kamajiDeleteDataset(ctx context.Context, services serviceGetter, shares sha
 // KamajiFactory builds the kamaji service with its infrastructure release wired in; the API and the sync
 // job's orphan sweep use the same one.
 // lb, when set, releases the cluster's load balancer (Handler.LBReleaseCluster) alongside the rest: its parts are its
-// own, so a step of one never holds back the other, and both run again until each succeeds.
-func KamajiFactory(esSvc *externalservice.Service, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, csi *CSIGateway, lb func(ctx context.Context, computeID, projectID, clusterID string) error) func(*externalservice.ExternalService) (*kamaji.Service, error) {
+// own, so a step of one never holds back the other, and both run again until each succeeds. lbImage is the portal's
+// image, which carries the load balancer controller (PROXCLOUD_LB_CONTROLLER_IMAGE, kamaji.Config.LBControllerImage).
+func KamajiFactory(esSvc *externalservice.Service, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, csi *CSIGateway, lb func(ctx context.Context, computeID, projectID, clusterID string) error, lbImage string) func(*externalservice.ExternalService) (*kamaji.Service, error) {
 	var release func(ctx context.Context, clusterID string) error
 	if csi != nil {
 		release = func(ctx context.Context, clusterID string) error {
@@ -516,6 +535,7 @@ func KamajiFactory(esSvc *externalservice.Service, shares shareRowFinder, pveFor
 	}
 	return func(es *externalservice.ExternalService) (*kamaji.Service, error) {
 		cfg := es.KamajiConfig()
+		cfg.LBControllerImage = lbImage
 		ks, err := kamaji.New(cfg, es.ID)
 		if err != nil {
 			return nil, err

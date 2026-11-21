@@ -54,6 +54,9 @@ spec:
               value: {{ .Values.api.csiGateway.url | quote }}
             - name: PROXCLOUD_CSI_GATEWAY_CA_FILE
               value: /etc/proxcloud/csi-gateway/ca.crt
+            # The managed clusters' load balancer controllers run this API's own image (cmd/lb-controller).
+            - name: PROXCLOUD_LB_CONTROLLER_IMAGE
+              value: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag | default .Chart.AppVersion }}"
             {{- end }}
             {{- include "proxcloud.dbURLEnv" . | nindent 12 }}
             {{- include "proxcloud.dbReadURLEnv" . | nindent 12 }}

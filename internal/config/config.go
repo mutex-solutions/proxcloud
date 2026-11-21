@@ -169,6 +169,10 @@ type Config struct {
 		// TLSCert when they do not exist, and trust it as the CA (CAFile defaults to TLSCert). For a site with no
 		// certificate of its own, such as Docker Compose (proxcloud-up.sh --cluster-gateway).
 		SelfSigned bool
+		// LBControllerImage is the portal's own image (proxcloud-api, which carries cmd/lb-controller) that the load
+		// balancer controllers of managed clusters run. Set at a cluster's create, at "Enable load balancer controller"
+		// and at its chart bump, never re-pinned by the sync. Empty: no cluster gets a controller.
+		LBControllerImage string
 	}
 	LogLevel string
 }
@@ -307,6 +311,7 @@ func Load() (*Config, error) {
 	c.CSIGateway.URL = envOr("PROXCLOUD_CSI_GATEWAY_URL", k.String("proxcloud.csi-gateway.url"))
 	c.CSIGateway.CAFile = envOr("PROXCLOUD_CSI_GATEWAY_CA_FILE", k.String("proxcloud.csi-gateway.ca-file"))
 	c.CSIGateway.SelfSigned = boolEnv("PROXCLOUD_CSI_GATEWAY_SELF_SIGNED") || k.Bool("proxcloud.csi-gateway.self-signed")
+	c.CSIGateway.LBControllerImage = envOr("PROXCLOUD_LB_CONTROLLER_IMAGE", k.String("proxcloud.csi-gateway.lb-controller-image"))
 	if c.CSIGateway.SelfSigned && c.CSIGateway.CAFile == "" {
 		c.CSIGateway.CAFile = c.CSIGateway.TLSCert
 	}

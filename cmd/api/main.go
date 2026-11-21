@@ -402,7 +402,7 @@ func run() error {
 	projectH.SetLBGateway(lbStore)
 	kamajiFactory := project.KamajiFactory(esSvc, cloudRepo, func(es *externalservice.ExternalService) (*pve.Service, error) {
 		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
-	}, publicIPRepo, csiGateway, projectH.LBReleaseCluster)
+	}, publicIPRepo, csiGateway, projectH.LBReleaseCluster, cfg.CSIGateway.LBControllerImage)
 	projectH.SetKamaji(kamajiFactory)
 	projectH.SetSeeds(project.NewSeedRepo(pg, enc))
 
@@ -568,6 +568,7 @@ func run() error {
 		}
 		return rep, err
 	})
+	adminH.SetLBEnabler(projectH.EnableClusterLB)
 	adminH.SetWorkerFirewall(func(ctx context.Context, ks *kamaji.Service, clusterID, method string) (any, error) {
 		switch method {
 		case http.MethodPost:

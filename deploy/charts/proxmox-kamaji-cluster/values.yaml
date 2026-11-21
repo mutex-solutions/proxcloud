@@ -129,6 +129,27 @@ proxmox:
     # that runs a LoadBalancer's endpoints (externalTrafficPolicy Local) needs its speaker there. Empty for tenants.
     speakerTolerations: []
 
+# -- From chart 0.1.17. The cluster's load balancer controller (templates/lb-controller.yaml): a Deployment next to the
+# control plane on this (services) cluster that PUTs the cluster's Services of type LoadBalancer to the portal's gateway
+# (cmd/lb-controller). Set by the portal; secretName empty = no controller, which renders what 0.1.16 rendered. kamaji
+# mode only.
+loadBalancer:
+  # -- The controller's Secret the portal writes: token (lb@proxcloud!<cluster id>=<secret>) and ca.crt of the gateway.
+  secretName: ""
+  # -- The Kamaji admin kubeconfig of this cluster (key admin.svc, the in-cluster address).
+  kubeconfigSecretName: ""
+  # -- The portal's proxcloud-api image (PROXCLOUD_LB_CONTROLLER_IMAGE), which carries the controller. Written at create,
+  # at "Enable load balancer controller" and at a chart bump, never by the provider sync.
+  image: ""
+  # -- The gateway, https://<host>:<port>. An IPv4 host narrows the controller's egress to that address; a name leaves
+  # the port open to any address.
+  gatewayURL: ""
+  # -- true (new clusters on a site that serves the product balancer): Services of type LoadBalancer without a class get
+  # the product balancer, and MetalLB serves only class proxcloud.io/internal. false (class-only, an existing cluster):
+  # only class proxcloud.io/lb, MetalLB keeps the Services without a class. Never changed on a cluster: it would move
+  # MetalLB's addresses.
+  default: false
+
 nodeGroups:
   - name: workers
     machineFlavor: example-small

@@ -137,6 +137,37 @@ func (h *Handler) kamajiClusterCSIGateway(w http.ResponseWriter, r *http.Request
 	httpx.OK(w, rep)
 }
 
+// LBEnabler gives one cluster of a kamaji provider its load balancer controller (project.Handler.EnableClusterLB).
+type LBEnabler func(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string) (any, error)
+
+// SetLBEnabler wires kamajiClusterLoadBalancer (nil = 501).
+func (h *Handler) SetLBEnabler(f LBEnabler) { h.lbEnable = f }
+
+// kamajiClusterLoadBalancer is "Enable load balancer controller" for ONE existing cluster: class-only mode (Services of
+// class proxcloud.io/lb get the product balancer, MetalLB keeps the rest and their addresses), the chart pinned to the
+// provider's version, a credential minted and its Secret written. Again on the same cluster: a new credential and the
+// portal's controller image, the mode unchanged. Refused with the missing gate named (sharedWorkers, no gateway URL or
+// controller image, a chart too old, no config.cluster.loadBalancer, a public network the project may not use).
+// ADMIN_SERVICE_MANAGE.
+func (h *Handler) kamajiClusterLoadBalancer(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, externalServiceManagePerm) {
+		return
+	}
+	es, ks, ok := h.kamajiService(w, r)
+	if !ok {
+		return
+	}
+	if h.lbEnable == nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "load balancers are not configured"))
+		return
+	}
+	rep, err := h.lbEnable(r.Context(), es, ks, chi.URLParam(r, "clusterId"))
+	if writeClusterErr(w, err) {
+		return
+	}
+	httpx.OK(w, rep)
+}
+
 // writeReportErr answers a typed error that comes with a report (a migration that stopped half way): both, at the
 // error's status. That is not httpx.WriteError, so why the backend failed is logged here (httpx.LogCause): after a
 // partial migration the log is the only place that says which step stopped it.

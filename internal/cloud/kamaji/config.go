@@ -79,6 +79,27 @@ func ChartHasNodeDeletionTimeout(v string) bool {
 	return chartAtLeast(v, NodeDeletionTimeoutChartVersion)
 }
 
+// LBControllerChartVersion is the first cluster chart that renders the load balancer controller (loadBalancer,
+// templates/lb-controller.yaml) and MetalLB's class proxcloud.io/internal in default mode. An older chart ignores the
+// block: a cluster on it gets no controller, so none is minted for it.
+const LBControllerChartVersion = "0.1.17"
+
+// ChartHasLBController reports whether chart version v renders the load balancer controller.
+func ChartHasLBController(v string) bool { return chartAtLeast(v, LBControllerChartVersion) }
+
+// LBGatewaySecretName is the Secret of the cluster's load balancer controller on the services cluster: its gateway
+// credential (token) and the gateway's CA. Management side only.
+func LBGatewaySecretName(clusterID string) string { return clusterID + "-lb-gateway" }
+
+// LBController is a cluster's load balancer controller as its values say it: the image (the portal's proxcloud-api),
+// the gateway's URL, and the mode. Default: Services of type LoadBalancer without a class get the product balancer and
+// MetalLB serves only proxcloud.io/internal (new clusters); otherwise class-only (proxcloud.io/lb), MetalLB unchanged.
+type LBController struct {
+	Image      string
+	GatewayURL string
+	Default    bool
+}
+
 // NodeDeletionTimeoutUnset is the value of nodeDeletionTimeoutSeconds that makes the chart render no timeout at all:
 // the objects of the chart before NodeDeletionTimeoutChartVersion.
 const NodeDeletionTimeoutUnset = -1
@@ -202,6 +223,10 @@ type Config struct {
 	ChartName     string // required — no default until the Proxmox cluster chart lands
 	ChartVersion  string // pinned default for NEW clusters; existing clusters keep their own pin
 	Defaults      ClusterDefaults
+	// LBControllerImage is the portal's own image (PROXCLOUD_LB_CONTROLLER_IMAGE), which carries the load balancer
+	// controller. Not part of the provider document: the portal sets it on the Service it builds. Empty: no cluster gets
+	// a controller, and a chart bump leaves a cluster's image as it is.
+	LBControllerImage string
 	// NamespacePlacement pins the new pods of each project namespace EnsureProjectNamespace applies to a node group
 	// (config.namespacePlacement). Empty: the namespaces carry no placement and no platform-role label, as before it
 	// existed.
@@ -347,6 +372,8 @@ type ClusterInfra struct {
 	// CSIGateway runs the cluster's proxmox-csi controller on the services cluster against the CSI gateway, with no PVE
 	// credential in the tenant cluster (CSIGatewaySecretName). False: the tenant-side controller of older clusters.
 	CSIGateway bool
+	// LoadBalancer is the cluster's load balancer controller (LBGatewaySecretName holds its credential); nil = none.
+	LoadBalancer *LBController
 }
 
 // StorageClass is one tenant-side proxmox-csi class.

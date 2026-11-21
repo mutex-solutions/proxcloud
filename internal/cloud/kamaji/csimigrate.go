@@ -131,6 +131,7 @@ func (s *Service) SwitchCSIGateway(ctx context.Context, projectID, clusterID, ch
 type ClusterNetwork struct {
 	ProjectID     string
 	Pool          string
+	Bridge        string   // the workers' vnet
 	Workers       []string // the worker addresses reserved for the cluster
 	LoadBalancers []string // its MetalLB addresses, as the chart takes them ("<address>/32")
 }
@@ -158,5 +159,6 @@ func (s *Service) ClusterNetwork(ctx context.Context, clusterID string) (*Cluste
 		return list
 	}
 	out.Workers, out.LoadBalancers = strs("network", "addresses"), strs("metallb", "addresses")
+	out.Bridge = digStr(app, "spec", "source", "helm", "valuesObject", "proxmox", "network", "bridge")
 	return out, nil
 }
