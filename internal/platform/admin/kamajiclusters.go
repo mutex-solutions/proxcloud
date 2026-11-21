@@ -157,8 +157,14 @@ func (h *Handler) kamajiClusterLoadBalancerView(w http.ResponseWriter, r *http.R
 	if !h.require(w, r, "admin:service:read") {
 		return
 	}
-	es, _, ok := h.kamajiService(w, r)
+	// No management cluster call: the view is the portal's own rows, so a cluster API that cannot be reached does not
+	// hide it.
+	es, ok := h.loadServiceOr(w, r, chi.URLParam(r, "id"))
 	if !ok {
+		return
+	}
+	if !es.IsKamaji() {
+		httpx.WriteError(w, httpx.BadRequest("not a Managed Kubernetes provider"))
 		return
 	}
 	if h.lbView == nil {
