@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-21: a load balancer on an appliance pair
+
+**What changed:** container "Load balancers" (C2) runs a new balancer on two appliance VMs instead of one, with
+keepalived (VRRPv3, unicast over the project network, both `BACKUP`, `nopreempt`) moving its public address between
+them; a balancer made before, or with `ha: false`, keeps the single appliance and its path unchanged. C4.2a gains the
+pair's create, apply, status, replace and delete (`cloud_lb_pair_pve.go`), the keepalived render and push
+(`pve/lbpair.go`), the listener-rule writer that keeps to its own rules and Proxmox's field limits (`SetLBRules`), the
+ip filter set changed entry by entry (`SetIPFilterEntries`), and two metering corrections: the VM inventory's orphan
+sweep skips addresses owned by a balancer (`lb:<id>`), and a pair's traffic is one counter per (appliance, balancer).
+No new container, relation, billing type or quota key: the appliances bill as servers and volumes, the address as a
+floating IP.
+
+**Why:** v0.11.0 plan, PR 1 (`run-1/v0110-lb-plan.md`, with the independent check's C1 to C14 and the spike's S1 to
+S5): a load balancer whose VM dies took its address down until the node came back. The spike measured 3.1 to 3.5 s
+lost for a dead master and under 1 s for a planned switch.
+
+**Diagrams:** none (the C2 row's text only).
+
 ## 2026-11-21: the BOM pins cert-manager v1.21.3
 
 **What changed:** no component, container or relation. The platform BOM pins cert-manager v1.21.3 from the chart

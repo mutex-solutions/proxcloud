@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A load balancer may run on two appliance VMs, and a new one does by default** (`data.ha`, default `true`;
+  `internal/platform/project/cloud_lb_pair_pve.go`, `internal/cloud/pve/lbpair.go`). keepalived (VRRPv3, unicast
+  over the project network with `check_unicast_src`, both `BACKUP` with `nopreempt`, a track script on HAProxy)
+  moves the public address between them; both run the same HAProxy config, bound to the address, and the standby
+  gets every config first. The address belongs to the balancer (`lb:<id>`), so a pair costs one public address, two
+  servers and their disks, with no new billing type or quota key. The second VM goes to another node when it can
+  (soft spread group `lb-<id>`) and to the first one's node on a `simple` zone, whose traffic stays on its node; where
+  both are on one node the page says the pair survives an appliance failure, not the loss of the node. Status
+  `ACTIVE`, `DEGRADED` (one appliance, or both holding the address, with the reason) or `DOWN`; **Replace
+  appliances** rebuilds both from the current image, the standby first, with one planned switch. A public network
+  that is an SDN vnet is refused for a pair. Existing balancers are not changed: their install line, readiness
+  check, config and firewall rules stay as they are. Measured on the lab spike: 3.1 to 3.5 s lost for a dead
+  appliance, under 1 s for a stopped one. Not run on a lab with a public network, across nodes, or with a node lost.
+- **Health checks, PROXY v2 and allowed sources on every load balancer**: per pool an HTTP check on a path and port
+  (`healthCheck`) and `proxyProtocol`; per listener `sourceRanges` (IPv4, at most 512 characters), written as the
+  source of the listener's firewall rule. Listener rules hold at most 15 ports each, Proxmox's limit, and the writer
+  no longer deletes a rule it did not write.
+
+### Fixed
+
+- **The VM inventory no longer treats an address owned by a load balancer as an orphan**: such a row (no VM lists
+  it) would have stopped the project's floating IP reconcile, so its address was never billed and no other address
+  change of the project reached its rows (`orphanIPs`, `ReleaseIfUnchanged`). **A pair's traffic is counted once**:
+  one counter per (appliance, balancer) on the appliance's public NIC, never one per address.
+
 ### Changed
 
 - **The platform BOM on `main` is `0.11.0-dev` again, and the build carries the BOM of `0.10.2`**
