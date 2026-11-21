@@ -141,9 +141,9 @@ func lbPairFiles(publicIface string) map[string]string {
 	return map[string]string{
 		// The standby's HAProxy binds VIPs it does not hold; rp_filter loose, as a reply's route and its
 		// request's interface may differ.
-		"/etc/sysctl.d/90-proxcloud-lb.conf": "net.ipv4.ip_nonlocal_bind = 1\nnet.ipv4.conf.all.rp_filter = 2\nnet.ipv4.conf.default.rp_filter = 2\n",
+		lbSysctlFile: "net.ipv4.ip_nonlocal_bind = 1\nnet.ipv4.conf.all.rp_filter = 2\nnet.ipv4.conf.default.rp_filter = 2\n",
 		// No cloud-init config names the public NIC, so nothing else brings its link up.
-		"/etc/systemd/system/keepalived.service.d/proxcloud.conf": "[Service]\nExecStartPre=/usr/sbin/ip link set dev " + publicIface + " up\n",
+		lbDropIn: "[Service]\nExecStartPre=/usr/sbin/ip link set dev " + publicIface + " up\n",
 		// The track script: HAProxy's master answers and has a worker. A stopped HAProxy puts the appliance in
 		// FAULT, and the peer takes over.
 		lbCheckScript: "#!/bin/sh\nout=$(echo 'show proc' | socat -t1 - UNIX-CONNECT:/run/haproxy-master.sock 2>/dev/null) || exit 1\necho \"$out\" | grep -qw worker\n",
@@ -165,23 +165,38 @@ func LBPairFilesDigest(publicIface string) string {
 
 const (
 	// lbPairInstall is the pair's own install line; a single appliance keeps haproxyInstall (C13).
-	lbPairInstall = "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat keepalived; }"
-	lbPairReady   = "command -v haproxy && command -v socat && command -v keepalived"
+	lbPairInstall = "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat keepalived iproute2; }"
+	lbSysctlFile  = "/etc/sysctl.d/90-proxcloud-lb.conf"
+	lbDropIn      = "/etc/systemd/system/keepalived.service.d/proxcloud.conf"
 	// lbKeepalivedApply runs after the files are written: keepalived checks the new config before it is moved in, and
-	// a running keepalived reloads, which keeps its state.
+	// a running keepalived reloads, which keeps its state; a stopped one is started. The agent creates a file with
+	// mode 0666, so every file gets its mode here, before anything reads it. It answers 0 only when keepalived
+	// runs after the change: only then is the config's hash recorded.
 	lbKeepalivedApply = `set -e
-chown root:root ` + lbCheckScript + ` ` + lbNotifyScript + `
-chmod 0755 ` + lbCheckScript + ` ` + lbNotifyScript + `
-sysctl -q -p /etc/sysctl.d/90-proxcloud-lb.conf
-systemctl daemon-reload
 F=/etc/keepalived/keepalived.conf
+chown root:root ` + lbCheckScript + ` ` + lbNotifyScript + ` ` + lbSysctlFile + ` ` + lbDropIn + ` $F.new
+chmod 0755 ` + lbCheckScript + ` ` + lbNotifyScript + `
+chmod 0644 ` + lbSysctlFile + ` ` + lbDropIn + ` $F.new
+sysctl -q -p ` + lbSysctlFile + `
+systemctl daemon-reload
 keepalived -t -f $F.new
 mv $F.new $F
 systemctl enable -q keepalived
-if systemctl is-active -q keepalived; then systemctl reload keepalived; else systemctl start keepalived; fi`
+if systemctl is-active -q keepalived; then systemctl reload keepalived; else systemctl start keepalived; fi
+n=0
+until systemctl is-active -q keepalived; do
+  n=$((n+1))
+  [ $n -lt 10 ] || { echo "keepalived does not run after the change" >&2; exit 1; }
+  sleep 0.5
+done
+[ "$(stat -c %a:%U:%G $F)" = 644:root:root ]`
 )
 
+// lbPairReady: the pair's packages, as lbReadyScript has it.
+var lbPairReady = lbReadyScript("haproxy socat keepalived", "haproxy.service keepalived.service")
+
 // PushPairHAProxy installs config on an appliance of a pair, and the pair's packages first if the image lacks them.
+// As PushHAProxy, nil means the running HAProxy was seen to serve config.
 func (s *Service) PushPairHAProxy(ctx context.Context, node string, vmid int, config string) error {
 	if err := s.lbReady(ctx, node, vmid, lbPairReady, lbPairInstall); err != nil {
 		return err
@@ -217,7 +232,7 @@ func (s *Service) PushKeepalived(ctx context.Context, node string, vmid int, con
 		return err
 	}
 	if exit != 0 {
-		return fmt.Errorf("keepalived refused the change, the last config stays in use: %s", strings.TrimSpace(stderr))
+		return fmt.Errorf("keepalived did not take the change: %s", strings.TrimSpace(stderr))
 	}
 	return nil
 }
@@ -240,16 +255,18 @@ type VRRPState struct {
 	State    string // MASTER, BACKUP, FAULT, STOPPED (keepalived not running), UNKNOWN
 	HAProxy  bool   // the track script passes
 	HoldsVIP bool   // the public NIC carries a VIP
+	Serving  bool   // HAProxy listens on every bind of its config (lbServingFn)
 }
 
-// ReadVRRPState asks an appliance for its VRRP state, whether HAProxy runs, and whether it holds the first VIP.
+// ReadVRRPState asks an appliance for its VRRP state, whether HAProxy runs, whether it holds the first VIP, and
+// whether HAProxy serves the config on disk.
 func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip string) (VRRPState, error) {
 	holds := "v=0"
 	if a, err := netip.ParseAddr(vip); err == nil && a.Is4() {
 		holds = "ip -o -4 addr show | grep -qF ' " + a.String() + "/' && v=1 || v=0"
 	}
-	script := "s=$(cat " + lbStateFile + " 2>/dev/null); systemctl is-active -q keepalived || s=STOPPED; " +
-		lbCheckScript + " && h=1 || h=0; " + holds + "; echo \"${s:-UNKNOWN} $h $v\""
+	script := lbServingFn + "s=$(cat " + lbStateFile + " 2>/dev/null); systemctl is-active -q keepalived || s=STOPPED; " +
+		lbCheckScript + " && h=1 || h=0; " + holds + "; serving >/dev/null 2>&1 && c=1 || c=0; echo \"${s:-UNKNOWN} $h $v $c\""
 	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", script)
 	if err != nil {
 		return VRRPState{}, err
@@ -264,12 +281,12 @@ func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip 
 func ParseVRRPState(out string) VRRPState {
 	f := strings.Fields(out)
 	st := VRRPState{State: "UNKNOWN"}
-	if len(f) == 3 {
+	if len(f) == 4 {
 		switch f[0] {
 		case "MASTER", "BACKUP", "FAULT", "STOP", "STOPPED":
 			st.State = f[0]
 		}
-		st.HAProxy, st.HoldsVIP = f[1] == "1", f[2] == "1"
+		st.HAProxy, st.HoldsVIP, st.Serving = f[1] == "1", f[2] == "1", f[3] == "1"
 	}
 	if st.State == "STOP" {
 		st.State = "STOPPED"

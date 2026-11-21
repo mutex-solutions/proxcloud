@@ -4,14 +4,10 @@ package project
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -24,128 +20,6 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/lock"
 )
-
-// pairWire fakes the Proxmox API around two appliances, 301 on n1 and 302 on n2, as far as an apply reaches: their
-// state, config and NICs, their firewall, and the guest agent. It logs every write in order, and answers the VRRP
-// state read from vrrp[vmid].
-type pairWire struct {
-	t     *testing.T
-	tag   string // the appliances' balancer tag, pc-lb-abc when empty
-	gone  bool   // no VM is listed any more
-	mu    sync.Mutex
-	log   []string
-	rules map[string][]pve.FirewallRule
-	sets  map[string][]string
-	vrrp  map[string]string
-	runs  map[int]string
-	files []string // the HAProxy configs written, in order
-}
-
-func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	_ = r.ParseForm()
-	write := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
-	if r.URL.Path == "/api2/json/cluster/resources" {
-		tag := f.tag
-		if tag == "" {
-			tag = "pc-lb-abc"
-		}
-		if f.gone {
-			write([]map[string]any{})
-			return
-		}
-		write([]map[string]any{
-			{"id": "qemu/301", "type": "qemu", "vmid": 301, "node": "n1", "pool": "pc-p1", "status": "running", "tags": "proxcloud;" + tag},
-			{"id": "qemu/302", "type": "qemu", "vmid": 302, "node": "n2", "pool": "pc-p1", "status": "running", "tags": "proxcloud;" + tag},
-		})
-		return
-	}
-	p := strings.Split(strings.TrimPrefix(r.URL.Path, "/api2/json/nodes/"), "/") // n, qemu, vmid, ...
-	if len(p) < 4 || p[1] != "qemu" {
-		f.t.Errorf("reached PVE: %s %s", r.Method, r.URL.Path)
-		w.WriteHeader(http.StatusNotImplemented)
-		return
-	}
-	vm, rest := p[2], strings.Join(p[3:], "/")
-	mac := func(nic string) string { return fmt.Sprintf("bc:24:11:00:%s:%s", nic, vm[1:]) }
-	switch r.Method + " " + rest {
-	case "GET status/current":
-		write(map[string]any{"status": "running", "qmpstatus": "running"})
-	case "GET config":
-		write(map[string]any{"net0": "virtio=" + mac("00") + ",bridge=v1", "net1": "virtio=" + mac("01") + ",bridge=vmbr1"})
-	case "GET agent/network-get-interfaces":
-		write(map[string]any{"result": []map[string]any{{"name": "lo"}, {"name": "ens18", "hardware-address": mac("00")}, {"name": "ens19", "hardware-address": mac("01")}}})
-	case "GET firewall/rules":
-		out := slices.Clone(f.rules[vm])
-		for i := range out {
-			out[i].Pos = i
-		}
-		write(out)
-	case "POST firewall/rules":
-		f.rules[vm] = append([]pve.FirewallRule{{Type: r.Form.Get("type"), Action: r.Form.Get("action"), Proto: r.Form.Get("proto"),
-			Source: r.Form.Get("source"), Dest: r.Form.Get("dest"), DPort: r.Form.Get("dport"), Comment: r.Form.Get("comment")}}, f.rules[vm]...)
-		f.log = append(f.log, vm+" rule "+r.Form.Get("proto"))
-		write(nil)
-	case "GET firewall/ipset":
-		write([]map[string]any{{"name": "ipfilter-net1"}})
-	case "GET firewall/ipset/ipfilter-net1":
-		var out []map[string]any
-		for _, c := range f.sets[vm] {
-			out = append(out, map[string]any{"cidr": c})
-		}
-		write(out)
-	case "POST firewall/ipset/ipfilter-net1":
-		f.sets[vm] = append(f.sets[vm], r.Form.Get("cidr"))
-		f.log = append(f.log, vm+" ipset "+r.Form.Get("cidr"))
-		write(nil)
-	case "POST agent/file-write":
-		if strings.HasSuffix(r.Form.Get("file"), "haproxy.cfg.new") {
-			f.files = append(f.files, r.Form.Get("content"))
-		}
-		f.log = append(f.log, vm+" write "+r.Form.Get("file"))
-		write(nil)
-	case "POST agent/exec":
-		cmd := strings.Join(r.Form["command"], " ")
-		pid := len(f.runs) + 1
-		out := ""
-		switch {
-		case strings.Contains(cmd, "proxcloud-lb.state"):
-			out = f.vrrp[vm]
-		case strings.Contains(cmd, "keepalived -t"):
-			f.log = append(f.log, vm+" keepalived reload")
-		case strings.Contains(cmd, "haproxy -c"):
-			f.log = append(f.log, vm+" haproxy reload")
-		}
-		f.runs[pid] = out
-		write(map[string]any{"pid": pid})
-	case "GET agent/exec-status":
-		pid, _ := strconv.Atoi(r.Form.Get("pid"))
-		write(map[string]any{"exited": 1, "exitcode": 0, "out-data": f.runs[pid]})
-	default:
-		switch {
-		case r.Method == http.MethodDelete && strings.HasPrefix(rest, "firewall/rules/"):
-			pos, _ := strconv.Atoi(strings.TrimPrefix(rest, "firewall/rules/"))
-			f.rules[vm] = slices.Delete(f.rules[vm], pos, pos+1)
-			f.log = append(f.log, vm+" rule delete")
-			write(nil)
-		case r.Method == http.MethodDelete && strings.HasPrefix(rest, "firewall/ipset/ipfilter-net1/"):
-			cidr := strings.TrimPrefix(rest, "firewall/ipset/ipfilter-net1/")
-			f.sets[vm] = slices.DeleteFunc(f.sets[vm], func(c string) bool { return strings.TrimSuffix(c, "/32") == cidr })
-			f.log = append(f.log, vm+" ipset delete "+cidr)
-			write(nil)
-		default:
-			f.t.Errorf("reached PVE: %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotImplemented)
-		}
-	}
-}
-
-func (f *pairWire) first(entry string) int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Index(f.log, entry)
-}
 
 // One apply of a pair: the vrrp rule and the VIP in both appliances' sets before keepalived anywhere (C14), the
 // standby before the appliance holding the address, ACTIVE when one of two answering appliances holds it; nothing
@@ -164,8 +38,7 @@ func TestLBPairApplyOrderAndStatus(t *testing.T) {
 	}
 	defer db.Close(ctx)
 
-	f := &pairWire{t: t, rules: map[string][]pve.FirewallRule{}, sets: map[string][]string{},
-		vrrp: map[string]string{"301": "BACKUP 1 0", "302": "MASTER 1 1"}, runs: map[int]string{}}
+	f := newPairWire(t, "")
 	srv := httptest.NewServer(f)
 	defer srv.Close()
 	ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
@@ -228,7 +101,7 @@ func TestLBPairApplyOrderAndStatus(t *testing.T) {
 
 	// Both hold the address: DEGRADED, said so, nothing done about it.
 	f.mu.Lock()
-	f.vrrp["301"] = "MASTER 1 1"
+	f.guests["301"].role, f.guests["301"].holds = "MASTER", true
 	f.mu.Unlock()
 	status, _ = h.pveLBApply(ctx, es, proj, "lb-abc")
 	saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
