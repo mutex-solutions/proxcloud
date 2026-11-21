@@ -695,6 +695,7 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 		}
 		if _, err := h.lbEdit(ctx, es, externalID, func(lb *loadBalancer) {
 			lb.Appliances = slices.DeleteFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID == old })
+			lbPairLegacyFields(lb)
 		}); err != nil {
 			return err.Error()
 		}
@@ -714,6 +715,7 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 	}
 	if _, err := h.lbEdit(ctx, es, externalID, func(lb *loadBalancer) {
 		lb.Appliances = append(lb.Appliances, *app)
+		lbPairLegacyFields(lb)
 	}); err != nil {
 		// The balancer went meanwhile: the new VM is nobody's.
 		if derr := h.lbDestroyVM(ctx, es, proj, app.ServerID); derr != nil {
@@ -741,6 +743,16 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 		case <-time.After(lbConvergeEvery):
 		}
 	}
+}
+
+// lbPairLegacyFields keeps the single appliance's fields (ServerID, PrivateIP) on an appliance of the pair: a replace
+// destroys the VM they named, PVE gives its vmid to the next VM, and a VM the balancer names is never a member and,
+// before its row exists, refused to its tenant (lbOwnerOf).
+func lbPairLegacyFields(lb *loadBalancer) {
+	if len(lb.Appliances) == 0 || slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID == lb.ServerID }) {
+		return
+	}
+	lb.ServerID, lb.PrivateIP = lb.Appliances[0].ServerID, lb.Appliances[0].PrivateIP
 }
 
 // lbDestroyVM destroys one appliance VM and its rows, as a server delete does.

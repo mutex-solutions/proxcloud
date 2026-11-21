@@ -98,6 +98,21 @@ func TestLBOwnerOfPair(t *testing.T) {
 	}
 }
 
+// A replace destroys the VM the single appliance's fields name; they move to an appliance still in the pair, so a
+// tenant's next server on that reused vmid is not taken for the balancer's.
+func TestLBPairLegacyFieldsFollowAReplace(t *testing.T) {
+	lb := &loadBalancer{HA: true, ServerID: "301", PrivateIP: "10.0.0.5", Appliances: []lbAppliance{{ServerID: "302", PrivateIP: "10.0.0.6"}}}
+	lbPairLegacyFields(lb)
+	if lb.ServerID != "302" || lb.PrivateIP != "10.0.0.6" || lb.owns("301") {
+		t.Fatalf("after the old one left: %s %s, owns 301 %v", lb.ServerID, lb.PrivateIP, lb.owns("301"))
+	}
+	lb.Appliances = append(lb.Appliances, lbAppliance{ServerID: "303", PrivateIP: "10.0.0.7"})
+	lbPairLegacyFields(lb)
+	if lb.ServerID != "302" {
+		t.Fatalf("a field still naming an appliance moved to %s", lb.ServerID)
+	}
+}
+
 func TestLBReplacing(t *testing.T) {
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	for mark, want := range map[string]bool{
