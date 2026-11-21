@@ -1,6 +1,6 @@
 name: helm
 
-# Chart releases — four charts, four independent tag flows:
+# Chart releases — five charts, five independent tag flows:
 #   - PR touching deploy/charts/**:        lint + template all charts, publish nothing.
 #   - tag v*:                              the proxcloud APP chart, versioned by the tag
 #                                          (v0.1.2 -> 0.1.2, shared with the image tags),
@@ -11,6 +11,8 @@ name: helm
 #                                          Chart.yaml version, to the same charts repo.
 #   - tag proxcloud-platform-v*:           the managed-services platform chart (ADR 0009),
 #                                          at its own Chart.yaml version, same repo.
+#   - tag proxcloud-sandbox-v*:            the sandbox chart of the managed platform, at its own
+#                                          Chart.yaml version, same repo.
 #
 # The DBaaS chart is deliberately NOT released off the app tag: a customer database pins a
 # chart version and keeps it until something explicitly moves it, so that chart's lifecycle
@@ -25,6 +27,7 @@ on:
       - "database-cluster-v*"
       - "proxmox-kamaji-cluster-v*"
       - "proxcloud-platform-v*"
+      - "proxcloud-sandbox-v*"
   pull_request:
     branches:
       - main
@@ -41,6 +44,8 @@ env:
   K8S_CHART_NAME: proxmox-kamaji-cluster
   PLATFORM_CHART_DIR: deploy/charts/proxcloud-platform
   PLATFORM_CHART_NAME: proxcloud-platform
+  SANDBOX_CHART_DIR: deploy/charts/proxcloud-sandbox
+  SANDBOX_CHART_NAME: proxcloud-sandbox
 
 jobs:
   # ---- PR: sanity only ------------------------------------------------------
@@ -95,6 +100,17 @@ jobs:
             echo "==> $f"
             helm lint "$PLATFORM_CHART_DIR" -f "$f"
             helm template test "$PLATFORM_CHART_DIR" -n proxcloud-system -f "$f" >/dev/null
+          done
+
+      - name: Lint + template the proxcloud-sandbox chart
+        run: |
+          set -euo pipefail
+          # Bare defaults DO NOT render by design (proxy.address and proxy.domain are required): one example per
+          # mode (shared, separate) is the render check.
+          for f in "$SANDBOX_CHART_DIR"/examples/values-*.yaml; do
+            echo "==> $f"
+            helm lint "$SANDBOX_CHART_DIR" -f "$f"
+            helm template test "$SANDBOX_CHART_DIR" -n sandbox-system -f "$f" >/dev/null
           done
 
   # ---- tag v*: the proxcloud app chart at the tag version ----------------------
@@ -247,3 +263,39 @@ jobs:
           done
           helm package "$PLATFORM_CHART_DIR" -d /tmp/pkg
           helm push "/tmp/pkg/$PLATFORM_CHART_NAME-$version.tgz" "$OCI_REPO"
+
+  # ---- tag proxcloud-sandbox-v*: the sandbox chart of the managed platform ---------
+  publish-sandbox-chart:
+    if: github.event_name == 'push' && startsWith(github.ref_name, 'proxcloud-sandbox-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: ghcr login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Publish at the Chart.yaml version (tag must match)
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#"$SANDBOX_CHART_NAME"-v}"
+          version="$(helm show chart "$SANDBOX_CHART_DIR" | awk '/^version:/ {print $2}')"
+          if [ "$tag_version" != "$version" ]; then
+            echo "tag says $tag_version but $SANDBOX_CHART_DIR/Chart.yaml says $version — bump Chart.yaml (or fix the tag) and re-tag." >&2
+            exit 1
+          fi
+          if helm show chart "$OCI_REPO/$SANDBOX_CHART_NAME" --version "$version" >/dev/null 2>&1; then
+            echo "chart $SANDBOX_CHART_NAME $version already published — nothing to do."
+            exit 0
+          fi
+          for f in "$SANDBOX_CHART_DIR"/examples/values-*.yaml; do
+            echo "==> $f"
+            helm lint "$SANDBOX_CHART_DIR" -f "$f"
+            helm template test "$SANDBOX_CHART_DIR" -n sandbox-system -f "$f" >/dev/null
+          done
+          helm package "$SANDBOX_CHART_DIR" -d /tmp/pkg
+          helm push "/tmp/pkg/$SANDBOX_CHART_NAME-$version.tgz" "$OCI_REPO"

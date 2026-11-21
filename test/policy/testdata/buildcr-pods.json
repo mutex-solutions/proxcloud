@@ -1,0 +1,237 @@
+{
+  "envd": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+      "name": "sbx-00000001",
+      "namespace": "sb-p1"
+    },
+    "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+        {
+          "args": [
+            "--serve"
+          ],
+          "command": [
+            "/.proxcloud/sandbox-init"
+          ],
+          "env": [
+            {
+              "name": "E2B_SANDBOX_ID",
+              "value": "sbx-00000001"
+            }
+          ],
+          "image": "ghcr.io/mutex-solutions/sandbox-base@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "name": "main",
+          "readinessProbe": {
+            "exec": {
+              "command": [
+                "/.proxcloud/sandbox-init",
+                "-ready"
+              ]
+            },
+            "failureThreshold": 1,
+            "periodSeconds": 1
+          },
+          "resources": {
+            "limits": {
+              "cpu": "1",
+              "memory": "1Gi"
+            },
+            "requests": {
+              "cpu": "1",
+              "memory": "1Gi"
+            }
+          },
+          "securityContext": {
+            "runAsGroup": 0,
+            "runAsUser": 0
+          },
+          "startupProbe": {
+            "exec": {
+              "command": [
+                "/.proxcloud/sandbox-init",
+                "-ready"
+              ]
+            },
+            "failureThreshold": 600,
+            "periodSeconds": 1
+          },
+          "volumeMounts": [
+            {
+              "mountPath": "/.proxcloud",
+              "name": "proxcloud-runtime",
+              "readOnly": true
+            }
+          ]
+        }
+      ],
+      "enableServiceLinks": false,
+      "runtimeClassName": "gvisor",
+      "terminationGracePeriodSeconds": 5,
+      "volumes": [
+        {
+          "hostPath": {
+            "path": "/opt/proxcloud-sandbox/bin",
+            "type": "Directory"
+          },
+          "name": "proxcloud-runtime"
+        }
+      ]
+    }
+  },
+  "gpu": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+      "name": "sbx-00000001",
+      "namespace": "sb-p1"
+    },
+    "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+        {
+          "args": [
+            "--serve"
+          ],
+          "command": [
+            "/.proxcloud/sandbox-init"
+          ],
+          "env": [
+            {
+              "name": "E2B_SANDBOX_ID",
+              "value": "sbx-00000001"
+            }
+          ],
+          "image": "ghcr.io/mutex-solutions/sandbox-base@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "name": "main",
+          "readinessProbe": {
+            "exec": {
+              "command": [
+                "/.proxcloud/sandbox-init",
+                "-ready"
+              ]
+            },
+            "failureThreshold": 1,
+            "periodSeconds": 1
+          },
+          "resources": {
+            "limits": {
+              "cpu": "1",
+              "memory": "1Gi",
+              "nvidia.com/gpu": "1"
+            },
+            "requests": {
+              "cpu": "1",
+              "memory": "1Gi",
+              "nvidia.com/gpu": "1"
+            }
+          },
+          "securityContext": {
+            "runAsGroup": 0,
+            "runAsUser": 0
+          },
+          "startupProbe": {
+            "exec": {
+              "command": [
+                "/.proxcloud/sandbox-init",
+                "-ready"
+              ]
+            },
+            "failureThreshold": 600,
+            "periodSeconds": 1
+          },
+          "volumeMounts": [
+            {
+              "mountPath": "/.proxcloud",
+              "name": "proxcloud-runtime",
+              "readOnly": true
+            }
+          ]
+        }
+      ],
+      "enableServiceLinks": false,
+      "nodeSelector": {
+        "node-restriction.kubernetes.io/proxcloud-gpu": "nvidia-a6000"
+      },
+      "runtimeClassName": "gvisor",
+      "terminationGracePeriodSeconds": 5,
+      "tolerations": [
+        {
+          "effect": "NoSchedule",
+          "key": "nvidia.com/gpu",
+          "operator": "Exists"
+        }
+      ],
+      "volumes": [
+        {
+          "hostPath": {
+            "path": "/opt/proxcloud-sandbox/bin",
+            "type": "Directory"
+          },
+          "name": "proxcloud-runtime"
+        }
+      ]
+    }
+  },
+  "native": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+      "name": "sbx-00000001",
+      "namespace": "sb-p1"
+    },
+    "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+        {
+          "args": [],
+          "command": [
+            "/.proxcloud/sandbox-init",
+            "-native",
+            "sleep",
+            "infinity"
+          ],
+          "env": [
+            {
+              "name": "E2B_SANDBOX_ID",
+              "value": "sbx-00000001"
+            }
+          ],
+          "image": "ghcr.io/mutex-solutions/sandbox-base@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "name": "main",
+          "resources": {
+            "limits": {
+              "cpu": "1",
+              "memory": "1Gi"
+            },
+            "requests": {
+              "cpu": "1",
+              "memory": "1Gi"
+            }
+          },
+          "volumeMounts": [
+            {
+              "mountPath": "/.proxcloud",
+              "name": "proxcloud-runtime",
+              "readOnly": true
+            }
+          ]
+        }
+      ],
+      "enableServiceLinks": false,
+      "runtimeClassName": "gvisor",
+      "terminationGracePeriodSeconds": 5,
+      "volumes": [
+        {
+          "hostPath": {
+            "path": "/opt/proxcloud-sandbox/bin",
+            "type": "Directory"
+          },
+          "name": "proxcloud-runtime"
+        }
+      ]
+    }
+  }
+}

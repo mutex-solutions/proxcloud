@@ -1,0 +1,77 @@
+# Values contract of the sandbox chart. Bare defaults do not render (proxy.address and proxy.domain are required):
+# examples/values-shared.yaml and examples/values-separate.yaml do. No secrets here: the chart sits in an ArgoCD
+# Application (shared) or a HelmChartProxy (separate). The run writes the Secrets the proxy reads (sandbox-proxy-tls,
+# sandbox-proxy-wake) into the release namespace itself.
+
+# -- shared: a node group `sandbox` of the platform cluster pc-platform, next to kamaji-etcd and every tenant's control
+# plane. The portal's identity is held to the sb-* namespaces by RBAC (a RoleBinding per namespace, which the portal
+# writes) and four admission policies; the firewall identity may change sandbox nodes only; Cilium chains the network
+# guard on the sandbox nodes only (CiliumNodeConfig). separate: the platform-owned cluster pc-sandbox, which runs
+# sandboxes alone: the installer's cluster-wide identities (deploy/sandbox-cluster/rbac.yaml) and Cilium's chain on
+# every node (the cluster chart's sandboxBandwidth). The pod policy and the rest are the same in both.
+mode: shared
+
+# Placement: null = the mode's default (templates/_helpers.tpl sbx.placement); a value replaces the default whole.
+
+# -- Node-side DaemonSets (node-setup, telemetry, template prepull): only the nodes that run sandboxes. node-setup
+# installs runsc and restarts containerd, so a selector that matches a platform node changes that node. Shared:
+# {node-restriction.kubernetes.io/proxcloud-node-group: sandbox}. Separate: {} (every node of the sandbox cluster, as
+# the installer; the network guard gate counts every node there).
+sandboxNodes:
+  nodeSelector: null
+
+# -- System-side pods (sandbox-proxy, the agent-sandbox controller), {nodeSelector, tolerations} as the platform's
+# placementValues. Never a sandbox node: the proxy holds the wildcard key, and a kubelet can read the Secrets of the
+# pods on its node. Shared: the group system. Separate: node-restriction.kubernetes.io/proxcloud-system=true and the
+# toleration of proxcloud.io/sandbox-system (installer template sandbox-cluster.yml.j2).
+system:
+  nodeSelector: null
+  tolerations: null
+
+# -- RuntimeClass of every sandbox pod. scheduling is merged by Kubernetes into every pod that names the class, and a
+# pod whose own selector conflicts is refused: so every gVisor pod lands on a sandbox node and nowhere else. ONE
+# toleration, proxcloud.io/sandbox: never proxcloud.io/unsecured, which keeps sandboxes off a node whose VM firewall
+# is not written yet. Shared: nodeSelector node-restriction.kubernetes.io/proxcloud-node-group=sandbox and that
+# toleration. Separate: none (the system group's own taint keeps sandboxes off it), as the installer.
+runtimeClass:
+  name: gvisor
+  scheduling: null
+
+# -- Shared only: the nodes whose Cilium agent chains the network guard (CiliumNodeConfig). A kubelet label, present
+# when the agent starts, not the CAPI one, which arrives after it. Shared: proxcloud.io/node-group=sandbox.
+cilium:
+  nodeSelector: null
+
+# -- The node label the firewall identity may patch (shared only): the CAPI label of the sandbox group.
+sandboxNodeLabel: {key: node-restriction.kubernetes.io/proxcloud-node-group, value: sandbox}
+
+runsc:
+  # -- gVisor honours setuid, so sudo works in a sandbox (docs/managed-sandbox.md §1.4).
+  allowSuid: true
+
+# -- Denied from every sandbox on top of the private, CGNAT and link-local ranges: the platform prefix and the
+# MetalLB range of a site whose platform network is not RFC 1918.
+guardrail:
+  extraDeny: []
+
+# -- Image references pulled by the template prepull DaemonSet on every sandbox node, by digest (deploy/templates/
+# images.yaml). Empty = no prepull.
+prepull: []
+
+proxy:
+  replicas: 2
+  # -- The address MetalLB announces for sandbox-proxy (metallb.io/loadBalancerIPs). Required.
+  address: ""
+  # -- Sandboxes are https://<port>-<id>.<domain>. Required.
+  domain: ""
+  # -- Where the proxy wakes a paused autoResume sandbox: <portal API>/api/v1/internal/sandboxes. Empty = no wake.
+  wakeURL: ""
+
+# -- By digest. runtime: envd, sandbox-init and sandbox-netguard (deploy/sandbox-runtime.Dockerfile); proxy:
+# cmd/sandbox-proxy; both CI builds of tag v0.11.0-rc.1. busybox as deploy/sandbox-cluster/registry.yaml, pause as
+# the installer's versions.yml.
+images:
+  runtime: ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:v0.11.0-rc.1@sha256:7fb46d30a7782f0cc57034bd8b66576c1129986dd8233803759a276b0be27a07
+  proxy: ghcr.io/mutex-solutions/proxcloud-sandbox-proxy:v0.11.0-rc.1@sha256:afc0e6e53262ce517d341c428093f7e81106272dda9af0dda6297498bca0e37e
+  busybox: docker.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+  pause: registry.k8s.io/pause:3.10@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a

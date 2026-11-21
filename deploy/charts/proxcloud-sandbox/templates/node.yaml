@@ -1,0 +1,222 @@
+{{- /*
+What runs on the sandbox nodes: node-setup (gVisor and the network guard), the telemetry collector and the template
+prepull, each a DaemonSet held to sandboxNodes.nodeSelector and tolerating every taint (the nodes are tainted
+proxcloud.io/sandbox and, until the sync writes their VM firewall, proxcloud.io/unsecured). The node-setup script is
+deploy/sandbox-cluster/node-setup.yaml's, byte for byte (internal/cloud/sandbox/chart_test.go); comments on it are
+there.
+*/ -}}
+{{- $ns := .Release.Namespace }}
+{{- $sel := (include "sbx.placement" . | fromJson).sandboxNodes }}
+apiVersion: v1
+kind: Namespace
+metadata: {name: sandbox-telemetry}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-setup
+  namespace: {{ $ns }}
+data:
+  setup.sh: |
+    #!/bin/bash
+    # Runs on the HOST (nsenter -t 1). Idempotent.
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    if [ -n "$(ip -6 addr show scope global 2>/dev/null)" ] || [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
+      echo "REFUSED: this node has IPv6 (global address or default route); the sandbox guardrail is IPv4 only" >&2
+      ip -6 addr show scope global >&2 || true
+      exit 1
+    fi
+    before=$(cat /etc/containerd/conf.d/*.toml /etc/containerd/runsc.toml 2>/dev/null | sha256sum || true)
+    if [ "$(dpkg-query -W -f='${Version}' runsc 2>/dev/null || true)" != "$RUNSC_VERSION" ]; then
+      deb=$(mktemp)
+      trap 'rm -f "$deb"' EXIT
+      curl -fsSL -o "$deb" "https://storage.googleapis.com/gvisor/releases/pool/$RUNSC_VERSION/binary-amd64/runsc.deb"
+      echo "$RUNSC_SHA256  $deb" | sha256sum -c -
+      # confold: keep our runsc.toml (the package ships an example as a conffile); it is rewritten below anyway.
+      dpkg -i --force-confdef --force-confold "$deb"
+      # The apt source of earlier versions would let an upgrade move runsc off the pin.
+      rm -f /etc/apt/sources.list.d/gvisor.list /usr/share/keyrings/gvisor-archive-keyring.gpg
+    fi
+    mkdir -p /etc/containerd/conf.d
+    cat > /etc/containerd/conf.d/10-gvisor.toml <<'T'
+    version = 3
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gvisor]
+      runtime_type = 'io.containerd.runsc.v1'
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gvisor.options]
+      TypeUrl = "io.containerd.runsc.v1.options"
+      ConfigPath = "/etc/containerd/runsc.toml"
+    T
+    # allow-suid (RUNSC_ALLOW_SUID, default true): gVisor honours the setuid bit, so `sudo` works in a sandbox as on
+    # E2B (the base template gives user "user" passwordless sudo, templates and agents rely on it). Without it every
+    # sudo fails ("effective uid is not 0 ... nosuid"). Effect: every setuid binary in a sandbox's image works again, so
+    # any process in it can become root of that sandbox. No new power for the tenant (envd already runs commands as root
+    # for whoever holds the sandbox's access token) and none on the node: root inside gVisor is root of gVisor's own
+    # kernel, the sentry keeps its seccomp filter and namespaces. It does let code that got in as "user" (a dependency,
+    # a prompt-injected agent) start an escape attempt from root inside the sentry. Docs: managed-sandbox.md §1.4.
+    # New sandboxes pick a change up; running ones keep their config.
+    printf '[runsc_config]\n  platform = "%s"\n' "$RUNSC_PLATFORM" > /etc/containerd/runsc.toml
+    if [ "$RUNSC_ALLOW_SUID" = true ]; then
+      printf '  allow-suid = "true"\n' >> /etc/containerd/runsc.toml
+    fi
+    # gVisor docs: large workloads exhaust host VMAs at the default.
+    echo 'vm.max_map_count = 4194304' > /etc/sysctl.d/90-gvisor.conf
+    sysctl -q -w vm.max_map_count=4194304
+    after=$(cat /etc/containerd/conf.d/*.toml /etc/containerd/runsc.toml 2>/dev/null | sha256sum || true)
+    if [ "$before" != "$after" ]; then
+      echo "containerd config changed, restarting containerd"
+      systemctl restart containerd
+    fi
+    echo "node-setup done: runsc $(dpkg-query -W -f='${Version}' runsc), platform $RUNSC_PLATFORM, allow-suid $RUNSC_ALLOW_SUID"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-setup
+  namespace: {{ $ns }}
+spec:
+  selector:
+    matchLabels: {app: node-setup}
+  updateStrategy:
+    rollingUpdate: {maxUnavailable: 1}
+  template:
+    metadata:
+      labels: {app: node-setup}
+    spec:
+      {{- with $sel }}
+      nodeSelector: {{ toJson . }}
+      {{- end }}
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: sandbox-netguard
+      priorityClassName: system-node-critical
+      tolerations: [{operator: Exists}]
+      initContainers:
+      # The copy is atomic (tmp + mv), so a rollout never hands a starting sandbox a half-written binary.
+      - name: sandbox-runtime
+        image: {{ .Values.images.runtime }}
+        env: [{name: DEST, value: /host/opt/proxcloud-sandbox/bin}]
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+        volumeMounts: [{name: sandbox-runtime, mountPath: /host/opt/proxcloud-sandbox}]
+      containers:
+      - name: setup
+        image: {{ .Values.images.busybox }}
+        env:
+        - name: NODE_NAME
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+        - {name: RUNSC_VERSION, value: "20261116.0"}
+        - {name: RUNSC_SHA256, value: "495796a56d811a43ea218bd0af3d89ea471df1cbd684edcb21c4a00356caeb1e"}
+        - {name: RUNSC_PLATFORM, value: systrap}
+        - {name: RUNSC_ALLOW_SUID, value: {{ .Values.runsc.allowSuid | toString | quote }}}
+        command: [sh, -c]
+        args:
+        - |
+          set -e
+          nsenter -t 1 -m -u -i -n -p -- env RUNSC_VERSION="$RUNSC_VERSION" RUNSC_SHA256="$RUNSC_SHA256" \
+            RUNSC_PLATFORM="$RUNSC_PLATFORM" RUNSC_ALLOW_SUID="$RUNSC_ALLOW_SUID" bash -c "$(cat /setup/setup.sh)"
+          # Static CNI guard runs on the host, before any customer container starts.
+          # tc is host iproute2; update the token/config without letting Cilium own/rewrite the chain.
+          nsenter -t 1 -m -u -i -n -p -- bash -c 'command -v tc >/dev/null || (apt-get update -qq && apt-get install -y -qq iproute2)'
+          while true; do
+            API_SERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" /runtime/sandbox-netguard -install
+            touch /tmp/ready
+            sleep 30
+          done
+        readinessProbe:
+          exec: {command: [test, -f, /tmp/ready]}
+          periodSeconds: 5
+        securityContext: {privileged: true}
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+        volumeMounts:
+        - {name: setup, mountPath: /setup}
+        - {name: sandbox-runtime, mountPath: /runtime, subPath: bin, readOnly: true}
+        - {name: cni-config, mountPath: /host/etc/cni/net.d}
+        - {name: cni-bin, mountPath: /host/opt/cni/bin}
+      volumes:
+      - name: cni-config
+        hostPath: {path: /etc/cni/net.d, type: DirectoryOrCreate}
+      - name: cni-bin
+        hostPath: {path: /opt/cni/bin, type: Directory}
+      - name: setup
+        configMap: {name: node-setup}
+      - name: sandbox-runtime
+        hostPath: {path: /opt/proxcloud-sandbox, type: DirectoryOrCreate}
+---
+{{- /* deploy/sandbox-cluster/telemetry.yaml: host-owned CPU and network samples, no kubelet write, no nodes/proxy. */}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: sandbox-telemetry, namespace: {{ $ns }}}
+spec:
+  selector: {matchLabels: {app: sandbox-telemetry}}
+  template:
+    metadata: {labels: {app: sandbox-telemetry}}
+    spec:
+      {{- with $sel }}
+      nodeSelector: {{ toJson . }}
+      {{- end }}
+      hostNetwork: true
+      serviceAccountName: sandbox-netguard
+      tolerations: [{operator: Exists}]
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: collect
+          image: {{ .Values.images.busybox }}
+          command: [/runtime/sandbox-netguard, -collect]
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: API_SERVER
+              value: https://kubernetes.default.svc
+          securityContext: {runAsUser: 65534, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+          volumeMounts:
+            - {name: runtime, mountPath: /runtime, readOnly: true}
+            - {name: serving-cert, mountPath: /kubelet-serving.crt, readOnly: true}
+      volumes:
+        - name: runtime
+          hostPath: {path: /opt/proxcloud-sandbox/bin, type: Directory}
+        - name: serving-cert
+          hostPath: {path: /var/lib/kubelet/pki/kubelet.crt, type: File}
+{{- with .Values.prepull }}
+---
+{{- /* Template prepull: each init container only pulls its image (by digest) and exits, so a sandbox from a built-in
+template starts without a download. Runs no tenant code. */}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: template-prepull
+  namespace: {{ $ns }}
+  labels: {app: template-prepull}
+spec:
+  selector:
+    matchLabels: {app: template-prepull}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 100%}
+  template:
+    metadata:
+      labels: {app: template-prepull}
+    spec:
+      {{- with $sel }}
+      nodeSelector: {{ toJson . }}
+      {{- end }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 1
+      tolerations: [{operator: Exists}]
+      initContainers:
+      {{- range $i, $image := . }}
+        - name: p{{ $i }}
+          image: {{ $image | quote }}
+          command: ["sh", "-c", "true"]
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {cpu: 100m, memory: 64Mi}}
+          securityContext: {runAsNonRoot: true, runAsUser: 65532, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+      {{- end }}
+      containers:
+        - name: pause
+          image: {{ $.Values.images.pause }}
+          resources: {requests: {cpu: 1m, memory: 4Mi}, limits: {cpu: 10m, memory: 16Mi}}
+{{- end }}

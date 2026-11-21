@@ -1,0 +1,749 @@
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# kubernetes-sigs/agent-sandbox v1.0.9, vendored verbatim from
+# https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.9/sandbox-with-extensions.yaml
+# (sha256 prefix 4bf9ee5558e9a663). To upgrade: replace this file with the new release asset, keep the header.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-sandbox-system
+---
+# Source: proxcloud-sandbox/templates/node.yaml
+apiVersion: v1
+kind: Namespace
+metadata: {name: sandbox-telemetry}
+---
+# Source: proxcloud-sandbox/templates/proxy.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: sandbox-proxy, namespace: sandbox-system}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: sandbox-proxy}
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# vendored document sha256:bd185d481194a8735796ee416656177584d7ac3dbe24b9cf9627f72de7556153
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: proxcloud-sandbox, namespace: sandbox-system}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: proxcloud-sandbox-firewall, namespace: sandbox-system}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: sandbox-netguard, namespace: sandbox-system}
+---
+# Source: proxcloud-sandbox/templates/proxy.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: sandbox-proxy, namespace: sandbox-system}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-sandbox-token
+  namespace: sandbox-system
+  annotations: {kubernetes.io/service-account.name: proxcloud-sandbox}
+type: kubernetes.io/service-account-token
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-sandbox-firewall-token
+  namespace: sandbox-system
+  annotations: {kubernetes.io/service-account.name: proxcloud-sandbox-firewall}
+type: kubernetes.io/service-account-token
+---
+# Source: proxcloud-sandbox/templates/node.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-setup
+  namespace: sandbox-system
+data:
+  setup.sh: |
+    #!/bin/bash
+    # Runs on the HOST (nsenter -t 1). Idempotent.
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    if [ -n "$(ip -6 addr show scope global 2>/dev/null)" ] || [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
+      echo "REFUSED: this node has IPv6 (global address or default route); the sandbox guardrail is IPv4 only" >&2
+      ip -6 addr show scope global >&2 || true
+      exit 1
+    fi
+    before=$(cat /etc/containerd/conf.d/*.toml /etc/containerd/runsc.toml 2>/dev/null | sha256sum || true)
+    if [ "$(dpkg-query -W -f='${Version}' runsc 2>/dev/null || true)" != "$RUNSC_VERSION" ]; then
+      deb=$(mktemp)
+      trap 'rm -f "$deb"' EXIT
+      curl -fsSL -o "$deb" "https://storage.googleapis.com/gvisor/releases/pool/$RUNSC_VERSION/binary-amd64/runsc.deb"
+      echo "$RUNSC_SHA256  $deb" | sha256sum -c -
+      # confold: keep our runsc.toml (the package ships an example as a conffile); it is rewritten below anyway.
+      dpkg -i --force-confdef --force-confold "$deb"
+      # The apt source of earlier versions would let an upgrade move runsc off the pin.
+      rm -f /etc/apt/sources.list.d/gvisor.list /usr/share/keyrings/gvisor-archive-keyring.gpg
+    fi
+    mkdir -p /etc/containerd/conf.d
+    cat > /etc/containerd/conf.d/10-gvisor.toml <<'T'
+    version = 3
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gvisor]
+      runtime_type = 'io.containerd.runsc.v1'
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gvisor.options]
+      TypeUrl = "io.containerd.runsc.v1.options"
+      ConfigPath = "/etc/containerd/runsc.toml"
+    T
+    # allow-suid (RUNSC_ALLOW_SUID, default true): gVisor honours the setuid bit, so `sudo` works in a sandbox as on
+    # E2B (the base template gives user "user" passwordless sudo, templates and agents rely on it). Without it every
+    # sudo fails ("effective uid is not 0 ... nosuid"). Effect: every setuid binary in a sandbox's image works again, so
+    # any process in it can become root of that sandbox. No new power for the tenant (envd already runs commands as root
+    # for whoever holds the sandbox's access token) and none on the node: root inside gVisor is root of gVisor's own
+    # kernel, the sentry keeps its seccomp filter and namespaces. It does let code that got in as "user" (a dependency,
+    # a prompt-injected agent) start an escape attempt from root inside the sentry. Docs: managed-sandbox.md §1.4.
+    # New sandboxes pick a change up; running ones keep their config.
+    printf '[runsc_config]\n  platform = "%s"\n' "$RUNSC_PLATFORM" > /etc/containerd/runsc.toml
+    if [ "$RUNSC_ALLOW_SUID" = true ]; then
+      printf '  allow-suid = "true"\n' >> /etc/containerd/runsc.toml
+    fi
+    # gVisor docs: large workloads exhaust host VMAs at the default.
+    echo 'vm.max_map_count = 4194304' > /etc/sysctl.d/90-gvisor.conf
+    sysctl -q -w vm.max_map_count=4194304
+    after=$(cat /etc/containerd/conf.d/*.toml /etc/containerd/runsc.toml 2>/dev/null | sha256sum || true)
+    if [ "$before" != "$after" ]; then
+      echo "containerd config changed, restarting containerd"
+      systemctl restart containerd
+    fi
+    echo "node-setup done: runsc $(dpkg-query -W -f='${Version}' runsc), platform $RUNSC_PLATFORM, allow-suid $RUNSC_ALLOW_SUID"
+---
+# Source: proxcloud-sandbox/templates/proxy.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: sandbox-proxy-config, namespace: sandbox-system}
+data:
+  SANDBOX_DOMAIN: "sbx.example.org"
+  PROXCLOUD_WAKE_URL: "https://api.example.org/api/v1/internal/sandboxes"
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# vendored document sha256:a4a9bf72fecd84e3ffefd8550acf204ab04caf450aa64e70e3d425a32487e06b
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# vendored document sha256:808801ae7c956e04281c22533a597c01a116cc86277af8a69a149acc8fc9ff00
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# vendored document sha256:7442caae7ea2931eeae903706741c7ec3042a2762b9ded089696aca8ea1fda1a
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# vendored document sha256:cd03a0d6146631b4e8c5205acdfcf280b2680331ecb5bf2bfd9e8e588e805c5a
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# vendored document sha256:f819ed8290af6443c6b6b31839ddc3adafc4289acaec5ccf0378a4a352e381ce
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# vendored document sha256:9365ddf1a34d924828178ddda39d14c8f9a473afdb3a0d3cd44da18721b1de4d
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: proxcloud-sandbox}
+# Exec over WebSocket is authorized as get and (Kubernetes >= 1.30) create on pods/exec: both, in the namespaced role.
+rules:
+  - {apiGroups: [""], resources: [namespaces], verbs: [get, list, create, patch, delete]}
+  - {apiGroups: [rbac.authorization.k8s.io], resources: [rolebindings], verbs: [get, create, patch, delete]}
+  - {apiGroups: [rbac.authorization.k8s.io], resources: [clusterroles], verbs: [bind], resourceNames: [proxcloud-sandbox-namespace]}
+  - {"apiGroups":[""],"resources":["nodes"],"verbs":["get","list"]}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: proxcloud-sandbox-namespace}
+rules:
+  - {"apiGroups":[""],"resources":["resourcequotas","limitranges"],"verbs":["get","list","create","patch"]}
+  - {"apiGroups":[""],"resources":["pods"],"verbs":["get","list","watch"]}
+  - {"apiGroups":[""],"resources":["pods/exec"],"verbs":["get","create"]}
+  - {"apiGroups":[""],"resources":["pods/log"],"verbs":["get"]}
+  - {"apiGroups":["agents.x-k8s.io"],"resources":["sandboxes"],"verbs":["get","list","watch","create","patch","delete"]}
+  - {"apiGroups":["extensions.agents.x-k8s.io"],"resources":["sandboxclaims","sandboxtemplates","sandboxwarmpools"],"verbs":["get","list","watch","create","patch","delete"]}
+  - {"apiGroups":["cilium.io"],"resources":["ciliumnetworkpolicies"],"verbs":["get","list","create","patch","delete"]}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: proxcloud-sandbox-firewall}
+rules:
+  - {apiGroups: [""], resources: [nodes], verbs: [get, list, patch]}
+  - {apiGroups: [""], resources: [users], verbs: [impersonate], resourceNames: ["system:node:proxcloud-noderestriction-probe"]}
+  - {apiGroups: [""], resources: [groups], verbs: [impersonate], resourceNames: ["system:nodes"]}
+  # The fence gate checks that the class still places every sandbox pod on the sandbox nodes.
+  - {apiGroups: [node.k8s.io], resources: [runtimeclasses], verbs: [get], resourceNames: ["gvisor"]}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: sandbox-netguard}
+rules:
+  - {apiGroups: [""], resources: [pods], verbs: [get]}
+  - {apiGroups: [""], resources: [nodes], verbs: [get]}
+  - {apiGroups: [""], resources: [nodes/stats], verbs: [get]}
+---
+# Source: proxcloud-sandbox/templates/proxy.yaml
+# Pod lookup by the proxcloud.io/sandbox-id label across the sb-<project> namespaces. Nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: sandbox-proxy}
+rules:
+  - {apiGroups: [""], resources: [pods], verbs: [list]}
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# vendored document sha256:4efc620b8f8b4a0708a1c0b264f546e904d020dc3b41e7f056d482b06c9ff6b4
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# vendored document sha256:500f3bd64e99aff7c4e21be1a66210fb56fc062611efd113550f5928466491a1
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: proxcloud-sandbox}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: proxcloud-sandbox}
+subjects: [{kind: ServiceAccount, name: proxcloud-sandbox, namespace: sandbox-system}]
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: proxcloud-sandbox-firewall}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: proxcloud-sandbox-firewall}
+subjects: [{kind: ServiceAccount, name: proxcloud-sandbox-firewall, namespace: sandbox-system}]
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: sandbox-netguard}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sandbox-netguard}
+subjects: [{kind: ServiceAccount, name: sandbox-netguard, namespace: sandbox-system}]
+---
+# Source: proxcloud-sandbox/templates/proxy.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: sandbox-proxy}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sandbox-proxy}
+subjects: [{kind: ServiceAccount, name: sandbox-proxy, namespace: sandbox-system}]
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: sandbox-netguard-cilium-read, namespace: kube-system}
+rules:
+  - {apiGroups: [""], resources: [configmaps], resourceNames: [cilium-config], verbs: [get]}
+  - {apiGroups: [cilium.io], resources: [ciliumnodeconfigs], verbs: [get, list]}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: sandbox-netguard, namespace: sandbox-telemetry}
+rules:
+  - {apiGroups: [""], resources: [configmaps], verbs: [get, create, update]}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: proxcloud-telemetry-reader, namespace: sandbox-telemetry}
+rules:
+  - {apiGroups: [""], resources: [configmaps], verbs: [get, list]}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: sandbox-netguard-cilium-read, namespace: kube-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-netguard-cilium-read}
+subjects:
+  - {kind: ServiceAccount, name: sandbox-netguard, namespace: sandbox-system}
+  - {kind: ServiceAccount, name: proxcloud-sandbox, namespace: sandbox-system}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: sandbox-netguard, namespace: sandbox-telemetry}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-netguard}
+subjects: [{kind: ServiceAccount, name: sandbox-netguard, namespace: sandbox-system}]
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: proxcloud-telemetry-reader, namespace: sandbox-telemetry}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: proxcloud-telemetry-reader}
+subjects: [{kind: ServiceAccount, name: proxcloud-sandbox, namespace: sandbox-system}]
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+# vendored document sha256:41f4f2dcf08949d211a8a1169a55e7e8c565426e0a39fe6925af3e25af2e5e92
+---
+# Source: proxcloud-sandbox/templates/proxy.yaml
+# Local keeps the caller's address as the source, and MetalLB answers for the address only from a node with a ready proxy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-proxy
+  namespace: sandbox-system
+  annotations: {metallb.io/loadBalancerIPs: "192.0.2.150"}
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector: {app: sandbox-proxy}
+  ports:
+    - {name: https, port: 443, targetPort: https}
+---
+# Source: proxcloud-sandbox/templates/node.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-setup
+  namespace: sandbox-system
+spec:
+  selector:
+    matchLabels: {app: node-setup}
+  updateStrategy:
+    rollingUpdate: {maxUnavailable: 1}
+  template:
+    metadata:
+      labels: {app: node-setup}
+    spec:
+      nodeSelector: {"node-restriction.kubernetes.io/proxcloud-node-group":"sandbox"}
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: sandbox-netguard
+      priorityClassName: system-node-critical
+      tolerations: [{operator: Exists}]
+      initContainers:
+      # The copy is atomic (tmp + mv), so a rollout never hands a starting sandbox a half-written binary.
+      - name: sandbox-runtime
+        image: ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:v0.11.0-rc.1@sha256:7fb46d30a7782f0cc57034bd8b66576c1129986dd8233803759a276b0be27a07
+        env: [{name: DEST, value: /host/opt/proxcloud-sandbox/bin}]
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+        volumeMounts: [{name: sandbox-runtime, mountPath: /host/opt/proxcloud-sandbox}]
+      containers:
+      - name: setup
+        image: docker.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+        env:
+        - name: NODE_NAME
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+        - {name: RUNSC_VERSION, value: "20261116.0"}
+        - {name: RUNSC_SHA256, value: "495796a56d811a43ea218bd0af3d89ea471df1cbd684edcb21c4a00356caeb1e"}
+        - {name: RUNSC_PLATFORM, value: systrap}
+        - {name: RUNSC_ALLOW_SUID, value: "true"}
+        command: [sh, -c]
+        args:
+        - |
+          set -e
+          nsenter -t 1 -m -u -i -n -p -- env RUNSC_VERSION="$RUNSC_VERSION" RUNSC_SHA256="$RUNSC_SHA256" \
+            RUNSC_PLATFORM="$RUNSC_PLATFORM" RUNSC_ALLOW_SUID="$RUNSC_ALLOW_SUID" bash -c "$(cat /setup/setup.sh)"
+          # Static CNI guard runs on the host, before any customer container starts.
+          # tc is host iproute2; update the token/config without letting Cilium own/rewrite the chain.
+          nsenter -t 1 -m -u -i -n -p -- bash -c 'command -v tc >/dev/null || (apt-get update -qq && apt-get install -y -qq iproute2)'
+          while true; do
+            API_SERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" /runtime/sandbox-netguard -install
+            touch /tmp/ready
+            sleep 30
+          done
+        readinessProbe:
+          exec: {command: [test, -f, /tmp/ready]}
+          periodSeconds: 5
+        securityContext: {privileged: true}
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+        volumeMounts:
+        - {name: setup, mountPath: /setup}
+        - {name: sandbox-runtime, mountPath: /runtime, subPath: bin, readOnly: true}
+        - {name: cni-config, mountPath: /host/etc/cni/net.d}
+        - {name: cni-bin, mountPath: /host/opt/cni/bin}
+      volumes:
+      - name: cni-config
+        hostPath: {path: /etc/cni/net.d, type: DirectoryOrCreate}
+      - name: cni-bin
+        hostPath: {path: /opt/cni/bin, type: Directory}
+      - name: setup
+        configMap: {name: node-setup}
+      - name: sandbox-runtime
+        hostPath: {path: /opt/proxcloud-sandbox, type: DirectoryOrCreate}
+---
+# Source: proxcloud-sandbox/templates/node.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: sandbox-telemetry, namespace: sandbox-system}
+spec:
+  selector: {matchLabels: {app: sandbox-telemetry}}
+  template:
+    metadata: {labels: {app: sandbox-telemetry}}
+    spec:
+      nodeSelector: {"node-restriction.kubernetes.io/proxcloud-node-group":"sandbox"}
+      hostNetwork: true
+      serviceAccountName: sandbox-netguard
+      tolerations: [{operator: Exists}]
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: collect
+          image: docker.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+          command: [/runtime/sandbox-netguard, -collect]
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: API_SERVER
+              value: https://kubernetes.default.svc
+          securityContext: {runAsUser: 65534, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+          volumeMounts:
+            - {name: runtime, mountPath: /runtime, readOnly: true}
+            - {name: serving-cert, mountPath: /kubelet-serving.crt, readOnly: true}
+      volumes:
+        - name: runtime
+          hostPath: {path: /opt/proxcloud-sandbox/bin, type: Directory}
+        - name: serving-cert
+          hostPath: {path: /var/lib/kubelet/pki/kubelet.crt, type: File}
+---
+# Source: proxcloud-sandbox/templates/node.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: template-prepull
+  namespace: sandbox-system
+  labels: {app: template-prepull}
+spec:
+  selector:
+    matchLabels: {app: template-prepull}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 100%}
+  template:
+    metadata:
+      labels: {app: template-prepull}
+    spec:
+      nodeSelector: {"node-restriction.kubernetes.io/proxcloud-node-group":"sandbox"}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 1
+      tolerations: [{operator: Exists}]
+      initContainers:
+        - name: p0
+          image: "ghcr.io/mutex-solutions/sandbox-base:20261119-8be6a47@sha256:b6ad7cf4414befbe3614b8095d4dda67082ce4bf7c6a2f54c999766977cd9cec"
+          command: ["sh", "-c", "true"]
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {cpu: 100m, memory: 64Mi}}
+          securityContext: {runAsNonRoot: true, runAsUser: 65532, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+        - name: p1
+          image: "ghcr.io/mutex-solutions/sandbox-code-interpreter:20261119-8be6a47@sha256:280fd008ba71827850d559c62bbe4fd522c943e3558b89a00fde058e9f68ecfe"
+          command: ["sh", "-c", "true"]
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {cpu: 100m, memory: 64Mi}}
+          securityContext: {runAsNonRoot: true, runAsUser: 65532, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a
+          resources: {requests: {cpu: 1m, memory: 4Mi}, limits: {cpu: 10m, memory: 16Mi}}
+---
+# Source: proxcloud-sandbox/templates/agent-sandbox.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: agent-sandbox-controller
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-sandbox-controller
+  template:
+    metadata:
+      labels:
+        app: agent-sandbox-controller
+    spec:
+      containers:
+      - args:
+        - --leader-elect=true
+        - --extensions
+        image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.9
+        name: agent-sandbox-controller
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: healthz
+          protocol: TCP
+        volumeMounts:
+        - mountPath: /etc/sandbox-config
+          name: config-volume
+          readOnly: true
+      nodeSelector:
+        node-restriction.kubernetes.io/proxcloud-node-group: system
+      serviceAccountName: agent-sandbox-controller
+      volumes:
+      - configMap:
+          name: agent-sandbox-config
+          optional: true
+        name: config-volume
+---
+# Source: proxcloud-sandbox/templates/proxy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: sandbox-proxy, namespace: sandbox-system}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: sandbox-proxy}
+  template:
+    metadata:
+      labels: {app: sandbox-proxy}
+    spec:
+      serviceAccountName: sandbox-proxy
+      nodeSelector: {"node-restriction.kubernetes.io/proxcloud-node-group":"system"}
+      topologySpreadConstraints:
+        - {maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: ScheduleAnyway, labelSelector: {matchLabels: {app: sandbox-proxy}}}
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: proxy
+          image: ghcr.io/mutex-solutions/proxcloud-sandbox-proxy:v0.11.0-rc.1@sha256:afc0e6e53262ce517d341c428093f7e81106272dda9af0dda6297498bca0e37e
+          env:
+            - {name: SANDBOX_TLS_DIR, value: /etc/sandbox-proxy/tls}
+          envFrom:
+            - configMapRef: {name: sandbox-proxy-config}
+            - secretRef: {name: sandbox-proxy-wake, optional: true}
+          ports:
+            - {name: https, containerPort: 8443}
+            - {name: health, containerPort: 8081}
+          readinessProbe: {httpGet: {path: /readyz, port: health}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: health}, periodSeconds: 10}
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: tls, mountPath: /etc/sandbox-proxy/tls, readOnly: true}
+      volumes:
+        - name: tls
+          secret: {secretName: sandbox-proxy-tls}
+---
+# Source: proxcloud-sandbox/templates/runtime.yaml
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: sandbox-tenant-egress
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s:io.cilium.k8s.namespace.labels.proxcloud.io/tenant: "true"
+  egress:
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: kube-system
+        k8s:k8s-app: kube-dns
+    toPorts:
+    - ports:
+      - {port: "53", protocol: ANY}
+  egressDeny:
+  - toCIDRSet:
+    - cidr: 10.0.0.0/8
+    - cidr: 172.16.0.0/12
+    - cidr: 192.168.0.0/16
+    - cidr: 100.64.0.0/10
+    - cidr: 169.254.0.0/16
+    - cidr: 192.0.2.0/24
+  - toCIDRSet:
+    - cidr: 0.0.0.0/0
+    toPorts:
+    - ports:
+      - {port: "25", protocol: TCP}
+---
+# Source: proxcloud-sandbox/templates/runtime.yaml
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: sandbox-tenant-ingress
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s:io.cilium.k8s.namespace.labels.proxcloud.io/tenant: "true"
+  ingress:
+  - fromEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: sandbox-system
+        k8s:app: sandbox-proxy
+---
+# Source: proxcloud-sandbox/templates/runtime.yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sandbox-warming-deny-all
+  namespace: sandbox-system
+spec:
+  endpointSelector:
+    matchLabels:
+      proxcloud.io/sandbox-warm: "true"
+  ingress: []
+  egress: []
+---
+# Source: proxcloud-sandbox/templates/runtime.yaml
+apiVersion: cilium.io/v2
+kind: CiliumNodeConfig
+metadata:
+  name: sandbox-nodes
+  namespace: kube-system
+spec:
+  nodeSelector:
+    matchLabels: {"proxcloud.io/node-group":"sandbox"}
+  defaults:
+    custom-cni-conf: "true"
+    write-cni-conf-when-ready: ""
+    enable-bandwidth-manager: "true"
+    bpf-lb-sock-hostns-only: "true"
+---
+# Source: proxcloud-sandbox/templates/runtime.yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata: {name: gvisor}
+handler: gvisor
+scheduling: {"nodeSelector":{"node-restriction.kubernetes.io/proxcloud-node-group":"sandbox"},"tolerations":[{"effect":"NoSchedule","key":"proxcloud.io/sandbox","operator":"Exists"}]}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-sandbox-tenant-pods}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector: {matchLabels: {proxcloud.io/tenant: "true"}}
+    resourceRules:
+    - {apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [pods, pods/ephemeralcontainers]}
+  variables:
+  - name: ctrs
+    expression: 'object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : []) + (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : [])'
+  validations:
+  - expression: 'has(object.spec.runtimeClassName) && object.spec.runtimeClassName == "gvisor"'
+    message: tenant pods must use runtimeClassName gvisor
+  - expression: '!(has(object.spec.hostNetwork) && object.spec.hostNetwork) && !(has(object.spec.hostPID) && object.spec.hostPID) && !(has(object.spec.hostIPC) && object.spec.hostIPC)'
+    message: tenant pods may not use host namespaces
+  - expression: 'request.operation != "CREATE" || !has(object.spec.nodeName) || object.spec.nodeName == ""'
+    message: tenant pods may not set nodeName
+  - expression: 'variables.ctrs.all(c, !has(c.securityContext) || ((!has(c.securityContext.privileged) || !c.securityContext.privileged) && (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)))'
+    message: tenant containers may not be privileged or add capabilities
+  - expression: '!has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || v.hostPath.path == "/opt/proxcloud-sandbox/bin")'
+    message: tenant pods may mount no hostPath but the runtime directory /opt/proxcloud-sandbox/bin
+  - expression: '!has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || variables.ctrs.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly))))'
+    message: the runtime directory must be mounted read-only
+  # The volume types Pod Security restricted allows, and the hostPath above: none the kubelet mounts from the network
+  # on the node itself (nfs, iscsi and the like).
+  - expression: '!has(object.spec.volumes) || object.spec.volumes.all(v, has(v.hostPath) || has(v.emptyDir) || has(v.configMap) || has(v.secret) || has(v.projected) || has(v.downwardAPI) || has(v.persistentVolumeClaim) || has(v.ephemeral) || has(v.csi) || has(v.image))'
+    message: tenant pods may use only the volume types of Pod Security restricted
+  - expression: 'variables.ctrs.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))'
+    message: tenant containers may not use hostPort
+  # The RuntimeClass adds proxcloud.io/sandbox; a pod of its own may not tolerate proxcloud.io/unsecured (a node whose
+  # VM firewall is not written yet) or every taint at once.
+  - expression: '!has(object.spec.tolerations) || object.spec.tolerations.all(t, has(t.key) && t.key != "" && t.key != "proxcloud.io/unsecured")'
+    message: tenant pods may not tolerate proxcloud.io/unsecured or every taint
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-noderestriction-probe-dry-run-only}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE", "CONNECT"]
+        resources: ["*/*"]
+  matchConditions:
+    - name: probe-identity
+      expression: request.userInfo.username == "system:node:proxcloud-noderestriction-probe"
+  validations:
+    - expression: has(request.dryRun) && request.dryRun
+      message: the proxcloud NodeRestriction probe identity may only dry-run
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-sandbox-namespaces}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - {apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [namespaces]}
+  matchConditions:
+  - {name: portal-identity, expression: 'request.userInfo.username == "system:serviceaccount:sandbox-system:proxcloud-sandbox"'}
+  validations:
+  - expression: 'request.name.startsWith("sb-")'
+    message: the sandbox identity may only manage sb-* namespaces
+  - expression: 'request.operation == "DELETE" || (has(object.metadata.labels) && object.metadata.labels[?"proxcloud.io/tenant"].orValue("") == "true")'
+    message: an sb-* namespace must carry proxcloud.io/tenant=true
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-sandbox-rolebindings}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - {apiGroups: [rbac.authorization.k8s.io], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [rolebindings]}
+  matchConditions:
+  - {name: portal-identity, expression: 'request.userInfo.username == "system:serviceaccount:sandbox-system:proxcloud-sandbox"'}
+  validations:
+  - expression: "request.namespace.startsWith(\"sb-\") && namespaceObject != null && has(namespaceObject.metadata.labels) && namespaceObject.metadata.labels[?\"proxcloud.io/tenant\"].orValue(\"\") == \"true\""
+    message: the sandbox identity may bind only inside sb-* tenant namespaces
+  - expression: 'request.operation == "DELETE" || (object.roleRef.apiGroup == "rbac.authorization.k8s.io" && object.roleRef.kind == "ClusterRole" && object.roleRef.name == "proxcloud-sandbox-namespace")'
+    message: the sandbox identity may bind only ClusterRole proxcloud-sandbox-namespace
+  - expression: 'request.operation == "DELETE" || (has(object.subjects) && object.subjects.all(s, s.kind == "ServiceAccount" && s.name == "proxcloud-sandbox" && has(s.namespace) && s.namespace == "sandbox-system"))'
+    message: the sandbox identity may bind only itself
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-sandbox-firewall-nodes}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - {apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [nodes, nodes/status]}
+  matchConditions:
+  - {name: firewall-identity, expression: 'request.userInfo.username == "system:serviceaccount:sandbox-system:proxcloud-sandbox-firewall"'}
+  validations:
+  - expression: 'request.operation == "UPDATE" && has(oldObject.metadata.labels) && oldObject.metadata.labels[?"node-restriction.kubernetes.io/proxcloud-node-group"].orValue("") == "sandbox" && has(object.metadata.labels) && object.metadata.labels[?"node-restriction.kubernetes.io/proxcloud-node-group"].orValue("") == "sandbox"'
+    message: the firewall identity may only update sandbox nodes
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-sandbox-tenant-pods}
+spec: {policyName: proxcloud-sandbox-tenant-pods, validationActions: [Deny]}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-noderestriction-probe-dry-run-only}
+spec:
+  policyName: proxcloud-noderestriction-probe-dry-run-only
+  validationActions: ["Deny"]
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-sandbox-namespaces}
+spec: {policyName: proxcloud-sandbox-namespaces, validationActions: [Deny]}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-sandbox-rolebindings}
+spec: {policyName: proxcloud-sandbox-rolebindings, validationActions: [Deny]}
+---
+# Source: proxcloud-sandbox/templates/identities.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-sandbox-firewall-nodes}
+spec: {policyName: proxcloud-sandbox-firewall-nodes, validationActions: [Deny]}

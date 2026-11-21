@@ -134,7 +134,7 @@ in `web/`.
    version bumps are a review requirement, not an enforced universal CI gate.
    Releases are cut by tags, not commit prefixes: a `v*` tag publishes five images
    and the app chart at the tag's version in separate workflows;
-   `database-cluster-v*` / `proxmox-kamaji-cluster-v*` / `proxcloud-platform-v*` publish those charts and must
+   `database-cluster-v*` / `proxmox-kamaji-cluster-v*` / `proxcloud-platform-v*` / `proxcloud-sandbox-v*` publish those charts and must
    match their `Chart.yaml` versions. No chart is published merely by merging.
    See [CI/release operations](docs/ci-release.md) and
    [chart publishing](deploy/charts/README.md). Do not create a tag as part of a
