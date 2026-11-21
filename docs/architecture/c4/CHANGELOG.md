@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-21: new clusters are offered the product load balancer
+
+**What changed:** no new component, container or relation. The platform BOM pins cluster chart 0.1.17 for tenant
+clusters (`tenantCharts.kubernetes`, record only on an installed platform; `pc-platform` stays on 0.1.16), so a new
+cluster gets the load balancer controller when every gate holds. The consoles read a cluster's load balancer: its
+mode off the values (`kamaji.LBMode`: the tenant's cluster row and the operator's cluster list), and the controller's
+minted and last-seen times with the cluster's balancer row through `project.Handler.lbClusterView`, for the tenant
+(cluster action `GET_LOAD_BALANCER`) and the operator (`GET /admin/service/{id}/k8s-clusters/{clusterId}/load-balancer`,
+`admin.LBViewer` wired to `ClusterLBView`). The tenant's cluster page, the load balancer pages (a cluster's balancer
+read-only) and the operator's provider form (`config.cluster.loadBalancer`) and clusters card (mode, the Load balancer
+dialog with Enable and rotate) show and use them.
+
+**Why:** v0.11.0 plan, PR 4 (`run-1/v0110-lb-plan.md`, with C4: the cost of NGINX Gateway Fabric's public address per
+Gateway is said where the tenant turns it on).
+
+**Diagrams:** none (the C2 rows of the gateway and the cluster chart, the C3 "Managed K8s create on Proxmox" row and
+the C4.2a table's text).
+
 ## 2026-11-21: the load balancer controller of managed clusters
 
 **What changed:** a new process on the services cluster, one per tenant cluster that has it: the load balancer

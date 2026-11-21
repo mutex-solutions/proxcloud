@@ -49,8 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as its default; **Enable load balancer controller** (`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/load-balancer`)
   adds the controller in class-only mode (class `proxcloud.io/lb`), and again rotates the credential. NGINX Gateway
   Fabric's Service class is never changed. The controller's image is set at create, enable and chart bump, never by the
-  sync. Compose sets the image with `--cluster-gateway`, the installer chart with `api.csiGateway`. Ships dark: the BOM
-  still pins cluster chart 0.1.16. Not run on a lab.
+  sync. Compose sets the image with `--cluster-gateway`, the installer chart with `api.csiGateway`. The BOM pins
+  chart 0.1.17 for new tenant clusters (Changed). Not run on a lab.
+- **The consoles show a cluster's load balancer** (docs/managed-k8s.md, the Kubernetes and load balancer guides).
+  The tenant's cluster page says which Services of type LoadBalancer get a public address (default, class only, or
+  private addresses only), what the pair of appliances and each address cost, and in default mode that NGINX Gateway
+  Fabric takes a public address per Gateway (the add-on dialog says it too); it shows when the controller last
+  reported and the balancer: its appliances, each Service's address, ports, workers up and state, with refusals such
+  as `UDPNotSupported`. On the load balancer pages a cluster's balancer is read-only and links to its cluster. The
+  operator's Kubernetes provider form edits `config.cluster.loadBalancer` (public network and flavor, both or
+  neither), and the provider's clusters card shows each cluster's mode with a **Load balancer** dialog: the
+  controller's last call, the balancer, and **Enable load balancer controller** or, on a cluster that has one, a
+  rotation. New reads: the cluster action `GET_LOAD_BALANCER` and
+  `GET /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/load-balancer`; `load_balancer` on the cluster row and
+  `loadBalancer` in the operator's cluster list. Not run on a lab.
 - **Docker Compose can serve the gateway listener** (`proxcloud-up.sh install --cluster-gateway <address>`,
   `deploy/compose/compose.cluster-gateway.yaml`): published on `<address>:8444` only, with an ECDSA key and a
   self-signed certificate the API makes on its first start (`PROXCLOUD_CSI_GATEWAY_SELF_SIGNED`) in a volume of its
@@ -71,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **New tenant clusters get cluster chart `proxmox-kamaji-cluster` 0.1.17** (`tenantCharts.kubernetes`, digest
+  `sha256:dfdccf67de36238f4ae7e7914035f99f394fb6f45ed80540d6e1a2bf5076e914`, published from the tag
+  `proxmox-kamaji-cluster-v0.1.17`), and with it the load balancer controller where every gate holds. The platform
+  cluster (`pc-platform`) stays on 0.1.16. On an installed platform the move is record only: the upgrade run writes
+  the chart on the Kubernetes provider, and an existing tenant cluster keeps its chart until its own update. From
+  the BOMs `0.10.1-rc.2` to `0.10.2` the plan gains that one record-only row (`TestPreviousBOMsMoveCertManager`).
 - **The platform BOM on `main` is `0.11.0-dev` again, and the build carries the BOM of `0.10.2`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.10.2.yaml`, sha256
   `78dbc9a79150ea71d77d460e8679ba94d1d7484c82e6f6bdcbcbf4560cdf3dee`, the file of the tag byte for byte). The `v0.10.2` release

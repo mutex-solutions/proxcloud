@@ -171,3 +171,37 @@ func TestChartLBClasses(t *testing.T) {
 		t.Fatal("default without the controller's Secret gave MetalLB a class or rendered a controller")
 	}
 }
+
+// The consoles read a cluster's mode back off its values: the tenant's cluster row (clusterData) and the operator's
+// list of clusters (ListClusterPins) say default, class-only, or nothing without a controller.
+func TestLBModeReadBack(t *testing.T) {
+	for want, values := range map[string]map[string]any{
+		"default":    {"loadBalancer": LBValues("c", LBController{Default: true})},
+		"class-only": {"loadBalancer": LBValues("c", LBController{})},
+		"":           {"loadBalancer": map[string]any{"default": true}},
+	} {
+		if got := LBMode(values); got != want {
+			t.Errorf("LBMode(%v) = %q, want %q", values, got, want)
+		}
+	}
+	ctx := context.Background()
+	api := newFakeAPI()
+	svc := NewWithAPI(api, testCfg(), "svc-1")
+	spec := testSpec()
+	spec.Infra.LoadBalancer = &LBController{Image: "img:v1", GatewayURL: "https://192.0.2.7:8444", Default: true}
+	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
+		t.Fatal(err)
+	}
+	pins, err := svc.ListClusterPins(ctx)
+	if err != nil || len(pins) != 1 || pins[0].LoadBalancer != "default" {
+		t.Fatalf("pins = %+v, %v", pins, err)
+	}
+	app := api.apps[testCfg().ArgoNamespace+"/"+spec.ID]
+	if c := clusterData(app, nil, nil)["cluster"].(map[string]any); c["load_balancer"] != "default" {
+		t.Fatalf("cluster data load_balancer = %v", c["load_balancer"])
+	}
+	delete(dig(app, "spec", "source", "helm", "valuesObject").(map[string]any), "loadBalancer")
+	if c := clusterData(app, nil, nil)["cluster"].(map[string]any); c["load_balancer"] != nil {
+		t.Fatalf("a cluster without a controller reads %v", c["load_balancer"])
+	}
+}

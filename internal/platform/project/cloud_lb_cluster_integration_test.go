@@ -184,6 +184,28 @@ func TestLBClusterStateConverges(t *testing.T) {
 		t.Fatalf("firewall: %+v %v", f.rules["301"], f.sets["302"])
 	}
 
+	// What the consoles show next to the cluster: the balancer row and the controller's last call, never the secret;
+	// the operator reads it through the cluster's own Kubernetes provider only.
+	if err := store.Seen(ctx, "c1", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	view, err := h.lbClusterView(ctx, "c1")
+	if err != nil || view == nil || view.ControllerLastSeen == nil || view.ControllerSince == nil || view.projectID != "p1" {
+		t.Fatalf("view: %+v, %v", view, err)
+	}
+	if cr, _ := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", ext); view.BalancerID != cr.ID {
+		t.Fatalf("view names row %q, want %q", view.BalancerID, cr.ID)
+	}
+	if b, _ := json.Marshal(view); !strings.Contains(string(b), `"vip":"`+vipA+`"`) || strings.Contains(string(b), "secret") {
+		t.Fatalf("view JSON: %s", b)
+	}
+	if v, _ := h.ClusterLBView(ctx, &externalservice.ExternalService{ID: "k8s-off"}, "c1"); v != nil {
+		t.Fatalf("another provider reads the cluster's balancer: %+v", v)
+	}
+	if v, _ := h.ClusterLBView(ctx, &externalservice.ExternalService{ID: "k8s"}, "c1"); v == nil {
+		t.Fatal("the cluster's provider reads no balancer")
+	}
+
 	// The same state again: the same address, no second one.
 	if ans := state(svc("a", 80, 30080)); ans.Services[0].State != lbgw.StateReady || ans.Services[0].Address != vipA {
 		t.Fatalf("repeated PUT: %+v", ans.Services)
@@ -300,6 +322,9 @@ func TestLBClusterStateConverges(t *testing.T) {
 	held()
 	if c, _ := store.Credential(ctx, "c1"); c.RevokedAt == nil {
 		t.Fatal("the credential was not revoked first")
+	}
+	if v, _ := h.lbClusterView(ctx, "c1"); v != nil {
+		t.Fatalf("a released cluster still shows a controller: %+v", v)
 	}
 	// The appliances are gone (the fake lists no VM); the addresses, their FLOATING_IP rows, the row and the state go.
 	now := time.Now().UTC()

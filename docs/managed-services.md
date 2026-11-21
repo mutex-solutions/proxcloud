@@ -1984,10 +1984,12 @@ its documentation as remembered, and was not checked in its code or on a node.
 - **The gateway listener is opt-in.** `proxcloud-up.sh install --cluster-gateway <address>` (v0.11.0 or later)
   serves the listener of the clusters' controllers on `<address>:8444` only, with an ECDSA key and a
   self-signed certificate for the address that the API makes on its first start, in its own volume
-  ([compose README](../deploy/compose/README.md#optional-features)). It is for the load balancer controller of
-  v0.11.0, which a later change of the release adds. **A new route:** the platform cluster's nodes, on the platform
-  network, must reach the portal host on `<address>:8444`; without it no controller reaches the gateway, and nothing
-  else breaks.
+  ([compose README](../deploy/compose/README.md#optional-features)). It is for the clusters' load balancer
+  controller (cluster chart 0.1.17, which the BOM of v0.11.0 pins for new tenant clusters). A Kubernetes cluster gets
+  one only with the listener on, the controller image the flag sets, and `config.cluster.loadBalancer` on the
+  Kubernetes provider (a public network and a flavor; [managed-k8s.md](managed-k8s.md)). **A new route:** the platform
+  cluster's nodes, on the platform network, must reach the portal host on `<address>:8444`; without it no controller
+  reaches the gateway (its cluster page says it has not reported), and nothing else breaks.
 - **No database backups.** The Databases provider is registered without a backup store, and with the
   egress fence on (`egressFence: true`), which allows no object store.
 - **Database replicas.** PostgreSQL 17 and 18; three replicas are offered only when the `dbaas`

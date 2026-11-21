@@ -109,6 +109,7 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | Worker firewall for new clusters | `config.cluster.workerFirewall` | Optional, API only, default `false`. A JSON boolean: the save answers 400 to any other value. `true`: every new cluster's workers go behind the Proxmox VM firewall. **Not verified on a lab**; see [Worker firewall](#worker-firewall). |
 | RWX dataset size | `config.cluster.rwxGiB` | Optional, API or installer (`services.kamaji.rwx_gib`). See [section 9](#9-how-a-cluster-lands-on-proxmox). |
 | Block volumes for tenants | — | Through the CSI gateway only, with no credential in the tenant ([section 9](#9-how-a-cluster-lands-on-proxmox)). `csiSharedStores` and `pveCsiUrl` were removed: the API answers 400 to a `cluster` block that still has one, and the form drops them on save. |
+| Load balancer | `config.cluster.loadBalancer` | Optional: `{"publicNetworkId": "<id>", "flavorId": "<id>"}`, both or neither (the form's **Load balancer public network** and **Load balancer flavor id**). The public network of each cluster's load balancer, on the workers' Proxmox provider, with a gateway and on a plain bridge, not an SDN vnet; the flavor of its two appliances, active. Checked on save. Absent: every cluster keeps MetalLB alone. See "Load balancers of a cluster's Services" in [section 9](#9-how-a-cluster-lands-on-proxmox). **Not verified on a lab.** |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
 | Node startup timeout | `config.cluster.nodeStartupTimeoutSeconds` | API only (the form keeps the key). Seconds a worker may run without a Node before Cluster API replaces it; absent = 1800, `0` = never. `0` or a whole number from 900 to 86400: the save answers 400 to anything else ([Values the save refuses](#values-the-save-refuses)). Read by cluster chart 0.1.14 and later. See [A worker that does not join](#a-worker-that-does-not-join). |
 | Repair guard | `config.cluster.repairMaxUnhealthy` | API only. Machines of a node group that may be without a Node while one is still replaced; absent = 1. A whole number of 1 or more, never a percentage: the save answers 400 to anything else. |
@@ -693,8 +694,8 @@ What it does not do:
 - **Existing clusters are untouched** until an operator sets the provider's `chartVersion` to 0.1.13 and bumps each
   cluster (**Bump** on the provider page, or the tenant's *Apply platform update*). A cluster on an older chart gets
   no `machinePlacement` and no check, exactly as before. After the bump its render is the same until its node groups
-  change. The platform BOM pins chart 0.1.16, which keeps the placement of 0.1.13: a managed-services platform
-  installed from this release registers its Kubernetes provider with `chartVersion` 0.1.16, and an installer-built
+  change. The platform BOM pins chart 0.1.17 for tenant clusters, which keeps the placement of 0.1.13: a managed-services platform
+  installed from this release registers its Kubernetes provider with `chartVersion` 0.1.17, and an installer-built
   site registers the chart's source version. A platform installed from an earlier BOM keeps the `chartVersion` it
   was registered with until the operator sets it on the provider, or until an upgrade to this release's BOM writes
   the new one (an apply on a platform of a BOM this build does not carry is refused, `bom_unsupported`).
@@ -838,8 +839,7 @@ A PersistentVolume on a node-local store (`zfspool`, `lvmthin`) carries its PVE 
 workers of that node; on a shared store (NFS, RBD) it follows the pod to any worker.
 
 **Load balancers of a cluster's Services: the gateway side.** The same listener serves one more call, for a cluster's
-load balancer controller (below; chart 0.1.17, which no BOM pins yet, so no cluster holds the credential until one
-does or an operator enables the controller). `PUT /lb/v1/state` (`internal/cloud/lbgw`, `cmd/api` sends `/lb/v1/` there and every
+load balancer controller (below; chart 0.1.17, which the platform BOM pins for new tenant clusters from v0.11.0). `PUT /lb/v1/state` (`internal/cloud/lbgw`, `cmd/api` sends `/lb/v1/` there and every
 other path to the CSI gateway, unchanged) takes `Authorization: PVEAPIToken=lb@proxcloud!<clusterId>=<secret>`, the
 header `ProxCloud-LB-Protocol: 1` and a body of at most 64 KiB: the Services of type LoadBalancer the controller owns
 (uid, ports with protocol, port and node port, `externalTrafficPolicy`, `healthCheckNodePort`,
@@ -875,6 +875,12 @@ call for its own cluster, and minting it again rotates it.
   work as on any pair, and project teardown deletes it. When the cluster is released (`kamaji.OnClusterGone`, with or
   without a controller), the credential is revoked first, then the appliances, the addresses with their `FLOATING_IP`
   rows, the row and the state go.
+- What the tenant pays: the two appliances are `SERVER` rows of the project with their `VOLUME` rows, billed from the
+  first Service until the cluster is deleted, and each address is a billed `FLOATING_IP`. Only the addresses are
+  checked against the quota (`floatingIps`); the appliances are not checked against the server quota. What HA means is
+  that of any pair ([cloud-integration.md](cloud-integration.md#high-availability-a-pair-of-appliances)): where both
+  appliances run on one node (a one-node site, a `simple` zone, or the appliance image on one node only) the balancer
+  survives an appliance failure, not the loss of that node, and the cluster page says so.
 - On Docker Compose the listener is opt-in, with a certificate the API makes itself
   (`proxcloud-up.sh install --cluster-gateway <address>`, [managed-services.md](managed-services.md#9-limits-on-the-compose-install)).
 
@@ -938,7 +944,22 @@ update**), never by the provider sync: a portal upgrade restarts no controller, 
 keeps working while `/lb/v1` stays compatible. A cluster with a controller is never moved below chart 0.1.17. The
 cluster's release revokes the credential (gateway side, above) and deletes the Secret with the cluster's others.
 
-Ships dark in v0.11.0 until the BOM pins chart 0.1.17. Not run on a lab. Tested: the reconcile against a fake tenant
+**What the consoles show.** The cluster's mode is read back off its values: `load_balancer` (`default` or
+`class-only`, absent without a controller) on the tenant's cluster row, and `loadBalancer` per cluster in the
+operator's list (`GET /admin/service/{id}/k8s-clusters`). The tenant's cluster page says which Services get a public
+address, what the pair and each address cost, and in default mode that NGINX Gateway Fabric takes one address per
+Gateway (the add-on dialog says so too); its cluster action `GET_LOAD_BALANCER` and the operator's
+`GET /admin/service/{id}/k8s-clusters/{clusterId}/load-balancer` (`admin:service:read`) answer when the controller's
+credential was minted and last used (`lastSeenAt`, written at most once a minute) and the cluster's balancer row
+(status, appliances, each Service's address and state; none before the first Service), `null` without a controller.
+No token is in it. The tenant's page reads the balancer's member health as the load balancer page does. On the load
+balancer pages the cluster's balancer is read-only: no listener, pool or **Delete**, a link to its cluster, and
+**Replace appliances**. The operator's **Load balancer** dialog on the provider's clusters card runs the enable action
+above, or a rotation on a cluster that has a controller.
+
+The platform BOM pins chart 0.1.17 from v0.11.0 (`tenantCharts.kubernetes`, record only on an installed platform: the
+upgrade run writes it on the provider, so clusters created after it get the controller when every gate holds; the
+platform cluster `pc-platform` stays on 0.1.16). Not run on a lab. Tested: the reconcile against a fake tenant
 API and the gateway client against a TLS server (`cmd/lb-controller`), the chart's renders (goldens for default mode,
 class-only and off), the values, the Secret, the enable action and the bump (`internal/cloud/kamaji`), and the enable
 action against Postgres with a fake management cluster, the token passing the real gateway handler

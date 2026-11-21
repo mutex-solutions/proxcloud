@@ -206,6 +206,16 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     return ok("REPLACING")
   }
 
+  // A cluster's load balancer: the controller's last call and the balancer its Services built (null: no controller).
+  if (r?.type === "KUBERNETES_CLUSTER" && action === "GET_LOAD_BALANCER") {
+    if (!r.data?.cluster?.load_balancer) return ok(null)
+    const lb = db.cloud.find((x) => x.type === "LOAD_BALANCER" && x.data?.loadbalancer?.cluster?.id === r.externalId)
+    return ok({
+      controllerSince: "2026-11-20T08:00:00Z", controllerLastSeen: new Date(Date.now() - 20000).toISOString(),
+      ...(lb ? { balancerId: lb.id, balancer: lb.data?.loadbalancer } : {}),
+    })
+  }
+
   switch (action) {
     // Compute lifecycle
     case "START": setServerStatus("ACTIVE"); return ok()
@@ -255,7 +265,10 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     // Load balancers: the members as the appliance holding the address sees them, and a replace that starts.
     case "GET_HEALTH":
       return { data: {
-        result: (r?.data?.loadbalancer?.pools ?? []).flatMap((p: any) => (p.members ?? []).map((m: any) => ({ pool: p.name, serverId: m.serverId, port: m.port, status: "UP" }))),
+        // A pool checked over HTTP on a cluster's health port (policy Local) has one worker with a pod.
+        result: (r?.data?.loadbalancer?.pools ?? []).flatMap((p: any) => (p.members ?? []).map((m: any, i: number) => ({
+          pool: p.name, serverId: m.serverId, address: m.address, port: m.port, status: m.node && p.healthCheck?.type === "http" && i > 0 ? "DOWN" : "UP",
+        }))),
         appliances: r?.data?.loadbalancer?.appliances ?? [],
       } }
     case "REPLACE_APPLIANCES":

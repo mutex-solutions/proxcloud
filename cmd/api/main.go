@@ -569,6 +569,7 @@ func run() error {
 		return rep, err
 	})
 	adminH.SetLBEnabler(projectH.EnableClusterLB)
+	adminH.SetLBViewer(projectH.ClusterLBView)
 	adminH.SetWorkerFirewall(func(ctx context.Context, ks *kamaji.Service, clusterID, method string) (any, error) {
 		switch method {
 		case http.MethodPost:

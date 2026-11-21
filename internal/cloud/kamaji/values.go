@@ -137,6 +137,20 @@ func LBValues(clusterID string, lb LBController) map[string]any {
 	}
 }
 
+// LBMode reads a cluster's load balancer mode back off its values, for the consoles: "default" (a Service of type
+// LoadBalancer without a class gets the product balancer), "class-only" (only class proxcloud.io/lb does) or "" (no
+// controller: MetalLB alone).
+func LBMode(values map[string]any) string {
+	lb, _ := values["loadBalancer"].(map[string]any)
+	switch {
+	case digStr(lb, "secretName") == "":
+		return ""
+	case lb["default"] == true:
+		return "default"
+	}
+	return "class-only"
+}
+
 func anySlice(in []string) []any {
 	out := make([]any, 0, len(in))
 	for _, v := range in {

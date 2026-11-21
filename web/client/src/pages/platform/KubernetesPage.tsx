@@ -4,7 +4,7 @@
 // service and mirrors CreateServerPage's flavor gating:
 // quota + region GPU capacity + no ephemeral/swap flavors + the admin's kubernetesFlavorIds
 // allowlist. Actions map to Go cloud_kamaji.go: create/delete + GET_KUBECONFIG / UPGRADE /
-// SET_NODE_GROUPS / SET_OIDC.
+// SET_NODE_GROUPS / SET_OIDC / GET_LOAD_BALANCER.
 import { useCallback, useMemo, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -38,6 +38,7 @@ import {
 import { gpuCapacityViolations, serverQuotaViolations } from "@/lib/quota"
 import type { CloudResource, Location } from "@/lib/types"
 import { isPrivateNetwork, networkName } from "../network/NetworksPage"
+import { ApplianceList, ClusterServices, type Health, type LB } from "../network/LoadBalancersPage"
 import { serverName, serverStatus, serverIPs } from "../servers/serverFields"
 
 type Cluster = Record<string, any>
@@ -123,7 +124,7 @@ const emptyGroup: NodeGroupRow = {
 const ADDONS = [
   { key: "metricsServer", label: "Metrics Server", hint: "kubectl top and autoscaling (HPA) metrics", on: true },
   { key: "certManager", label: "cert-manager", hint: "TLS certificates from Let's Encrypt or private CAs", on: false },
-  { key: "nginxGatewayFabric", label: "NGINX Gateway Fabric", hint: "Gateway API controller and nginx GatewayClass; create Gateway/HTTPRoute and TLS listeners separately", on: false },
+  { key: "nginxGatewayFabric", label: "NGINX Gateway Fabric", hint: "Gateway API controller and nginx GatewayClass; create Gateway/HTTPRoute and TLS listeners separately. Where the platform's load balancer serves the cluster, each Gateway takes a public address, billed", on: false },
 ] as const
 const defaultAddons = () => Object.fromEntries(ADDONS.map((a) => [a.key, a.on])) as Record<string, boolean>
 const gatewayFabricChartSupported = (pin: string) => {
@@ -743,12 +744,13 @@ export function KubernetesClusterDetailPage() {
   const {
     clusters, versionsFor, variantsFor, platformVersionFor, rowServiceId, rowScope, flavorOptionsFor, invalidate, patchCluster,
   } = useKubernetesData(pid)
-  const resource = (clusters.data ?? []).find((r) => r.id === resourceId)
+  // A load balancer's page links to its cluster by the cluster's id.
+  const resource = (clusters.data ?? []).find((r) => r.id === resourceId || r.externalId === resourceId)
   const [deleteOpen, setDeleteOpen] = useState(false)
 
   const del = useMutation({
     mutationFn: () =>
-      apiFetch(`/project/${pid}/cloud/${resourceId}`, { method: "DELETE", cloud: resource ? rowScope(resource) : undefined }),
+      apiFetch(`/project/${pid}/cloud/${resource?.id ?? resourceId}`, { method: "DELETE", cloud: resource ? rowScope(resource) : undefined }),
     onSuccess: () => {
       toast.success("Cluster deletion requested")
       setTimeout(invalidate, 1500)
@@ -831,6 +833,78 @@ export function KubernetesClusterDetailPage() {
         </DialogContent>
       </Dialog>
     </>
+  )
+}
+
+// What GET_LOAD_BALANCER answers: the controller's last call and the balancer the cluster's first Service built.
+type ClusterLBView = { controllerSince?: string; controllerLastSeen?: string; balancerId?: string; balancer?: LB } | null
+
+// ClusterLoadBalancer — which Services of type LoadBalancer get a public address (the cluster's mode, read off its
+// values), what that costs, and the cluster's load balancer once a Service built it. The balancer is a row of the
+// project's compute service, so its health is read in that scope, as on the load balancer page.
+function ClusterLoadBalancer({ pid, mode, gatewayFabric, view, resourceId }: {
+  pid: string; mode: string; gatewayFabric: boolean; view: () => Promise<{ result?: any }>; resourceId: string
+}) {
+  const navigate = useNavigate()
+  const computeScope = useCloudScope(pid)
+  const q = useQuery({
+    queryKey: ["k8s-lb", pid, resourceId],
+    queryFn: async () => ((await view()).result ?? null) as ClusterLBView,
+    enabled: !!mode,
+    refetchInterval: 15000,
+  })
+  const v = q.data
+  const lb = v?.balancer
+  const health = useQuery({
+    queryKey: ["lb-health", pid, v?.balancerId],
+    queryFn: async () =>
+      ((await apiFetch<{ result?: Health[] }>(`/project/${pid}/cloud/${v?.balancerId}/action`, {
+        method: "POST", body: { action: "GET_HEALTH", data: {} }, cloud: computeScope,
+      })).result ?? []),
+    enabled: !!v?.balancerId && lb?.status === "ACTIVE",
+    refetchInterval: 15000,
+    retry: false,
+  })
+  return (
+    <div className="grid gap-3 rounded-xl border bg-card p-4 text-sm" data-testid="k8s-lb">
+      <div className="font-medium">Load balancer</div>
+      <p className="text-muted-foreground" data-testid="k8s-lb-mode">
+        {mode === "default"
+          ? "Services of type LoadBalancer get a public address of the platform's load balancer. A Service of class proxcloud.io/internal gets a private address of the cluster's network instead."
+          : mode === "class-only"
+            ? "Services of type LoadBalancer keep a private address of the cluster's network. A Service of class proxcloud.io/lb gets a public address of the platform's load balancer. A Service's class cannot change: to move one, delete it and create it again, with a new address."
+            : "Services of type LoadBalancer get a private address of the cluster's network, up to 8 of them. The platform's public load balancer is not offered on this cluster: your operator can enable it."}
+      </p>
+      {mode && (
+        <p className="text-muted-foreground" data-testid="k8s-lb-cost">
+          The first Service with a public address builds the load balancer: two appliance VMs, billed as servers with their
+          disks and kept until the cluster is deleted. Each such Service takes one public address, billed and counted in your
+          quota.{mode === "default" && gatewayFabric ? " NGINX Gateway Fabric is on: it makes one Service per Gateway, so each Gateway takes a public address." : ""}
+        </p>
+      )}
+      {mode && v !== undefined && (
+        <p className="text-muted-foreground" data-testid="k8s-lb-controller">
+          {v?.controllerLastSeen
+            ? `The cluster's load balancer controller last reported ${timeAgo(v.controllerLastSeen)}.`
+            : "The cluster's load balancer controller has not reported yet."}
+        </p>
+      )}
+      {lb ? (
+        <>
+          <div className="flex flex-wrap items-center gap-3">
+            <StatusBadge status={lb.status} />
+            {lb.statusMessage && <span className="text-muted-foreground">{lb.statusMessage}</span>}
+            <Button variant="link" className="h-auto p-0" onClick={() => navigate(`/p/${pid}/load-balancers/${v?.balancerId}`)}>
+              Open the load balancer
+            </Button>
+          </div>
+          <ApplianceList appliances={lb.appliances ?? []} />
+          <ClusterServices lb={lb} health={health.data} />
+        </>
+      ) : mode && v !== undefined ? (
+        <p className="text-muted-foreground">No Service has asked for a public address yet: the load balancer is built with the first one.</p>
+      ) : null}
+    </div>
   )
 }
 
@@ -1618,6 +1692,14 @@ function ClusterDetail({
             )
           )}
 
+          <ClusterLoadBalancer
+            pid={pid}
+            mode={(c.load_balancer as string) || ""}
+            gatewayFabric={addonStates?.nginxGatewayFabric === true}
+            view={() => act("GET_LOAD_BALANCER")}
+            resourceId={resource.id}
+          />
+
           {workerGroup && (
             <p className="text-xs text-muted-foreground">
               Worker firewall: inbound traffic to the nodes is dropped except what security group{" "}
@@ -1762,6 +1844,12 @@ function ClusterDetail({
                 </div>
               ))}
             </div>
+            {c.load_balancer === "default" && (
+              <p className="text-sm text-muted-foreground" data-testid="ngf-public-address">
+                Services of type LoadBalancer get a public address on this cluster, and NGINX Gateway Fabric makes one per
+                Gateway: each Gateway takes a public address, billed and counted in your quota.
+              </p>
+            )}
             {(legacyIngress || !gatewayFabricAvailable) && (
               <p className="text-sm text-muted-foreground">
                 {legacyIngress ? "Existing ingress traffic is not automatically migrated. Contact your operator before changing controllers." : "Gateway Fabric requires platform chart 0.1.10 or later. Apply an offered platform update first."}

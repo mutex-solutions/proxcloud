@@ -32,6 +32,10 @@ A load balancer made before high availability existed, or with it turned off, ru
 
 **Replace appliances** builds both VMs again from the current image, one at a time, the standby first, so the address keeps answering. Traffic switches once, in about a second. Use it to get updated software, or to rebuild an appliance that is gone. It takes a few minutes per appliance, and the load balancer cannot be deleted while it runs.
 
+## A Kubernetes cluster's load balancer
+
+A load balancer named `k8s-…` whose row names a Kubernetes cluster belongs to that cluster: its Services of type `LoadBalancer` make it ([Kubernetes clusters](/docs/guides/kubernetes)). Its page lists those Services with their addresses and links to the cluster. It has no listeners, pools or **Delete** for you to change: change the cluster's Services instead, and it is deleted with the cluster. **Replace appliances** works as on any load balancer.
+
 ## Add listeners, pools and servers
 
 - A **pool** is a set of your servers. Choose HTTP or TCP, and how to spread traffic: round robin, least connections, or by source address.
