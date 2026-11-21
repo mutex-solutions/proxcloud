@@ -1,0 +1,20 @@
+# Mode separate: the platform-owned cluster pc-sandbox (the cluster chart's addons.sandbox installs the chart there),
+# with the node groups of installer template sandbox-cluster.yml.j2: workers `sandbox`, and `sandbox-system` labelled
+# node-restriction.kubernetes.io/proxcloud-system and tainted proxcloud.io/sandbox-system.
+mode: separate
+sandboxNodes:
+  nodeSelector: {}
+system:
+  nodeSelector: {node-restriction.kubernetes.io/proxcloud-system: "true"}
+  tolerations: [{key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}]
+runtimeClass:
+  scheduling: null
+cilium:
+  nodeSelector: null
+guardrail:
+  extraDeny: [192.0.2.0/24]
+prepull:
+  - ghcr.io/mutex-solutions/sandbox-base:20261119-8be6a47@sha256:b6ad7cf4414befbe3614b8095d4dda67082ce4bf7c6a2f54c999766977cd9cec
+proxy:
+  address: 192.0.2.151
+  domain: sbx.example.org

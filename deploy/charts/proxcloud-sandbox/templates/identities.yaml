@@ -1,0 +1,297 @@
+{{- /*
+The portal's two identities on the cluster that runs sandboxes, each with a token Secret the portal's run reads:
+
+- proxcloud-sandbox: the sandbox provider's kubeconfig (internal/cloud/sandbox: sb-<projectId> namespaces, Sandbox CRs
+  and their extensions, pod reads, exec and logs, one CiliumNetworkPolicy per sandbox, nodes read for capacity).
+- proxcloud-sandbox-firewall: the Proxmox provider's secret.sandboxKubeconfig (nodes read and patch, to fence each
+  sandbox VM and take its proxcloud.io/unsecured taint off; the NodeRestriction probe; the fence gate's RuntimeClass
+  read).
+
+Mode separate keeps the installer's cluster-wide rules (deploy/sandbox-cluster/rbac.yaml): the cluster runs sandboxes
+alone. Mode shared runs them next to kamaji-etcd and every tenant's control plane, so there the portal's identity holds
+cluster-wide only namespaces, RoleBindings and the right to bind ONE ClusterRole (proxcloud-sandbox-namespace, every
+namespaced right above), which the portal binds in each sb-* namespace when it creates it; the policies below keep the
+namespaces, the RoleBindings and the firewall identity's node writes to the sandbox side. A stolen token then reads,
+execs and writes inside sb-* namespaces only.
+
+In both modes the pod policy holds every pod of a tenant namespace (label proxcloud.io/tenant=true), whoever creates it
+(the agent-sandbox controller, from a Sandbox CR), to the RuntimeClass, so the RuntimeClass's scheduling keeps it on a
+sandbox node, and to no host access but the read-only runtime directory. No Pod Security label: baseline refuses the
+hostPath every sandbox mounts.
+*/ -}}
+{{- $shared := include "sbx.shared" . }}
+{{- $ns := .Release.Namespace }}
+{{- $portal := include "sbx.sa" (dict "root" . "name" "proxcloud-sandbox") }}
+{{- $firewall := include "sbx.sa" (dict "root" . "name" "proxcloud-sandbox-firewall") }}
+{{- $tenantNS := `request.namespace.startsWith("sb-") && namespaceObject != null && has(namespaceObject.metadata.labels) && namespaceObject.metadata.labels[?"proxcloud.io/tenant"].orValue("") == "true"` }}
+{{- $namespaced := list
+  (dict "apiGroups" (list "") "resources" (list "resourcequotas" "limitranges") "verbs" (list "get" "list" "create" "patch"))
+  (dict "apiGroups" (list "") "resources" (list "pods") "verbs" (list "get" "list" "watch"))
+  (dict "apiGroups" (list "") "resources" (list "pods/exec") "verbs" (list "get" "create"))
+  (dict "apiGroups" (list "") "resources" (list "pods/log") "verbs" (list "get"))
+  (dict "apiGroups" (list "agents.x-k8s.io") "resources" (list "sandboxes") "verbs" (list "get" "list" "watch" "create" "patch" "delete"))
+  (dict "apiGroups" (list "extensions.agents.x-k8s.io") "resources" (list "sandboxclaims" "sandboxtemplates" "sandboxwarmpools") "verbs" (list "get" "list" "watch" "create" "patch" "delete"))
+  (dict "apiGroups" (list "cilium.io") "resources" (list "ciliumnetworkpolicies") "verbs" (list "get" "list" "create" "patch" "delete")) }}
+{{- $nodesRead := dict "apiGroups" (list "") "resources" (list "nodes") "verbs" (list "get" "list") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: proxcloud-sandbox, namespace: {{ $ns }}}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-sandbox-token
+  namespace: {{ $ns }}
+  annotations: {kubernetes.io/service-account.name: proxcloud-sandbox}
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: proxcloud-sandbox}
+{{- if $shared }}
+# Exec over WebSocket is authorized as get and (Kubernetes >= 1.30) create on pods/exec: both, in the namespaced role.
+rules:
+  - {apiGroups: [""], resources: [namespaces], verbs: [get, list, create, patch, delete]}
+  - {apiGroups: [rbac.authorization.k8s.io], resources: [rolebindings], verbs: [get, create, patch, delete]}
+  - {apiGroups: [rbac.authorization.k8s.io], resources: [clusterroles], verbs: [bind], resourceNames: [proxcloud-sandbox-namespace]}
+  - {{ toJson $nodesRead }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: proxcloud-sandbox-namespace}
+rules:
+{{- range $namespaced }}
+  - {{ toJson . }}
+{{- end }}
+{{- else }}
+rules:
+  - {apiGroups: [""], resources: [namespaces], verbs: [get, list, create, patch, delete]}
+{{- range $namespaced }}
+  - {{ toJson . }}
+{{- end }}
+  - {{ toJson $nodesRead }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: proxcloud-sandbox}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: proxcloud-sandbox}
+subjects: [{kind: ServiceAccount, name: proxcloud-sandbox, namespace: {{ $ns }}}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: proxcloud-sandbox-firewall, namespace: {{ $ns }}}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-sandbox-firewall-token
+  namespace: {{ $ns }}
+  annotations: {kubernetes.io/service-account.name: proxcloud-sandbox-firewall}
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: proxcloud-sandbox-firewall}
+rules:
+  - {apiGroups: [""], resources: [nodes], verbs: [get, list, patch]}
+  - {apiGroups: [""], resources: [users], verbs: [impersonate], resourceNames: ["system:node:proxcloud-noderestriction-probe"]}
+  - {apiGroups: [""], resources: [groups], verbs: [impersonate], resourceNames: ["system:nodes"]}
+  # The fence gate checks that the class still places every sandbox pod on the sandbox nodes.
+  - {apiGroups: [node.k8s.io], resources: [runtimeclasses], verbs: [get], resourceNames: [{{ .Values.runtimeClass.name | quote }}]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: proxcloud-sandbox-firewall}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: proxcloud-sandbox-firewall}
+subjects: [{kind: ServiceAccount, name: proxcloud-sandbox-firewall, namespace: {{ $ns }}}]
+---
+{{- /* The network guard (sandbox-netguard, node-side) and the portal's network guard gate read Cilium's settings: the
+cluster-wide ConfigMap and, in shared mode, the CiliumNodeConfig that selects the sandbox nodes. */}}
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: sandbox-netguard, namespace: {{ $ns }}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: sandbox-netguard}
+rules:
+  - {apiGroups: [""], resources: [pods], verbs: [get]}
+  - {apiGroups: [""], resources: [nodes], verbs: [get]}
+  - {apiGroups: [""], resources: [nodes/stats], verbs: [get]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: sandbox-netguard}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sandbox-netguard}
+subjects: [{kind: ServiceAccount, name: sandbox-netguard, namespace: {{ $ns }}}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: sandbox-netguard-cilium-read, namespace: kube-system}
+rules:
+  - {apiGroups: [""], resources: [configmaps], resourceNames: [cilium-config], verbs: [get]}
+  - {apiGroups: [cilium.io], resources: [ciliumnodeconfigs], verbs: [get, list]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: sandbox-netguard-cilium-read, namespace: kube-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-netguard-cilium-read}
+subjects:
+  - {kind: ServiceAccount, name: sandbox-netguard, namespace: {{ $ns }}}
+  - {kind: ServiceAccount, name: proxcloud-sandbox, namespace: {{ $ns }}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: sandbox-netguard, namespace: sandbox-telemetry}
+rules:
+  - {apiGroups: [""], resources: [configmaps], verbs: [get, create, update]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: sandbox-netguard, namespace: sandbox-telemetry}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-netguard}
+subjects: [{kind: ServiceAccount, name: sandbox-netguard, namespace: {{ $ns }}}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: proxcloud-telemetry-reader, namespace: sandbox-telemetry}
+rules:
+  - {apiGroups: [""], resources: [configmaps], verbs: [get, list]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: proxcloud-telemetry-reader, namespace: sandbox-telemetry}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: proxcloud-telemetry-reader}
+subjects: [{kind: ServiceAccount, name: proxcloud-sandbox, namespace: {{ $ns }}}]
+---
+{{- /* Every pod of a tenant namespace, whoever writes it. nodeName only at CREATE: the scheduler's binding sets it
+later. pods/ephemeralcontainers too: an ephemeral container is the other way to put a container into a pod. */}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-sandbox-tenant-pods}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector: {matchLabels: {proxcloud.io/tenant: "true"}}
+    resourceRules:
+    - {apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [pods, pods/ephemeralcontainers]}
+  variables:
+  - name: ctrs
+    expression: 'object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : []) + (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : [])'
+  validations:
+  - expression: 'has(object.spec.runtimeClassName) && object.spec.runtimeClassName == {{ .Values.runtimeClass.name | quote }}'
+    message: tenant pods must use runtimeClassName {{ .Values.runtimeClass.name }}
+  - expression: '!(has(object.spec.hostNetwork) && object.spec.hostNetwork) && !(has(object.spec.hostPID) && object.spec.hostPID) && !(has(object.spec.hostIPC) && object.spec.hostIPC)'
+    message: tenant pods may not use host namespaces
+  - expression: 'request.operation != "CREATE" || !has(object.spec.nodeName) || object.spec.nodeName == ""'
+    message: tenant pods may not set nodeName
+  - expression: 'variables.ctrs.all(c, !has(c.securityContext) || ((!has(c.securityContext.privileged) || !c.securityContext.privileged) && (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)))'
+    message: tenant containers may not be privileged or add capabilities
+  - expression: '!has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || v.hostPath.path == "/opt/proxcloud-sandbox/bin")'
+    message: tenant pods may mount no hostPath but the runtime directory /opt/proxcloud-sandbox/bin
+  - expression: '!has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || variables.ctrs.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != v.name || (has(m.readOnly) && m.readOnly))))'
+    message: the runtime directory must be mounted read-only
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-sandbox-tenant-pods}
+spec: {policyName: proxcloud-sandbox-tenant-pods, validationActions: [Deny]}
+---
+{{- /* The NodeRestriction probe identity, which the firewall identity impersonates for the release gate, may only dry
+run (deploy/sandbox-cluster/rbac.yaml). */}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-noderestriction-probe-dry-run-only}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE", "CONNECT"]
+        resources: ["*/*"]
+  matchConditions:
+    - name: probe-identity
+      expression: request.userInfo.username == "system:node:proxcloud-noderestriction-probe"
+  validations:
+    - expression: has(request.dryRun) && request.dryRun
+      message: the proxcloud NodeRestriction probe identity may only dry-run
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-noderestriction-probe-dry-run-only}
+spec:
+  policyName: proxcloud-noderestriction-probe-dry-run-only
+  validationActions: ["Deny"]
+{{- if $shared }}
+---
+{{- /* The portal's identity: namespaces named sb-* only, labelled proxcloud.io/tenant=true, and the label stays. */}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-sandbox-namespaces}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - {apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [namespaces]}
+  matchConditions:
+  - {name: portal-identity, expression: 'request.userInfo.username == {{ $portal | quote }}'}
+  validations:
+  - expression: 'request.name.startsWith("sb-")'
+    message: the sandbox identity may only manage sb-* namespaces
+  - expression: 'request.operation == "DELETE" || (has(object.metadata.labels) && object.metadata.labels[?"proxcloud.io/tenant"].orValue("") == "true")'
+    message: an sb-* namespace must carry proxcloud.io/tenant=true
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-sandbox-namespaces}
+spec: {policyName: proxcloud-sandbox-namespaces, validationActions: [Deny]}
+---
+{{- /* The portal's identity: RoleBindings only in sb-* tenant namespaces, only of ClusterRole
+proxcloud-sandbox-namespace, and only to itself. */}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-sandbox-rolebindings}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - {apiGroups: [rbac.authorization.k8s.io], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [rolebindings]}
+  matchConditions:
+  - {name: portal-identity, expression: 'request.userInfo.username == {{ $portal | quote }}'}
+  validations:
+  - expression: {{ $tenantNS | quote }}
+    message: the sandbox identity may bind only inside sb-* tenant namespaces
+  - expression: 'request.operation == "DELETE" || (object.roleRef.apiGroup == "rbac.authorization.k8s.io" && object.roleRef.kind == "ClusterRole" && object.roleRef.name == "proxcloud-sandbox-namespace")'
+    message: the sandbox identity may bind only ClusterRole proxcloud-sandbox-namespace
+  - expression: 'request.operation == "DELETE" || (has(object.subjects) && object.subjects.all(s, s.kind == "ServiceAccount" && s.name == "proxcloud-sandbox" && has(s.namespace) && s.namespace == {{ $ns | quote }}))'
+    message: the sandbox identity may bind only itself
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-sandbox-rolebindings}
+spec: {policyName: proxcloud-sandbox-rolebindings, validationActions: [Deny]}
+---
+{{- /* The firewall identity: writes only Nodes labelled as the sandbox group, before and after the write (the label is
+CAPI's; NodeRestriction keeps a kubelet from setting it). */}}
+{{- $l := .Values.sandboxNodeLabel }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-sandbox-firewall-nodes}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - {apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [nodes, nodes/status]}
+  matchConditions:
+  - {name: firewall-identity, expression: 'request.userInfo.username == {{ $firewall | quote }}'}
+  validations:
+  - expression: 'request.operation == "UPDATE" && has(oldObject.metadata.labels) && oldObject.metadata.labels[?{{ $l.key | quote }}].orValue("") == {{ $l.value | quote }} && has(object.metadata.labels) && object.metadata.labels[?{{ $l.key | quote }}].orValue("") == {{ $l.value | quote }}'
+    message: the firewall identity may only update sandbox nodes
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-sandbox-firewall-nodes}
+spec: {policyName: proxcloud-sandbox-firewall-nodes, validationActions: [Deny]}
+{{- end }}

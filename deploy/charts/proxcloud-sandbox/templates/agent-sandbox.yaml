@@ -1,0 +1,19 @@
+{{- /*
+kubernetes-sigs/agent-sandbox v1.0.9 as vendored in deploy/sandbox-cluster/agent-sandbox (files/agent-sandbox links
+there; its README has the upstream checksum and the licence): every document verbatim but the controller's Deployment,
+which gets the system-side placement. The CRDs are too large for a client-side apply annotation: the Application syncs
+with ServerSideApply.
+*/ -}}
+{{- range $doc := regexSplit "\n---\n" ($.Files.Get "files/agent-sandbox/sandbox-with-extensions.yaml") -1 }}
+{{- if regexMatch "(?m)^kind: Deployment$" $doc }}
+{{- $d := fromYaml $doc }}
+{{- $spec := $d.spec.template.spec }}
+{{- $_ := set $spec "nodeSelector" $.Values.system.nodeSelector }}
+{{- with $.Values.system.tolerations }}{{ $_ := set $spec "tolerations" . }}{{ end }}
+---
+{{ toYaml $d }}
+{{- else }}
+---
+{{ $doc }}
+{{- end }}
+{{- end }}
