@@ -589,7 +589,7 @@ function ClusterLoadBalancerDialog({ serviceId, cluster, pin, onClose, onChanged
             ) : null}
             <Note>
               {mode
-                ? <>Run again to mint a new credential: the old token stops at once, the controller reads the new one from its Secret, and the cluster gets the portal's controller image. The mode stays.</>
+                ? <>Run again to mint a new credential: the old token stops at once, the controller reads the new one from its Secret, and the cluster gets the portal's controller image and the provider's chart <span className="font-mono">{pin || "—"}</span>, as a bump does. The mode stays.</>
                 : <>Adds the controller in class-only mode: Services of class <code>proxcloud.io/lb</code> get a public address, and no MetalLB address moves. The cluster is pinned to the provider's chart <span className="font-mono">{pin || "—"}</span> (0.1.17 or later) in the same apply, which re-renders its chart as a bump does. Refused, with the reason, when the site cannot serve the cluster: no gateway URL or controller image, shared workers, no load balancer on the provider, or a public network the project may not use.</>}
             </Note>
             {enable.isError && <p role="alert" className="text-destructive">{(enable.error as Error).message}</p>}

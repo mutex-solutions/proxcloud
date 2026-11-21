@@ -106,7 +106,7 @@ A **new** cluster gets the load balancer controller in default mode when every g
 The **Load balancer** column of the clusters list shows each cluster's mode: Default, Class only or MetalLB only. The **Load balancer** button opens the cluster's view: when its controller last called the gateway, the balancer's status, its appliances and its Services with their addresses.
 
 - **Enable load balancer controller** gives an **existing** cluster the controller in class-only mode: only Services of class `proxcloud.io/lb` get a public address, and no MetalLB address moves. The cluster is pinned to the provider's chart version in the same apply, as a bump does. A gate that does not hold is refused with its name.
-- On a cluster that has a controller the button **Rotate the controller's credential** mints a new one (the old token stops at once) and gives the cluster the portal's controller image. The mode stays.
+- On a cluster that has a controller the button **Rotate the controller's credential** mints a new one (the old token stops at once) and gives the cluster the portal's controller image and the provider's chart version, as a bump does. The mode stays.
 
 The tenant's cluster page says which Services get a public address, what it costs, and that NGINX Gateway Fabric takes one public address per Gateway in default mode. The full rules are in `docs/managed-k8s.md`, "Load balancers of a cluster's Services".
 

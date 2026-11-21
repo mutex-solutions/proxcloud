@@ -875,6 +875,12 @@ call for its own cluster, and minting it again rotates it.
   work as on any pair, and project teardown deletes it. When the cluster is released (`kamaji.OnClusterGone`, with or
   without a controller), the credential is revoked first, then the appliances, the addresses with their `FLOATING_IP`
   rows, the row and the state go.
+- What the tenant pays: the two appliances are `SERVER` rows of the project with their `VOLUME` rows, billed from the
+  first Service until the cluster is deleted, and each address is a billed `FLOATING_IP`. Only the addresses are
+  checked against the quota (`floatingIps`); the appliances are not checked against the server quota. What HA means is
+  that of any pair ([cloud-integration.md](cloud-integration.md#high-availability-a-pair-of-appliances)): where both
+  appliances run on one node (a one-node site, a `simple` zone, or the appliance image on one node only) the balancer
+  survives an appliance failure, not the loss of that node, and the cluster page says so.
 - On Docker Compose the listener is opt-in, with a certificate the API makes itself
   (`proxcloud-up.sh install --cluster-gateway <address>`, [managed-services.md](managed-services.md#9-limits-on-the-compose-install)).
 
