@@ -600,7 +600,7 @@ Invariants:
 | `Handler.lbDestroy`, `lbDestroyVM` | `cloud_lb_pve.go`, `cloud_lb_pair_pve.go` | Delete of either kind: every VM tagged `pc-lb-<id>`, then the addresses (the VM's, or owner `lb:<id>`) and their `FLOATING_IP` rows |
 | `RenderHAProxyOn`, `LBListenerRules`, `LBVRRPRule`, `Service.SetLBRules` | `internal/cloud/pve/lb.go` | Binds on the VIPs; per pool health check and PROXY v2; listener rules per (address, source list) with at most 15 ports and 512 characters, plus the `vrrp` rule; the writer touches only its own comments |
 | `RenderKeepalived`, `Service.PushKeepalived`, `PushPairHAProxy`, `ReadVRRPState`, `StopKeepalived`, `LBIfaces`, `SDNZoneOf` | `internal/cloud/pve/lbpair.go` | keepalived 2.3.x config and its files (sysctl, link-up drop-in, track and notify scripts); the pair's own install line; state, HAProxy and VIP read back; the planned switch; NIC names by MAC; a bridge's zone |
-| `Service.SetIPFilterEntries` | `internal/cloud/pve/firewallsvc.go` | An ip filter set changed entry by entry, never dropped: a pair's VIP answers only while it is in both sets |
+| `Service.AddIPFilterEntries`, `RemoveIPFilterEntries`, `SetIPFilterEntries` | `internal/cloud/pve/firewallsvc.go` | An ip filter set changed entry by entry, never dropped: a pair's VIP answers only while it is in both sets |
 | `PublicIP.OwnedByLB`, `orphanIPs`, `ReleaseIfUnchanged`, `trafficTaps` | `publicip_pve.go`, `internal/cloud/syncjob/pve_meter.go`, `publicip_inventory.go`, `internal/cloud/metrics/pve.go` | A VIP is never an orphan of the VM inventory; a pair's traffic is one counter per (appliance, balancer) |
 
 ## C4.2 VM firewall, default security group and public IPs

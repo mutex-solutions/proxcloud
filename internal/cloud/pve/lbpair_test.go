@@ -326,6 +326,13 @@ func TestSetIPFilterEntriesKeepsServedAddresses(t *testing.T) {
 	if cut != 0 || len(f.dropped) != 0 || f.answers("203.0.113.11") {
 		t.Fatalf("removing: cut %d, dropped %v, old one still answers %v", cut, f.dropped, f.answers("203.0.113.11"))
 	}
+	// Adding alone (the first pass of an apply) leaves what is no longer wanted, and says what it is.
+	if extra, err := s.AddIPFilterEntries(ctx, "n1", 201, "net1", []string{"203.0.113.12"}); err != nil || !slices.Equal(extra, []string{"203.0.113.10"}) {
+		t.Fatalf("add only: extra %v, %v", extra, err)
+	}
+	if err := s.RemoveIPFilterEntries(ctx, "n1", 201, "net1", []string{"203.0.113.12"}); err != nil {
+		t.Fatal(err)
+	}
 	// The same change through SetIPFilter drops and rebuilds the set: the served address stops answering.
 	if err := s.SetIPFilter(ctx, "n1", 201, "net1", []string{"203.0.113.10/32", "203.0.113.12/32"}); err != nil {
 		t.Fatal(err)

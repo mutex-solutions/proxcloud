@@ -275,9 +275,10 @@ func lbPeerOf(lb *loadBalancer, a *lbAppliance) *lbAppliance {
 	return nil
 }
 
-// lbApplyPair brings a pair in line with its row. Order (C14): firewall and ip filter sets on every running appliance
-// first, so a new VIP is in both sets before keepalived can take it; then per appliance, standby first, keepalived and
-// HAProxy; then each one's state is read back.
+// lbApplyPair brings a pair in line with its row. Order (C14): firewall and new VIPs in the ip filter sets on every
+// running appliance first, so a VIP is in both sets before keepalived can take it; then per appliance, standby first,
+// keepalived and HAProxy; then a VIP no longer served leaves the sets, once keepalived let go of it; then each one's
+// state is read back. Rules and sets are compared on every pass, so one changed by hand is put back.
 func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, lb *loadBalancer) error {
 	ps, err := h.pveFor(es)
 	if err != nil {
@@ -351,6 +352,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	hhash := lbHash(haproxy)
 	pn := pveAllowedPublicNetwork(es, proj, lb.PublicNetworkID)
 	var refused error
+	leftover := map[*lbAppliance][]string{} // set entries of VIPs no longer served, removed after keepalived let go
 	for _, a := range running {
 		vmid, _ := strconv.Atoi(a.ServerID)
 		rules := pve.LBListenerRules(lb.Listeners, lb.VIPs)
@@ -360,10 +362,13 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		if err := ps.SetLBRules(ctx, a.Node, vmid, rules); err != nil {
 			return err
 		}
-		if err := ps.SetIPFilterEntries(ctx, a.Node, vmid, publicNIC, lb.VIPs); err != nil {
+		extra, err := ps.AddIPFilterEntries(ctx, a.Node, vmid, publicNIC, lb.VIPs)
+		if err != nil {
 			return err
 		}
+		leftover[a] = extra
 	}
+	keepalivedCurrent := map[*lbAppliance]bool{}
 	for _, a := range lbPushOrder(running) {
 		vmid, _ := strconv.Atoi(a.ServerID)
 		// keepalived needs the peer; an appliance whose peer left keeps the config it has, and the address.
@@ -384,6 +389,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 				}
 				a.KeepalivedHash = khash
 			}
+			keepalivedCurrent[a] = true
 		}
 		if hhash != a.HAProxyHash {
 			if err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy); err != nil {
@@ -395,6 +401,14 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 				continue
 			}
 			a.HAProxyHash = hhash
+		}
+	}
+	for a, extra := range leftover {
+		if len(extra) > 0 && keepalivedCurrent[a] {
+			vmid, _ := strconv.Atoi(a.ServerID)
+			if err := ps.RemoveIPFilterEntries(ctx, a.Node, vmid, publicNIC, extra); err != nil {
+				return err
+			}
 		}
 	}
 	vip := ""
