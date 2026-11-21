@@ -133,6 +133,73 @@ func TestAuthentication(t *testing.T) {
 	}
 }
 
+// N1-3 (v0.11.0-rc.1 drill): a controller that kept its old Secret after a rotation was refused three times, and the
+// log line named neither its cluster nor the reason, and no audit event was written. Every refusal is logged with the
+// cluster it claimed and why. A known cluster's revoked credential and a wrong secret are audit events, one per
+// cluster and reason a minute however often the controller comes back; what names no known cluster is not, and
+// neither the log nor the event ever holds the secret.
+func TestRefusedCredentialIsLoggedAndAudited(t *testing.T) {
+	r := newRig()
+	var logged bytes.Buffer
+	r.h.Log = slog.New(slog.NewJSONHandler(&logged, nil))
+	at := time.Now()
+	r.h.now = func() time.Time { return at }
+	body := Request{}
+	for _, tc := range []struct{ auth, cluster, why string }{
+		{"", "", denyMalformed},
+		{"Bearer x", "", denyMalformed},
+		{"PVEAPIToken=csi@proxcloud!c1=TOPSECRET", "", denyMalformed},
+		{"PVEAPIToken=lb@proxcloud!C1/../c2=TOPSECRET", "", denyMalformed},
+		{"PVEAPIToken=lb@proxcloud!c1=", "c1", denyMalformed},
+		{"PVEAPIToken=lb@proxcloud!c9=TOPSECRET", "c9", denyUnknown},
+		{"PVEAPIToken=lb@proxcloud!gone=s3", "gone", denyRevoked},
+		{"PVEAPIToken=lb@proxcloud!c1=TOPSECRET", "c1", denyWrongSecret},
+		{"PVEAPIToken=lb@proxcloud!c1=s2", "c1", denyWrongSecret}, // another cluster's secret
+	} {
+		logged.Reset()
+		w, _ := r.put(t, tc.auth, body)
+		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `"message":"authentication failure"`) || strings.Contains(w.Body.String(), tc.why) {
+			t.Fatalf("%q: %d %s: every refusal is the same 401", tc.auth, w.Code, w.Body)
+		}
+		line := logged.String()
+		var rec map[string]any
+		if err := json.Unmarshal(logged.Bytes(), &rec); err != nil || rec["cluster"] != tc.cluster || rec["reason"] != tc.why || rec["remote"] == "" {
+			t.Errorf("%q: log line %q, want cluster %q and reason %q", tc.auth, line, tc.cluster, tc.why)
+		}
+		if strings.Contains(line, "TOPSECRET") || strings.Contains(line, "s3") || strings.Contains(line, "../") {
+			t.Errorf("%q: the log line holds the secret or the caller's own text: %q", tc.auth, line)
+		}
+	}
+	// The controller of the released cluster and the guesser come back every ten seconds for a minute.
+	for i := 0; i < 5; i++ {
+		at = at.Add(10 * time.Second)
+		r.put(t, "PVEAPIToken=lb@proxcloud!gone=s3", body)
+		r.put(t, "PVEAPIToken=lb@proxcloud!c1=TOPSECRET", body)
+	}
+	want := map[string]string{"gone": denyRevoked, "c1": denyWrongSecret}
+	if len(r.events) != 2 {
+		t.Fatalf("audit events %d, want one per known cluster and reason: %+v", len(r.events), r.events)
+	}
+	for _, ev := range r.events {
+		raw, _ := json.Marshal(ev)
+		if ev.RequestInterface != audit.InterfaceLBGateway || ev.Action != audit.ActionDeny || ev.Outcome != audit.OutcomeFailure ||
+			ev.ErrorMessage != "credential refused: "+want[ev.ResourceID] || ev.ResourceMetadata["reason"] != want[ev.ResourceID] ||
+			ev.ProjectID == "" || strings.Contains(string(raw), "TOPSECRET") || strings.Contains(string(raw), `"s3"`) {
+			t.Errorf("audit event: %s", raw)
+		}
+	}
+	// A minute after the first: one more each. Another reason for the same cluster is its own event.
+	at = at.Add(15 * time.Second)
+	r.put(t, "PVEAPIToken=lb@proxcloud!gone=s3", body)
+	r.put(t, "PVEAPIToken=lb@proxcloud!c1=TOPSECRET", body)
+	if len(r.events) != 4 {
+		t.Fatalf("audit events after a minute: %d, want 4", len(r.events))
+	}
+	if r.portal.calls != 0 || r.reg.seen != 0 {
+		t.Fatalf("a refused credential reached the portal (%d) or counted as seen (%d)", r.portal.calls, r.reg.seen)
+	}
+}
+
 // Each Service is checked on its own; a refused one never reaches the portal, the others do, and the answer keeps the
 // request's order.
 func TestServiceChecks(t *testing.T) {

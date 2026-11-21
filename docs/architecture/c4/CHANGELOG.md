@@ -4,6 +4,31 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-22: the services sync keeps running when an appliance is down
+
+**What changed:** no new component, container or relation. `internal/cloud/pve`: a load balancer's appliance is never
+asked for its addresses (`vmInventory.addresses`, `Service.ServerAddresses`), so a pair's public address no longer
+enters a SERVER row, and a VM that Proxmox reports stopped or paused counts as known to have no guest agent
+(`ServerSyncProvider.List`). `internal/cloud/syncjob`: a project's unproved inventory holds back that project's own
+sync and the two provider passes that delete on a list (the seed sweep, the sandbox pass's sweep); the other
+projects, the load balancer pass, provider isolation, worker firewalls, start at boot and the sandbox fence run
+(`detectProxmoxCapabilities`, `syncProxmoxService`, `reconcileSandboxWorkers`). `internal/platform/lock`:
+`ShedLock.Hold`, a lock taken for a lease and extended while its holder works. `internal/platform/project`: the
+cluster converge takes `lbc-<clusterId>` with it (one minute, was 20), a controller's PUT starts a pass only when
+the state changed, the balancer is not settled or the last look is a minute old (`lbPassDue`), and a cluster's pair
+never takes a third appliance (`lbClusterBuild`). `internal/cloud/lbgw`: a refused credential is logged with the
+cluster it claimed and the reason, and audited for a known cluster's revoked credential or wrong secret
+(`authenticate`, `auditDenied`).
+
+**Why:** the drill of v0.11.0-rc.1 (findings N2-1, N2-3, N2-4, N1-3): a stopped master appliance whose SERVER row had
+cached the pair's address made its project's inventory unproved at every sync, which left out the load balancer pass
+that starts it, and the isolation rules, worker firewalls, start at boot and sandbox pass of every tenant of the
+provider; an API restart during a converge kept a cluster's balancer from converging for 24.7 minutes; every PUT of
+a controller cost about 16 Proxmox calls.
+
+**Diagrams:** none (C4.0's table gains the rows of the sync job and of `vmInventory.addresses`; C4.2a's rows of
+`lbgw.Handler` and `Handler.LBClusterState`).
+
 ## 2026-11-22: a load balancer's config is recorded only when the appliance serves it
 
 **What changed:** no new component, container or relation. Inside `internal/cloud/pve` the appliance's apply

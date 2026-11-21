@@ -54,6 +54,11 @@ func (v *vmInventory) disks(ctx context.Context, r ClusterResource) ([]VMDisk, e
 // Use the already proved current config; a second best-effort config read must
 // never silently replace a known address set with {}. Agent failure is recorded
 // and can veto loss of a cached dynamic address in verify.
+//
+// A load balancer's appliance is not asked: its addresses are the ones the product configured, and what its guest
+// holds on top is the balancer's. A pair's public addresses move between its two VMs with keepalived and are owned by
+// the balancer ("lb:<id>"), never by a VM, so a row that cached one named an address its VM loses at the next switch,
+// stop or pause. Its row is its configuration, and that is known (v0.11.0 drill, N2-1).
 func (v *vmInventory) addresses(ctx context.Context, r ClusterResource) (map[string]any, bool) {
 	cfg := v.configs[r.VMID]
 	public := map[string]bool{}
@@ -65,8 +70,9 @@ func (v *vmInventory) addresses(ctx context.Context, r ClusterResource) (map[str
 		}
 	}
 	var entries []any
-	agentOK := false
-	if r.Status == "running" {
+	appliance := LBOfTags(r.Tags) != ""
+	agentOK := appliance
+	if r.Status == "running" && !appliance {
 		if ifaces, err := v.svc.C.inventoryAgentInterfaces(ctx, r.Node, r.VMID); err == nil {
 			agentOK = true
 			entries, _ = AgentAddresses(ifaces)["private"].([]any)

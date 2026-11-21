@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -61,25 +62,77 @@ func (l *ShedLock) Lock(ctx context.Context, name string, atMostFor time.Duratio
 // Wait is Lock retried for up to wait. It returns the release, or acquired false when the lock stayed busy. The release
 // still works once ctx is cancelled.
 func (l *ShedLock) Wait(ctx context.Context, name string, atMostFor, wait time.Duration) (release func(), acquired bool, err error) {
+	at, ok, err := l.waitLock(ctx, name, atMostFor, wait)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	return func() { _ = l.Unlock(context.WithoutCancel(ctx), name, 0, at, time.Now().UTC()) }, true, nil
+}
+
+// waitLock is Lock retried for up to wait; at is the acquisition, which Unlock and the extends of Hold name.
+func (l *ShedLock) waitLock(ctx context.Context, name string, atMostFor, wait time.Duration) (at time.Time, acquired bool, err error) {
 	const step = 500 * time.Millisecond
 	for left := wait; ; left -= step {
 		now := time.Now().UTC()
 		ok, err := l.Lock(ctx, name, atMostFor, now)
-		if err != nil {
-			return nil, false, err
-		}
-		if ok {
-			return func() { _ = l.Unlock(context.WithoutCancel(ctx), name, 0, now, time.Now().UTC()) }, true, nil
+		if err != nil || ok {
+			return now, ok, err
 		}
 		if left <= 0 {
-			return nil, false, nil
+			return now, false, nil
 		}
 		select {
 		case <-ctx.Done():
-			return nil, false, ctx.Err()
+			return now, false, ctx.Err()
 		case <-time.After(step):
 		}
 	}
+}
+
+// Hold is Wait for work whose length nobody knows in advance (a build of minutes, or a pass of seconds): the lock is
+// taken for lease only and extended to lease from now every third of it, for as long as the holder works. Wait has to
+// be given the longest the work can take, and a holder that dies (an API restart) keeps everyone out for all of it;
+// here a dead holder stops extending, and the next taker waits lease at most. The release stops the extends and frees
+// the lock; so does the end of ctx, without freeing it.
+// ponytail: a holder that cannot reach the database for a whole lease loses the lock while it still works, as a
+// holder that outlives atMostFor does with Wait. Hand the work a context that ends with the lease if two holders at
+// once ever cost more than a repeated pass.
+func (l *ShedLock) Hold(ctx context.Context, name string, lease, wait time.Duration) (release func(), acquired bool, err error) {
+	at, ok, err := l.waitLock(ctx, name, lease, wait)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(lease / 3)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+			owned, err := l.col.SetFieldsOne(ctx, pgdoc.M{"_id": name, "lockedBy": l.host, "lockedAt": acquisition(at)},
+				pgdoc.M{"lockUntil": time.Now().UTC().Add(lease)}, nil)
+			if err != nil {
+				slog.Warn("lock: extend a held lock, tried again", "lock", name, "err", err)
+			} else if !owned { // it expired and someone took it: nothing left to extend
+				slog.Warn("lock: a holder lost its lock while it worked", "lock", name, "acquiredAt", at)
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(stop)
+			<-done
+			_ = l.Unlock(context.WithoutCancel(ctx), name, 0, at, time.Now().UTC())
+		})
+	}, true, nil
 }
 
 // Unlock releases the named lock, honouring atLeastFor: lockUntil is set to the later of

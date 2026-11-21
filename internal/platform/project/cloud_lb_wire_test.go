@@ -52,6 +52,9 @@ type pairWire struct {
 	runs   map[int]lbRun
 	files  []string // the HAProxy configs written, in order
 	reads  int      // state reads
+	pages  int      // reads of the cluster's VM list: one per apply
+	// gate, while set, holds every read of the VM list until it is closed: an apply in the middle of its work.
+	gate chan struct{}
 }
 
 type lbRun struct {
@@ -162,6 +165,12 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tag = "pc-lb-abc"
 	}
 	if r.URL.Path == "/api2/json/cluster/resources" {
+		f.pages++
+		if gate := f.gate; gate != nil {
+			f.mu.Unlock()
+			<-gate
+			f.mu.Lock()
+		}
 		if f.gone {
 			write([]map[string]any{})
 			return

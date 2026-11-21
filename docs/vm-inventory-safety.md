@@ -21,6 +21,43 @@ including legacy rows that have not learned UUID yet. Template flags, when prese
 must be numeric0 or1 before any SERVER/IMAGE classification decision. Legacy SERVER rows learn UUID
 from a full strict mapping before sampled enrichment can be carried forward.
 
+## A VM that cannot be asked
+
+"A malformed or missing guest-agent result is unknown" is about a VM that runs: its agent was asked and did not give
+a usable answer, so the addresses only the agent knows stay in the row, and the project's SERVER scope waits. Two
+cases are not unknown, and were treated as if they were until v0.11.0-rc.1:
+
+- **A VM that Proxmox reports stopped or paused** has no agent to ask. Its addresses are the ones in its
+  configuration, and its row holds those, as it does after a stop through the portal. Before, a VM stopped by its own
+  guest, by an operator or by a node's restart, whose row held one address the agent had reported (a container
+  bridge, a second address), kept its project unproved at every sync until someone started it.
+- **A load balancer's appliance** (tag `pc-lb-<id>`) is never asked for addresses: a pair's public addresses move
+  between its two VMs and belong to the balancer. Its row is its configuration. A row that cached a balancer's address
+  is rewritten by the next services sync, in whatever state the VM is.
+
+## What an unproved inventory holds back
+
+One project's failed proof holds back what is decided from an absence in that project's inventory, and nothing else:
+
+| Held back in that run | Why |
+|---|---|
+| The project's own SERVER, VOLUME, IMAGE, NETWORK, SECURITY_GROUP and FLOATING_IP rows after the type that failed | each write is decided against the proved list |
+| The project's isolation ACCEPTs, protection healing, blank-VM removal and address release | they are written from those rows, and the last three delete |
+| The provider's seed sweep | it removes the seed of a server whose row is gone |
+| The sandbox pass's sweep of old firewall generations | it deletes the generations no worker it lists refers to |
+
+Everything else the services sync does for the provider runs: **every other project's sync** (each proves its own pool
+before it writes), the load balancer pass, the provider's isolation DROPs, the worker firewalls of Kubernetes
+clusters, start at boot, and the fencing of sandbox workers. None of them reads the rows a failed proof kept: each
+asks Proxmox itself and acts on the portal's own records, and none removes anything because a VM is missing from a
+list. The load balancer pass starts a stopped appliance and loads a config again, and a tenant's change or a cluster's
+controller runs the same apply at any time without asking the sync. Until v0.11.0-rc.1 the first failed project
+stopped the sync of every project after it and all of these passes, at every run: one stopped appliance froze the
+isolation rules and worker firewalls of every tenant of the provider.
+
+A load balancer pass that runs while the token really has lost sight of VMs marks a member it cannot see `missing`
+and takes it out of the config until it is seen again; it deletes nothing, and the row keeps the member.
+
 ## Proving real retirement
 
 A would-disappear decision (a cached row whose VM is not in the project pool any

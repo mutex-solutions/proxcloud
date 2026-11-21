@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -37,7 +38,56 @@ const (
 	lbClusterBuildRetry = 5 * time.Minute
 	// lbSizePlaceholder stands in for an address not yet taken when a config's size is checked: the longest one.
 	lbSizePlaceholder = "255.255.255.255"
+	// lbPassEvery is how often a settled cluster balancer is looked at when its cluster's state did not change: the
+	// pass that finds an appliance someone stopped, about 16 Proxmox calls. A changed state, and a balancer that is
+	// not settled, converge at once.
+	lbPassEvery = time.Minute
 )
+
+// lbcLease is how long the cluster's converge lock (lbc-<clusterId>) lasts without its holder: the holder extends it
+// while it works (lock.ShedLock.Hold), so an API that restarts in the middle of a pass keeps the cluster's balancer
+// from converging for a minute at most. It was taken for lbBuildTimeout, 20 minutes (v0.11.0-rc.1 drill, N2-3).
+var lbcLease = time.Minute
+
+// lbPass is the last pass over a cluster's balancer that ran to its end, as this process saw it.
+type lbPass struct {
+	digest  string // of the state it applied (lbStateDigest)
+	at      time.Time
+	settled bool // the row then read ACTIVE, with every Service answered and no address left to give back
+}
+
+// lbStateDigest names a cluster's state by content: the Services and nodes in the order the controller sent them,
+// which is the order the config is rendered in. The time it was stored is not part of it.
+func lbStateDigest(st *lbgw.State) string {
+	if st == nil {
+		return ""
+	}
+	services, nodes := st.Services, st.Nodes
+	if len(services) == 0 {
+		services = nil
+	}
+	if len(nodes) == 0 {
+		nodes = nil
+	}
+	raw, _ := json.Marshal([]any{services, nodes})
+	return lbHash(string(raw))
+}
+
+// lbPassDue says whether a controller's PUT of the state named digest starts a pass. The controller sends its state
+// every ten seconds, changed or not, and each pass costs about 16 Proxmox calls with two guest commands (v0.11.0-rc.1
+// drill, N2-4: 96 calls a minute per cluster). So a PUT starts one only when it has something to do: the state is
+// not the one the last pass applied, that pass left the balancer unsettled (building, degraded, an address still to
+// give back), or the last look at a settled balancer is lbPassEvery old.
+// ponytail: kept per process, so each API replica looks once per lbPassEvery and the first PUT after a restart always
+// starts a pass. Keep it on the row if replicas ever multiply the calls enough to matter.
+func (h *Handler) lbPassDue(clusterID, digest string) bool {
+	v, ok := h.lbPasses.Load(clusterID)
+	if !ok {
+		return true
+	}
+	last := v.(lbPass)
+	return last.digest != digest || !last.settled || time.Since(last.at) >= lbPassEvery
+}
 
 // lbCluster is a cluster balancer's part of the row.
 type lbCluster struct {
@@ -148,8 +198,9 @@ func (h *Handler) lbClusterSettings(ctx context.Context, cred *lbgw.Credential, 
 }
 
 // LBClusterState is the gateway's call (lbgw.Portal): services passed the gateway's own checks, nodes did not yet. It
-// refuses with no change while the project is suspended or being deleted (C3), stores the state and starts a converge,
-// and answers each Service as the balancer has it now. Nothing is built here.
+// refuses with no change while the project is suspended or being deleted (C3), stores the state, starts a converge
+// when there is something to converge (lbPassDue), and answers each Service as the balancer has it now. Nothing is
+// built here.
 func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, services []lbgw.Service, nodes []lbgw.Node) (*lbgw.Answer, error) {
 	if h.lbGW == nil || h.sdnLock == nil || h.publicIPs == nil || h.pveFor == nil || h.pveFlavors == nil {
 		return nil, &lbgw.Refusal{Status: http.StatusServiceUnavailable, Message: "Load balancers are not configured on this portal"}
@@ -201,10 +252,13 @@ func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, ser
 			return ans, nil
 		}
 	}
-	if err := h.lbGW.PutState(ctx, &lbgw.State{ID: cred.ID, Services: services, Nodes: accepted}); err != nil {
+	st := &lbgw.State{ID: cred.ID, Services: services, Nodes: accepted}
+	if err := h.lbGW.PutState(ctx, st); err != nil {
 		return nil, err
 	}
-	go h.lbClusterConverge(context.WithoutCancel(ctx), cred.ID)
+	if h.lbPassDue(cred.ID, lbStateDigest(st)) {
+		go h.lbClusterConverge(context.WithoutCancel(ctx), cred.ID, false)
+	}
 	for _, s := range services {
 		ans.Services = append(ans.Services, lbClusterStatus(lb, s.UID))
 	}
@@ -225,9 +279,11 @@ func lbClusterStatus(lb *loadBalancer, uid string) lbgw.ServiceStatus {
 }
 
 // lbClusterConverge runs one converge of the cluster's balancer, unless one runs already: the controller sends its
-// state every few seconds and the provider sync calls this too, so a converge that is skipped comes again.
-func (h *Handler) lbClusterConverge(ctx context.Context, clusterID string) {
-	release, ok, err := h.sdnLock.Wait(ctx, "lbc-"+clusterID, lbBuildTimeout, 0)
+// state every few seconds and the provider sync calls this too, so a converge that is skipped comes again. force is
+// the sync's: its pass runs whatever the last one found. A PUT's pass asks lbPassDue again once it holds the lock,
+// since the pass it waited behind may have applied its state.
+func (h *Handler) lbClusterConverge(ctx context.Context, clusterID string, force bool) {
+	release, ok, err := h.sdnLock.Hold(ctx, "lbc-"+clusterID, lbcLease, 0)
 	if err != nil {
 		slog.Warn("load balancer: cluster converge lock", "cluster", clusterID, "err", err)
 		return
@@ -236,13 +292,13 @@ func (h *Handler) lbClusterConverge(ctx context.Context, clusterID string) {
 		return
 	}
 	defer release()
-	if err := h.lbClusterPass(ctx, clusterID); err != nil {
+	if err := h.lbClusterPass(ctx, clusterID, force); err != nil {
 		slog.Warn("load balancer: cluster converge", "cluster", clusterID, "err", err)
 	}
 }
 
 // lbClusterPass: the row, then the appliances, then addresses and config. The caller holds lbc-<clusterId>.
-func (h *Handler) lbClusterPass(ctx context.Context, clusterID string) error {
+func (h *Handler) lbClusterPass(ctx context.Context, clusterID string, force bool) error {
 	cred, err := h.lbGW.Credential(ctx, clusterID)
 	if err != nil || cred == nil || cred.RevokedAt != nil { // released, or being released
 		return err
@@ -258,6 +314,10 @@ func (h *Handler) lbClusterPass(ctx context.Context, clusterID string) error {
 	if err != nil {
 		return err
 	}
+	digest := lbStateDigest(st)
+	if !force && !h.lbPassDue(clusterID, digest) {
+		return nil
+	}
 	es, err := h.esSvc.Get(ctx, cred.ComputeServiceID)
 	if err != nil {
 		return err
@@ -269,6 +329,7 @@ func (h *Handler) lbClusterPass(ctx context.Context, clusterID string) error {
 	}
 	if row == nil {
 		if st == nil || len(st.Services) == 0 {
+			h.lbPasses.Store(clusterID, lbPass{digest: digest, at: time.Now(), settled: true})
 			return nil // the pair comes with the first Service
 		}
 		pn, fl, herr := h.lbClusterSettings(ctx, cred, proj, es)
@@ -293,7 +354,9 @@ func (h *Handler) lbClusterPass(ctx context.Context, clusterID string) error {
 	if err := h.lbClusterBuild(ctx, es, proj, ext); err != nil {
 		slog.Warn("load balancer: cluster appliance", "cluster", clusterID, "err", err)
 	}
-	return h.lbClusterApply(ctx, es, proj, ext, st)
+	settled, err := h.lbClusterApply(ctx, es, proj, ext, st)
+	h.lbPasses.Store(clusterID, lbPass{digest: digest, at: time.Now(), settled: settled})
+	return err
 }
 
 // lbClusterBuild builds the appliances the pair lacks, one at a time, outside the row's lock so that the gateway's PUTs
@@ -325,40 +388,48 @@ func (h *Handler) lbClusterBuild(ctx context.Context, es *externalservice.Extern
 			return errors.Join(berr, err)
 		}
 		prefix := lb.PrivatePrefix // the appliance's network, read during its build
+		full := false
 		if _, err := h.lbEdit(ctx, es, ext, func(lb *loadBalancer) {
+			// The build ran outside the row's lock, and the converge lock is a lease: a holder cut off from the
+			// database for a whole lease works on while the next one builds too. The row takes two appliances.
+			if full = len(lb.Appliances) >= 2; full {
+				return
+			}
 			lb.Appliances = append(lb.Appliances, *app)
 			lb.Cluster.BuildFailedAt, lb.StatusMessage = "", ""
 			lbPairLegacyFields(lb)
 			if lb.PrivatePrefix == 0 {
 				lb.PrivatePrefix = prefix
 			}
-		}); err != nil {
-			// The row went meanwhile: the new VM is nobody's.
+		}); err != nil || full {
+			// The row went meanwhile, or has its pair already: the new VM is nobody's.
 			if derr := h.lbDestroyVM(ctx, es, proj, app.ServerID); derr != nil {
-				slog.Error("load balancer: remove an appliance built for a balancer that went", "lb", ext, "vm", app.ServerID, "err", derr)
+				slog.Error("load balancer: remove an appliance built for a balancer that went or is complete", "lb", ext, "vm", app.ServerID, "err", derr)
 			}
 			return err
 		}
 	}
 }
 
-// lbClusterApply brings the row in line with the state and the appliances with the row, under the row's lock.
-func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.ExternalService, proj *Project, ext string, st *lbgw.State) error {
+// lbClusterApply brings the row in line with the state and the appliances with the row, under the row's lock. settled
+// says that it left nothing for a next pass: the balancer is ACTIVE, every Service has its answer (ready or refused),
+// and no address waits to be given back.
+func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.ExternalService, proj *Project, ext string, st *lbgw.State) (settled bool, err error) {
 	release, ok, err := h.sdnLock.Wait(ctx, "lb-"+ext, lbLockMaxFor, lbLockWait)
 	if err != nil || !ok {
-		return err // another apply is on it
+		return false, err // another apply is on it
 	}
 	defer release()
 	cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, ext)
 	if err != nil || cr == nil {
-		return err
+		return false, err
 	}
 	lb, err := lbOfRow(cr)
 	if err != nil || lb.Cluster == nil {
-		return err
+		return false, err
 	}
 	if err := h.lbClusterDesired(ctx, es, proj, lb, st); err != nil {
-		return err
+		return false, err
 	}
 	if len(lb.Appliances) > 0 {
 		err = h.lbApplyPair(ctx, es, proj, cr, lb)
@@ -380,7 +451,9 @@ func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.Extern
 	if serr := h.lbSave(ctx, cr, lb); serr != nil && err == nil {
 		err = serr
 	}
-	return err
+	settled = err == nil && lb.Status == lbStatusActive && len(lb.Cluster.Releasing) == 0 &&
+		!slices.ContainsFunc(lb.Cluster.Services, func(s lbClusterSvc) bool { return s.State == lbgw.StateBuilding })
+	return settled, err
 }
 
 // lbClusterDesired folds the state into the row: Services gone give up their address, new ones are added in the order
@@ -532,7 +605,7 @@ func (h *Handler) LBReleaseCluster(ctx context.Context, computeID, projectID, cl
 	if h.sdnLock == nil || h.pveFor == nil {
 		return nil // no balancer can have been built
 	}
-	release, ok, err := h.sdnLock.Wait(ctx, "lbc-"+clusterID, lbBuildTimeout, lbLockWait)
+	release, ok, err := h.sdnLock.Hold(ctx, "lbc-"+clusterID, lbcLease, lbLockWait)
 	if err != nil {
 		return err
 	}
@@ -584,6 +657,7 @@ func (h *Handler) LBReleaseCluster(ctx context.Context, computeID, projectID, cl
 }
 
 func (h *Handler) lbDropState(ctx context.Context, clusterID string) error {
+	h.lbPasses.Delete(clusterID)
 	if h.lbGW == nil {
 		return nil
 	}

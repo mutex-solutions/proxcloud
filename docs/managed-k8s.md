@@ -852,13 +852,33 @@ call for its own cluster, and minting it again rotates it.
   is not TCP refuses the whole Service (`UDPNotSupported`), IPv6 or dual stack (`IPFamilyNotSupported`), node port 0,
   a node port outside 30000-32767 or policy Local without a health port (`NoNodePort`), source ranges that do not fit
   one firewall rule of 512 characters (`TooManySourceRanges`; `0.0.0.0/0` means any), more than 50 Services or 20 ports
-  (`TooLarge`). A node whose address is not one of the cluster's 16 worker addresses (the 8 MetalLB addresses of the
-  reservation included) is answered `NotAWorker` and never becomes a member.
+  (`TooLarge`). A node whose address is not one of the cluster's 16 worker addresses is answered `NotAWorker` and never
+  becomes a member; so is one of the reservation's 8 MetalLB addresses, which are not worker addresses.
 - The answer is the state as it is: per Service `ready` with its address, `building`, or `refused`. Nothing is built in
-  the request: the state is stored (`lbGatewayState`) and a converge starts (lock `lbc-<clusterId>`; the provider sync
-  runs it too). A project that is suspended or being deleted is refused with 409 `ProjectNotEnabled` and nothing
-  changes; its state is applied after the resume. A controller older than the gateway takes is answered
-  `ControllerTooOld`, which says to bump the cluster. Refusals are audit events (`LB_GATEWAY` / `DENY`), once per change.
+  the request: the state is stored (`lbGatewayState`) and a converge starts when there is something to converge. The
+  controller sends its state every 10 s whether it changed or not, and a pass over the pair costs about 16 Proxmox
+  calls, so a PUT starts one only when the state is not the one the last pass applied, when that pass left the
+  balancer unsettled (building, `DEGRADED`, an address still to give back), or when the last look at a settled
+  balancer is a minute old (`lbPassDue`; kept per API process, so the first PUT after a restart always starts one).
+  That look is what finds an appliance someone stopped: the other appliance takes the address within seconds, and the
+  stopped one is started again within about 70 s (the provider sync starts it too). A quota raised for a Service
+  refused `QuotaExceeded` is seen by the same look.
+- One converge runs per cluster, under the lock `lbc-<clusterId>`. The lock lasts one minute and its holder extends it
+  while it works, so an API that is restarted in the middle of a pass (an upgrade, a change of the gateway listener)
+  keeps the cluster's balancer from converging for a minute at most; PUTs are stored meanwhile and the first one after
+  that minute is applied.
+- A project that is suspended or being deleted is refused with 409 `ProjectNotEnabled` and nothing changes; its state
+  is applied after the resume. A controller older than the gateway takes is answered `ControllerTooOld`, which says to
+  bump the cluster.
+- Refusals are audit events (`LB_GATEWAY` / `DENY`). One of an authenticated controller (a Service or node refused,
+  the whole request refused) is audited once per change. A refused credential is always the same 401 to the caller;
+  the API log line (`lb gateway: refused credential`) names the cluster the header claimed, when it has the form of a
+  cluster id, and the reason: `malformed`, `unknown cluster`, `revoked` (the cluster was released, or its credential
+  was minted again and the controller still presents the old one, which lasts until it reads the new Secret) or
+  `wrong secret`. `revoked` and `wrong secret` for a cluster that has a credential are also audit events of that
+  cluster's project, at most one per cluster and reason a minute. A header that names no known cluster is only
+  logged: it belongs to no project, and anyone who reaches the listener could fill the audit log with them. The
+  secret is in neither.
 - The cluster's balancer is one load balancer row, always a pair, built with the first Service from the Kubernetes
   provider's `config.cluster.loadBalancer` (`publicNetworkId`, `flavorId`; checked on save: an active flavor, and a
   public network of the workers' compute provider with a gateway, on a plain bridge). It stays until the cluster is
@@ -877,14 +897,27 @@ call for its own cluster, and minting it again rotates it.
   rows, the row and the state go.
 - What the tenant pays: the two appliances are `SERVER` rows of the project with their `VOLUME` rows, billed from the
   first Service until the cluster is deleted, and each address is a billed `FLOATING_IP`. Only the addresses are
-  checked against the quota (`floatingIps`); the appliances are not checked against the server quota. What HA means is
+  checked against the quota (`floatingIps`); the appliances are not checked against the server quota. **The quota
+  caps the cluster's Services**: a project's public addresses count together (its servers', its own load balancers',
+  each Service's), and the quota the seed gives a provider is 5 (`deploy/seed`, `floatingIps`), so a cluster in
+  default mode gets at most five Services of type LoadBalancer, each NGINX Gateway Fabric Gateway included; the next
+  one stays `<pending>` with a Warning `QuotaExceeded`. Raise it for one project on its admin **Quota** tab
+  (`PUT /api/v1/admin/project/{id}/quota`), or for every project without a quota of its own in the compute
+  provider's default quota (`config.provisioning.quota`, `PUT /api/v1/admin/service/{id}/quota`); the refused Service
+  gets its address within about a minute. What HA means is
   that of any pair ([cloud-integration.md](cloud-integration.md#high-availability-a-pair-of-appliances)): where both
   appliances run on one node (a one-node site, a `simple` zone, or the appliance image on one node only) the balancer
   survives an appliance failure, not the loss of that node, and the cluster page says so.
 - On Docker Compose the listener is opt-in, with a certificate the API makes itself
   (`proxcloud-up.sh install --cluster-gateway <address>`, [managed-services.md](managed-services.md#9-limits-on-the-compose-install)).
 
-Not run on a lab: any of it. Tested against Postgres and a fake Proxmox (`TestLBClusterStateConverges`).
+Run on one lab (v0.11.0-rc.1, a nested three-node Proxmox cluster, both appliances on one node, packages installed
+from apt through the lab's router; a sample, not a promise): the first Service had its address in `status` 4 min 22 s
+after it was applied and answered from outside after 6 min 7 s, most of it the two appliance builds; the members
+followed a new node in 8 s; a stopped master appliance cost 3.1 to 3.4 s. On that release every PUT started a pass (96 Proxmox calls a minute per
+cluster) and a restart of the API during a pass held the cluster's lock for 20 minutes; the two paragraphs above are
+the answer to both, and are tested against Postgres and a fake Proxmox (`TestLBClusterStateConverges`), not yet run
+on a lab.
 
 **Load balancers of a cluster's Services: the controller.** Each cluster that has one runs its load balancer
 controller (`cmd/lb-controller`) on the services cluster next to its control plane, as the proxmox-csi controller:
@@ -907,7 +940,15 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   into another type or of another class keeps it until a PUT without it is accepted, then loses it (and its address in
   the status); while the gateway cannot be reached it stays `Terminating`, as with any cloud controller.
 - `status.loadBalancer.ingress` gets the address once the portal has one, `ipMode: Proxy` with the annotation
-  `proxcloud.io/lb-proxy-protocol: "true"` (in-cluster clients then go through the balancer too) and `VIP` otherwise.
+  `proxcloud.io/lb-proxy-protocol: "true"` and `VIP` otherwise. **With `VIP`, a client inside the cluster never
+  reaches the balancer**: kube-proxy treats an address with that mode as one of the Service's own and sends a pod's or
+  a node's connection to it straight to an endpoint. Such a client does not see an outage of the pair or a switch
+  between its appliances, never meets the appliance's firewall, which is what holds clients from outside to
+  `loadBalancerSourceRanges`, and proves nothing about the path from outside: test a Service from outside the
+  cluster. With `Proxy`, kube-proxy installs no such rule, so in-cluster clients leave the cluster and
+  come back through the pair like anyone else (seen by the backend as the worker's address, after the tenant
+  network's gateway); that is what a backend that requires the PROXY header needs, and it means the Service's
+  ClusterIP no longer works for that backend, which gets no header on the direct path.
 - The answers become Events on the Service, one per change: `EnsuringLoadBalancer`, `EnsuredLoadBalancer` with the
   address, and a Warning with the gateway's reason (`UDPNotSupported`, `NoNodePort`, `TooManySourceRanges`,
   `IPFamilyNotSupported`, `QuotaExceeded`, `PublicNetworkUnavailable`, `TooLarge`; for the whole request

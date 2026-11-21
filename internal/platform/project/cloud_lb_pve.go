@@ -352,7 +352,7 @@ func (h *Handler) ReconcileLoadBalancers(ctx context.Context, _ *pve.Service, es
 		// A cluster's balancer converges from its cluster's state, which checks the project itself. In the background:
 		// a pass may build an appliance (up to lbBuildTimeout), which must not hold up the rest of the sync.
 		if lb, err := lbOfRow(&rows[i]); err == nil && lb.Cluster != nil && h.lbGW != nil {
-			go h.lbClusterConverge(context.WithoutCancel(ctx), lb.Cluster.ID)
+			go h.lbClusterConverge(context.WithoutCancel(ctx), lb.Cluster.ID, true)
 			continue
 		}
 		proj, err := h.svc.GetProjectByID(ctx, rows[i].ProjectID)
