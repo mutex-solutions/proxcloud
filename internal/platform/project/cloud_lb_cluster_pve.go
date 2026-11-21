@@ -593,6 +593,46 @@ func (h *Handler) lbDropState(ctx context.Context, clusterID string) error {
 // The load balancer controller of a cluster (cmd/lb-controller, chart proxmox-kamaji-cluster from 0.1.17): what a cluster
 // needs for one, the credential it presents, and the operator's "Enable load balancer controller" for an existing cluster.
 
+// LBClusterView is a cluster's load balancer as the consoles show it next to the cluster: when its controller's
+// credential was minted and last used, and the cluster's balancer row (none before the first Service). No token.
+type LBClusterView struct {
+	ControllerSince    *time.Time `json:"controllerSince,omitempty"`
+	ControllerLastSeen *time.Time `json:"controllerLastSeen,omitempty"`
+	BalancerID         string     `json:"balancerId,omitempty"` // the LOAD_BALANCER row
+	Balancer           any        `json:"balancer,omitempty"`   // its data.loadbalancer, as the tenant's list has it
+	projectID          string
+	kubernetesID       string
+}
+
+// lbClusterView reads cluster clusterID's view; nil when it has no controller (never minted, or released).
+func (h *Handler) lbClusterView(ctx context.Context, clusterID string) (*LBClusterView, error) {
+	if h.lbGW == nil {
+		return nil, nil
+	}
+	cred, err := h.lbGW.Credential(ctx, clusterID)
+	if err != nil || cred == nil || cred.RevokedAt != nil {
+		return nil, err
+	}
+	v := &LBClusterView{ControllerSince: cred.CreatedAt, ControllerLastSeen: cred.LastSeenAt, projectID: cred.ProjectID,
+		kubernetesID: cred.KubernetesServiceID}
+	row, err := h.cloud.FindByServiceIDAndExternalID(ctx, cred.ComputeServiceID, lbClusterExternalID(clusterID))
+	if err != nil || row == nil {
+		return v, err
+	}
+	v.BalancerID, v.Balancer = row.ID, row.Data[lbDataKey]
+	return v, nil
+}
+
+// ClusterLBView is the operator's read of one cluster of the kamaji provider es (admin.LBViewer); nil when the cluster
+// has no controller.
+func (h *Handler) ClusterLBView(ctx context.Context, es *externalservice.ExternalService, clusterID string) (any, error) {
+	v, err := h.lbClusterView(ctx, clusterID)
+	if err != nil || v == nil || v.kubernetesID != es.ID {
+		return nil, err
+	}
+	return v, nil
+}
+
 // kamajiLBGate names the first thing that keeps a cluster of the Kubernetes provider k8s, with its workers on compute in
 // proj, from a load balancer controller; "" when every gate holds: this portal holds the gateway's store, a gateway URL
 // and the controller image, the provider pins a chart that renders the controller, the workers are the project's own,

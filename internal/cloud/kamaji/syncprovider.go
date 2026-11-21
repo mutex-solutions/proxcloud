@@ -161,6 +161,9 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 	}
 	c["storage_classes"] = classes
 	c["rwx"] = digStr(values, "proxmox", "rwx", "server") != ""
+	if mode := LBMode(values); mode != "" {
+		c["load_balancer"] = mode
+	}
 	// Customer add-on toggles, read back for the UI (absent block = chart defaults). Filtered to
 	// the curated menu: a legacy credential-push addon (and any operator hand-edit)
 	// must not surface as a customer toggle — it would round-trip into SET_ADDONS and be

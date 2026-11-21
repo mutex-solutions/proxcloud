@@ -89,6 +89,8 @@ type Handler struct {
 	workerFirewall WorkerFirewall
 	// lbEnable gives a cluster its load balancer controller in class-only mode (nil → 501).
 	lbEnable LBEnabler
+	// lbView reads a cluster's load balancer (nil → 501).
+	lbView LBViewer
 	// pveFlavors is the Proxmox flavor catalog (nil in tests → the surface 503s).
 	pveFlavors *pveflavor.Repo
 	pay        *billing.PayService // bill record-payment (nil → 501)

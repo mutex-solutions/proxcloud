@@ -33,15 +33,17 @@ func TestProjectGPUUsageRoute(t *testing.T) {
 	}
 }
 
-// "Enable load balancer controller" for one cluster: POST only.
+// One cluster's load balancer: GET reads it, POST is "Enable load balancer controller"; nothing else.
 func TestKamajiLoadBalancerRoute(t *testing.T) {
 	router := chi.NewRouter()
 	(&Handler{}).Routes(router)
-	if !router.Match(chi.NewRouteContext(), http.MethodPost, "/admin/service/svc-1/k8s-clusters/pc-c-1/load-balancer") {
-		t.Fatal("POST /admin/service/{id}/k8s-clusters/{clusterId}/load-balancer route is not registered")
+	for _, m := range []string{http.MethodGet, http.MethodPost} {
+		if !router.Match(chi.NewRouteContext(), m, "/admin/service/svc-1/k8s-clusters/pc-c-1/load-balancer") {
+			t.Fatalf("%s /admin/service/{id}/k8s-clusters/{clusterId}/load-balancer route is not registered", m)
+		}
 	}
-	if router.Match(chi.NewRouteContext(), http.MethodGet, "/admin/service/svc-1/k8s-clusters/pc-c-1/load-balancer") {
-		t.Fatal("GET matched")
+	if router.Match(chi.NewRouteContext(), http.MethodDelete, "/admin/service/svc-1/k8s-clusters/pc-c-1/load-balancer") {
+		t.Fatal("DELETE matched")
 	}
 }
 

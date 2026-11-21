@@ -143,6 +143,7 @@ func (h *Handler) kamajiDelete(ctx context.Context, es *externalservice.External
 //   - SET_OIDC {oidc}         → replaces the customer OIDC block; empty issuerUrl disables
 //   - REPLACE_MACHINE {machine, confirm} → deletes one worker Machine; Cluster API makes a new one. confirm is
 //     needed for the last Ready node of a group
+//   - GET_LOAD_BALANCER → the cluster's load balancer (LBClusterView); null when the cluster has no controller
 func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if !es.IsKamaji() || cr.Type != cloud.TypeKubernetesCluster {
 		return false
@@ -309,6 +310,20 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			return true
 		}
 		httpx.OK(w, map[string]any{"result": "REPLACING"})
+		return true
+
+	case "GET_LOAD_BALANCER":
+		// The mode is in the row's data (load_balancer); this adds what only the portal knows: the controller's last
+		// call and the balancer its first Service built.
+		v, err := h.lbClusterView(r.Context(), cr.ExternalID)
+		if err != nil {
+			h.fail(w, err)
+			return true
+		}
+		if v != nil && v.projectID != proj.ID {
+			v = nil
+		}
+		httpx.OK(w, map[string]any{"result": v})
 		return true
 
 	case "APPLY_PLATFORM_UPDATE":

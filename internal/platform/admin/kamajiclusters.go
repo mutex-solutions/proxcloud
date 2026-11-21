@@ -143,6 +143,35 @@ type LBEnabler func(ctx context.Context, es *externalservice.ExternalService, ks
 // SetLBEnabler wires kamajiClusterLoadBalancer (nil = 501).
 func (h *Handler) SetLBEnabler(f LBEnabler) { h.lbEnable = f }
 
+// LBViewer reads one cluster's load balancer for the operator (project.Handler.ClusterLBView): nil when the cluster has
+// no controller.
+type LBViewer func(ctx context.Context, es *externalservice.ExternalService, clusterID string) (any, error)
+
+// SetLBViewer wires kamajiClusterLoadBalancerView (nil = 501).
+func (h *Handler) SetLBViewer(f LBViewer) { h.lbView = f }
+
+// kamajiClusterLoadBalancerView is the operator's view of one cluster's load balancer: when its controller last called
+// the gateway, and the balancer's status, appliances and Services; data null when the cluster has no controller (its
+// mode is in the cluster list). ADMIN_SERVICE_READ.
+func (h *Handler) kamajiClusterLoadBalancerView(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, "admin:service:read") {
+		return
+	}
+	es, _, ok := h.kamajiService(w, r)
+	if !ok {
+		return
+	}
+	if h.lbView == nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "load balancers are not configured"))
+		return
+	}
+	v, err := h.lbView(r.Context(), es, chi.URLParam(r, "clusterId"))
+	if httpx.WriteError(w, err) {
+		return
+	}
+	httpx.OK(w, v)
+}
+
 // kamajiClusterLoadBalancer is "Enable load balancer controller" for ONE existing cluster: class-only mode (Services of
 // class proxcloud.io/lb get the product balancer, MetalLB keeps the rest and their addresses), the chart pinned to the
 // provider's version, a credential minted and its Secret written. Again on the same cluster: a new credential and the

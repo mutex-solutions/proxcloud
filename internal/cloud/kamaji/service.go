@@ -783,6 +783,8 @@ type ClusterPin struct {
 	Name         string `json:"name"`
 	ProjectID    string `json:"projectId"`
 	ChartVersion string `json:"chartVersion"`
+	// LoadBalancer is the cluster's load balancer mode (LBMode): "default", "class-only" or empty (MetalLB alone).
+	LoadBalancer string `json:"loadBalancer,omitempty"`
 }
 
 // ListClusterPins lists every proxcloud-managed cluster on this provider with its chart pin
@@ -801,11 +803,13 @@ func (s *Service) ListClusterPins(ctx context.Context) ([]ClusterPin, error) {
 		if id == "" {
 			continue
 		}
+		values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
 		out = append(out, ClusterPin{
 			ID:           id,
 			Name:         digStr(app, "metadata", "annotations", AnnotationDisplayName),
 			ProjectID:    digStr(app, "metadata", "labels", LabelProject),
 			ChartVersion: digStr(app, "spec", "source", "targetRevision"),
+			LoadBalancer: LBMode(values),
 		})
 	}
 	return out, nil
