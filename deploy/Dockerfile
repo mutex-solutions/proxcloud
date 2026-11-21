@@ -34,8 +34,10 @@ RUN mkdir -p /opt/proxcloud/api
 
 COPY --from=build /out/proxcloud-api /usr/local/bin/proxcloud-api
 
-# Non-root.
-RUN adduser -S -D -H -u 10001 -G root proxcloud
+# Non-root. /var/lib/proxcloud/gateway is where the Compose stack mounts the gateway volume, in which the API makes its own
+# gateway certificate (--cluster-gateway): a new named volume takes the owner of the image's directory.
+RUN adduser -S -D -H -u 10001 -G root proxcloud \
+ && install -d -o 10001 -g 0 -m 700 /var/lib/proxcloud/gateway
 USER 10001
 
 EXPOSE 8080 8081
