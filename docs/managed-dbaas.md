@@ -329,7 +329,9 @@ another node of the group: it is down for that restart. Databases of more than o
 their budget. The platform BOM pins 0.5.2: a managed-services platform installed from this release
 registers its database provider with it, and an upgrade to this BOM writes it on the provider. An
 existing database takes the change with `bump-chart`, once the provider pins
-0.5.2 or later; until then it keeps its budget.
+0.5.2 or later; until then it keeps its budget. On CloudNativePG 1.30.1 the bump of a database of
+one instance from 0.5.1 to 0.5.2 removed its budget without restarting it (one production site,
+2026-11-20: the same pod and postmaster start, no failed connection).
 
 An upgrade of a managed-services platform that replaces the platform cluster's machines checks
 this before it starts: its plan lists every PodDisruptionBudget on the platform cluster that
