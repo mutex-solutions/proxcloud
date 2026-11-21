@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -207,5 +208,29 @@ func TestLBPairApplyOrderAndStatus(t *testing.T) {
 	got, _ = lbOfRow(saved)
 	if status != lbStatusDegraded || !strings.Contains(got.StatusMessage, "Both appliances hold the address") || len(f.log) != writes {
 		t.Fatalf("split: %s %q, writes %v", status, got.StatusMessage, f.log[writes:])
+	}
+
+	// A replace is refused while one runs, and so is a delete, which would leave the VM being built to nobody; a
+	// mark from a portal that died long ago holds nothing.
+	got.Replacing = time.Now().UTC().Format(time.RFC3339)
+	if err := h.lbSave(ctx, saved, got); err != nil {
+		t.Fatal(err)
+	}
+	if herr := h.pveLBReplace(ctx, nil, es, proj, saved); herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "already being replaced") {
+		t.Fatalf("second replace: %v", herr)
+	}
+	if err := h.pveDeleteLoadBalancer(ctx, es, proj, saved); err == nil || !strings.Contains(err.Error(), "being replaced") {
+		t.Fatalf("delete during a replace: %v", err)
+	}
+	// A single appliance has nothing to replace.
+	single := &cloud.CloudResource{ExternalID: "lb-def", ServiceID: "svc", ProjectID: "p1", Type: cloud.TypeLoadBalancer}
+	if err := setLBRow(single, &loadBalancer{ID: "def", Name: "one", Status: lbStatusActive, ServerID: "401"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.cloud.Insert(ctx, single); err != nil {
+		t.Fatal(err)
+	}
+	if herr := h.pveLBReplace(ctx, nil, es, proj, single); herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "one VM") {
+		t.Fatalf("replace on a single appliance: %v", herr)
 	}
 }
