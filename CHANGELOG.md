@@ -193,6 +193,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestPreviousBOMsMoveCertManager` states that answer, and `TestUpgradeRollsNoMachine` compares six of the fifteen
   previous BOMs with the BOM on `main`, none of them rolling. No apply on such a platform was run on a lab by this
   change.
+- **The platform BOM on `main` is `0.11.0-dev` again, and the build carries the BOM of `0.11.0-rc.2`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.0-rc.2.yaml`, sha256
+  `1c31634d18e5888d0974cf34e6b06c7bc6563c0d9035b326cc0e70ac41e72705`, the file of the tag byte for byte). The
+  second candidate's commit left the BOM at `0.11.0-rc.2`, and the release gate refuses only `-dev`. A platform
+  moved to that BOM (the candidate's drill) is not refused (`bom_unsupported`) under a later build while the file is
+  carried. Its pins are those of `main` and of `0.11.0-rc.1`, so the plan from it has one change, the release,
+  record only. `TestPreviousBOMsMoveCertManager` states that answer, and `TestUpgradeRollsNoMachine` compares seven
+  of the sixteen previous BOMs with the BOM on `main`, none of them rolling. No apply on such a platform was run on a
+  lab by this change.
 
 ## [0.11.0-rc.2] - 2026-11-22
 
