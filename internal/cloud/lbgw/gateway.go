@@ -398,15 +398,14 @@ func CheckService(s *Service, index int) (reason, message string) {
 	return "", ""
 }
 
-// refused audits a request the gateway refused as a whole.
+// refused audits a request the gateway refused as a whole, once per change (auditChange).
 func (h *Handler) refused(cred *Credential, method, path string, rf *Refusal) {
 	h.log().Warn("lb gateway: refused", "cluster", cred.ID, "method", method, "path", path, "reason", rf.Reason, "message", rf.Message)
-	h.audit(cred, rf.Message, map[string]any{"clusterId": cred.ID, "method": method, "path": path, "status": rf.Status, "reason": rf.Reason})
+	h.auditChange(cred, fmt.Sprintf("request %d %s %s %s %s", rf.Status, rf.Reason, method, path, rf.Message), rf.Message,
+		map[string]any{"clusterId": cred.ID, "method": method, "path": path, "status": rf.Status, "reason": rf.Reason})
 }
 
-// auditAnswer audits the Services and nodes an answer refused, once per change: the controller sends the same state
-// every few seconds, and the same refusal is one event, not one a poll.
-// ponytail: the last set is kept per process; a restart audits it once more.
+// auditAnswer audits the Services and nodes an answer refused (auditChange).
 func (h *Handler) auditAnswer(cred *Credential, ans *Answer) {
 	var items []string
 	for _, s := range ans.Services {
@@ -419,6 +418,13 @@ func (h *Handler) auditAnswer(cred *Credential, ans *Answer) {
 	}
 	slices.Sort(items)
 	key := strings.Join(items, ",")
+	h.auditChange(cred, key, "refused: "+key, map[string]any{"clusterId": cred.ID, "refused": items})
+}
+
+// auditChange audits a refusal when it differs from the cluster's last one: the controller sends its state every few
+// seconds, and the same refusal is one event, not one a poll. An empty key (nothing refused) is not audited.
+// ponytail: the last key is kept per process; a restart audits a standing refusal once more.
+func (h *Handler) auditChange(cred *Credential, key, msg string, meta map[string]any) {
 	h.mu.Lock()
 	if h.audited == nil {
 		h.audited = map[string]string{}
@@ -426,10 +432,9 @@ func (h *Handler) auditAnswer(cred *Credential, ans *Answer) {
 	changed := h.audited[cred.ID] != key
 	h.audited[cred.ID] = key
 	h.mu.Unlock()
-	if !changed || key == "" {
-		return
+	if changed && key != "" {
+		h.audit(cred, msg, meta)
 	}
-	h.audit(cred, "refused: "+key, map[string]any{"clusterId": cred.ID, "refused": items})
 }
 
 func (h *Handler) audit(cred *Credential, msg string, meta map[string]any) {

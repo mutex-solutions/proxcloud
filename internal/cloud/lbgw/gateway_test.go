@@ -216,32 +216,38 @@ func TestRequestRefusals(t *testing.T) {
 	}
 	ok, _ := json.Marshal(Request{Services: []Service{web("u1")}})
 	big := append([]byte(`{"services":[],"nodes":[],"pad":"`), bytes.Repeat([]byte("x"), 70<<10)...)
-	for name, tc := range map[string]struct {
-		method, path, proto string
-		body                []byte
-		status              int
-		reason              string
+	for _, tc := range []struct {
+		name, method, path, proto string
+		body                      []byte
+		status                    int
+		reason                    string
 	}{
-		"other path":      {http.MethodPut, "/lb/v1/other", "1", ok, http.StatusNotFound, ""},
-		"query":           {http.MethodPut, StatePath + "?project=p2", "1", ok, http.StatusNotFound, ""},
-		"get":             {http.MethodGet, StatePath, "1", nil, http.StatusMethodNotAllowed, ""},
-		"no protocol":     {http.MethodPut, StatePath, "", ok, http.StatusConflict, ReasonControllerTooOld},
-		"old protocol":    {http.MethodPut, StatePath, "0", ok, http.StatusConflict, ReasonControllerTooOld},
-		"too large":       {http.MethodPut, StatePath, "1", big, http.StatusRequestEntityTooLarge, ReasonTooLarge},
-		"unknown field":   {http.MethodPut, StatePath, "1", []byte(`{"services":[],"projectId":"p2"}`), http.StatusBadRequest, ReasonInvalid},
-		"bad node":        {http.MethodPut, StatePath, "1", []byte(`{"nodes":[{"address":"fd00::1"}]}`), http.StatusBadRequest, ReasonInvalid},
-		"duplicate uid":   {http.MethodPut, StatePath, "1", []byte(`{"services":[{"uid":"a","ports":[{"port":80,"nodePort":30080}]},{"uid":"a","ports":[{"port":81,"nodePort":30081}]}]}`), http.StatusBadRequest, ReasonInvalid},
-		"name not a name": {http.MethodPut, StatePath, "1", []byte(`{"services":[{"uid":"a","name":"x\ny","ports":[{"port":80,"nodePort":30080}]}]}`), http.StatusBadRequest, ReasonInvalid},
+		{"other path", http.MethodPut, "/lb/v1/other", "1", ok, http.StatusNotFound, ""},
+		{"query", http.MethodPut, StatePath + "?project=p2", "1", ok, http.StatusNotFound, ""},
+		{"get", http.MethodGet, StatePath, "1", nil, http.StatusMethodNotAllowed, ""},
+		{"no protocol", http.MethodPut, StatePath, "", ok, http.StatusConflict, ReasonControllerTooOld},
+		{"too large", http.MethodPut, StatePath, "1", big, http.StatusRequestEntityTooLarge, ReasonTooLarge},
+		{"unknown field", http.MethodPut, StatePath, "1", []byte(`{"services":[],"projectId":"p2"}`), http.StatusBadRequest, ReasonInvalid},
+		{"bad node", http.MethodPut, StatePath, "1", []byte(`{"nodes":[{"address":"fd00::1"}]}`), http.StatusBadRequest, ReasonInvalid},
+		{"duplicate uid", http.MethodPut, StatePath, "1", []byte(`{"services":[{"uid":"a","ports":[{"port":80,"nodePort":30080}]},{"uid":"a","ports":[{"port":81,"nodePort":30081}]}]}`), http.StatusBadRequest, ReasonInvalid},
+		{"name not a name", http.MethodPut, StatePath, "1", []byte(`{"services":[{"uid":"a","name":"x\ny","ports":[{"port":80,"nodePort":30080}]}]}`), http.StatusBadRequest, ReasonInvalid},
+		{"old protocol", http.MethodPut, StatePath, "0", ok, http.StatusConflict, ReasonControllerTooOld},
 	} {
 		w := do(tc.method, tc.path, tc.proto, tc.body)
 		var got map[string]string
 		_ = json.Unmarshal(w.Body.Bytes(), &got)
 		if w.Code != tc.status || got["reason"] != tc.reason {
-			t.Errorf("%s: %d %s", name, w.Code, w.Body)
+			t.Errorf("%s: %d %s", tc.name, w.Code, w.Body)
 		}
 	}
 	if r.portal.calls != 0 || len(r.events) != 10 {
 		t.Fatalf("portal reached %d times, %d audit events", r.portal.calls, len(r.events))
+	}
+	// An old controller polling: one event, not one a poll.
+	do(http.MethodPut, StatePath, "0", ok)
+	do(http.MethodPut, StatePath, "", ok)
+	if len(r.events) != 10 {
+		t.Fatalf("a repeated refusal: %d audit events", len(r.events))
 	}
 
 	var many Request
