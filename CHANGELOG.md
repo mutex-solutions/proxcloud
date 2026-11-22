@@ -59,7 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     lets through nothing but the answers of balanced flows; the unit loads the table first and switches forwarding
     off when it stops or fails to start. TCP is not connection-tracked, so HAProxy's traffic cannot fill the table.
   - **Only where it is used.** A load balancer without a UDP listener gets no file, no package and no service of
-    this, and its recorded hashes do not move. The first UDP listener installs `nftables` where the image lacks it;
+    this, and its recorded hashes do not move. The first UDP listener installs `nftables` where the image lacks it (that package alone: nothing already on a serving appliance is upgraded);
     removing the last one takes the service, the table and the files off again.
   - **Not on one VM.** A load balancer without high availability answers `400` "UDP needs a high-availability load
     balancer". A Kubernetes Service with a UDP port is still refused (`UDPNotSupported`) until the cluster
@@ -67,8 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **After a failover** the other appliance spreads clients afresh (the appliances do not sync their connections).
   - Tested in real guests of both appliance images (Debian 13 and Ubuntu 26.04 containers with systemd, keepalived,
     nftables and HAProxy, on the CI runner's kernel) with network namespaces for client, servers and gateway: the
-    reply path, the dead server, the dropped forwarding, the untracked TCP, the refused config. Run on the lab on
-    Ubuntu 26.04 appliances in the spike; a Debian 13 pair is part of the release drill.
+    reply path, the dead server, the dropped forwarding, the untracked TCP, the refused config. The method was
+    run by hand on the lab's Ubuntu 26.04 appliances in the spike of 2026-11-22; this code has run on no lab pair
+    yet: an Ubuntu 26.04 pair and a Debian 13 pair are part of the release drill.
 
 - **Managed platform: the code that builds sandboxes from the install settings, not offered yet**
   (`internal/platformlife/sandbox.go`, `sandbox_run.go`). `spec.sandbox` takes `placement` `shared`, `separate` or

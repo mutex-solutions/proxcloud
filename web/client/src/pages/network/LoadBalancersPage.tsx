@@ -637,9 +637,9 @@ export function LoadBalancerDetailPage() {
                 {p.protocol === "udp" && (
                   <p className="text-xs text-muted-foreground" data-testid={`pool-udp-${i}`}>
                     The servers see the load balancer's address, not the client's, and their security group must let the load balancer's
-                    private addresses in on the port, for UDP. The UDP datagram check sends random bytes to the port unless a payload is
-                    given, and takes a server out only when it stops answering pings (about 10 seconds) or answers "port unreachable":
-                    a closed port on a running server is not seen while the port has traffic, and a server whose firewall drops in silence
+                    private addresses in on the port, for UDP, and their pings (ICMP echo) for the UDP datagram check. The UDP datagram
+                    check sends random bytes to the port unless a payload is given, and takes a server out only when it stops
+                    answering pings (about 10 seconds) or answers "port unreachable": a closed port on a running server is not seen while the port has traffic, and a server whose firewall drops in silence
                     is never seen. For a real check give a payload the service answers and require the reply, or check a TCP or HTTP port
                     of the service. After a failover of the load balancer a client may reach another server.
                   </p>

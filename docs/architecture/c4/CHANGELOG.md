@@ -39,7 +39,10 @@ the kernel's `Documentation/networking/ipvs-sysctl.rst`. A second keepalived kee
 `docs/cloud-integration.md` ("UDP listeners"): `alpha`, the ping beside the UDP check, chain names that are no nft
 keywords, interface names read from the guest, the table before forwarding and `ip_forward` in no boot-time file,
 and the comparison of the appliance's files with the recorded hashes. The service exists only on a pair with a UDP
-listener, so no other balancer changes.
+listener, so no other balancer changes. Two rules came out of the review: the install line of the first UDP listener
+names `nftables` alone and upgrades nothing (apt would upgrade, and so restart, HAProxy and keepalived on an appliance
+in use), and an appliance that holds an LVS config its row records nothing of has the service taken off again, so
+forwarding is never on without a record that some pass looks after.
 ## 2026-11-22: the managed platform builds a sandbox node group or cluster from its settings (dark)
 
 **What changed:** no new container. Component "Platform installations" gains `internal/platformlife/sandbox.go` and

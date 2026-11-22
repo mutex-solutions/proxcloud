@@ -75,7 +75,7 @@ UDP has no connection to open, so the checks are different, and it matters which
 
 ## Let the traffic in
 
-The load balancer reaches your servers from its private addresses (one per VM; a replace gives new ones). The `default` security group already allows that. If a server uses other groups, open its port to the load balancer's network, for UDP when the pool is a UDP pool.
+The load balancer reaches your servers from its private addresses (one per VM; a replace gives new ones). The `default` security group already allows that. If a server uses other groups, open its port to the load balancer's network, for UDP when the pool is a UDP pool. The default check of a UDP pool also pings the server: let ICMP echo in from the load balancer's network as well, or the server never enters the pool (a check with a required reply, a TCP check or an HTTP check sends no ping).
 
 ## Health
 
