@@ -851,7 +851,7 @@ call for its own cluster, and minting it again rotates it.
 
 - Each Service is checked on its own, and a refused one gets a reason the controller turns into an Event: a UDP port
   from a controller that speaks protocol 1 refuses the whole Service (`UDPNotSupported`), a port that is neither TCP
-  nor UDP too (`ProtocolNotSupported`), the OpenStack annotation for an internal balancer (`InternalNotSupported`),
+  nor UDP too (`ProtocolNotSupported`), the annotation `service.beta.kubernetes.io/openstack-internal-load-balancer` (`InternalNotSupported`),
   annotations that contradict each other or are too many (`InvalidAnnotation`), IPv6 or dual stack
   (`IPFamilyNotSupported`), node port 0,
   a node port outside 30000-32767 or policy Local without a health port (`NoNodePort`), source ranges that do not fit
@@ -1004,7 +1004,7 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   allocated, minutes before a cluster's first Service answered; Kubernetes' own service controller also patches the
   status only with what a provider returns once its balancer is provisioned). An address already written stays while
   a later change is building and goes when the portal names none. `ipMode: Proxy` when the TCP ports' members get
-  the PROXY header (the annotation `proxcloud.io/lb-proxy-protocol` or OpenStack's name for it; the portal says
+  the PROXY header (the annotation `proxcloud.io/lb-proxy-protocol` or OCCM's name for it; the portal says
   which mode, a portal of v0.11.0 leaves it to the own annotation's `"true"`) and `VIP` otherwise. **With `VIP`, a client inside the cluster never
   reaches the balancer**: kube-proxy treats an address with that mode as one of the Service's own and sends a pod's or
   a node's connection to it straight to an endpoint. Such a client does not see an outage of the pair or a switch
@@ -1033,8 +1033,9 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   from the next turn on, since that portal refuses a field it does not know. `-interval` is unchanged, so this
   release's image runs under chart 0.1.17.
 
-**Load balancers of a cluster's Services: UDP, affinity, annotations, and how it differs from OpenStack.** From
-v0.11.1 the gateway speaks protocol 2, which only adds to protocol 1: per Service its annotations of the load
+**Load balancers of a cluster's Services: UDP, affinity, annotations, and how it differs from OCCM.** OCCM is
+the cloud controller manager whose annotations are named `loadbalancer.openstack.org/...`: the one tenants' charts for
+load balancer Services are mostly written for. From v0.11.1 the gateway speaks protocol 2, which only adds to protocol 1: per Service its annotations of the load
 balancer's names, its `sessionAffinity` with the timeout, and the nodes its node selector picks; in the answer the
 `ipMode` of the address and the Events to say on the Service. A controller of v0.11.0 sends none of this and is
 served as before.
@@ -1054,8 +1055,8 @@ served as before.
 - **`externalTrafficPolicy: Local`** checks every port's members, TCP and UDP, with an HTTP GET on
   `healthCheckNodePort`, which kube-proxy answers 200 only on a node that holds a pod of the Service. It narrows the
   members and keeps no client address: over UDP the node sees the appliance's tenant address, over TCP too unless
-  the PROXY header is on (real source preservation would need the nodes' return path through the appliance; Octavia's
-  amphora has the same limit).
+  the PROXY header is on (real source preservation would need the nodes' return path through the appliance; the
+  load balancer OCCM drives has the same limit).
 - **The UDP check for policy Cluster** is keepalived's `UDP_CHECK` with a ping beside it. It sends a datagram of
   random bytes to the node port every 5 s, which kube-proxy hands to some pod of the Service: an application that
   cannot take junk bytes sets `proxcloud.io/lb-enable-health-monitor: "false"`. A closed port is not seen under
@@ -1063,19 +1064,19 @@ served as before.
   holds per node, not for the listener.
 
 Annotations. The own name is `proxcloud.io/lb-<knob>`; `loadbalancer.openstack.org/<alias>` is obeyed where it means
-the same as in the OpenStack cloud controller manager (cloud-provider-openstack v1.37.1,
-`pkg/openstack/loadbalancer.go`:61-107), so a chart or manifest moved from an OpenStack cluster behaves the same
+the same as in OCCM (v1.37.1, `loadbalancer.go`:61-107; the repository and the lines are named in
+[the C4 change log](architecture/c4/CHANGELOG.md), 2026-11-23), so a chart or manifest moved from a cluster that runs OCCM behaves the same
 without an edit. With both set the own name wins. The portal reads them (`internal/cloud/lbgw/annotations.go`), so a
 new knob ships with the portal and needs no new controller; the node selector alone is read by the controller, which
 has the nodes' labels.
 
 | `proxcloud.io/lb-` | `loadbalancer.openstack.org/` | Values | Effect |
 |---|---|---|---|
-| `proxy-protocol` | `proxy-protocol` | own name: `true` or `v2` = version 2, `v1`; OpenStack's: `true` or `v1` = version 1, `v2`; `false` | PROXY header to the members of the TCP ports; `ipMode: Proxy` |
+| `proxy-protocol` | `proxy-protocol` | own name: `true` or `v2` = version 2, `v1`; OCCM's: `true` or `v1` = version 1, `v2`; `false` | PROXY header to the members of the TCP ports; `ipMode: Proxy` |
 | `method` | `lb-method` | `roundrobin`, `leastconn`, `source`, or `ROUND_ROBIN`, `LEAST_CONNECTIONS`, `SOURCE_IP` (either spelling under either name) | the algorithm; anything else (`SOURCE_IP_PORT`) raises `LoadBalancerLbMethodUnknown` and balances round robin |
 | `connection-limit` | `connection-limit` | 1 to 20000, `-1` = none | open connections per listener; per node on a UDP port |
 | `timeout-client-data`, `timeout-member-connect`, `timeout-member-data` | the same | 1000 to 86400000 ms | the three timeouts of the TCP ports; unset, the cluster balancer's hour of idle time holds |
-| `x-forwarded-for` | `x-forwarded-for` | `true` | the TCP ports become HTTP listeners that add `X-Forwarded-For`; refused together with the PROXY header (`InvalidAnnotation`), as OpenStack refuses it |
+| `x-forwarded-for` | `x-forwarded-for` | `true` | the TCP ports become HTTP listeners that add `X-Forwarded-For`; refused together with the PROXY header (`InvalidAnnotation`), as OCCM refuses it |
 | `enable-health-monitor` | `enable-health-monitor` | `true`, `false` | `false` = no health check; not obeyed, with an Event, for policy Local |
 | `health-monitor-delay`, `-timeout`, `-max-retries`, `-max-retries-down` | the same | 1 to 300 s, 1 to 300 s, 1 to 10, 1 to 10 | the check's interval, timeout, good checks to come up, bad checks to go down. A UDP port takes no "up" count (keepalived brings a node back at its first good check) and goes down after 2 bad checks at least |
 | `node-selector` | `node-selector` | `key=value, key` | only the nodes with every one of these labels are behind the Service; none = no member and `UnAvailableLoadBalancer` |
@@ -1093,31 +1094,31 @@ has the nodes' labels.
   the tenant network use `loadBalancerClass: proxcloud.io/internal` (MetalLB, default mode).
 - A Service sends at most 32 such annotations of at most 256 characters each; more refuses it (`InvalidAnnotation`).
 
-The thirteen places where a Service behaves differently than with the OpenStack cloud controller manager, on
+The thirteen places where a Service behaves differently than with OCCM, on
 purpose:
 
 1. **One pair per cluster.** All Services of a cluster share one appliance pair; each still has an address of its
-   own, so a user sees what OpenStack shows, one external IP per Service.
-2. **No Octavia objects.** Names, ids, tags, flavors and zones of load balancers, listeners and pools do not exist,
+   own, so a user sees what OCCM shows, one external IP per Service.
+2. **No objects of OCCM's load balancer.** Names, ids, tags, flavors and zones of load balancers, listeners and pools do not exist,
    so the annotations about them have nothing to act on.
-3. **Which Services are owned.** Class `proxcloud.io/lb`, and in default mode also no class; OpenStack owns only
+3. **Which Services are owned.** Class `proxcloud.io/lb`, and in default mode also no class; OCCM owns only
    Services without a class.
-4. **The health check is on by default**; OpenStack's is off (`create-monitor` false) unless asked for.
+4. **The health check is on by default**; OCCM's is off (`create-monitor` false) unless asked for.
 5. **Other defaults.** A check every 3 s, 2 good checks up, 2 bad ones down, and an idle timeout of an hour;
-   OpenStack: 5 s, 3 s timeout, 1 up, 3 down, and 50 s. The annotations set OpenStack's figures.
-6. **TLS.** `default-tls-container-ref` names a Barbican container and is not obeyed. OpenStack turns every port of
+   OCCM: 5 s, 3 s timeout, 1 up, 3 down, and 50 s. The annotations set OCCM's figures.
+6. **TLS.** `default-tls-container-ref` names a container of OCCM's secret store and is not obeyed. OCCM turns every port of
    such a Service, UDP too, into a listener that ends TLS; here TLS from a Service's `kubernetes.io/tls` Secret is
    a change of its own, for TCP ports only. Until then a Service's TLS passes through a TCP port.
 7. **`proxcloud.io/lb-proxy-protocol: "true"` is version 2**, as v0.11.0 shipped it;
-   `loadbalancer.openstack.org/proxy-protocol: "true"` is version 1, as OpenStack reads it.
-8. **A port without a node port refuses the Service** (`NoNodePort`); OpenStack makes a pool without members.
-9. **`spec.loadBalancerIP` is not obeyed** (`LoadBalancerIPIgnored`); OpenStack takes any free floating IP of the
+   `loadbalancer.openstack.org/proxy-protocol: "true"` is version 1, as OCCM reads it.
+8. **A port without a node port refuses the Service** (`NoNodePort`); OCCM makes a pool without members.
+9. **`spec.loadBalancerIP` is not obeyed** (`LoadBalancerIPIgnored`); OCCM takes any free floating IP of the
    project.
 10. **No shared balancer**: `load-balancer-id` is not obeyed, each Service has its own address.
-11. **`SOURCE_IP_PORT` balances round robin**, with the Event OpenStack raises for a method it cannot set.
+11. **`SOURCE_IP_PORT` balances round robin**, with the Event OCCM raises for a method it cannot set.
 12. **The finalizer is `proxcloud.io/load-balancer`**; `service.kubernetes.io/load-balancer-cleanup` belongs to a
     cloud controller manager.
-13. **No operator defaults file** for the method or the check's figures (OpenStack's `cloud.conf`); the provider's
+13. **No operator defaults file** for the method or the check's figures (OCCM's `cloud.conf`); the provider's
     config can gain them later.
 
 Modes. A **new** cluster gets the controller in **default** mode when every gate holds: this portal has the gateway's

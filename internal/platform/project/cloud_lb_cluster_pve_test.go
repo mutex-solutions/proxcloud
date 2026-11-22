@@ -139,7 +139,7 @@ func TestLBClusterServiceSpecOfProtocol1IsUnchanged(t *testing.T) {
 // k8sServices are Services as a protocol 2 controller sends them, after the gateway's checks: a DNS server on TCP 53
 // and UDP 53 (one node port for both, as Kubernetes allocates it) with affinity, a selector and policy Local; a game
 // server on UDP with every figure an annotation can set; a web Service with the forwarded-for header, a method, a
-// limit and the three timeouts by OpenStack's names; and one with PROXY version 1 and no health check.
+// limit and the three timeouts by OCCM's names; and one with PROXY version 1 and no health check.
 func k8sServices() []lbgw.Service {
 	return []lbgw.Service{
 		{UID: "dns", Ports: []lbgw.Port{{Protocol: "TCP", Port: 53, NodePort: 30053}, {Protocol: "UDP", Port: 53, NodePort: 30053}},

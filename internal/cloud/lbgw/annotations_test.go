@@ -21,9 +21,9 @@ func annotated(kv ...string) *Service {
 	return &s
 }
 
-// Every knob, by its own name and by the OpenStack name, gives the same option; the one exception is the PROXY
-// header's "true", version 2 under the own name (as v0.11.0 shipped it) and version 1 under OpenStack's (as the
-// OpenStack cloud controller manager reads it).
+// Every knob, by its own name and by OCCM's name, gives the same option; the one exception is the PROXY
+// header's "true", version 2 under the own name (as v0.11.0 shipped it) and version 1 under OCCM's (as the
+// OCCM reads it).
 func TestEveryAnnotationByOwnNameAndByAlias(t *testing.T) {
 	cases := []struct {
 		knob, alias, value string
@@ -57,7 +57,7 @@ func TestEveryAnnotationByOwnNameAndByAlias(t *testing.T) {
 		if aliases[c.knob] != c.alias {
 			t.Errorf("%s: alias %q, want %q", c.knob, aliases[c.knob], c.alias)
 		}
-		for _, name := range []string{OwnPrefix + c.knob, OpenStackPrefix + c.alias} {
+		for _, name := range []string{OwnPrefix + c.knob, AliasPrefix + c.alias} {
 			got, reason, msg := ServiceOptions(annotated(name, c.value))
 			if reason != "" || !reflect.DeepEqual(got, c.want) {
 				t.Errorf("%s: %q = %+v (%s %s), want %+v", name, c.value, got, reason, msg, c.want)
@@ -66,7 +66,7 @@ func TestEveryAnnotationByOwnNameAndByAlias(t *testing.T) {
 	}
 	// keep-address is read under both names and says that it is not served yet.
 	seen[KnobKeepAddress] = true
-	for _, name := range []string{OwnPrefix + "keep-address", OpenStackPrefix + "keep-floatingip"} {
+	for _, name := range []string{OwnPrefix + "keep-address", AliasPrefix + "keep-floatingip"} {
 		got, reason, _ := ServiceOptions(annotated(name, "true"))
 		if reason != "" || !got.KeepAddress || len(got.Events) != 1 || got.Events[0].Reason != ReasonKeepAddressNotServed || !strings.Contains(got.Events[0].Message, name) {
 			t.Errorf("%s: %+v %s", name, got, reason)
@@ -78,14 +78,14 @@ func TestEveryAnnotationByOwnNameAndByAlias(t *testing.T) {
 		}
 	}
 
-	// "true": version 2 by the own name, version 1 by OpenStack's. With both set the own name wins.
+	// "true": version 2 by the own name, version 1 by OCCM's. With both set the own name wins.
 	if o, _, _ := ServiceOptions(annotated(OwnPrefix+"proxy-protocol", "true")); o.ProxyVersion != 2 {
 		t.Errorf("own true = %+v", o)
 	}
-	if o, _, _ := ServiceOptions(annotated(OpenStackPrefix+"proxy-protocol", "true")); o.ProxyVersion != 1 {
+	if o, _, _ := ServiceOptions(annotated(AliasPrefix+"proxy-protocol", "true")); o.ProxyVersion != 1 {
 		t.Errorf("alias true = %+v", o)
 	}
-	if o, _, _ := ServiceOptions(annotated(OwnPrefix+"method", "source", OpenStackPrefix+"lb-method", "LEAST_CONNECTIONS")); o.Method != "source" {
+	if o, _, _ := ServiceOptions(annotated(OwnPrefix+"method", "source", AliasPrefix+"lb-method", "LEAST_CONNECTIONS")); o.Method != "source" {
 		t.Errorf("both names: %+v, want the own one", o)
 	}
 	// Protocol 1's flag is version 2, and an annotation the portal reads itself overrides it.
@@ -106,14 +106,14 @@ func TestEveryAnnotationByOwnNameAndByAlias(t *testing.T) {
 }
 
 // What is not obeyed is said: every other annotation of the two prefixes in ONE Event, a value that is not understood
-// in another, an unknown method under OpenStack's own reason. The Service is served.
+// in another, an unknown method under OCCM's own reason. The Service is served.
 func TestAnnotationsThatAreNotObeyed(t *testing.T) {
 	other := []string{"availability-zone", "class", "default-tls-container-ref", "enable-ingress-hostname", "flavor-id", "floating-network-id",
 		"floating-subnet", "floating-subnet-id", "floating-subnet-tags", "hostname", "listener-tags", "load-balancer-address", "load-balancer-id",
 		"load-balancer-tags", "member-subnet-id", "network-id", "pool-tags", "port-id", "subnet-id", "timeout-tcp-inspect"}
 	var kv, names []string
 	for _, n := range other {
-		kv, names = append(kv, OpenStackPrefix+n, "x"), append(names, OpenStackPrefix+n)
+		kv, names = append(kv, AliasPrefix+n, "x"), append(names, AliasPrefix+n)
 	}
 	kv, names = append(kv, OwnPrefix+"tls-secret", "web-tls"), append(names, OwnPrefix+"tls-secret")
 	s := annotated(kv...)
@@ -125,15 +125,15 @@ func TestAnnotationsThatAreNotObeyed(t *testing.T) {
 	if !strings.Contains(o.Events[0].Message, strings.Join(names, ", ")) {
 		t.Fatalf("the Event does not name them all, sorted: %s", o.Events[0].Message)
 	}
-	// OpenStack's inspect timeout at its default asks for nothing.
-	if o, _, _ := ServiceOptions(annotated(OpenStackPrefix+"timeout-tcp-inspect", "0")); len(o.Events) != 0 {
+	// OCCM's inspect timeout at its default asks for nothing.
+	if o, _, _ := ServiceOptions(annotated(AliasPrefix+"timeout-tcp-inspect", "0")); len(o.Events) != 0 {
 		t.Errorf("timeout-tcp-inspect 0: %+v", o.Events)
 	}
 
 	for name, value := range map[string]string{
-		OwnPrefix + "connection-limit": "0", OpenStackPrefix + "connection-limit": "20001", OwnPrefix + "timeout-client-data": "999",
-		OpenStackPrefix + "timeout-member-data": "fast", OwnPrefix + "health-monitor-delay": "301", OpenStackPrefix + "health-monitor-max-retries": "11",
-		OwnPrefix + "x-forwarded-for": "yes", OpenStackPrefix + "proxy-protocol": "v3", OwnPrefix + "enable-health-monitor": "off",
+		OwnPrefix + "connection-limit": "0", AliasPrefix + "connection-limit": "20001", OwnPrefix + "timeout-client-data": "999",
+		AliasPrefix + "timeout-member-data": "fast", OwnPrefix + "health-monitor-delay": "301", AliasPrefix + "health-monitor-max-retries": "11",
+		OwnPrefix + "x-forwarded-for": "yes", AliasPrefix + "proxy-protocol": "v3", OwnPrefix + "enable-health-monitor": "off",
 	} {
 		o, reason, _ := ServiceOptions(annotated(name, value))
 		if reason != "" || len(o.Events) != 1 || o.Events[0].Reason != ReasonInvalidAnnotation || !strings.Contains(o.Events[0].Message, name) ||
@@ -145,14 +145,14 @@ func TestAnnotationsThatAreNotObeyed(t *testing.T) {
 			t.Errorf("%s=%s set something: %+v", name, value, o)
 		}
 	}
-	for _, name := range []string{OwnPrefix + "method", OpenStackPrefix + "lb-method"} {
+	for _, name := range []string{OwnPrefix + "method", AliasPrefix + "lb-method"} {
 		o, reason, _ := ServiceOptions(annotated(name, "SOURCE_IP_PORT"))
 		if reason != "" || o.Method != "" || len(o.Events) != 1 || o.Events[0].Reason != ReasonLbMethodUnknown {
 			t.Errorf("%s: %s %+v", name, reason, o)
 		}
 	}
 	// Policy Local keeps its check, and says so.
-	local := annotated(OpenStackPrefix+"enable-health-monitor", "false")
+	local := annotated(AliasPrefix+"enable-health-monitor", "false")
 	local.ExternalTrafficPolicy = "Local"
 	if o, _, _ := ServiceOptions(local); o.NoMonitor || len(o.Events) != 1 || o.Events[0].Reason != ReasonInvalidAnnotation {
 		t.Errorf("policy Local without a check: %+v", o)
@@ -176,7 +176,7 @@ func TestAnnotationsThatRefuseTheService(t *testing.T) {
 		"internal":                                      {annotated(InternalAnnotation, "true"), ReasonInternalNotSupported},
 		"internal, as a bool":                           {annotated(InternalAnnotation, "True"), ReasonInternalNotSupported},
 		"forwarded-for and PROXY, own names":            {annotated(OwnPrefix+"x-forwarded-for", "true", OwnPrefix+"proxy-protocol", "true"), ReasonInvalidAnnotation},
-		"forwarded-for and PROXY, OpenStack's names":    {annotated(OpenStackPrefix+"x-forwarded-for", "true", OpenStackPrefix+"proxy-protocol", "v2"), ReasonInvalidAnnotation},
+		"forwarded-for and PROXY, OCCM's names":         {annotated(AliasPrefix+"x-forwarded-for", "true", AliasPrefix+"proxy-protocol", "v2"), ReasonInvalidAnnotation},
 		"too many":                                      {many, ReasonInvalidAnnotation},
 		"a value too long":                              {annotated(OwnPrefix+"method", strings.Repeat("x", MaxAnnotationValue+1)), ReasonInvalidAnnotation},
 		"a name that is not a load balancer annotation": {annotated("example.com/owner", "me"), ReasonInvalidAnnotation},
@@ -213,7 +213,7 @@ func TestProtocol2(t *testing.T) {
 	internal := web("internal")
 	internal.Annotations = map[string]string{InternalAnnotation: "true"}
 	proxy := web("proxy")
-	proxy.Annotations = map[string]string{OpenStackPrefix + "proxy-protocol": "true", OpenStackPrefix + "flavor-id": "f1", OpenStackPrefix + "lb-method": "SOURCE_IP_PORT"}
+	proxy.Annotations = map[string]string{AliasPrefix + "proxy-protocol": "true", AliasPrefix + "flavor-id": "f1", AliasPrefix + "lb-method": "SOURCE_IP_PORT"}
 	sel := web("selected")
 	sel.Nodes = &[]string{"10.0.0.11"}
 	badSel := web("badsel")
@@ -244,7 +244,7 @@ func TestProtocol2(t *testing.T) {
 		t.Errorf("ipMode: %+v", by)
 	}
 	if ev := by["proxy"].Events; len(ev) != 2 || ev[0].Reason != ReasonLbMethodUnknown || ev[1].Reason != ReasonAnnotationNotSupported ||
-		!strings.Contains(ev[1].Message, OpenStackPrefix+"flavor-id") {
+		!strings.Contains(ev[1].Message, AliasPrefix+"flavor-id") {
 		t.Errorf("events: %+v", ev)
 	}
 	for _, s := range r.portal.got {

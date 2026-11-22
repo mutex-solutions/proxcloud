@@ -216,7 +216,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 	}
 
 	// Protocol 2: the Service gains UDP on its port's number (the same node port, as Kubernetes allocates it), an
-	// affinity and a method by OpenStack's name. It keeps its one address; the UDP port goes to the appliances' LVS
+	// affinity and a method by OCCM's name. It keeps its one address; the UDP port goes to the appliances' LVS
 	// and opens in the firewall beside the TCP one; nothing of it reaches HAProxy. When the UDP port goes, so does
 	// the UDP service of both appliances, and the config is the one it was.
 	tcpOnly := f.files[len(f.files)-1]

@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Kubernetes Services: UDP, session affinity and the layer 4 annotations on the cluster's load balancer**
   (`internal/cloud/lbgw`, `cmd/lb-controller`, `internal/platform/project/cloud_lb_cluster_pve.go`; the full table
-  and the differences from OpenStack: [managed-k8s.md](docs/managed-k8s.md)). The gateway speaks protocol 2, which
+  and the differences from OCCM: [managed-k8s.md](docs/managed-k8s.md)). The gateway speaks protocol 2, which
   only adds to protocol 1 (a Service's annotations, affinity and selected nodes in the request, its `ipMode` and
   Events in the answer); a controller of v0.11.0 is served as before.
   - A Service's UDP ports are served by the pair's LVS, and a TCP and a UDP port of one number share the Service's
@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `lb-connection-limit`, `lb-timeout-client-data`, `lb-timeout-member-connect`, `lb-timeout-member-data`,
     `lb-x-forwarded-for`, `lb-enable-health-monitor`, `lb-health-monitor-delay`, `-timeout`, `-max-retries`,
     `-max-retries-down`, `lb-node-selector`. The `loadbalancer.openstack.org/` annotations of the same meaning are
-    obeyed as aliases, so a manifest from an OpenStack cluster needs no edit. Every other annotation of the two
+    obeyed as aliases, so a manifest from a cluster that runs OCCM needs no edit. Every other annotation of the two
     prefixes is named in one Warning Event `AnnotationNotSupported`; a value that is not understood is named in
     `InvalidAnnotation` and the default holds; `service.beta.kubernetes.io/openstack-internal-load-balancer: "true"`
     refuses the Service (`InternalNotSupported`), so it never gets a public address. `lb-keep-address`

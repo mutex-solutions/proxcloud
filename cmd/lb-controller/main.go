@@ -517,8 +517,8 @@ func addressesOf(nodes []lbgw.Node) []string {
 	return out
 }
 
-// parseSelector reads a node selector annotation as the OpenStack cloud controller manager does ("key=value, key":
-// cloud-provider-openstack v1.37.1 pkg/openstack/loadbalancer.go:467-470 and matchNodeLabels, :2360-2373): terms
+// parseSelector reads a node selector annotation as OCCM does ("key=value, key":
+// OCCM v1.37.1 loadbalancer.go:467-470 and matchNodeLabels, :2360-2373): terms
 // between commas, each a label that must have that value, or without "=" a label that must be there.
 func parseSelector(v string) map[string]string {
 	out := map[string]string{}

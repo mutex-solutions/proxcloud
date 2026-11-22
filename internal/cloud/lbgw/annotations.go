@@ -6,11 +6,11 @@ package lbgw
 // the controller reads itself is the node selector, which needs the nodes' labels (Annotation).
 //
 // The own name is proxcloud.io/lb-<knob>. A loadbalancer.openstack.org/<alias> annotation is obeyed where it means the
-// same thing here as in the OpenStack cloud controller manager (cloud-provider-openstack v1.37.1,
-// pkg/openstack/loadbalancer.go:61-107 and docs/openstack-cloud-controller-manager/expose-applications-using-
-// loadbalancer-type-service.md), so a manifest moved from an OpenStack cluster behaves the same without an edit. When
-// both names are set the own one wins. Every other annotation of the two prefixes is named in one Warning Event
-// (AnnotationNotSupported): nothing is ignored in silence.
+// same thing here as in OCCM, the cloud controller manager those names belong to (v1.37.1, loadbalancer.go:61-107
+// and its guide to Services of type LoadBalancer; the repository and every line this file follows are named in
+// docs/architecture/c4/CHANGELOG.md, 2026-11-23), so a manifest moved from a cluster that runs OCCM behaves the same
+// without an edit. When both names are set the own one wins. Every other annotation of the two prefixes is named in
+// one Warning Event (AnnotationNotSupported): nothing is ignored in silence.
 
 import (
 	"fmt"
@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	OwnPrefix       = "proxcloud.io/lb-"
-	OpenStackPrefix = "loadbalancer.openstack.org/"
-	// InternalAnnotation asks OpenStack for a balancer without a floating IP. Here the pair's addresses are public, so a
+	OwnPrefix   = "proxcloud.io/lb-"
+	AliasPrefix = "loadbalancer.openstack.org/"
+	// InternalAnnotation asks OCCM for a balancer without a floating IP. Here the pair's addresses are public, so a
 	// Service that sets it to true is refused and never gets one (ReasonInternalNotSupported).
 	InternalAnnotation = "service.beta.kubernetes.io/openstack-internal-load-balancer"
 
@@ -42,7 +42,7 @@ const (
 const (
 	ReasonAnnotationNotSupported = "AnnotationNotSupported"
 	ReasonInvalidAnnotation      = "InvalidAnnotation"
-	// The OpenStack cloud controller manager's name for a refused lb-method (pkg/openstack/events.go:26).
+	// OCCM's name for a refused lb-method (events.go:26).
 	ReasonLbMethodUnknown = "LoadBalancerLbMethodUnknown"
 	// ReasonKeepAddressNotServed: lb-keep-address is read and not acted on yet.
 	ReasonKeepAddressNotServed = "KeepAddressNotServed"
@@ -83,17 +83,17 @@ var methods = map[string]string{"roundrobin": "roundrobin", "leastconn": "leastc
 
 // SentAnnotation: the controller sends a Service's annotation of this name.
 func SentAnnotation(key string) bool {
-	return strings.HasPrefix(key, OwnPrefix) || strings.HasPrefix(key, OpenStackPrefix) || key == InternalAnnotation
+	return strings.HasPrefix(key, OwnPrefix) || strings.HasPrefix(key, AliasPrefix) || key == InternalAnnotation
 }
 
-// Annotation reads one knob: the own name, then the OpenStack alias. name is the annotation that was read.
+// Annotation reads one knob: the own name, then OCCM's alias. name is the annotation that was read.
 func Annotation(ann map[string]string, knob string) (value, name string, ok bool) {
 	if v, ok := ann[OwnPrefix+knob]; ok {
 		return strings.TrimSpace(v), OwnPrefix + knob, true
 	}
 	if a := aliases[knob]; a != "" {
-		if v, ok := ann[OpenStackPrefix+a]; ok {
-			return strings.TrimSpace(v), OpenStackPrefix + a, true
+		if v, ok := ann[AliasPrefix+a]; ok {
+			return strings.TrimSpace(v), AliasPrefix + a, true
 		}
 	}
 	return "", "", false
@@ -141,7 +141,7 @@ func (o Options) IPMode(s *Service) string {
 }
 
 // ServiceOptions reads a Service's annotations and affinity. A reason refuses the Service: the internal annotation,
-// too many or too long annotations, the forwarded-for header together with PROXY (as OpenStack refuses it,
+// too many or too long annotations, the forwarded-for header together with PROXY (as OCCM refuses it,
 // loadbalancer.go:1627-1631). A value that is not understood is not obeyed and named in an Event; the Service is
 // served with the default, since refusing it would give its address back over a typing mistake.
 func ServiceOptions(s *Service) (o Options, reason, message string) {
@@ -190,7 +190,7 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 		o.ProxyVersion = 2
 	}
 	if v, name, ok := Annotation(ann, KnobProxyProtocol); ok {
-		// The own name's "true" is version 2, as it shipped in v0.11.0; OpenStack's "true" is version 1
+		// The own name's "true" is version 2, as it shipped in v0.11.0; OCCM's "true" is version 1
 		// (loadbalancer.go:531-542).
 		own := strings.HasPrefix(name, OwnPrefix)
 		switch strings.ToLower(v) {
@@ -216,7 +216,7 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 				"%s: %q is not roundrobin, leastconn or source (ROUND_ROBIN, LEAST_CONNECTIONS, SOURCE_IP): the Service is balanced round robin", name, v)})
 		}
 	}
-	if v, _, ok := Annotation(ann, KnobConnectionLimit); !ok || v != "-1" { // -1 is OpenStack's "no limit"
+	if v, _, ok := Annotation(ann, KnobConnectionLimit); !ok || v != "-1" { // -1 is OCCM's "no limit"
 		o.ConnectionLimit = number(KnobConnectionLimit, 1, maxConnectionLimit, fmt.Sprintf("-1 (no limit) or 1 to %d", maxConnectionLimit))
 	}
 	const ms = "1000 to 86400000 milliseconds (a second to a day)"
@@ -229,7 +229,7 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 	}
 	if on, set := flag(KnobEnableHealthMonitor); set && !on {
 		if s.ExternalTrafficPolicy == "Local" {
-			// "A health monitor is required for services with externalTrafficPolicy: Local" (OpenStack's guide).
+			// "A health monitor is required for services with externalTrafficPolicy: Local" (OCCM's guide).
 			invalid = append(invalid, "the health monitor stays on: externalTrafficPolicy Local needs it to find the nodes that hold a pod")
 		} else {
 			o.NoMonitor = true
@@ -260,12 +260,12 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 	// What is left: names of the two prefixes that are no knob here.
 	known := map[string]bool{InternalAnnotation: true}
 	for knob, alias := range aliases {
-		known[OwnPrefix+knob], known[OpenStackPrefix+alias] = true, true
+		known[OwnPrefix+knob], known[AliasPrefix+alias] = true, true
 	}
-	// OpenStack's fourth timeout has no counterpart: HAProxy inspects nothing of a TCP stream here. Its default, 0,
+	// OCCM's fourth timeout has no counterpart: HAProxy inspects nothing of a TCP stream here. Its default, 0,
 	// asks for nothing.
-	if strings.TrimSpace(ann[OpenStackPrefix+"timeout-tcp-inspect"]) == "0" {
-		known[OpenStackPrefix+"timeout-tcp-inspect"] = true
+	if strings.TrimSpace(ann[AliasPrefix+"timeout-tcp-inspect"]) == "0" {
+		known[AliasPrefix+"timeout-tcp-inspect"] = true
 	}
 	var unknown []string
 	for k := range ann {
@@ -281,7 +281,7 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 		slices.Sort(unknown)
 		o.Events = append(o.Events, Event{Type: "Warning", Reason: ReasonAnnotationNotSupported,
 			Message: "The load balancer does not obey these annotations: " + strings.Join(unknown, ", ") +
-				". The Kubernetes guide lists the ones it obeys and how it differs from an OpenStack load balancer"})
+				". The Kubernetes guide lists the ones it obeys"})
 	}
 	return o, "", ""
 }

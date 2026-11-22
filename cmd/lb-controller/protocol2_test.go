@@ -152,7 +152,7 @@ func TestServiceWireOfProtocol2(t *testing.T) {
 		t.Errorf("selector pool=edge, public: %v", s[0].Nodes)
 	}
 	if s[1].Nodes == nil || !slices.Equal(*s[1].Nodes, []string{"10.0.0.13"}) || s[1].SessionAffinity != "" {
-		t.Errorf("selector by OpenStack's name: %+v", s[1])
+		t.Errorf("selector by OCCM's name: %+v", s[1])
 	}
 	if s[2].Nodes == nil || len(*s[2].Nodes) != 0 {
 		t.Errorf("a selector that matches no node is an empty list, not none: %v", s[2].Nodes)
@@ -201,7 +201,7 @@ func TestEventsOfProtocol2(t *testing.T) {
 	if ev := f.events[1]; ev["type"] != "Warning" || ev["message"] != notSupported.Message {
 		t.Fatalf("the portal's Event: %v", ev)
 	}
-	// OpenStack's annotation is not the controller's to read: the portal said Proxy.
+	// OCCM's annotation is not the controller's to read: the portal said Proxy.
 	if ing := ingress(f.svc("web", "shop")); len(ing) != 1 || ing[0].(map[string]any)["ipMode"] != "Proxy" {
 		t.Fatalf("ingress %v", ing)
 	}
