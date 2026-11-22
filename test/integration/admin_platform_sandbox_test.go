@@ -69,10 +69,11 @@ func TestPlatformSandboxProviderRows(t *testing.T) {
 	}
 	// The installer's sandbox cluster on the provider: nothing of it is overwritten or taken away.
 	other := &platformlife.Installation{ID: "pi-1", ServiceID: "svc-installer"}
-	for _, s := range []*platformlife.SandboxSite{site(""), {Range: "192.168.140.64/28"}} {
-		if err := h.PlatformSandboxSite(ctx, other, s); !errors.Is(err, platformlife.ErrProviderConflict) {
-			t.Fatalf("over the installer's block: %v", err)
-		}
+	if err := h.PlatformSandboxSite(ctx, other, site("")); !errors.Is(err, platformlife.ErrProviderConflict) {
+		t.Fatalf("over the installer's block: %v", err)
+	}
+	if err := h.PlatformSandboxSite(ctx, other, &platformlife.SandboxSite{Range: "192.168.140.64/28"}); err != nil {
+		t.Fatalf("a removal beside the installer's block: %v", err)
 	}
 	if inst, _ := esSvc.Get(ctx, "svc-installer"); inst == nil || len(inst.PVENetworkConfig().SandboxCIDRs) != 1 {
 		t.Fatalf("the installer's provider row changed: %+v", inst)

@@ -53,9 +53,10 @@ func TestApplySandboxSite(t *testing.T) {
 		if _, err := applySandboxSite(inst, "pi-1", site(""), seal); !errors.Is(err, platformlife.ErrProviderConflict) || inst["config"].(map[string]any)["sandbox"].(map[string]any)["pool"] != "proxcloud-sandbox" {
 			t.Fatalf("over a block of owner %q: %v %v", other, err, inst)
 		}
-		// The same refusal for a removal: a run never takes away another owner's block.
-		if _, err := applySandboxSite(inst, "pi-1", &platformlife.SandboxSite{Range: "192.168.140.64/28"}, seal); !errors.Is(err, platformlife.ErrProviderConflict) {
-			t.Fatalf("removal over a block of owner %q: %v", other, err)
+		// A removal takes nothing of another owner's away, and does not fail for it (a Remove must still end).
+		if changed, err := applySandboxSite(inst, "pi-1", &platformlife.SandboxSite{Range: "192.168.140.64/28"}, seal); err != nil || changed ||
+			inst["config"].(map[string]any)["sandbox"] == nil || len(inst["config"].(map[string]any)["network"].(map[string]any)["sandboxCidrs"].([]any)) != 1 {
+			t.Fatalf("removal beside a block of owner %q: changed %v, %v, %v", other, changed, err, inst)
 		}
 	}
 	if !reflect.DeepEqual(before, doc["config"].(map[string]any)["sandbox"]) {

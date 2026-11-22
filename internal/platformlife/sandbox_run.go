@@ -26,6 +26,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"reflect"
 	"slices"
@@ -387,7 +388,7 @@ func (x *acq) sandboxCluster(ctx context.Context, seed, wl *kamajik8s.Client) er
 		return err
 	}
 	if err := x.applySandboxTLS(ctx, sc); err != nil {
-		return err
+		return sandboxStarting(err)
 	}
 	machines, err := wl.ListCRs(ctx, capiGroup, capiVersion, "machines", SandboxClusterName, "")
 	if err != nil {
@@ -407,9 +408,24 @@ func (x *acq) sandboxCluster(ctx context.Context, seed, wl *kamajik8s.Client) er
 	}
 	if st := x.in.Status.Sandbox; st != nil && st.BuiltAt == nil {
 		now := time.Now().UTC()
-		return x.save(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Sandbox.BuiltAt = &now })
+		if err := x.save(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Sandbox.BuiltAt = &now }); err != nil {
+			return err
+		}
 	}
-	return nil
+	// The sandbox chart is installed inside the cluster once its machines run; stage register reads the two
+	// identities it makes. Waited for here, where the deadline is the long one.
+	_, _, err = x.sandboxKubeconfigs(ctx, wl)
+	return sandboxStarting(err)
+}
+
+// sandboxStarting makes a failed call to the API of pc-sandbox a wait: its control plane was made minutes ago, and
+// an API that does not answer yet is no reason to spend the stage's retries. The stage's deadline still ends it.
+func sandboxStarting(err error) error {
+	var se *stageErr
+	if errors.As(err, &se) && (se.kind == kindRetry || se.kind == kindRefused) {
+		return waiting(CodeControlPlaneTimeout, "The control plane of %s does not answer yet: %s", SandboxClusterName, se.msg)
+	}
+	return err
 }
 
 // removeSandboxCluster is the first deletion of a Remove on a platform with a separate sandbox cluster: its

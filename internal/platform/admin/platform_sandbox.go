@@ -22,8 +22,9 @@ import (
 //
 // One provider fences one sandbox pool and one sandbox network. A block that is not this installation's (the
 // installer's sandbox cluster has none of the marker; another installation has its own) is never overwritten, and a
-// sandbox network other than the installation's range is never dropped: both answer platformlife.ErrProviderConflict
-// and leave the row as it was.
+// sandbox network other than the installation's range is never dropped: a write over either answers
+// platformlife.ErrProviderConflict and leaves the row as it was, and a removal takes away only what is the
+// installation's own.
 func (h *Handler) PlatformSandboxSite(ctx context.Context, in *platformlife.Installation, site *platformlife.SandboxSite) error {
 	return h.repo.db.WithTx(ctx, func(ctx context.Context) error {
 		if err := h.repo.db.LockXact(ctx, "platform-run:"+in.ID); err != nil {
@@ -59,6 +60,23 @@ func applySandboxSite(doc pgdoc.M, installationID string, site *platformlife.San
 	}
 	have, _ := cfg["sandbox"].(map[string]any)
 	owner, _ := have[platformlife.ProviderMarker].(string)
+	secret := ensureMap(doc, "secret")
+	if site.Config == nil {
+		// Only what is this installation's goes: its own block with the kubeconfig that belongs to it, and its own
+		// range. A block or a sandbox network of another owner stays, and is no reason to stop a Remove.
+		if have != nil && owner == installationID {
+			delete(cfg, "sandbox")
+			delete(secret, "sandboxKubeconfig")
+			changed = true
+		}
+		if kept := slices.DeleteFunc(slices.Clone(cidrs), func(c string) bool { return c == site.Range }); len(kept) != len(cidrs) {
+			changed = true
+			if network["sandboxCidrs"] = kept; len(kept) == 0 {
+				delete(network, "sandboxCidrs")
+			}
+		}
+		return changed, nil
+	}
 	if pool, _ := have["pool"].(string); pool != "" && owner != installationID {
 		return false, fmt.Errorf("%w: the provider's config.sandbox fences pool %s, which is not installation %s's. One provider fences one sandbox pool: remove that sandbox cluster and its config.sandbox first",
 			platformlife.ErrProviderConflict, pool, installationID)
@@ -66,15 +84,6 @@ func applySandboxSite(doc pgdoc.M, installationID string, site *platformlife.San
 	if others := slices.DeleteFunc(slices.Clone(cidrs), func(c string) bool { return c == site.Range }); len(others) > 0 {
 		return false, fmt.Errorf("%w: the provider names the sandbox network %s (config.network.sandboxCidrs), which is not installation %s's range %s. One provider fences one sandbox network",
 			platformlife.ErrProviderConflict, strings.Join(others, ", "), installationID, site.Range)
-	}
-	secret := ensureMap(doc, "secret")
-	if site.Config == nil {
-		_, hadKey := secret["sandboxKubeconfig"]
-		changed = have != nil || len(cidrs) > 0 || hadKey
-		delete(cfg, "sandbox")
-		delete(network, "sandboxCidrs")
-		delete(secret, "sandboxKubeconfig")
-		return changed, nil
 	}
 	if !sameJSONValue(have, site.Config) || !slices.Equal(cidrs, []string{site.Range}) {
 		cfg["sandbox"], network["sandboxCidrs"], changed = site.Config, []any{site.Range}, true

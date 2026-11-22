@@ -381,12 +381,16 @@ func TestSiteProblemsKnowTheBuiltSandboxRange(t *testing.T) {
 	if p := in.SiteProblems(site); len(p) != 0 {
 		t.Fatalf("the installation's own block and range: %v", p)
 	}
-	// The installer's sandbox cluster, or another installation's, on the same provider.
-	for owner, want := range map[string]string{"": "the installer's sandbox cluster", "pi-ffffffff": "installation pi-ffffffff"} {
-		s := site
-		s.SandboxPool, s.SandboxOwner, s.Sandbox = "proxcloud-sandbox", owner, nil
-		if p := strings.Join(in.SiteProblems(s), "\n"); !strings.Contains(p, "already fences a sandbox pool, proxcloud-sandbox") || !strings.Contains(p, want) {
-			t.Errorf("owner %q: %q", owner, p)
+	// The installer's sandbox cluster, or another installation's, on the same provider. Also for an installation that
+	// has no id yet (the save that creates it): no owner is not "this one".
+	for _, id := range []string{in.ID, ""} {
+		in.ID = id
+		for owner, want := range map[string]string{"": "the installer's sandbox cluster", "pi-ffffffff": "installation pi-ffffffff"} {
+			s := site
+			s.SandboxPool, s.SandboxOwner, s.Sandbox = "proxcloud-sandbox", owner, nil
+			if p := strings.Join(in.SiteProblems(s), "\n"); !strings.Contains(p, "already fences a sandbox pool, proxcloud-sandbox") || !strings.Contains(p, want) {
+				t.Errorf("installation %q, owner %q: %q", id, owner, p)
+			}
 		}
 	}
 }

@@ -43,6 +43,8 @@ package externalservice
 //	                "entry": {"vmid": 9110, "pool": "proxcloud-sandbox-entry", "address": "192.0.2.5"}}  // (its pool,
 //	                                                                         // its address on the sandbox vnet)
 //	      "registry": {"address": "198.51.100.226", "port": 443}  // the sandbox registry the workers pull from
+//	      // written by a managed platform's run for its own sandbox machines, which sit on the platform network:
+//	      // "platformInstallationId", "mode": "shared"|"separate", "bridge", "vlan", "deny": [...], "peers": [...]
 //	    },                                     // + secret.sandboxKubeconfig (nodes get/list/patch)
 //	    "storageProfiles": {                   // Phase 5 — honest capability flags
 //	      "std": {"storages": {"*": "local-zfs"}, "shared": false, "snapshots": true,

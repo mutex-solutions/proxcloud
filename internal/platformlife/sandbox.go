@@ -298,7 +298,7 @@ func (in *Installation) sandboxSiteProblems(site Site) []string {
 	var out []string
 	// One provider fences one sandbox pool: the block of the installer's sandbox cluster, or of another installation,
 	// is not overwritten.
-	if site.SandboxPool != "" && site.SandboxOwner != in.ID {
+	if site.SandboxPool != "" && (site.SandboxOwner == "" || site.SandboxOwner != in.ID) {
 		whose := "the installer's sandbox cluster (docs/managed-sandbox.md)"
 		if site.SandboxOwner != "" {
 			whose = "installation " + site.SandboxOwner
