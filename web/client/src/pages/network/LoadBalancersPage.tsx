@@ -11,7 +11,6 @@ import { StatusBadge } from "@/components/status-badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog"
@@ -27,10 +26,20 @@ import type { CloudResource } from "@/lib/types"
 
 // node: a worker of a Kubernetes cluster, named by its address alone.
 interface Member { serverId: string; port: number; weight?: number; address?: string; missing?: boolean; node?: boolean }
-interface HealthCheck { type: string; port?: number; path?: string }
-interface Pool { name: string; protocol: string; algorithm: string; members: Member[]; healthCheck?: HealthCheck | null; proxyProtocol?: boolean }
+// interval and timeout in seconds, rise and fall in checks; absent = the load balancer's own (3 s, 2 and 2).
+interface HealthCheck { type: string; port?: number; path?: string; interval?: number; timeout?: number; rise?: number; fall?: number }
+// protocol: what the members are spoken to in. proxyVersion 1 or 2 (absent = 2). The timeouts are milliseconds.
+interface Pool {
+  name: string; protocol: string; algorithm: string; members: Member[]; healthCheck?: HealthCheck | null
+  proxyProtocol?: boolean; proxyVersion?: number; sessionPersistence?: { type: string; timeout?: number } | null
+  timeoutMemberConnect?: number; timeoutMemberData?: number
+}
+// protocol: what clients are spoken to in; absent on a listener made before it existed, which has its pool's.
 // vip: the one address a cluster Service's listener binds.
-interface Listener { port: number; pool: string; sourceRanges?: string[] | null; vip?: string }
+interface Listener {
+  port: number; protocol?: string; pool: string; sourceRanges?: string[] | null; vip?: string
+  connectionLimit?: number; timeoutClientData?: number
+}
 // One VM of a load balancer with high availability, as the last apply saw it.
 interface Appliance { serverId: string; node?: string; privateIp?: string; role?: string; holdsVip?: boolean; state?: string; reason?: string }
 // A Kubernetes Service on a cluster's balancer, as the cluster's controller last sent it.
@@ -111,6 +120,14 @@ export function ClusterServices({ lb, health }: { lb: LB; health?: Health[] }) {
   )
 }
 const BUSY = new Set(["BUILD"])
+// The listener protocols a load balancer serves today.
+const PROTOCOLS = [{ value: "tcp", label: "TCP" }, { value: "http", label: "HTTP" }]
+const CHECKS = [
+  { value: "tcp", label: "TCP connection" }, { value: "http", label: "HTTP GET" }, { value: "https", label: "HTTPS GET" },
+  { value: "tls-hello", label: "TLS hello" }, { value: "none", label: "None" },
+]
+// A number field that may be empty: empty is "the load balancer's own", sent as no field at all.
+const numberOf = (v: string, scale = 1) => (Number(v) > 0 ? Number(v) * scale : undefined)
 
 function serverName(s: CloudResource) {
   return (s.data?.server?.name as string) ?? s.externalId ?? s.id
@@ -361,13 +378,22 @@ export function LoadBalancerDetailPage() {
   const setPool = (i: number, patch: Partial<Pool>) => edit(() => setPools(pools.map((p, j) => (j === i ? { ...p, ...patch } : p))))
   const setMember = (i: number, k: number, patch: Partial<Member>) =>
     setPool(i, { members: pools[i].members.map((m, j) => (j === k ? { ...m, ...patch } : m)) })
-  // A TCP check on the member's own port is the default, sent as no check at all.
+  // A TCP check on the member's own port with no figure of its own is the default, sent as no check at all.
   const setCheck = (i: number, patch: Partial<HealthCheck>) => {
-    const next: HealthCheck = { ...(pools[i].healthCheck ?? { type: "tcp" }), ...patch }
-    if (next.type !== "http") delete next.path
-    if (!next.port) delete next.port
-    setPool(i, { healthCheck: next.type === "tcp" && !next.port ? null : next })
+    let next: HealthCheck = { ...(pools[i].healthCheck ?? { type: "tcp" }), ...patch }
+    if (next.type === "none") next = { type: "none" }
+    if (next.type !== "http" && next.type !== "https") delete next.path
+    for (const k of ["port", "interval", "timeout", "rise", "fall"] as const) if (!next[k]) delete next[k]
+    setPool(i, { healthCheck: next.type === "tcp" && Object.keys(next).length === 1 ? null : next })
   }
+  const setListener = (i: number, patch: Partial<Listener>) => edit(() => setListeners(listeners.map((x, j) => (j === i ? { ...x, ...patch } : x))))
+  const protocolOf = (l: Listener) => l.protocol ?? pools.find((p) => p.name === l.pool)?.protocol ?? "http"
+  // A pool speaks one protocol to its servers, the one its listeners need: the pool and its other listeners follow.
+  const setProtocol = (i: number, protocol: string) => edit(() => {
+    const pool = listeners[i].pool
+    setListeners(listeners.map((x, j) => (j === i || x.pool === pool ? { ...x, protocol } : x)))
+    setPools(pools.map((p) => (p.name === pool ? { ...p, protocol } : p)))
+  })
 
   const save = useMutation({
     mutationFn: () => action<CloudResource>(pid, resourceId, scope, "UPDATE_CONFIG", {
@@ -485,13 +511,6 @@ export function LoadBalancerDetailPage() {
                     }} />
                   </div>
                   <div className="grid gap-1">
-                    <Label>Protocol</Label>
-                    <Select value={p.protocol} onValueChange={(v) => setPool(i, { protocol: v })}>
-                      <SelectTrigger className="w-28" aria-label="Protocol"><SelectValue /></SelectTrigger>
-                      <SelectContent><SelectItem value="http">HTTP</SelectItem><SelectItem value="tcp">TCP</SelectItem></SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid gap-1">
                     <Label>Algorithm</Label>
                     <Select value={p.algorithm} onValueChange={(v) => setPool(i, { algorithm: v })}>
                       <SelectTrigger className="w-40" aria-label="Algorithm"><SelectValue /></SelectTrigger>
@@ -503,31 +522,72 @@ export function LoadBalancerDetailPage() {
                     </Select>
                   </div>
                   <div className="grid gap-1">
-                    <Label>Health check</Label>
-                    <Select value={p.healthCheck?.type ?? "tcp"} onValueChange={(v) => setCheck(i, { type: v })}>
-                      <SelectTrigger className="w-40" aria-label="Health check"><SelectValue /></SelectTrigger>
-                      <SelectContent><SelectItem value="tcp">TCP connection</SelectItem><SelectItem value="http">HTTP GET</SelectItem></SelectContent>
+                    <Label>Session persistence</Label>
+                    <Select value={p.sessionPersistence ? "source_ip" : "none"} onValueChange={(v) => setPool(i, { sessionPersistence: v === "source_ip" ? { type: "source_ip" } : null })}>
+                      <SelectTrigger className="w-40" aria-label="Session persistence"><SelectValue /></SelectTrigger>
+                      <SelectContent><SelectItem value="none">None</SelectItem><SelectItem value="source_ip">Source address</SelectItem></SelectContent>
                     </Select>
                   </div>
-                  {p.healthCheck?.type === "http" && (
+                  {p.sessionPersistence && (
                     <div className="grid gap-1">
-                      <Label htmlFor={`check-path-${i}`}>Path</Label>
-                      <Input id={`check-path-${i}`} className="w-36" placeholder="/" value={p.healthCheck.path ?? ""} onChange={(e) => setCheck(i, { path: e.target.value })} />
+                      <Label htmlFor={`persist-${i}`}>Kept for (s)</Label>
+                      <Input id={`persist-${i}`} className="w-28" type="number" min={1} max={86400} placeholder="10800" value={p.sessionPersistence.timeout ?? ""}
+                        onChange={(e) => setPool(i, { sessionPersistence: { type: "source_ip", timeout: numberOf(e.target.value) } })} />
                     </div>
                   )}
                   <div className="grid gap-1">
-                    <Label htmlFor={`check-port-${i}`}>Check port</Label>
-                    <Input id={`check-port-${i}`} className="w-28" type="number" placeholder="member's" value={p.healthCheck?.port ?? ""} onChange={(e) => setCheck(i, { port: Number(e.target.value) || undefined })} />
+                    <Label>PROXY protocol</Label>
+                    <Select value={!p.proxyProtocol ? "off" : p.proxyVersion === 1 ? "1" : "2"}
+                      onValueChange={(v) => setPool(i, { proxyProtocol: v !== "off", proxyVersion: v === "off" ? undefined : Number(v) })}>
+                      <SelectTrigger className="w-24" aria-label="PROXY protocol"><SelectValue /></SelectTrigger>
+                      <SelectContent><SelectItem value="off">Off</SelectItem><SelectItem value="1">v1</SelectItem><SelectItem value="2">v2</SelectItem></SelectContent>
+                    </Select>
                   </div>
-                  <label className="flex items-center gap-2 pb-2 text-sm">
-                    <Checkbox checked={!!p.proxyProtocol} onCheckedChange={(v) => setPool(i, { proxyProtocol: v === true })} aria-label="PROXY protocol" />
-                    PROXY protocol v2
-                  </label>
                   <Button variant="ghost" size="sm" onClick={() => edit(() => {
                     setPools(pools.filter((_, j) => j !== i))
                     setListeners(listeners.filter((l) => l.pool !== p.name))
                   })}>Remove pool</Button>
                 </div>
+                <div className="flex flex-wrap items-end gap-2">
+                  <div className="grid gap-1">
+                    <Label>Health check</Label>
+                    <Select value={p.healthCheck?.type ?? "tcp"} onValueChange={(v) => setCheck(i, { type: v })}>
+                      <SelectTrigger className="w-40" aria-label="Health check"><SelectValue /></SelectTrigger>
+                      <SelectContent>{CHECKS.map((c) => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}</SelectContent>
+                    </Select>
+                  </div>
+                  {(p.healthCheck?.type === "http" || p.healthCheck?.type === "https") && (
+                    <div className="grid gap-1">
+                      <Label htmlFor={`check-path-${i}`}>Path</Label>
+                      <Input id={`check-path-${i}`} className="w-36" placeholder="/" value={p.healthCheck.path ?? ""} onChange={(e) => setCheck(i, { path: e.target.value })} />
+                    </div>
+                  )}
+                  {p.healthCheck?.type !== "none" && <>
+                    <div className="grid gap-1">
+                      <Label htmlFor={`check-port-${i}`}>Check port</Label>
+                      <Input id={`check-port-${i}`} className="w-28" type="number" placeholder="member's" value={p.healthCheck?.port ?? ""} onChange={(e) => setCheck(i, { port: numberOf(e.target.value) })} />
+                    </div>
+                    {([["interval", "Every (s)", "3", 300], ["timeout", "Timeout (s)", "interval", 300], ["rise", "Up after", "2", 10], ["fall", "Down after", "2", 10]] as const).map(([key, label, own, most]) => (
+                      <div key={key} className="grid gap-1">
+                        <Label htmlFor={`check-${key}-${i}`}>{label}</Label>
+                        <Input id={`check-${key}-${i}`} className="w-24" type="number" min={1} max={most} placeholder={own} value={p.healthCheck?.[key] ?? ""} onChange={(e) => setCheck(i, { [key]: numberOf(e.target.value) })} />
+                      </div>
+                    ))}
+                  </>}
+                  <div className="grid gap-1">
+                    <Label htmlFor={`connect-${i}`}>Connect timeout (s)</Label>
+                    <Input id={`connect-${i}`} className="w-32" type="number" min={1} max={86400} placeholder="2" value={p.timeoutMemberConnect ? p.timeoutMemberConnect / 1000 : ""}
+                      onChange={(e) => setPool(i, { timeoutMemberConnect: numberOf(e.target.value, 1000) })} />
+                  </div>
+                  <div className="grid gap-1">
+                    <Label htmlFor={`server-idle-${i}`}>Server idle timeout (s)</Label>
+                    <Input id={`server-idle-${i}`} className="w-36" type="number" min={1} max={86400} placeholder="60" value={p.timeoutMemberData ? p.timeoutMemberData / 1000 : ""}
+                      onChange={(e) => setPool(i, { timeoutMemberData: numberOf(e.target.value, 1000) })} />
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground" data-testid={`pool-protocol-${i}`}>
+                  Its servers are spoken to in {p.protocol === "tcp" ? "TCP" : "HTTP"}, as its listeners say. An empty figure is the load balancer's own.
+                </p>
                 {p.members.length > 0 && <p className="text-xs text-muted-foreground">Server, port and weight</p>}
                 {p.members.map((m, k) => (
                   <div key={k} className="flex flex-wrap items-center gap-2">
@@ -557,7 +617,7 @@ export function LoadBalancerDetailPage() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="text-base">Listeners</CardTitle>
-            <Button variant="outline" size="sm" disabled={!pools.length} onClick={() => edit(() => setListeners([...listeners, { port: 80, pool: pools[0].name }]))}>
+            <Button variant="outline" size="sm" disabled={!pools.length} onClick={() => edit(() => setListeners([...listeners, { port: 80, protocol: pools[0].protocol, pool: pools[0].name }]))}>
               <Plus className="size-4" /> Add listener
             </Button>
           </CardHeader>
@@ -565,16 +625,26 @@ export function LoadBalancerDetailPage() {
             {!listeners.length && <p className="text-sm text-muted-foreground">A listener opens a port on the public address.</p>}
             {listeners.map((l, i) => (
               <div key={i} className="flex flex-wrap items-center gap-2">
-                <Input className="w-24" type="number" aria-label="Listener port" value={l.port} onChange={(e) => edit(() => setListeners(listeners.map((x, j) => (j === i ? { ...x, port: Number(e.target.value) } : x))))} />
+                <Select value={protocolOf(l)} onValueChange={(v) => setProtocol(i, v)}>
+                  <SelectTrigger className="w-24" aria-label="Listener protocol"><SelectValue /></SelectTrigger>
+                  <SelectContent>{PROTOCOLS.map((x) => <SelectItem key={x.value} value={x.value}>{x.label}</SelectItem>)}</SelectContent>
+                </Select>
+                <Input className="w-24" type="number" aria-label="Listener port" value={l.port} onChange={(e) => setListener(i, { port: Number(e.target.value) })} />
                 <span className="text-sm text-muted-foreground">forwards to</span>
-                <Select value={l.pool} onValueChange={(v) => edit(() => setListeners(listeners.map((x, j) => (j === i ? { ...x, pool: v } : x))))}>
+                <Select value={l.pool} onValueChange={(v) => setListener(i, { pool: v, protocol: pools.find((p) => p.name === v)?.protocol })}>
                   <SelectTrigger className="w-44" aria-label="Pool"><SelectValue /></SelectTrigger>
                   <SelectContent>{pools.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}</SelectContent>
                 </Select>
                 <span className="text-sm text-muted-foreground">from</span>
                 <Input className="w-72" aria-label="Allowed sources" placeholder="Any address, or networks such as 203.0.113.0/24"
                   value={(l.sourceRanges ?? []).join(", ")}
-                  onChange={(e) => edit(() => setListeners(listeners.map((x, j) => (j === i ? { ...x, sourceRanges: e.target.value.split(/[\s,]+/) } : x))))} />
+                  onChange={(e) => setListener(i, { sourceRanges: e.target.value.split(/[\s,]+/) })} />
+                <span className="text-sm text-muted-foreground">connections</span>
+                <Input className="w-28" type="number" min={1} max={20000} aria-label="Connection limit" placeholder="No limit" value={l.connectionLimit ?? ""}
+                  onChange={(e) => setListener(i, { connectionLimit: numberOf(e.target.value) })} />
+                <span className="text-sm text-muted-foreground">idle timeout (s)</span>
+                <Input className="w-24" type="number" min={1} max={86400} aria-label="Client idle timeout in seconds" placeholder="60" value={l.timeoutClientData ? l.timeoutClientData / 1000 : ""}
+                  onChange={(e) => setListener(i, { timeoutClientData: numberOf(e.target.value, 1000) })} />
                 <Button variant="ghost" size="sm" onClick={() => edit(() => setListeners(listeners.filter((_, j) => j !== i)))}>Remove</Button>
               </div>
             ))}

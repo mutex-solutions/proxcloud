@@ -267,12 +267,18 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
       return { data: {
         // A pool checked over HTTP on a cluster's health port (policy Local) has one worker with a pod.
         result: (r?.data?.loadbalancer?.pools ?? []).flatMap((p: any) => (p.members ?? []).map((m: any, i: number) => ({
-          pool: p.name, serverId: m.serverId, address: m.address, port: m.port, status: m.node && p.healthCheck?.type === "http" && i > 0 ? "DOWN" : "UP",
+          pool: p.name, serverId: m.serverId, address: m.address, port: m.port,
+          status: p.healthCheck?.type === "none" ? "no check" : m.node && p.healthCheck?.type === "http" && i > 0 ? "DOWN" : "UP",
         }))),
         appliances: r?.data?.loadbalancer?.appliances ?? [],
       } }
     case "REPLACE_APPLIANCES":
       if (r?.data?.loadbalancer) r.data.loadbalancer.replacing = new Date().toISOString()
+      return { data: r }
+    // The row then holds what was asked, as the API stores it.
+    case "UPDATE_CONFIG":
+      ;(globalThis as { __lbConfig?: unknown }).__lbConfig = data // what the page sent, for the e2e spec
+      if (r?.data?.loadbalancer) Object.assign(r.data.loadbalancer, { listeners: data?.listeners ?? [], pools: data?.pools ?? [] })
       return { data: r }
 
     // Networks / routers / ports / security groups
