@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-22: a load balancer's listeners get a protocol, and the layer 4 options (#PRNUM)
+## 2026-11-22: a load balancer's listeners get a protocol, and the layer 4 options (#431)
 
 **What changed:** no new component, container or relation; the data model of a `LOAD_BALANCER` row grew.
 `internal/cloud/pve`: `LBListener` carries `protocol` (`tcp`, `udp`, `tls`, `http`, `https`), `certificates`
