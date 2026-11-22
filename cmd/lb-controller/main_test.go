@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 type fakeTenant struct {
 	services map[string]map[string]any
 	nodes    []map[string]any
+	nodesErr error // ListNodes fails with it
 	events   []map[string]any
 	rv       int
 }
@@ -36,7 +38,7 @@ func (f *fakeTenant) ListServicesAllNamespaces(context.Context) ([]map[string]an
 	return out, nil
 }
 
-func (f *fakeTenant) ListNodes(context.Context) ([]map[string]any, error) { return f.nodes, nil }
+func (f *fakeTenant) ListNodes(context.Context) ([]map[string]any, error) { return f.nodes, f.nodesErr }
 
 func (f *fakeTenant) PatchService(_ context.Context, ns, name string, patch map[string]any) error {
 	s := f.services[ns+"/"+name]
@@ -170,6 +172,8 @@ func TestNodesAreSentFromTheirFirstReadyOn(t *testing.T) {
 		}
 	}
 	w1, w2 := node("w1", "10.0.0.11", nil), ready(node("w2", "10.0.0.12", nil), "")
+	f.nodes = []map[string]any{w1}
+	turn("the controller's first turn", "10.0.0.11")
 	f.nodes = []map[string]any{w1, w2}
 	turn("a Node object without conditions", "10.0.0.11")
 	ready(w2, "False")
@@ -194,9 +198,20 @@ func TestNodesAreSentFromTheirFirstReadyOn(t *testing.T) {
 	turn("a new machine under an old name", []string{}...)
 	ready(f.nodes[1], "True")
 	turn("the new machine is Ready", "10.0.0.14")
-	// A controller that starts over knows no member: what is Ready is sent, what is not waits.
+	// A controller that starts over does not know what the balancer has: every node it finds is a member, Ready or
+	// not (w1 is not), so a restart takes no member out. A node that joins after that waits for its first Ready.
 	c = &controller{api: f, put: g.put, log: quiet()}
-	turn("after a restart", "10.0.0.14")
+	turn("after a restart", "10.0.0.11", "10.0.0.14")
+	f.nodes = append(f.nodes, ready(node("w3", "10.0.0.15", nil), "False"))
+	turn("a node that joins a restarted controller, not Ready", "10.0.0.11", "10.0.0.14")
+	// A turn that could not list the nodes is not the first one: the next still takes every node.
+	c = &controller{api: f, put: g.put, log: quiet()}
+	f.nodesErr = errors.New("no answer")
+	if err := c.turn(ctx); err == nil {
+		t.Fatal("a turn without the list of nodes passed")
+	}
+	f.nodesErr = nil
+	turn("the first turn that read the nodes", "10.0.0.11", "10.0.0.14", "10.0.0.15")
 }
 
 // The address is written when the portal says the Service is served, not when it has an address (drill N3-7: 3 min

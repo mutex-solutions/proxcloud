@@ -981,9 +981,10 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   hands a balancer every node that is not deleted, excluded or tainted for removal (`k8s.io/cloud-provider`
   `controllers/service/controller.go`, `stableNodeSetPredicates`). It differs from that controller in waiting for
   the first Ready, because HAProxy before 3.1 starts a member new to its config as up (v0.11.0 sent a node as soon as
-  its object existed; the lab's figures below say what that cost). What was sent is the process's memory: after a
-  restart of the controller a member that is NotReady at that moment is left out until it is Ready again. The oldest
-  Service is sent first, so a full balancer refuses the newest.
+  its object existed; the lab's figures below say what that cost). What was sent is the process's memory: a
+  controller that starts takes every node it finds for a member, Ready or not, so a restart takes no member out of
+  a balancer, and a node that joins in that very turn is sent before it is Ready. The oldest Service is sent first,
+  so a full balancer refuses the newest.
 - An owned Service gets the finalizer `proxcloud.io/load-balancer` before it is first sent. A Service deleted, turned
   into another type or of another class keeps it until a PUT without it is accepted, then loses it (and its address in
   the status); while the gateway cannot be reached it stays `Terminating`, as with any cloud controller.

@@ -18,7 +18,8 @@ by its Service and node port (`lbClusterServiceSpec`), a Service is ready when t
 serves the config (`lbClusterApply`), a config an appliance refused goes to no other appliance in that pass and a
 paused appliance holds no address (`lbApplyPair`), the pair's message names a paused appliance and an address holder
 that is behind (`lbPairStatus`), and a replace reads the remaining appliance before it builds (`lbReplaceStep`).
-`cmd/lb-controller`: a Node is sent from its first turn Ready on (`readNodes`, `controller.members`), and a
+`cmd/lb-controller`: a Node is sent from its first turn Ready on, and a controller that starts takes every node it
+finds for a member (`readNodes`, `controller.members`), and a
 Service's address is written when the portal answers ready (`turn`, `hasIngress`), as cloud-provider-openstack
 does (`pkg/openstack/loadbalancer.go`, `ensureOctaviaLoadBalancer`, v1.34.0: an error while the balancer's
 provisioning status is not `ACTIVE`, the status after it).

@@ -113,8 +113,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `controllers/service/controller.go`, `stableNodeSetPredicates`, v0.34.0; KEP-3458), so that a flapping Ready
     condition does not reconfigure every balancer. The second half is kept: a member that goes NotReady stays, and
     its health check decides. The first half is not, because HAProxy before 3.1 starts a member new to its config as
-    up. The memory of what was sent is the controller process's: after its restart a member that is NotReady at that
-    moment is left out until it is Ready again.
+    up. The memory of what was sent is the controller process's: a controller that starts takes every node it finds
+    for a member, Ready or not, so its restart takes no member out of a balancer (a node that joins in that very
+    turn is sent before it is Ready).
   - *A member that just went away kept its share of the connections until two checks had failed.* `option redispatch
     1` with `retries 3` and `timeout connect 2s` (it was 5 s): a connection a member does not take is tried on
     another member at once. A member that stopped costs a client the connect timeout, 2 seconds, not its answer.

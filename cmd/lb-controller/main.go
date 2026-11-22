@@ -158,9 +158,10 @@ type controller struct {
 	// events is what the last Event of each Service (by UID) said, so a standing state is one Event, not one a turn.
 	// ponytail: per process; a restart reports each Service's state once more.
 	events map[string]string
-	// members are the nodes sent so far, by name: a node is sent from its first turn Ready on (readNodes).
-	// ponytail: per process; after a restart a member that is NotReady at that moment is left out until it is Ready
-	// again, one reload of the balancer each way. Keep it in the portal's state if that ever matters.
+	// members are the nodes sent so far, by name: a node is sent from its first turn Ready on (readNodes). nil until
+	// the first list of nodes was read.
+	// ponytail: per process; a controller that starts takes every node it finds for a member, so a node that joins
+	// in that very turn is sent before it is Ready. Keep it in the portal's state if that ever matters.
 	members map[string]bool
 }
 
@@ -182,9 +183,6 @@ func (c *controller) turn(ctx context.Context) error {
 	if c.events == nil {
 		c.events = map[string]string{}
 	}
-	if c.members == nil {
-		c.members = map[string]bool{}
-	}
 	items, err := c.api.ListServicesAllNamespaces(ctx)
 	if err != nil {
 		return fmt.Errorf("list services: %w", err)
@@ -201,7 +199,9 @@ func (c *controller) turn(ctx context.Context) error {
 	slices.SortFunc(services, func(a, b *service) int {
 		return strings.Compare(a.created+a.uid, b.created+b.uid)
 	})
-	req := &lbgw.Request{Services: []lbgw.Service{}, Nodes: readNodes(nodeItems, c.members)}
+	nodes, members := readNodes(nodeItems, c.members)
+	c.members = members
+	req := &lbgw.Request{Services: []lbgw.Service{}, Nodes: nodes}
 	var owned []*service
 	for _, s := range services {
 		if !s.owned || s.deleting {
@@ -338,7 +338,16 @@ func readService(obj map[string]any, defaultClass bool) *service {
 // its health check decides. The first half is not: HAProxy starts a member new to its config as UP ("init-state
 // down" needs 3.1, Debian 13 ships 3.0), so a node sent before it is Ready took its share of the requests until its
 // first check had failed (drill N3-8 of v0.11.0: 4.4 s, 22 of 44 requests, at each worker added or replaced).
-func readNodes(items []map[string]any, members map[string]bool) []lbgw.Node {
+//
+// members nil is a controller that just started: it does not know what the balancer has, so every node it finds
+// counts as a member, as that controller would have it. Waiting for Ready there would take a member that is NotReady
+// at that moment out of a balancer it may still serve through, and all of them when no kubelet reaches the control
+// plane while the controller is restarted.
+func readNodes(items []map[string]any, members map[string]bool) ([]lbgw.Node, map[string]bool) {
+	started := members == nil
+	if started {
+		members = map[string]bool{}
+	}
 	out := []lbgw.Node{}
 	seen := map[string]bool{}
 	for _, n := range items {
@@ -349,7 +358,7 @@ func readNodes(items []map[string]any, members map[string]bool) []lbgw.Node {
 			continue
 		}
 		status, _ := n["status"].(map[string]any)
-		if !members[name] && !nodeReady(status) {
+		if !started && !members[name] && !nodeReady(status) {
 			continue
 		}
 		members[name], seen[name] = true, true
@@ -366,7 +375,7 @@ func readNodes(items []map[string]any, members map[string]bool) []lbgw.Node {
 			delete(members, name)
 		}
 	}
-	return out
+	return out, members
 }
 
 // nodeReady: the node's Ready condition is True.
