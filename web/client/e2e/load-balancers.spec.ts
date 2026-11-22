@@ -71,7 +71,7 @@ test("a listener's protocol and limits and a pool's layer 4 options are saved as
   await page.getByLabel("Timeout (s)", { exact: true }).fill("2")
   await page.getByLabel("Up after").fill("3")
   await page.getByLabel("Down after").fill("4")
-  await page.getByLabel("Connect timeout (s)").fill("1")
+  await page.getByLabel("Connect timeout (s)").fill("1.1") // 1.1 * 1000 is not a whole number before it is rounded
   await page.getByLabel("Server idle timeout (s)").fill("30")
   await page.getByRole("button", { name: "Save configuration" }).click()
   await expect(page.getByText("Configuration saved")).toBeVisible()
@@ -81,7 +81,7 @@ test("a listener's protocol and limits and a pool's layer 4 options are saved as
   expect(sent?.listeners[0]).toEqual({ port: 80, protocol: "tcp", pool: "web", sourceRanges: ["198.51.100.0/24"], connectionLimit: 500, timeoutClientData: 30000 })
   expect(sent?.pools[0]).toMatchObject({
     name: "web", protocol: "tcp", algorithm: "leastconn", proxyProtocol: true, proxyVersion: 1,
-    sessionPersistence: { type: "source_ip", timeout: 600 }, timeoutMemberConnect: 1000, timeoutMemberData: 30000,
+    sessionPersistence: { type: "source_ip", timeout: 600 }, timeoutMemberConnect: 1100, timeoutMemberData: 30000,
     healthCheck: { type: "https", path: "/healthz", interval: 5, timeout: 2, rise: 3, fall: 4 },
   })
 

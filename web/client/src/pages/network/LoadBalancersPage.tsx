@@ -126,8 +126,12 @@ const CHECKS = [
   { value: "tcp", label: "TCP connection" }, { value: "http", label: "HTTP GET" }, { value: "https", label: "HTTPS GET" },
   { value: "tls-hello", label: "TLS hello" }, { value: "none", label: "None" },
 ]
-// A number field that may be empty: empty is "the load balancer's own", sent as no field at all.
-const numberOf = (v: string, scale = 1) => (Number(v) > 0 ? Number(v) * scale : undefined)
+// A number field that may be empty: empty is "the load balancer's own", sent as no field at all. The API takes whole
+// numbers only, and 1.1 s is not 1100 ms before it is rounded.
+const numberOf = (v: string, scale = 1) => {
+  const n = Math.round(Number(v) * scale)
+  return n > 0 ? n : undefined
+}
 
 function serverName(s: CloudResource) {
   return (s.data?.server?.name as string) ?? s.externalId ?? s.id
