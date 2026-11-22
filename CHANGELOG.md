@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The platform BOM on `main` is `0.12.0-dev`, and the build carries the BOM of `0.11.0`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.0.yaml`, sha256
+  `d8e37db2fd204a6a58a4d6357f4c54bb6dccc82de52430340f2c8c7ca0e0d7ff`, the file of the tag byte for byte). The `v0.11.0`
+  release commit left the BOM at `0.11.0`, and the release gate refuses only `-dev`. A platform installed by `v0.11.0`
+  or moved to its BOM is not refused (`bom_unsupported`) under a later build while the file is carried. Its pins are
+  those of `main`, so the plan from it has one change, the release, record only. `TestPreviousBOMsMoveCertManager`
+  states that answer, and `TestUpgradeRollsNoMachine` compares eight of the seventeen previous BOMs with the BOM on
+  `main`, none of them rolling. No apply on such a platform was run on a lab by this change.
+
 ## [0.11.0] - 2026-11-22
 
 The release after `v0.10.2`. It brings highly available load balancers: a load balancer runs on a pair of appliance
