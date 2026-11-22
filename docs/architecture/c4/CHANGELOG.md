@@ -4,6 +4,36 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-22: a load balancer's listeners get a protocol, and the layer 4 options (#431)
+
+**What changed:** no new component, container or relation; the data model of a `LOAD_BALANCER` row grew.
+`internal/cloud/pve`: `LBListener` carries `protocol` (`tcp`, `udp`, `tls`, `http`, `https`), `certificates`
+(reserved), `connectionLimit` and `timeoutClientData`; `LBPool` carries `sessionPersistence` (`LBPersistence`, type
+`source_ip`), `proxyVersion` and the two member timeouts; `LBHealthCheck` the types `https`, `tls-hello` and `none`
+and `interval`, `timeout`, `rise`, `fall`. `lbPoolProtocolOf` is the matrix from a listener's protocol to its pool's: Octavia's
+`VALID_LISTENER_POOL_PROTOCOL_MAP` (`octavia/common/constants.py`:210-221 at `9718c66`: TCP in front of HTTP, HTTPS,
+PROXY, PROXYV2 or TCP; HTTP in front of HTTP or PROXY; TERMINATED_HTTPS in front of HTTP or PROXY; UDP in front of
+UDP) cut to one pool protocol per listener protocol, PROXY being a pool option here and not a pool protocol;
+`lbFamily` the transport in a listener's key (validation and `LBListenerRules`), `lbNotServed` the one place that
+refuses `udp`, `tls` and `https` until an appliance serves them, and `lbFrontendMode` what the renderer and
+`ParseHAProxyStat` ask before they count on a HAProxy frontend. `renderHAProxy` writes the options
+(`maxconn`, `timeout client`, `timeout connect`, `timeout server`, `timeout check`, `default-server inter fall rise`,
+`stick-table` with `stick on src`, `send-proxy`, `check-ssl verify none`, `option ssl-hello-chk`, and for a pool
+without a check no `check` and `load-server-state-from-file none`, so that a member saved as down is not kept down
+with nothing to raise it).
+`internal/platform/project`: `lbSpecOfRequest` reads the body of `UPDATE_CONFIG`. `web/client`: the load balancer
+page edits all of it.
+
+**Why:** v0.11.1 makes the balancer a complete layer 4 one (TCP, UDP, TLS ended on the balancer). This is the model
+the UDP renderer, TLS termination and the Kubernetes gateway's annotations build on, with every option HAProxy
+already serves live now. The protocol sits on the listener, each listener keeps its own frontend that ends in a
+default backend, certificates are a list on the listener and persistence and health are typed, so that layer 7
+rules later add fields and move none.
+
+**Diagrams:** none (C4.2a gained the rows of `lbPoolProtocolOf`, `lbNotServed`, `lbFrontendMode` and
+`lbSpecOfRequest`, and the row of `RenderHAProxyOn` names the options). No stored row and no config of an existing
+balancer changes: the goldens of before are byte for byte the same.
+
 ## 2026-11-22: a load balancer loses no request at a reload or a node change (#430)
 
 **What changed:** no new component, container or relation. `internal/cloud/pve`: the HAProxy config of every balancer

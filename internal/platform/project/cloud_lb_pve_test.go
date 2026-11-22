@@ -2,13 +2,83 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
+
+// UPDATE_CONFIG takes every layer 4 option, stores it in the row as it was sent, and still reads a body from before
+// v0.11.1. What no appliance serves yet is a 400 that says so.
+func TestLBSpecOfRequest(t *testing.T) {
+	body := func(js string) map[string]any {
+		t.Helper()
+		var m map[string]any
+		if err := json.Unmarshal([]byte(js), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	old, err := lbSpecOfRequest(body(`{"listeners":[{"port":80,"pool":"web"},{"port":5432,"pool":"db","sourceRanges":["198.51.100.7"]}],
+		"pools":[{"name":"web","members":[{"serverId":"101","port":8080}]},
+		         {"name":"db","protocol":"tcp","algorithm":"leastconn","proxyProtocol":true,"healthCheck":{"type":"http","port":8008,"path":"/ready"},"members":[]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := old.Listeners; l[0].Protocol != "http" || l[1].Protocol != "tcp" || old.Pools[0].Protocol != "http" || old.Pools[1].ProxyVersion != 0 {
+		t.Fatalf("a body from before v0.11.1 read as %+v", old)
+	}
+	got, err := lbSpecOfRequest(body(`{"listeners":[{"port":443,"protocol":"tcp","pool":"web","connectionLimit":2000,"timeoutClientData":50000}],
+		"pools":[{"name":"web","algorithm":"source","proxyProtocol":true,"proxyVersion":1,"timeoutMemberConnect":5000,"timeoutMemberData":50000,
+		  "sessionPersistence":{"type":"source_ip","timeout":3600},
+		  "healthCheck":{"type":"https","port":8443,"path":"/healthz","interval":5,"timeout":3,"rise":1,"fall":3},
+		  "members":[{"serverId":"101","port":8443,"weight":2}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := pve.LBSpec{
+		Listeners: []pve.LBListener{{Port: 443, Protocol: "tcp", Pool: "web", ConnectionLimit: 2000, TimeoutClientData: 50000}},
+		Pools: []pve.LBPool{{Name: "web", Protocol: "tcp", Algorithm: "source", ProxyProtocol: true, ProxyVersion: 1, TimeoutMemberConnect: 5000, TimeoutMemberData: 50000,
+			SessionPersistence: &pve.LBPersistence{Type: "source_ip", Timeout: 3600},
+			HealthCheck:        &pve.LBHealthCheck{Type: "https", Port: 8443, Path: "/healthz", Interval: 5, Timeout: 3, Rise: 1, Fall: 3},
+			Members:            []pve.LBMember{{ServerID: "101", Port: 8443, Weight: 2}}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("spec %+v\nwant %+v", got, want)
+	}
+	// The row holds what was asked, under the names of the request.
+	row, err := json.Marshal(loadBalancer{ID: "a", LBSpec: got})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"protocol":"tcp"`, `"connectionLimit":2000`, `"timeoutClientData":50000`, `"proxyVersion":1`, `"timeoutMemberConnect":5000`,
+		`"timeoutMemberData":50000`, `"sessionPersistence":{"type":"source_ip","timeout":3600}`, `"interval":5,"timeout":3,"rise":1,"fall":3`} {
+		if !strings.Contains(string(row), key) {
+			t.Errorf("the row lacks %s: %s", key, row)
+		}
+	}
+	for name, c := range map[string]struct{ body, say string }{
+		"udp":              {`{"listeners":[{"port":53,"protocol":"udp","pool":"dns"}],"pools":[{"name":"dns","members":[]}]}`, "UDP is not available"},
+		"tls":              {`{"listeners":[{"port":443,"protocol":"tls","pool":"web"}],"pools":[{"name":"web","members":[]}]}`, "TLS termination is not available"},
+		"https":            {`{"listeners":[{"port":443,"protocol":"https","pool":"web","certificates":["c1"]}],"pools":[{"name":"web","members":[]}]}`, "TLS termination is not available"},
+		"mismatch":         {`{"listeners":[{"port":80,"protocol":"http","pool":"db"}],"pools":[{"name":"db","protocol":"tcp","members":[]}]}`, "an http listener needs an http pool"},
+		"a limit in words": {`{"listeners":[{"port":80,"pool":"web","connectionLimit":"many"}],"pools":[{"name":"web","members":[]}]}`, "expected shape"},
+		"a limit too high": {`{"listeners":[{"port":80,"pool":"web","connectionLimit":20001}],"pools":[{"name":"web","members":[]}]}`, "connection limit must be 1 to 20000"},
+	} {
+		_, err := lbSpecOfRequest(body(c.body))
+		var he *httpx.HTTPError
+		if !errors.As(err, &he) || he.Status != http.StatusBadRequest || !strings.Contains(he.Msg, c.say) {
+			t.Errorf("%s: %v, want a 400 that says %q", name, err, c.say)
+		}
+	}
+}
 
 func TestLBMemberVM(t *testing.T) {
 	vm := func(pool, tags string) pve.ClusterResource { return pve.ClusterResource{Pool: pool, Tags: tags} }

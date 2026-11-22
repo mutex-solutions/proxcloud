@@ -5,6 +5,7 @@ package pve
 // generated ids, so nothing typed into a name can become a directive.
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/csv"
@@ -57,33 +58,67 @@ type LBMember struct {
 
 // LBPool is a set of members one or more listeners forward to.
 type LBPool struct {
-	Name      string     `json:"name"`
-	Protocol  string     `json:"protocol"`  // http | tcp
+	Name string `json:"name"`
+	// Protocol is what the members are spoken to in: http | tcp | udp. What clients are spoken to in is the
+	// listener's (LBListener.Protocol, lbPoolProtocolOf).
+	Protocol  string     `json:"protocol"`
 	Algorithm string     `json:"algorithm"` // roundrobin | leastconn | source
 	Members   []LBMember `json:"members"`
 	// HealthCheck nil is today's check: a TCP connection to the member's port.
 	HealthCheck *LBHealthCheck `json:"healthCheck,omitempty"`
-	// ProxyProtocol sends the client's address to the members in a PROXY v2 header.
+	// ProxyProtocol sends the client's address to the members in a PROXY header, of ProxyVersion 1 or 2 (0 = 2).
 	ProxyProtocol bool `json:"proxyProtocol,omitempty"`
+	ProxyVersion  int  `json:"proxyVersion,omitempty"`
+	// SessionPersistence nil: every connection is balanced on its own.
+	SessionPersistence *LBPersistence `json:"sessionPersistence,omitempty"`
+	// TimeoutMemberConnect and TimeoutMemberData, in milliseconds (0 = the balancer's own): how long a member may
+	// take to accept a connection, and how long a connection to it may stay idle. They sit on the pool and not on the
+	// listener: one HAProxy backend has one pair of them.
+	TimeoutMemberConnect int `json:"timeoutMemberConnect,omitempty"`
+	TimeoutMemberData    int `json:"timeoutMemberData,omitempty"`
+}
+
+// LBPersistence keeps a client on the member it first reached. It is an object with a type, so that a cookie is a
+// new type later and not a new field.
+type LBPersistence struct {
+	Type    string `json:"type"`              // source_ip
+	Timeout int    `json:"timeout,omitempty"` // seconds without a connection after which a client is balanced afresh; 0 = lbPersistenceTimeout
 }
 
 // LBHealthCheck is how a pool's members are checked.
 type LBHealthCheck struct {
-	Type string `json:"type"`           // tcp | http
+	Type string `json:"type"`           // tcp | http | https | tls-hello | none
 	Port int    `json:"port,omitempty"` // 0 = the member's own port
-	Path string `json:"path,omitempty"` // http: the path of the GET, "/" when empty
+	Path string `json:"path,omitempty"` // http, https: the path of the GET, "/" when empty
+	// Interval and Timeout in seconds, Rise and Fall in checks; 0 = the balancer's own (every 3 s, the answer within
+	// the interval, 2 good checks up, 2 bad ones down).
+	Interval int `json:"interval,omitempty"`
+	Timeout  int `json:"timeout,omitempty"`
+	Rise     int `json:"rise,omitempty"`
+	Fall     int `json:"fall,omitempty"`
 }
 
 // LBListener is a port on the load balancer's addresses.
 type LBListener struct {
-	Port int    `json:"port"`
-	Pool string `json:"pool"`
+	Port int `json:"port"`
+	// Protocol is what clients are spoken to in: tcp | udp | tls | http | https (lbPoolProtocolOf). Empty in a row
+	// from before v0.11.1, where the protocol sat on the pool alone: such a listener reads its pool's, and Validate
+	// writes it out at the next change.
+	Protocol string `json:"protocol,omitempty"`
+	Pool     string `json:"pool"`
+	// Certificates are the certificates a tls or https listener presents, the first one by default. Reserved: no
+	// listener takes one until TLS is served (lbNotServed).
+	Certificates []string `json:"certificates,omitempty"`
 	// SourceRanges are the IPv4 networks the port admits (empty = any). They become the source of the listener's
 	// firewall rule, so a refused client never reaches HAProxy.
 	SourceRanges []string `json:"sourceRanges,omitempty"`
 	// VIP is the one address the listener binds, a Kubernetes Service's own (empty: every address of the balancer).
 	// Only the platform sets it; Validate clears it on a tenant's spec.
 	VIP string `json:"vip,omitempty"`
+	// ConnectionLimit is the most connections the listener holds open at a time (0 = no limit of its own).
+	ConnectionLimit int `json:"connectionLimit,omitempty"`
+	// TimeoutClientData, in milliseconds (0 = the balancer's own): how long a client's connection may stay idle.
+	TimeoutClientData int `json:"timeoutClientData,omitempty"`
 }
 
 // LBSpec is what a tenant configures.
@@ -104,11 +139,49 @@ const (
 var (
 	lbNameRe     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 	lbServerIDRe = regexp.MustCompile(`^[0-9]{1,9}$`)
-	lbProtocols  = []string{"http", "tcp"}
 	lbAlgorithms = []string{"roundrobin", "leastconn", "source"}
+	lbChecks     = []string{"tcp", "http", "https", "tls-hello", "none"}
 	// lbCheckPathRe: what a health check's path may hold, so it can only be a path in the config.
 	lbCheckPathRe = regexp.MustCompile(`^/[A-Za-z0-9._~/%=&?:@+-]{0,199}$`)
+
+	// lbPoolProtocolOf is the validation matrix: the protocol a listener's pool must speak, for every listener
+	// protocol of the model, one pool protocol per listener protocol: tls and https end TLS on the balancer and speak
+	// plain TCP and HTTP to the members. A pool therefore serves listeners of one family. (Where the table comes
+	// from: docs/architecture/c4/CHANGELOG.md, 2026-11-22.)
+	lbPoolProtocolOf = map[string]string{"tcp": "tcp", "tls": "tcp", "http": "http", "https": "http", "udp": "udp"}
+
+	// lbNotServed is the switch of the protocols the model knows and no appliance serves yet: a listener or a pool
+	// of one is refused with the text here. It is the only thing that keeps them out. The matrix, the listener key
+	// (lbFamily), the firewall rule's protocol (LBListenerRules) and the renderer, which gives no HAProxy frontend
+	// to a protocol it does not serve (lbFrontendMode), already know them. So the change that serves UDP deletes
+	// "udp" here and adds its own renderer, and the one that ends TLS deletes "tls" and "https" and renders their
+	// binds in lbFrontendMode's place.
+	lbNotServed = map[string]string{
+		"udp":   "UDP is not available on a load balancer yet",
+		"tls":   "TLS termination is not available on a load balancer yet: use a tcp listener and end TLS on the servers",
+		"https": "TLS termination is not available on a load balancer yet: use a tcp listener and end TLS on the servers",
+	}
 )
+
+const (
+	// lbMaxConnections is the appliance's whole budget of connections, HAProxy's global maxconn. A listener's own
+	// limit "should not exceed the global maxconn" (HAProxy 3.0 configuration.txt, maxconn of a frontend).
+	lbMaxConnections = 20000
+	// lbPersistenceTimeout is how long a client stays on its member without a new connection when the pool names no
+	// time: Kubernetes' own default for sessionAffinity ClientIP, three hours.
+	lbPersistenceTimeout = 10800
+	// What a timeout may be, in milliseconds: one second to a day.
+	lbMinTimeout, lbMaxTimeout = 1000, 24 * 3600 * 1000
+)
+
+// lbFamily is the transport a listener protocol runs on, "tcp" or "udp". One port holds one listener of each: the
+// key of a listener is (family, port), in the validation and in the firewall rule.
+func lbFamily(protocol string) string {
+	if protocol == "udp" {
+		return "udp"
+	}
+	return "tcp"
+}
 
 // LBNameOK is the rule of a load balancer's and a pool's name.
 func LBNameOK(name string) bool { return lbNameRe.MatchString(name) }
@@ -122,21 +195,32 @@ func (s *LBSpec) Validate() string {
 	if len(s.Listeners) > lbMaxListeners || len(s.Pools) > lbMaxPools {
 		return fmt.Sprintf("A load balancer holds at most %d listeners and %d pools", lbMaxListeners, lbMaxPools)
 	}
-	pools := map[string]bool{}
+	// A pool that names no protocol speaks what its first listener needs, and HTTP when none says: a request from
+	// before v0.11.1 names the protocol on the pool alone, one after it may name it on the listener alone.
+	asked := map[string]string{}
+	for _, l := range s.Listeners {
+		if p, ok := lbPoolProtocolOf[l.Protocol]; ok && asked[l.Pool] == "" {
+			asked[l.Pool] = p
+		}
+	}
+	pools := map[string]*LBPool{}
 	for i := range s.Pools {
 		p := &s.Pools[i]
 		if !LBNameOK(p.Name) {
 			return "Pool names " + LBNameRule
 		}
-		if pools[p.Name] {
+		if pools[p.Name] != nil {
 			return "Pool " + p.Name + " is defined twice"
 		}
-		pools[p.Name] = true
+		pools[p.Name] = p
 		if p.Protocol == "" {
-			p.Protocol = "http"
+			p.Protocol = cmp.Or(asked[p.Name], "http")
 		}
-		if !slices.Contains(lbProtocols, p.Protocol) {
+		if !slices.Contains([]string{"http", "tcp", "udp"}, p.Protocol) {
 			return "Pool " + p.Name + ": protocol must be http or tcp"
+		}
+		if why := lbNotServed[p.Protocol]; why != "" {
+			return "Pool " + p.Name + ": " + why
 		}
 		if p.Algorithm == "" {
 			p.Algorithm = "roundrobin"
@@ -151,15 +235,38 @@ func (s *LBSpec) Validate() string {
 			if hc.Type == "" {
 				hc.Type = "tcp"
 			}
+			hasPath := hc.Type == "http" || hc.Type == "https"
 			switch {
-			case !slices.Contains(lbProtocols, hc.Type):
-				return "Pool " + p.Name + ": health check type must be tcp or http"
+			case !slices.Contains(lbChecks, hc.Type):
+				return "Pool " + p.Name + ": health check type must be tcp, http, https, tls-hello or none"
+			case hc.Type == "none" && *hc != (LBHealthCheck{Type: "none"}):
+				return "Pool " + p.Name + ": a pool without a health check takes no port, path or figures of one"
 			case hc.Port < 0 || hc.Port > 65535:
 				return "Pool " + p.Name + ": health check port must be 1 to 65535, or empty for the member's port"
-			case hc.Type == "tcp" && hc.Path != "":
-				return "Pool " + p.Name + ": a TCP health check has no path"
-			case hc.Type == "http" && hc.Path != "" && !lbCheckPathRe.MatchString(hc.Path):
+			case !hasPath && hc.Path != "":
+				return "Pool " + p.Name + ": only an HTTP or HTTPS health check has a path"
+			case hasPath && hc.Path != "" && !lbCheckPathRe.MatchString(hc.Path):
 				return "Pool " + p.Name + ": health check path must start with / and hold no spaces"
+			case hc.Interval < 0 || hc.Interval > 300 || hc.Timeout < 0 || hc.Timeout > 300:
+				return "Pool " + p.Name + ": health check interval and timeout must be 1 to 300 seconds, or empty"
+			case hc.Rise < 0 || hc.Rise > 10 || hc.Fall < 0 || hc.Fall > 10:
+				return "Pool " + p.Name + ": health check rise and fall must be 1 to 10 checks, or empty"
+			}
+		}
+		switch {
+		case p.ProxyVersion < 0 || p.ProxyVersion > 2:
+			return "Pool " + p.Name + ": PROXY protocol version must be 1 or 2"
+		case p.ProxyVersion != 0 && !p.ProxyProtocol:
+			return "Pool " + p.Name + ": a PROXY protocol version needs proxyProtocol on"
+		case !lbTimeoutOK(p.TimeoutMemberConnect) || !lbTimeoutOK(p.TimeoutMemberData):
+			return "Pool " + p.Name + ": member timeouts must be 1000 to 86400000 milliseconds (a second to a day), or empty"
+		}
+		if sp := p.SessionPersistence; sp != nil {
+			switch {
+			case sp.Type != "source_ip":
+				return "Pool " + p.Name + ": session persistence type must be source_ip"
+			case sp.Timeout < 0 || sp.Timeout > 86400:
+				return "Pool " + p.Name + ": session persistence timeout must be 1 to 86400 seconds, or empty"
 			}
 		}
 		seen := map[string]bool{}
@@ -185,28 +292,60 @@ func (s *LBSpec) Validate() string {
 			m.Address, m.Stamp, m.Missing, m.Node = "", "", false, false // the platform's to fill in
 		}
 	}
-	ports := map[int]bool{}
-	for _, l := range s.Listeners {
+	ports := map[string]bool{}
+	for i := range s.Listeners {
+		l := &s.Listeners[i]
 		if l.Port < 1 || l.Port > 65535 {
 			return "Listener port must be 1 to 65535"
 		}
-		if ports[l.Port] {
+		on := fmt.Sprintf("Listener on port %d", l.Port)
+		pool := pools[l.Pool]
+		if pool == nil {
+			return on + " names no pool of this load balancer"
+		}
+		if l.Protocol == "" {
+			l.Protocol = pool.Protocol
+		}
+		needs, known := lbPoolProtocolOf[l.Protocol]
+		if !known {
+			return on + ": protocol must be tcp or http"
+		}
+		if why := lbNotServed[l.Protocol]; why != "" {
+			return on + ": " + why
+		}
+		if needs != pool.Protocol {
+			return fmt.Sprintf("%s: %s %s listener needs %s %s pool, and pool %s is %s", on, lbArticle(l.Protocol), l.Protocol, lbArticle(needs), needs, pool.Name, pool.Protocol)
+		}
+		key := lbFamily(l.Protocol) + "/" + strconv.Itoa(l.Port)
+		if ports[key] {
 			return fmt.Sprintf("Port %d has two listeners", l.Port)
 		}
-		ports[l.Port] = true
-		if !pools[l.Pool] {
-			return fmt.Sprintf("Listener on port %d names no pool of this load balancer", l.Port)
+		ports[key] = true
+		switch {
+		case len(l.Certificates) > 0 && l.Protocol != "tls" && l.Protocol != "https":
+			return on + ": only a tls or https listener takes certificates"
+		case l.ConnectionLimit < 0 || l.ConnectionLimit > lbMaxConnections:
+			return fmt.Sprintf("%s: connection limit must be 1 to %d, or empty for none (%d is what the load balancer holds in all)", on, lbMaxConnections, lbMaxConnections)
+		case !lbTimeoutOK(l.TimeoutClientData):
+			return on + ": client timeout must be 1000 to 86400000 milliseconds (a second to a day), or empty"
 		}
-	}
-	for i := range s.Listeners {
-		s.Listeners[i].VIP = ""
-		ranges, msg := lbSourceRanges(s.Listeners[i].SourceRanges)
+		l.VIP = ""
+		ranges, msg := lbSourceRanges(l.SourceRanges)
 		if msg != "" {
-			return fmt.Sprintf("Listener on port %d: %s", s.Listeners[i].Port, msg)
+			return on + ": " + msg
 		}
-		s.Listeners[i].SourceRanges = ranges
+		l.SourceRanges = ranges
 	}
 	return ""
+}
+
+func lbTimeoutOK(ms int) bool { return ms == 0 || (ms >= lbMinTimeout && ms <= lbMaxTimeout) }
+
+func lbArticle(protocol string) string {
+	if protocol == "http" || protocol == "https" {
+		return "an"
+	}
+	return "a"
 }
 
 // LBSourceRanges is lbSourceRanges for a caller outside the package: the gateway checks a Service's list with it.
@@ -319,6 +458,34 @@ func RenderHAProxyOn(s LBSpec, vips []string) string { return renderHAProxy(s, v
 // address, and connections may stay idle for an hour.
 func RenderClusterHAProxy(s LBSpec, vips []string) string { return renderHAProxy(s, vips, "1h") }
 
+// lbBackendMode is the HAProxy mode of a pool's backend. A protocol off the list (a stored row no validation saw)
+// is plain TCP.
+func lbBackendMode(p LBPool) string {
+	if p.Protocol == "http" {
+		return "http"
+	}
+	return "tcp"
+}
+
+// lbFrontendMode is the HAProxy mode of a listener's frontend. ok false: HAProxy has no frontend for it, so the
+// config, the health read and nothing else may count on one. That is a protocol HAProxy does not serve here (udp,
+// and tls and https until their binds are rendered: lbNotServed), and a listener whose pool speaks another protocol
+// than it needs (a stored row no validation saw). A listener without a protocol is one from before v0.11.1 and
+// reads its pool's.
+func lbFrontendMode(l LBListener, p LBPool) (mode string, ok bool) {
+	backend := lbBackendMode(p)
+	switch l.Protocol {
+	case "":
+		return backend, true
+	case "tcp", "http":
+		return l.Protocol, l.Protocol == backend
+	}
+	return "", false
+}
+
+// renderHAProxy writes one frontend per listener, named by its port and never by its pool, that ends in its
+// default_backend: what chooses another pool later (a rule of a layer 7 listener) goes above that line and moves
+// nothing. A field at its default writes no line, so a config from before the field keeps its bytes.
 func renderHAProxy(s LBSpec, vips []string, idle string) string {
 	var binds []string
 	for _, v := range vips {
@@ -332,12 +499,6 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 	var b strings.Builder
 	b.WriteString(haproxyGlobal)
 	fmt.Fprintf(&b, haproxyTimeouts, idle)
-	mode := func(p LBPool) string {
-		if slices.Contains(lbProtocols, p.Protocol) {
-			return p.Protocol
-		}
-		return "tcp"
-	}
 	idx := map[string]int{}
 	for i, p := range s.Pools {
 		idx[p.Name] = i
@@ -349,6 +510,10 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		if !ok || l.Port < 1 || l.Port > 65535 {
 			continue
 		}
+		m, ok := lbFrontendMode(l, s.Pools[i])
+		if !ok {
+			continue
+		}
 		name, vip, ok := lbFrontend(l)
 		if !ok {
 			continue
@@ -358,7 +523,6 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 			on = []string{vip}
 		}
 		listeners++
-		m := mode(s.Pools[i])
 		fmt.Fprintf(&b, "\nfrontend %s\n", name)
 		for _, a := range on {
 			fmt.Fprintf(&b, "  bind %s:%d\n", a, l.Port)
@@ -366,6 +530,12 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		fmt.Fprintf(&b, "  mode %s\n  default_backend %s\n", m, backends[i])
 		if m == "http" {
 			b.WriteString("  option forwardfor\n")
+		}
+		if l.ConnectionLimit >= 1 && l.ConnectionLimit <= lbMaxConnections {
+			fmt.Fprintf(&b, "  maxconn %d\n", l.ConnectionLimit)
+		}
+		if t := l.TimeoutClientData; t != 0 && lbTimeoutOK(t) {
+			fmt.Fprintf(&b, "  timeout client %dms\n", t)
 		}
 	}
 	if listeners == 0 { // HAProxy refuses to start with no proxy
@@ -376,22 +546,67 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		if slices.Contains(lbAlgorithms, p.Algorithm) {
 			algo = p.Algorithm
 		}
-		fmt.Fprintf(&b, "\nbackend %s\n  mode %s\n  balance %s\n", backends[i], mode(p), algo)
-		check, extra := "check", ""
+		fmt.Fprintf(&b, "\nbackend %s\n  mode %s\n  balance %s\n", backends[i], lbBackendMode(p), algo)
+		check, extra := " check", ""
 		if hc := p.HealthCheck; hc != nil {
-			if hc.Type == "http" {
+			switch hc.Type {
+			case "http", "https":
 				path := "/"
 				if lbCheckPathRe.MatchString(hc.Path) {
 					path = hc.Path
 				}
 				fmt.Fprintf(&b, "  option httpchk GET %s\n", path)
+			case "tls-hello":
+				b.WriteString("  option ssl-hello-chk\n")
 			}
 			if hc.Port > 0 && hc.Port <= 65535 {
 				check += " port " + strconv.Itoa(hc.Port)
 			}
+			if hc.Type == "https" { // the check alone speaks TLS; nothing verifies a member's certificate
+				check += " check-ssl verify none"
+			}
+			in := func(v, lo, hi, or int) int {
+				if v < lo || v > hi {
+					return or
+				}
+				return v
+			}
+			if t := in(hc.Timeout, 1, 300, 0); t != 0 {
+				fmt.Fprintf(&b, "  timeout check %ds\n", t)
+			}
+			// The three figures go together, each at the balancer's own when the pool names none, so the line means
+			// the same whatever a backend takes over from the defaults.
+			if inter, fall, rise := in(hc.Interval, 1, 300, 0), in(hc.Fall, 1, 10, 0), in(hc.Rise, 1, 10, 0); inter+fall+rise != 0 {
+				fmt.Fprintf(&b, "  default-server inter %ds fall %d rise %d\n", cmp.Or(inter, 3), cmp.Or(fall, 2), cmp.Or(rise, 2))
+			}
+			if hc.Type == "none" {
+				// Nothing brings a member without a check back up, so what the last process knew of it is not read:
+				// a member that was down when its check was taken away would stay down for good, and at every reload
+				// after it (the state is saved again as it stands). HAProxy 3.0.11 and 3.2.25 both do that.
+				check = ""
+				b.WriteString("  load-server-state-from-file none\n")
+			}
+		}
+		if t := p.TimeoutMemberConnect; t != 0 && lbTimeoutOK(t) {
+			fmt.Fprintf(&b, "  timeout connect %dms\n", t)
+		}
+		if t := p.TimeoutMemberData; t != 0 && lbTimeoutOK(t) {
+			fmt.Fprintf(&b, "  timeout server %dms\n", t)
+		}
+		// The table is this HAProxy's own: it starts empty after a reload and on the other appliance of a pair.
+		// ponytail: a "peers" section carries it over both; add it when a tenant needs a client kept across them.
+		if sp := p.SessionPersistence; sp != nil && sp.Type == "source_ip" {
+			expire := sp.Timeout
+			if expire < 1 || expire > 86400 {
+				expire = lbPersistenceTimeout
+			}
+			fmt.Fprintf(&b, "  stick-table type ip size 100k expire %ds\n  stick on src\n", expire)
 		}
 		if p.ProxyProtocol { // never check-send-proxy: a check on its own port reaches a plain health endpoint
 			extra = " send-proxy-v2"
+			if p.ProxyVersion == 1 {
+				extra = " send-proxy"
+			}
 		}
 		for _, m := range p.Members {
 			addr, ok := lbMemberAddr(m)
@@ -402,7 +617,7 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 			if w < 1 || w > 256 {
 				w = 1
 			}
-			fmt.Fprintf(&b, "  server %s %s:%d %s weight %d%s\n", lbServerName(m), addr, m.Port, check, w, extra)
+			fmt.Fprintf(&b, "  server %s %s:%d%s weight %d%s\n", lbServerName(m), addr, m.Port, check, w, extra)
 		}
 	}
 	return b.String()
@@ -649,43 +864,45 @@ func LBListenerRules(listeners []LBListener, vips []string) []FirewallRule {
 			}
 		}
 	}
-	bySource := map[string]map[string][]int{} // dest -> source list -> ports
-	for _, l := range listeners {
-		if l.Port < 1 || l.Port > 65535 {
-			continue
-		}
-		ranges, msg := lbSourceRanges(l.SourceRanges)
-		if msg != "" {
-			continue // a stored row a validation never saw: nothing is opened for it
-		}
-		on := dests
-		if l.VIP != "" {
-			a, err := netip.ParseAddr(l.VIP)
-			if err != nil || !a.Is4() || !slices.Contains(dests, a.String()) {
+	var out []FirewallRule
+	for _, proto := range []string{"tcp", "udp"} { // a listener's key is (family, port): TCP 53 and UDP 53 are two rules
+		bySource := map[string]map[string][]int{} // dest -> source list -> ports
+		for _, l := range listeners {
+			if l.Port < 1 || l.Port > 65535 || lbFamily(l.Protocol) != proto {
 				continue
 			}
-			on = []string{a.String()}
-		}
-		src := strings.Join(ranges, ",")
-		for _, dest := range on {
-			if bySource[dest] == nil {
-				bySource[dest] = map[string][]int{}
+			ranges, msg := lbSourceRanges(l.SourceRanges)
+			if msg != "" {
+				continue // a stored row a validation never saw: nothing is opened for it
 			}
-			bySource[dest][src] = append(bySource[dest][src], l.Port)
-		}
-	}
-	var out []FirewallRule
-	for _, dest := range dests {
-		for _, src := range slices.Sorted(maps.Keys(bySource[dest])) {
-			ports := slices.Clone(bySource[dest][src])
-			slices.Sort(ports)
-			for chunk := range slices.Chunk(ports, size) {
-				nums := make([]string, len(chunk))
-				for i, p := range chunk {
-					nums[i] = strconv.Itoa(p)
+			on := dests
+			if l.VIP != "" {
+				a, err := netip.ParseAddr(l.VIP)
+				if err != nil || !a.Is4() || !slices.Contains(dests, a.String()) {
+					continue
 				}
-				out = append(out, FirewallRule{Type: "in", Action: "ACCEPT", Proto: "tcp", Source: src, Dest: dest,
-					DPort: strings.Join(nums, ","), Comment: lbListenerComment})
+				on = []string{a.String()}
+			}
+			src := strings.Join(ranges, ",")
+			for _, dest := range on {
+				if bySource[dest] == nil {
+					bySource[dest] = map[string][]int{}
+				}
+				bySource[dest][src] = append(bySource[dest][src], l.Port)
+			}
+		}
+		for _, dest := range dests {
+			for _, src := range slices.Sorted(maps.Keys(bySource[dest])) {
+				ports := slices.Clone(bySource[dest][src])
+				slices.Sort(ports)
+				for chunk := range slices.Chunk(ports, size) {
+					nums := make([]string, len(chunk))
+					for i, p := range chunk {
+						nums[i] = strconv.Itoa(p)
+					}
+					out = append(out, FirewallRule{Type: "in", Action: "ACCEPT", Proto: proto, Source: src, Dest: dest,
+						DPort: strings.Join(nums, ","), Comment: lbListenerComment})
+				}
 			}
 		}
 	}
@@ -804,10 +1021,10 @@ func ParseHAProxyStat(out string, spec LBSpec) ([]LBMemberHealth, []string, erro
 		}
 	}
 	health := []LBMemberHealth{}
-	pools := map[string]bool{}
+	pools := map[string]LBPool{}
 	backends := lbBackends(spec.Pools)
 	for i, p := range spec.Pools {
-		pools[p.Name] = true
+		pools[p.Name] = p
 		for _, m := range p.Members {
 			addr := ""
 			if m.Node {
@@ -823,7 +1040,8 @@ func ParseHAProxyStat(out string, spec LBSpec) ([]LBMemberHealth, []string, erro
 	var notLoaded []string
 	for _, l := range spec.Listeners {
 		name, vip, ok := lbFrontend(l)
-		if !ok || !pools[l.Pool] || l.Port < 1 || l.Port > 65535 {
+		pool, has := pools[l.Pool]
+		if _, served := lbFrontendMode(l, pool); !ok || !has || !served || l.Port < 1 || l.Port > 65535 {
 			continue
 		}
 		if _, running := status[name+"/FRONTEND"]; !running {

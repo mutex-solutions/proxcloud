@@ -37,6 +37,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Load balancers: a protocol per listener and the layer 4 options** (`internal/cloud/pve/lb.go`,
+  `internal/platform/project/cloud_lb_pve.go`, the tenant console's load balancer page). `UPDATE_CONFIG` and the
+  page take, on a single appliance and on a pair:
+  - per listener `protocol` (what clients are spoken to in), `connectionLimit` (1 to 20000, HAProxy `maxconn` of
+    the frontend; 20000 is the appliance's whole budget) and `timeoutClientData` (milliseconds, `timeout client`);
+  - per pool `sessionPersistence` `{type: source_ip, timeout}` (`stick-table type ip` with `stick on src`; 10800 s
+    when no time is named), `proxyVersion` `1` or `2` next to `proxyProtocol` (`send-proxy` or `send-proxy-v2`),
+    `timeoutMemberConnect` and `timeoutMemberData` (milliseconds, `timeout connect` and `timeout server`);
+  - per health check the types `https` (`check-ssl verify none`), `tls-hello` (`option ssl-hello-chk`) and `none`
+    next to `tcp` and `http`, and the figures `interval`, `timeout` (seconds), `rise` and `fall` (it was fixed at
+    3 s, 2 and 2).
+  - **The protocol moved to the listener.** The model knows `tcp`, `udp`, `tls`, `http` and `https` listeners and
+    which pool protocol each needs (`tcp` and `tls`: `tcp`; `http` and `https`: `http`; `udp`: `udp`), and one port
+    holds one listener per transport. **Served in this release: `tcp` and `http`.** A `udp`, `tls` or `https`
+    listener answers `400` with the reason ("UDP is not available on a load balancer yet", "TLS termination is not
+    available on a load balancer yet") until the releases that serve them; `certificates` on a listener is reserved
+    for the last two.
+  - **No existing balancer changes.** A stored listener without a protocol reads its pool's, a request from before
+    (the protocol on the pool only) is read as it was, and a field at its default writes no line: the three config
+    goldens of before are byte for byte the same, so the upgrade pushes nothing because of this.
+  - Limits: source persistence is kept by each HAProxy process, so it starts afresh after a change of the
+    configuration and after the other appliance takes over; a TLS hello check takes any TLS answer for healthy and
+    looks at no certificate; a pool with check `none` never takes a server out, and its backend reads no saved
+    state at a reload (`load-server-state-from-file none`): a server that was down when its check was taken away
+    would otherwise stay down for good, as nothing brings it back. A health check's `timeout` is HAProxy's
+    `timeout check`, the time the answer may take once the check is connected; with one set, the connection itself
+    must come within the pool's connect timeout (2 s when none is named) or the interval, whichever is shorter, so
+    on a `tcp` check it only shortens the wait. A Kubernetes cluster's balancer does not take these options from
+    its Services yet.
+  - Tests: the validation table (the matrix and every range), a line-by-line test of what each option adds to the
+    config, three new goldens, and the HAProxy of both appliance images (3.0 on Debian 13, 3.2 on Ubuntu 26.04)
+    running `haproxy -dW -c` on every golden and then a rendered config against members in the same container: a
+    PROXY v1 header at the member, one member per client with persistence and both without, HTTPS and TLS hello
+    checks that take a TLS server for up and a plain one for down, `no check`, and a listener's limit as the
+    frontend's. Not run on a lab.
 - **Chart `proxcloud-sandbox` 0.1.0: the sandbox runtime of the managed platform** (`deploy/charts/proxcloud-sandbox`,
   published on a `proxcloud-sandbox-v*` tag; not pinned by the BOM yet, so nothing installs it). Mode `shared` runs it
   on a node group `sandbox` of the platform cluster, mode `separate` on the platform-owned sandbox cluster. node-setup
