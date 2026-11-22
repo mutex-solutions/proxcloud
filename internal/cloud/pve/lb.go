@@ -111,9 +111,12 @@ type LBListener struct {
 	// writes it out at the next change.
 	Protocol string `json:"protocol,omitempty"`
 	Pool     string `json:"pool"`
-	// Certificates are the certificates a tls or https listener presents, the first one by default. Reserved: no
-	// listener takes one until TLS is served (lbNotServed).
+	// Certificates are the certificates a tls or https listener presents, by id: the one whose names hold the name a
+	// client asks for (SNI), and the first one when none does or the client asks for no name.
 	Certificates []string `json:"certificates,omitempty"`
+	// CertFiles are the files of Certificates on an appliance, in the same order (lbtls.go). Only the platform sets
+	// them, from the project's certificates; Validate clears them on a tenant's spec.
+	CertFiles []string `json:"certFiles,omitempty"`
 	// SourceRanges are the IPv4 networks the port admits (empty = any). They become the source of the listener's
 	// firewall rule, so a refused client never reaches HAProxy.
 	SourceRanges []string `json:"sourceRanges,omitempty"`
@@ -158,17 +161,6 @@ var (
 	// plain TCP and HTTP to the members. A pool therefore serves listeners of one family. (Where the table comes
 	// from: docs/architecture/c4/CHANGELOG.md, 2026-11-22.)
 	lbPoolProtocolOf = map[string]string{"tcp": "tcp", "tls": "tcp", "http": "http", "https": "http", "udp": "udp"}
-
-	// lbNotServed is the switch of the protocols the model knows and no appliance serves yet: a listener or a pool
-	// of one is refused with the text here. It is the only thing that keeps them out. The matrix, the listener key
-	// (lbFamily), the firewall rule's protocol (LBListenerRules) and the renderer, which gives no HAProxy frontend
-	// to a protocol it does not serve (lbFrontendMode), already know them. So the change that ends TLS deletes
-	// "tls" and "https" and renders their binds in lbFrontendMode's place. UDP is served by keepalived and LVS on an
-	// appliance pair (lblvs.go), and refused on a single appliance where the request is taken (LBSpec.HasUDP).
-	lbNotServed = map[string]string{
-		"tls":   "TLS termination is not available on a load balancer yet: use a tcp listener and end TLS on the servers",
-		"https": "TLS termination is not available on a load balancer yet: use a tcp listener and end TLS on the servers",
-	}
 )
 
 const (
@@ -226,9 +218,6 @@ func (s *LBSpec) Validate() string {
 		}
 		if !slices.Contains([]string{"http", "tcp", "udp"}, p.Protocol) {
 			return "Pool " + p.Name + ": protocol must be http, tcp or udp"
-		}
-		if why := lbNotServed[p.Protocol]; why != "" {
-			return "Pool " + p.Name + ": " + why
 		}
 		if p.Algorithm == "" {
 			p.Algorithm = "roundrobin"
@@ -335,10 +324,7 @@ func (s *LBSpec) Validate() string {
 		}
 		needs, known := lbPoolProtocolOf[l.Protocol]
 		if !known {
-			return on + ": protocol must be tcp, udp or http"
-		}
-		if why := lbNotServed[l.Protocol]; why != "" {
-			return on + ": " + why
+			return on + ": protocol must be tcp, udp, tls, http or https"
 		}
 		if needs != pool.Protocol {
 			return fmt.Sprintf("%s: %s %s listener needs %s %s pool, and pool %s is %s", on, lbArticle(l.Protocol), l.Protocol, lbArticle(needs), needs, pool.Name, pool.Protocol)
@@ -349,8 +335,16 @@ func (s *LBSpec) Validate() string {
 		}
 		ports[key] = true
 		switch {
-		case len(l.Certificates) > 0 && l.Protocol != "tls" && l.Protocol != "https":
+		case len(l.Certificates) > 0 && !lbTerminatesTLS(l.Protocol):
 			return on + ": only a tls or https listener takes certificates"
+		case lbTerminatesTLS(l.Protocol) && len(l.Certificates) == 0:
+			return fmt.Sprintf("%s: %s %s listener needs a certificate", on, lbArticle(l.Protocol), l.Protocol)
+		case len(l.Certificates) > lbMaxListenerCerts:
+			return fmt.Sprintf("%s: a listener takes at most %d certificates", on, lbMaxListenerCerts)
+		case slices.ContainsFunc(l.Certificates, func(id string) bool { return !lbCertIDRe.MatchString(id) }):
+			return on + ": a certificate is named by its id"
+		case len(slices.Compact(slices.Sorted(slices.Values(l.Certificates)))) != len(l.Certificates):
+			return on + " names a certificate twice"
 		case l.ConnectionLimit < 0 || l.ConnectionLimit > lbMaxConnections:
 			return fmt.Sprintf("%s: connection limit must be 1 to %d, or empty for none (%d is what the load balancer holds in all)", on, lbMaxConnections, lbMaxConnections)
 		case l.Protocol == "udp" && l.TimeoutClientData != 0:
@@ -358,7 +352,7 @@ func (s *LBSpec) Validate() string {
 		case !lbTimeoutOK(l.TimeoutClientData):
 			return on + ": client timeout must be 1000 to 86400000 milliseconds (a second to a day), or empty"
 		}
-		l.VIP = ""
+		l.VIP, l.CertFiles = "", nil
 		ranges, msg := lbSourceRanges(l.SourceRanges)
 		if msg != "" {
 			return on + ": " + msg
@@ -366,6 +360,11 @@ func (s *LBSpec) Validate() string {
 		l.SourceRanges = ranges
 	}
 	return ""
+}
+
+// HasTLS: the spec holds a listener that ends TLS, which needs its certificates on the appliance.
+func (s *LBSpec) HasTLS() bool {
+	return slices.ContainsFunc(s.Listeners, func(l LBListener) bool { return lbTerminatesTLS(l.Protocol) })
 }
 
 // HasUDP: the spec holds a UDP listener or pool, which only an appliance pair serves.
@@ -503,10 +502,10 @@ func lbBackendMode(p LBPool) string {
 }
 
 // lbFrontendMode is the HAProxy mode of a listener's frontend. ok false: HAProxy has no frontend for it, so the
-// config, the health read and nothing else may count on one. That is a protocol HAProxy does not serve here (udp,
-// and tls and https until their binds are rendered: lbNotServed), and a listener whose pool speaks another protocol
-// than it needs (a stored row no validation saw). A listener without a protocol is one from before v0.11.1 and
-// reads its pool's.
+// config, the health read and nothing else may count on one. That is a protocol HAProxy does not serve here (udp),
+// and a listener whose pool speaks another protocol than it needs (a stored row no validation saw). A tls listener
+// is a TCP frontend and an https listener an HTTP one, both with TLS on the bind line (lbBindTLS). A listener
+// without a protocol is one from before v0.11.1 and reads its pool's.
 func lbFrontendMode(l LBListener, p LBPool) (mode string, ok bool) {
 	backend := lbBackendMode(p)
 	switch l.Protocol {
@@ -514,6 +513,8 @@ func lbFrontendMode(l LBListener, p LBPool) (mode string, ok bool) {
 		return backend, true
 	case "tcp", "http":
 		return l.Protocol, l.Protocol == backend
+	case "tls", "https":
+		return lbPoolProtocolOf[l.Protocol], lbPoolProtocolOf[l.Protocol] == backend
 	}
 	return "", false
 }
@@ -532,7 +533,11 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		binds = []string{""}
 	}
 	var b strings.Builder
-	b.WriteString(haproxyGlobal)
+	global := haproxyGlobal
+	if slices.ContainsFunc(s.Listeners, func(l LBListener) bool { return lbTerminatesTLS(l.Protocol) && lbCertFiles(l) != nil }) {
+		global = strings.Replace(global, "\n\ndefaults\n", "\n"+haproxyTLS+"\ndefaults\n", 1)
+	}
+	b.WriteString(global)
 	fmt.Fprintf(&b, haproxyTimeouts, idle)
 	idx := map[string]int{}
 	for i, p := range s.Pools {
@@ -553,6 +558,16 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		if !ok {
 			continue
 		}
+		// A listener that ends TLS and has no certificate file (its certificate left the project, or a stored row
+		// no validation saw) gets no frontend: HAProxy takes no "ssl" bind without one, and the health read then
+		// lists the listener as not loaded.
+		tls := ""
+		if lbTerminatesTLS(l.Protocol) {
+			if lbCertFiles(l) == nil {
+				continue
+			}
+			tls = lbBindTLS(l)
+		}
 		on := binds
 		if vip != "" { // one Service's address: two Services may share a port
 			on = []string{vip}
@@ -560,11 +575,14 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		listeners++
 		fmt.Fprintf(&b, "\nfrontend %s\n", name)
 		for _, a := range on {
-			fmt.Fprintf(&b, "  bind %s:%d\n", a, l.Port)
+			fmt.Fprintf(&b, "  bind %s:%d%s\n", a, l.Port, tls)
 		}
 		fmt.Fprintf(&b, "  mode %s\n  default_backend %s\n", m, backends[i])
 		if m == "http" {
 			b.WriteString("  option forwardfor\n")
+		}
+		if l.Protocol == "https" { // whatever the client sent in the header: the member reads what the balancer saw
+			b.WriteString("  http-request set-header X-Forwarded-Proto https\n")
 		}
 		if l.ConnectionLimit >= 1 && l.ConnectionLimit <= lbMaxConnections {
 			fmt.Fprintf(&b, "  maxconn %d\n", l.ConnectionLimit)
@@ -750,7 +768,7 @@ mv $F.new $F
   done
 }
 swap || { mv $F.old $F; swap; exit 1; }
-chmod 0644 $F $F.old
+` + lbCertPrune + `chmod 0644 $F $F.old
 [ "$(stat -c %a:%U:%G $F)" = 644:root:root ]`
 	// haproxyInstall prepares a stock image from its repositories, over the public NIC.
 	// ponytail: a site with no egress bakes haproxy and socat into the image config.lbImage names.
@@ -771,14 +789,15 @@ func lbReadyScript(packages, units string) string {
 
 var haproxyReady = lbReadyScript("haproxy socat", "haproxy.service")
 
-// PushHAProxy installs config on a running appliance, and HAProxy first if the image lacks it. A guest
+// PushHAProxy installs config on a running appliance, and HAProxy first if the image lacks it. certs are the
+// certificate files config names (lbtls.go), written before it. A guest
 // without its agent or without HAProxy yet answers ErrLBNotReady. It answers nil only when the running HAProxy
 // was seen to serve config: any other answer means not applied, and the caller records nothing.
-func (s *Service) PushHAProxy(ctx context.Context, node string, vmid int, config string) error {
+func (s *Service) PushHAProxy(ctx context.Context, node string, vmid int, config string, certs ...LBCertFile) error {
 	if err := s.lbReady(ctx, node, vmid, haproxyReady, haproxyInstall); err != nil {
 		return err
 	}
-	return s.swapHAProxy(ctx, node, vmid, config)
+	return s.swapHAProxy(ctx, node, vmid, config, certs)
 }
 
 // lbReady installs what an appliance runs when ready says it lacks, and answers ErrLBNotReady meanwhile.
@@ -802,7 +821,12 @@ func (s *Service) lbReady(ctx context.Context, node string, vmid int, ready, ins
 	return ErrLBNotReady
 }
 
-func (s *Service) swapHAProxy(ctx context.Context, node string, vmid int, config string) error {
+// swapHAProxy writes the certificate files config names (certs), then config, and makes HAProxy run it. The files
+// go first: the check of the new config reads them.
+func (s *Service) swapHAProxy(ctx context.Context, node string, vmid int, config string, certs []LBCertFile) error {
+	if err := s.pushCertificates(ctx, node, vmid, certs); err != nil {
+		return err
+	}
 	if err := s.C.GuestWriteFile(ctx, node, vmid, haproxyConfig+".new", config); err != nil {
 		return err
 	}

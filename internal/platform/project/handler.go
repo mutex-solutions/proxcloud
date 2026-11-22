@@ -31,6 +31,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
+	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
 type Handler struct {
@@ -112,6 +113,10 @@ type Handler struct {
 	sandboxGates func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
 	gateMu       sync.Mutex
 	gateCache    map[string]gateVerdict
+	// lbCerts holds the projects' TLS certificates, each sealed with lbCertKeys (SetLBCertificates; nil = no
+	// certificate is taken, and no tls or https listener is served).
+	lbCerts    *pgdoc.Store
+	lbCertKeys *textcrypt.BlobKeys
 	// sbKeys holds the sandbox API keys, SHA-256 only (SetSandboxKeys; nil = the E2B API refuses every key).
 	sbKeys *pgdoc.Store
 	// sbTemplates holds the projects' custom templates and their builds (SetSandboxTemplates; nil = off).
@@ -297,6 +302,11 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Get("/project/{id}/quota-usage", h.quotaUsage)
 	r.Get("/project/{id}/gpu-capacity", h.projectGPUCapacity)
 	r.Get("/project/{id}/resource-types", h.resourceTypes)
+	// TLS certificates of the project's load balancers (cloud_lb_certs.go).
+	r.Get("/project/{id}/certificates", h.lbCertList)
+	r.Post("/project/{id}/certificates", h.lbCertCreate)
+	r.Get("/project/{id}/certificates/{certId}", h.lbCertGet)
+	r.Delete("/project/{id}/certificates/{certId}", h.lbCertDelete)
 	// Sandbox API keys: the E2B_API_KEY of the E2B-compatible API (e2b_keys.go).
 	r.Get("/project/{id}/sandbox-paused", h.nativePausedList)
 	r.Post("/project/{id}/sandbox-paused/{sandboxID}/resume", h.nativePausedResume)

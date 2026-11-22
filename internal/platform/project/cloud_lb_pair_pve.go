@@ -377,6 +377,12 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			}
 		}
 	}
+	// The certificates of the tls and https listeners: each appliance gets their files with its config, before it
+	// (PushPairHAProxy), the standby first as the config itself.
+	certs, ok := h.lbApplyCerts(ctx, proj, lb)
+	if !ok {
+		return nil
+	}
 	haproxy := lbRender(lb)
 	hhash := lbHash(haproxy)
 	lvs := pve.RenderLVS(lb.LBSpec, lb.VIPs) // "" without a UDP listener
@@ -469,7 +475,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		// serve at all has nothing to lose and is pushed.
 		if (hhash != a.HAProxyHash && refused == nil) || reloadHAProxy {
 			pushed[a] = true
-			if err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy); err != nil {
+			if err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...); err != nil {
 				if errors.Is(err, pve.ErrLBNotReady) {
 					a.State, a.Reason = lbAppBuilding, "it is installing HAProxy and keepalived"
 					continue
