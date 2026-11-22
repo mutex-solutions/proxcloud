@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -79,8 +80,8 @@ func lbSum(s string) string {
 // member sees the appliance's tenant address, nothing goes to the tenant gateway, a dead member leaves the table,
 // and nothing sent from the public side to a tenant address is forwarded.
 //
-// Where the runner's kernel has no IPVS the test is skipped with a warning on the run, and the lab drill is the
-// gate.
+// Where the runner's kernel has no IPVS the test is skipped, the workflow's step writes a warning on the run, and the
+// lab drill is the gate. Where that step loaded the module (LB_UDP_REQUIRE_IPVS) the test does not skip.
 func TestLBApplianceUDP(t *testing.T) {
 	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
 		t.Run(image, func(t *testing.T) {
@@ -191,8 +192,13 @@ func TestLBApplianceUDP(t *testing.T) {
 			// asked for (ipvsadm comes with keepalived on both images). Without IPVS on the host there is nothing to
 			// test here.
 			if code, _, _ := g.sh(ctx, "ipvs", "sh", "-c", "ipvsadm -Ln >/dev/null 2>&1; test -e /proc/sys/net/ipv4/vs/conntrack"); code != 0 {
-				fmt.Println("::warning title=UDP load balancer test skipped::this runner's kernel has no IPVS (ip_vs): TestLBApplianceUDP did not run, the lab drill is the gate for UDP listeners")
-				t.Skip("the kernel has no IPVS (ip_vs)")
+				// go test shows nothing a passing package prints, so the skip is made visible by the workflow: its step
+				// loads ip_vs and sets LB_UDP_REQUIRE_IPVS, and then there is no skipping; where the module cannot be
+				// loaded that step writes the warning on the run.
+				if os.Getenv("LB_UDP_REQUIRE_IPVS") != "" {
+					t.Fatalf("ip_vs is loaded on this runner (LB_UDP_REQUIRE_IPVS) and the guest has no IPVS\n%s", diag())
+				}
+				t.Skip("the kernel has no IPVS (ip_vs): the lab drill is the gate for UDP listeners")
 			}
 
 			// 2. The first UDP listener: nftables through the product's own install line where the image lacks it,
