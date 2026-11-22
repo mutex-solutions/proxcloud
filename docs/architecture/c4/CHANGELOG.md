@@ -4,6 +4,58 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: annotations that cannot be read, the step-down per request, a selector's spaces
+
+**What changed:** three findings of the review of the change below, in its own pull request. No container, no trust
+relation, no field of the protocol changed.
+
+- `internal/cloud/lbgw/annotations.go`: `Read` is what both sides read of a Service's annotations: the names of the
+  two prefixes and the internal one, with a value of at most `MaxAnnotationValue` (256) characters. `ServiceOptions`
+  no longer refuses a Service for a value that is too long, for more than 32 annotations or for a name that is not
+  the load balancer's: the first is not obeyed and named in the `InvalidAnnotation` Event, the count is no limit
+  (`maxNamed`, 32, is how many names the `AnnotationNotSupported` Event lists before it counts), the third is not
+  looked at. The internal annotation is read first and still refuses.
+- `internal/cloud/lbgw/gateway.go`: the refusal of a body over 64 KiB says what stays and what to do; it reaches
+  every Service as an Event.
+- `cmd/lb-controller`: `gateway.put` sends the whole request every time and the request of protocol 1 only after an
+  older portal's `400`, for that request; the `peer` it remembered is gone. `readService` sends a value over the
+  limit cut to one character more, and reads the node selector through `lbgw.Read`. `parseSelector` drops the
+  spaces around `=` too.
+- Diagrams: none. `c4-code.md` (the `lbgw` and `cmd/lb-controller` rows) says the same.
+
+**Why:**
+
+- *An address must not be lost over an annotation nobody can read.* v0.11.0's controller read one annotation, so a
+  Service could carry any others of the two prefixes. Refusing such a Service at the cluster's upgrade took it out
+  of the state, and its address went back to the pool. Only the internal annotation is worth that: obeying it
+  halfway would publish a Service that asked not to be.
+- *No limit on the count.* The table has 14 knobs under two names: it looks up at most 30 names, whatever else is
+  there. A limit of 32 could only pick which annotation the table knows to drop, by the order of names. What the
+  count costs is the size of the request, which has its own limit, and the length of the Event, which is capped.
+- *The cut value.* Kubernetes takes 256 KiB of annotations on one object. One long value under a load balancer
+  name would take the whole cluster's state over 64 KiB, and the gateway would refuse all of it. The controller
+  cannot drop the annotation (the portal is the one that says what is not obeyed), so it sends 257 characters: still
+  too long, so the portal names it. Both sides call `Read`, so a node selector the portal says it does not obey is
+  not applied by the controller either.
+- *The body limit stays.* 50 Services with 20 ports and 100 source ranges each never fitted 64 KiB; annotations
+  add to that. The limit is the bound on what a cluster's credential can make the portal read and store. Over it
+  nothing is stored, so nothing is released, and the Event says so.
+- *The step-down is per request.* Remembering that the portal was old made the first request to a portal that came
+  back the short one: for one turn it stored Services without their PROXY version, selected nodes and affinity, and
+  converged to that. Now nothing is remembered. The cost is on the old portal only: its `auditChange` audits a
+  refusal when it differs from the last answer, and a refused request followed by an accepted one differs every
+  turn, so a cluster whose Services use protocol 2 writes one audit event a turn while the portal is rolled back. A
+  request with nothing of protocol 2 is not refused, and a refusal that is the same without those fields is not sent
+  twice. The way out of that cost, if a rollback ever lasts, is a mark on the short request that the newer portal
+  refuses; it needs a change of the protocol and was left out.
+- *Spaces around `=`.* cloud-provider-openstack v1.37.1 `pkg/util/util.go`:73-94 (`StringToMap`, called from
+  `pkg/openstack/loadbalancer.go`:467-470) trims each term and nothing else: `" k1=v1, k2 "` is its own test, and
+  `pool = edge` gives the key `pool ` and the value ` edge`, which `matchNodeLabels` (:2360-2373) finds on no node.
+  The review read this as upstream trimming around `=`; it does not. The trim is kept as a difference on purpose,
+  the fourteenth in the guide: a label's key and value hold no space, so the term has one meaning, and every
+  selector that matches nodes upstream matches the same nodes here. A term with an empty key (`=x`) is still dropped
+  here, where upstream keeps a key no node has.
+
 ## 2026-11-23: gateway protocol 2, UDP and the layer 4 annotations from Services
 
 **What changed:** no new container, no new trust relation. The one call between a cluster's load balancer controller
@@ -60,7 +112,8 @@ and the portal carries more, in both directions, and the portal reads what a Ser
 - *The controller steps down for an older portal.* The gateway decodes strictly, so a portal rolled back refuses
   protocol 2's fields with 400 for every Service of the cluster. The portal names its protocol on every answer; the
   controller sends protocol 1's request from the next turn on, without the Services that set the internal
-  annotation: that portal reads no annotation and would give them a public address.
+  annotation: that portal reads no annotation and would give them a public address. (Superseded the same day, entry
+  above: in the same turn, and for that request only.)
 
 **Not in this change:** TLS from a Service's Secret, the watch (the controller still polls, `-interval`), keeping a
 Service's address (`lb-keep-address` is read and answered with an Event), a chart change, the consoles and the

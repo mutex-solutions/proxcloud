@@ -852,12 +852,17 @@ call for its own cluster, and minting it again rotates it.
 - Each Service is checked on its own, and a refused one gets a reason the controller turns into an Event: a UDP port
   from a controller that speaks protocol 1 refuses the whole Service (`UDPNotSupported`), a port that is neither TCP
   nor UDP too (`ProtocolNotSupported`), the annotation `service.beta.kubernetes.io/openstack-internal-load-balancer` (`InternalNotSupported`),
-  annotations that contradict each other or are too many (`InvalidAnnotation`), IPv6 or dual stack
+  the forwarded-for header asked for together with the PROXY header (`InvalidAnnotation`), IPv6 or dual stack
   (`IPFamilyNotSupported`), node port 0,
   a node port outside 30000-32767 or policy Local without a health port (`NoNodePort`), source ranges that do not fit
   one firewall rule of 512 characters (`TooManySourceRanges`; `0.0.0.0/0` means any), more than 50 Services or 20 ports
   (`TooLarge`). A node whose address is not one of the cluster's 16 worker addresses is answered `NotAWorker` and never
   becomes a member; so is one of the reservation's 8 MetalLB addresses, which are not worker addresses.
+- A body over 64 KiB is refused as a whole (`413`, `TooLarge`) and nothing of it is stored: the cluster's balancer
+  stays as the last state that fitted made it, every address stays, and no change to a Service or a node reaches
+  the balancer until the state fits again. The controller says so in a Warning Event `TooLarge` on each of its
+  Services. What makes a state large is long `loadBalancerSourceRanges` and many load balancer annotations; no other
+  annotation of a Service is in the body, and a value over 256 characters is sent cut (below).
 - The answer is the state as it is: per Service `ready` with its address, `building`, or `refused`. Nothing is built in
   the request: the state is stored (`lbGatewayState`) and a converge starts when there is something to converge. The
   controller sends its state every 10 s whether it changed or not, and a pass over the pair costs about 16 Proxmox
@@ -1029,8 +1034,12 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   while it stands.
 - It sends `ProxCloud-LB-Protocol: 2` (v0.11.0's controller: 1); a portal that needs a newer controller answers
   `ControllerTooOld`, and a chart bump gives the cluster the portal's image. The portal says its own protocol on
-  every answer: a controller that finds an older portal (a portal rolled back) sends it the request of protocol 1
-  from the next turn on, since that portal refuses a field it does not know. A Service that asks for an internal
+  every answer. A portal older than the controller (a portal rolled back) refuses a field it does not know with
+  `400`; the controller then sends it the request of protocol 1, in the same turn and for that request only. It
+  remembers nothing: every turn starts with the whole request, so the first request a portal that came back gets
+  carries the annotations, the affinity and the selected nodes, and no Service is served a turn without them. The
+  price is paid only while the portal is rolled back: a turn of a cluster whose Services use protocol 2 is two
+  requests, and the old portal logs and audits the refused one each turn. A Service that asks for an internal
   balancer (below) is left out of that request and gets the Event `InternalNotSupported` from the controller: a
   portal of protocol 1 reads no annotation and would give it a public address. `-interval` is unchanged, so this
   release's image runs under chart 0.1.17.
@@ -1081,7 +1090,7 @@ has the nodes' labels.
 | `x-forwarded-for` | `x-forwarded-for` | `true` | the TCP ports become HTTP listeners that add `X-Forwarded-For`; refused together with the PROXY header (`InvalidAnnotation`), as OCCM refuses it |
 | `enable-health-monitor` | `enable-health-monitor` | `true`, `false` | `false` = no health check; not obeyed, with an Event, for policy Local |
 | `health-monitor-delay`, `-timeout`, `-max-retries`, `-max-retries-down` | the same | 1 to 300 s, 1 to 300 s, 1 to 10, 1 to 10 | the check's interval, timeout, good checks to come up, bad checks to go down. A UDP port takes no "up" count (keepalived brings a node back at its first good check) and goes down after 2 bad checks at least |
-| `node-selector` | `node-selector` | `key=value, key` | only the nodes with every one of these labels are behind the Service; none = no member and `UnAvailableLoadBalancer` |
+| `node-selector` | `node-selector` | `key=value, key` | only the nodes with every one of these labels are behind the Service; none = no member and `UnAvailableLoadBalancer`. Spaces around a term and around `=` are dropped |
 | `keep-address` | `keep-floatingip` | `true` | read, and not served yet: the Event `KeepAddressNotServed` says that the address is given back with the Service |
 
 - A value that is not understood is not obeyed and named in a Warning Event `InvalidAnnotation`; the Service is
@@ -1094,9 +1103,17 @@ has the nodes' labels.
 - `service.beta.kubernetes.io/openstack-internal-load-balancer: "true"` **refuses** the Service
   (`InternalNotSupported`), so it never gets a public address: every address of the pair is public. For an address of
   the tenant network use `loadBalancerClass: proxcloud.io/internal` (MetalLB, default mode).
-- A Service sends at most 32 such annotations of at most 256 characters each; more refuses it (`InvalidAnnotation`).
+- **An annotation that cannot be read never costs a Service its address.** A value of more than 256 characters is
+  as if the annotation were not set (when the own name's value is too long, its alias is the one read), and the same
+  Warning Event `InvalidAnnotation` names it. The controller sends such a value cut to 257 characters and does not
+  obey a node selector that long either. The number of annotations is no limit: the ones the table knows are obeyed
+  however many others there are, and `AnnotationNotSupported` names the first 32 of the others by name and counts
+  the rest. So a Service that v0.11.0 served with such annotations left on it is served as before after the
+  cluster's upgrade. The one annotation that takes an address back is the internal one, above.
+- Only annotations of the two prefixes and the internal one are sent to the portal. Any other annotation of a
+  Service, however large, is not in the request.
 
-The thirteen places where a Service behaves differently than with OCCM, on
+The fourteen places where a Service behaves differently than with OCCM, on
 purpose:
 
 1. **One pair per cluster.** All Services of a cluster share one appliance pair; each still has an address of its
@@ -1122,6 +1139,9 @@ purpose:
     cloud controller manager.
 13. **No operator defaults file** for the method or the check's figures (OCCM's `cloud.conf`); the provider's
     config can gain them later.
+14. **A node selector written `key = value` selects the nodes labelled `key=value`.** OCCM drops the spaces around
+    a term only (`StringToMap`, `pkg/util/util.go`), reads the key as `key ` with its space, which no node has, and
+    leaves the Service without a member. A selector that matches nodes with OCCM matches the same nodes here.
 
 Modes. A **new** cluster gets the controller in **default** mode when every gate holds: this portal has the gateway's
 store, a gateway URL (`PROXCLOUD_CSI_GATEWAY_URL`) and the controller image (`PROXCLOUD_LB_CONTROLLER_IMAGE`, the API's
