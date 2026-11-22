@@ -183,11 +183,34 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
   `state`: `up`, `down`, `building` or `gone`, and `reason` when not up) and `replacing` (when a replace started,
   absent when none runs). `status` is `BUILD`, `ACTIVE`, `DEGRADED` (one appliance answers, or both hold the
   address; `statusMessage` says which), `DOWN` or `ERROR`.
-- **`UPDATE_CONFIG`** takes, on top of listeners, pools and members: per pool `healthCheck` (`type` `tcp` or
-  `http`, `port` 1 to 65535 or absent for the member's port, `path` for `http`, starting with `/` and with no
-  space) and `proxyProtocol` (boolean, PROXY v2 to the members); per listener `sourceRanges`, IPv4 networks or
-  addresses, at most 512 characters together (`400` past that), absent or empty for any address. Both kinds of
-  balancer take them.
+- **`UPDATE_CONFIG`** takes `listeners` and `pools`, whole: what the body leaves out is removed. Both kinds of
+  balancer take every field below; a field left out or `0` is the balancer's own value, and a body from before
+  v0.11.1 (the protocol on the pool only) is read as it was.
+  - A **listener**: `port`; `protocol`, what clients are spoken to in, `tcp` or `http` (absent: its pool's); `pool`;
+    `sourceRanges`, IPv4 networks or addresses, at most 512 characters together (`400` past that), absent or empty
+    for any address; `connectionLimit`, 1 to 20000 connections open at a time (absent: no limit of its own; 20000
+    is what the load balancer holds in all); `timeoutClientData`, milliseconds a client's connection may stay idle,
+    1000 to 86400000 (absent: 60 s). One port holds one listener.
+  - A **pool**: `name`; `protocol`, what its servers are spoken to in, `tcp` or `http` (absent: what its first
+    listener needs, `http` when none says); `algorithm` `roundrobin`, `leastconn` or `source`; `members`
+    (`serverId`, `port`, `weight` 1 to 256); `healthCheck`; `proxyProtocol` (boolean) with `proxyVersion` `1` or
+    `2` (absent: 2), the PROXY header sent to the servers; `sessionPersistence` `{type: "source_ip", timeout}`,
+    which keeps a client address on the server it first reached until `timeout` seconds pass without a new
+    connection from it (1 to 86400, absent: 10800); `timeoutMemberConnect` and `timeoutMemberData`, milliseconds
+    a server may take to accept a connection (absent: 2 s) and a connection to it may stay idle (absent: 60 s),
+    1000 to 86400000 each.
+  - A **health check**: `type` `tcp` (a connection; also what an absent `healthCheck` means), `http` or `https`
+    (a `GET` of `path`, healthy on any 2xx or 3xx; `https` speaks TLS and verifies no certificate), `tls-hello`
+    (a TLS hello: healthy when the server answers with TLS, down when it answers in clear) or `none` (no check:
+    every server always gets traffic, and `GET_HEALTH` reads `no check`; it takes no other field); `port` 1 to
+    65535 or absent for the member's port; `path` for `http` and `https`, starting with `/` and with no space;
+    `interval` and `timeout` in seconds, 1 to 300 (absent: every 3 s, the answer due within the interval); `rise`
+    and `fall`, 1 to 10 checks (absent: 2 and 2).
+  - **The protocol of a listener decides the protocol of its pool**: a `tcp` listener needs a `tcp` pool, an `http`
+    listener an `http` pool (`400` otherwise, naming both), so a pool serves listeners of one protocol. The model
+    also knows `udp`, `tls` and `https` listeners (with `certificates` on the last two) and `udp` pools: until a
+    load balancer serves them they answer `400` "UDP is not available on a load balancer yet" and "TLS termination
+    is not available on a load balancer yet". `sctp` and any other value are a `400` too.
 - **`REPLACE_APPLIANCES`** (a pair only; `409` on a single VM, while it is still being created, or while a replace
   runs): answers the row with `replacing` set and rebuilds the appliances one at a time, the standby first. A
   delete answers `409` while it runs. Refused while the project is suspended, like any change.

@@ -38,10 +38,15 @@ A load balancer named `k8s-…` whose row names a Kubernetes cluster belongs to 
 
 ## Add listeners, pools and servers
 
-- A **pool** is a set of your servers. Choose HTTP or TCP, and how to spread traffic: round robin, least connections, or by source address.
+- A **pool** is a set of your servers. Choose how to spread traffic: round robin, least connections, or by source address.
 - Each server in a pool has a **port** and a **weight**. A server with twice the weight gets twice the traffic.
-- A **listener** opens a port on the public address and forwards it to a pool. Under **Allowed sources** you can list the networks that may connect, such as `203.0.113.0/24`; empty means any address. Other clients are dropped before they reach the load balancer.
-- **PROXY protocol v2** on a pool passes the client's address to your servers in a PROXY header. Turn it on only when your servers expect that header.
+- A **listener** opens a port on the public address and forwards it to a pool. Its **protocol** is TCP or HTTP, and the pool speaks the same to your servers: a pool serves listeners of one protocol, so changing a listener's protocol changes its pool and the pool's other listeners with it. Under **Allowed sources** you can list the networks that may connect, such as `203.0.113.0/24`; empty means any address. Other clients are dropped before they reach the load balancer.
+- A listener's **connection limit** is the most connections it holds open at a time; further clients wait until one closes. Empty means no limit of its own. The load balancer as a whole holds 20000. Its **idle timeout** closes a client's connection after that many seconds without data (60 when empty).
+- **Session persistence** by source address keeps each client address on the server it first reached, until that address has made no new connection for the time you set (three hours when empty). The load balancer forgets these choices when you save a change and when the other appliance takes over, and clients are then spread afresh.
+- **PROXY protocol** on a pool passes the client's address to your servers in a PROXY header, version 1 (a text line) or 2 (binary). Turn it on only when your servers expect that header, in that version.
+- A pool's **connect timeout** is how long a server may take to accept a connection before the next server is tried (2 seconds when empty), and its **server idle timeout** closes a connection after that many seconds without data from the server (60 when empty). For long-lived connections such as a database or a websocket, raise both idle timeouts.
+
+UDP listeners and TLS termination on the load balancer are not available yet.
 
 Press **Save configuration**. The change reaches the load balancer within seconds. If HAProxy refuses it, the page shows why and the load balancer keeps running the last configuration that worked.
 
@@ -53,7 +58,13 @@ The load balancer reaches your servers from its private addresses (one per VM; a
 
 ## Health
 
-Every server is checked every 3 seconds, by default with a TCP connection to its port. A pool can instead check with an HTTP `GET` on a path you choose (any 2xx or 3xx answer is healthy), and on another port than the one traffic goes to. Two failures take a server out, two successes bring it back. The page shows each server's state as `up` or `down`.
+Every server is checked every 3 seconds, by default with a TCP connection to its port. Two failures take a server out, two successes bring it back. The page shows each server's state as `up` or `down`. A pool can check differently:
+
+- **HTTP GET** or **HTTPS GET** on a path you choose: any 2xx or 3xx answer is healthy. The HTTPS check speaks TLS to the server and does not verify its certificate.
+- **TLS hello**: the server is healthy when it answers a TLS hello with TLS. Use it for a TCP pool whose servers end TLS themselves. It does not look at the certificate.
+- **None**: no check. Every server always gets traffic and reads `no check`; use it only when a check would disturb the service.
+- On **another port** than the one traffic goes to.
+- With your own figures: how often (**Every**, 1 to 300 seconds), how long an answer may take (**Timeout**), and how many checks in a row bring a server back (**Up after**) or take it out (**Down after**), 1 to 10 each.
 
 If you delete a server that is in a pool, it stays listed as `gone` and receives no traffic until you remove it.
 

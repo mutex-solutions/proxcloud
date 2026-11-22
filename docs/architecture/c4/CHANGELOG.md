@@ -4,6 +4,31 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-22: a load balancer's listeners get a protocol, and the layer 4 options (#PRNUM)
+
+**What changed:** no new component, container or relation; the data model of a `LOAD_BALANCER` row grew.
+`internal/cloud/pve`: `LBListener` carries `protocol` (`tcp`, `udp`, `tls`, `http`, `https`), `certificates`
+(reserved), `connectionLimit` and `timeoutClientData`; `LBPool` carries `sessionPersistence` (`LBPersistence`, type
+`source_ip`), `proxyVersion` and the two member timeouts; `LBHealthCheck` the types `https`, `tls-hello` and `none`
+and `interval`, `timeout`, `rise`, `fall`. `lbPoolProtocolOf` is the matrix from a listener's protocol to its pool's,
+`lbFamily` the transport in a listener's key (validation and `LBListenerRules`), `lbNotServed` the one place that
+refuses `udp`, `tls` and `https` until an appliance serves them, and `lbFrontendMode` what the renderer and
+`ParseHAProxyStat` ask before they count on a HAProxy frontend. `renderHAProxy` writes the options
+(`maxconn`, `timeout client`, `timeout connect`, `timeout server`, `timeout check`, `default-server inter fall rise`,
+`stick-table` with `stick on src`, `send-proxy`, `check-ssl verify none`, `option ssl-hello-chk`, no `check`).
+`internal/platform/project`: `lbSpecOfRequest` reads the body of `UPDATE_CONFIG`. `web/client`: the load balancer
+page edits all of it.
+
+**Why:** v0.11.1 makes the balancer a complete layer 4 one (TCP, UDP, TLS ended on the balancer). This is the model
+the UDP renderer, TLS termination and the Kubernetes gateway's annotations build on, with every option HAProxy
+already serves live now. The protocol sits on the listener, each listener keeps its own frontend that ends in a
+default backend, certificates are a list on the listener and persistence and health are typed, so that layer 7
+rules later add fields and move none.
+
+**Diagrams:** none (C4.2a gained the rows of `lbPoolProtocolOf`, `lbNotServed`, `lbFrontendMode` and
+`lbSpecOfRequest`, and the row of `RenderHAProxyOn` names the options). No stored row and no config of an existing
+balancer changes: the goldens of before are byte for byte the same.
+
 ## 2026-11-22: a load balancer loses no request at a reload or a node change (#430)
 
 **What changed:** no new component, container or relation. `internal/cloud/pve`: the HAProxy config of every balancer
