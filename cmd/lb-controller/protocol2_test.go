@@ -508,6 +508,12 @@ func TestAnnotationsThatCannotBeReadKeepTheAddress(t *testing.T) {
 	if got, err := turn(); err != nil || !slices.Equal(got, []string{"shop:InternalNotSupported"}) || served() {
 		t.Fatalf("internal: %v %v, served %v", got, err, served())
 	}
+	// The cut does not take the "true" off an internal annotation that came with spaces around it: the portal's
+	// reader drops them, so what is sent must still say true.
+	annotate(f.svc("web", "shop"), lbgw.InternalAnnotation, strings.Repeat(" ", 2*lbgw.MaxAnnotationValue)+"true\n")
+	if s := readService(f.svc("web", "shop"), false); !lbgw.Internal(s.wire.Annotations) {
+		t.Errorf("an internal Service is sent as %q, which is not true: it would get a public address", s.wire.Annotations[lbgw.InternalAnnotation])
+	}
 }
 
 // A node selector's terms: spaces around a term as OCCM drops them (StringToMap, its test " k1=v1, k2 "), and around

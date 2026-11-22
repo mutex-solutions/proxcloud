@@ -439,10 +439,13 @@ func readService(obj map[string]any, defaultClass bool) *service {
 			}
 			// A value the portal does not read (lbgw.Read) is sent cut, one character over the limit: the portal
 			// still names it in the Service's Event, and one long annotation cannot take the cluster's whole state
-			// over the gateway's body limit.
+			// over the gateway's body limit. The spaces around it go first, as the portal's readers drop them: the
+			// cut must not take the "true" off an internal annotation.
 			val := str(v)
 			if len(val) > lbgw.MaxAnnotationValue {
-				val = val[:lbgw.MaxAnnotationValue+1]
+				if val = strings.TrimSpace(val); len(val) > lbgw.MaxAnnotationValue {
+					val = val[:lbgw.MaxAnnotationValue+1]
+				}
 			}
 			w.Annotations[k] = val
 		}
