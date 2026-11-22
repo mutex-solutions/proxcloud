@@ -265,9 +265,11 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			}
 			// Drill N3-3: such an appliance kept the address for 25 s, until the next pass, since keepalived's track
 			// script only asked for HAProxy's worker. It asks for the config's first listener too, once the file is
-			// ten seconds old: FAULT, with HAProxy running, and the address is given up for the peer to take.
-			for deadline := time.Now().Add(40 * time.Second); ; time.Sleep(500 * time.Millisecond) {
-				if st := state(); st.State == "FAULT" && !st.HoldsVIP && st.HAProxy && !st.Serving {
+			// ten seconds old: FAULT, with HAProxy running, and the address is given up for the peer to take. It is
+			// asked 15 s on: the stop a moment ago made a FAULT of its own, which is over by then (with the script
+			// of v0.11.0 the appliance is MASTER and holds the address again, and this step fails).
+			for asked, deadline := time.Now().Add(15*time.Second), time.Now().Add(45*time.Second); ; time.Sleep(500 * time.Millisecond) {
+				if st := state(); time.Now().After(asked) && st.State == "FAULT" && !st.HoldsVIP && st.HAProxy && !st.Serving {
 					break
 				} else if time.Now().After(deadline) {
 					t.Fatalf("an appliance whose HAProxy runs without the balancer's listeners kept the address: %+v\n%s", st,
