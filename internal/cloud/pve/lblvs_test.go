@@ -349,6 +349,10 @@ func TestLVSFiles(t *testing.T) {
 		t.Errorf("ip_forward is set from a sysctl file: %s\n%s", lvsSysctl, sysctl)
 	}
 	table, on := strings.Index(net, "nft -f "+lvsNft), strings.Index(net, "net.ipv4.ip_forward=1")
+	// Between the two the script reads the chain back: a table that loaded without the drop policy switches nothing on.
+	if policy := strings.Index(net, "nft list chain "+lvsTable+" "+lvsForward+" | grep -q 'policy drop'"); policy < table || policy > on {
+		t.Errorf("the net script does not read the forward chain's policy back before it switches forwarding on:\n%s", net)
+	}
 	if table < 0 || on < table || strings.Count(net, "net.ipv4.ip_forward=1") != 1 || !strings.Contains(net, "sysctl -q -w net.ipv4.ip_forward=0\n  nft delete table") {
 		t.Errorf("the net script must load the table before it switches forwarding on, and switch it off before the table goes:\n%s", net)
 	}
@@ -366,5 +370,18 @@ func TestLVSFiles(t *testing.T) {
 	a := LVSHash("x", "ens18")
 	if a != LVSHash("x", "ens18") || a == LVSHash("y", "ens18") || a == LVSHash("x", "eth0") || len(a) != 64 {
 		t.Errorf("LVSHash: %s", a)
+	}
+}
+
+// The install line of the first UDP listener runs on an appliance that serves. apt-get install upgrades every
+// installed package it is given, and an upgrade of HAProxy or keepalived restarts it: the line names nftables alone.
+func TestLVSInstallUpgradesNothing(t *testing.T) {
+	for _, p := range []string{"haproxy", "keepalived", "socat", "iproute2"} {
+		if strings.Contains(lvsInstall, p) {
+			t.Errorf("the install line of a UDP listener names %s, which apt would upgrade on an appliance in use: %s", p, lvsInstall)
+		}
+	}
+	if !strings.Contains(lvsInstall, "install -y -qq --no-upgrade nftables;") {
+		t.Errorf("the install line of a UDP listener: %s", lvsInstall)
 	}
 }

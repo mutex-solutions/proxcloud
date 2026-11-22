@@ -483,8 +483,11 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			}
 		}
 		// The UDP listeners, last: their firewall rules are in, and a member change reloads this service alone.
+		// stray: the appliance holds an LVS config the row records nothing of (a push whose answer was lost, and the
+		// listener gone before the next pass). It would keep forwarding on with nothing looking after its table.
+		stray := known && a.LVSHash == "" && st.LVSSum != "" && st.LVSSum != "-"
 		switch want := lvsWant(a); {
-		case want == "" && a.LVSHash == "": // never had a UDP listener: nothing of it is on the appliance
+		case want == "" && a.LVSHash == "" && !stray: // never had a UDP listener: nothing of it is on the appliance
 		case want == "":
 			pushed[a] = true
 			if err := ps.RemoveLVS(ctx, a.Node, vmid); err != nil {

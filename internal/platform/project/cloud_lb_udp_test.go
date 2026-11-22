@@ -158,6 +158,19 @@ func TestLBPairUDPListeners(t *testing.T) {
 	if writes() != n {
 		t.Fatalf("an apply after the removal wrote: %q", f.log[n:])
 	}
+
+	// 8. A UDP service the row records nothing of (the push's answer was lost and the listener went before the next
+	// pass): the state read shows its files, and it is taken off, on that appliance alone.
+	f.set("301", func(g *lbGuest) {
+		for _, path := range lbGuestLVSFiles {
+			g.disk[path] = "left behind\n"
+		}
+		g.lvs = true
+	})
+	apply()
+	if a, b := f.count("301 lvs remove"), f.count("302 lvs remove"); a != 2 || b != 1 || f.guests["301"].lvsSum() != "-" || lb.Appliances[0].LVSHash != "" || lb.Status != lbStatusActive {
+		t.Fatalf("a UDP service the row does not record: %d and %d removals, files %s, %+v, %s", a, b, f.guests["301"].lvsSum(), lb.Appliances[0], lb.Status)
+	}
 }
 
 // UDP is a pair's: a single appliance has no keepalived, and says so by name when asked for a UDP listener.

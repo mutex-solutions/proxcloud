@@ -378,10 +378,13 @@ systemctl daemon-reload
 [ "$(cat /proc/sys/net/ipv4/ip_forward)" = 0 ] || { echo "forwarding is still on" >&2; exit 1; }
 ! nft list table ` + lvsTable + ` >/dev/null 2>&1 || { echo "the forwarding filter is still loaded" >&2; exit 1; }
 ! grep -q '^UDP' /proc/net/ip_vs 2>/dev/null || { echo "the IPVS table still holds a UDP listener" >&2; exit 1; }`
-	// lvsInstall is the install line of a pair with a UDP listener: the pair's own and nftables, which Ubuntu 26.04's
-	// image has and Debian 13's may lack. No other appliance ever runs it (C13: a release that changes a package list
-	// makes no existing appliance run apt).
-	lvsInstall = "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat keepalived iproute2 nftables; }"
+	// lvsInstall is the install line of a pair with a UDP listener: nftables, which Ubuntu 26.04's image has and
+	// Debian 13's may lack. No other appliance ever runs it (C13: a release that changes a package list makes no
+	// existing appliance run apt). It names nftables alone and upgrades nothing: the appliance serves when it runs
+	// (the pair's own packages are in, PushLVS comes after the pair's pushes), and apt-get install upgrades every
+	// installed package it is given, which would restart HAProxy and keepalived on both appliances of a balancer in
+	// use, in the same pass.
+	lvsInstall = "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-upgrade nftables; }"
 )
 
 var lvsReady = lbReadyScript("haproxy socat keepalived nftables", "haproxy.service keepalived.service")
