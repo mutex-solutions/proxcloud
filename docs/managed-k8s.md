@@ -989,9 +989,9 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   the status); while the gateway cannot be reached it stays `Terminating`, as with any cloud controller.
 - `status.loadBalancer.ingress` gets the address when the portal answers the Service `ready`, which it does when the
   appliance that holds the address serves the Service's listeners (v0.11.0 wrote it as soon as an address was
-  allocated, minutes before a cluster's first Service answered; cloud-provider-openstack also answers a status only
-  once Octavia's provisioning status is `ACTIVE`). An address already written stays while a later change is building
-  and goes when the portal names none. `ipMode: Proxy` with the annotation
+  allocated, minutes before a cluster's first Service answered; Kubernetes' own service controller also patches the
+  status only with what a provider returns once its balancer is provisioned). An address already written stays while
+  a later change is building and goes when the portal names none. `ipMode: Proxy` with the annotation
   `proxcloud.io/lb-proxy-protocol: "true"` and `VIP` otherwise. **With `VIP`, a client inside the cluster never
   reaches the balancer**: kube-proxy treats an address with that mode as one of the Service's own and sends a pod's or
   a node's connection to it straight to an endpoint. Such a client does not see an outage of the pair or a switch

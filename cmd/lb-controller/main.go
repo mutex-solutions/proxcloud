@@ -242,11 +242,11 @@ func (c *controller) turn(ctx context.Context) error {
 		}
 		// The address goes into the Service's status when the portal says it is served, not when it is allocated:
 		// what waits for status.loadBalancer.ingress (helm --wait, Argo CD's health, external-dns) takes the Service
-		// for reachable (drill N3-7: 3 min 12 s too early for a cluster's first Service). cloud-provider-openstack
-		// does the same: EnsureLoadBalancer answers an error until Octavia's provisioning status is ACTIVE, and
-		// only then the status it builds (pkg/openstack/loadbalancer.go, ensureOctaviaLoadBalancer, v1.34.0:
-		// "load balancer %s is not ACTIVE", then createLoadBalancerStatus). An address already written stays while
-		// a later change is building, and goes when the portal names none (refused, or given back).
+		// for reachable (drill N3-7: 3 min 12 s too early for a cluster's first Service). Kubernetes' own service
+		// controller does the same: it patches the status with what the provider's EnsureLoadBalancer returned, and
+		// a provider returns a status once its balancer is provisioned, an error before (k8s.io/cloud-provider
+		// controllers/service/controller.go, syncLoadBalancerIfNeeded, v0.34.0). An address already written stays
+		// while a later change is building, and goes when the portal names none (refused, or given back).
 		if st.State == lbgw.StateReady || st.Address == "" || hasIngress(s.ingress, st.Address) {
 			c.setStatus(ctx, s, st.Address)
 		}

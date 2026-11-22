@@ -131,9 +131,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a cluster answered: `helm --wait`, Argo CD's health and external-dns took the Service for reachable. It writes
   it when the portal answers `ready`, keeps an address already written while a later change is building, and
   removes it when the portal names none. `ready` now means that the appliance holding the address serves the
-  Service's config: one appliance was enough, and every config reaches the standby first. cloud-provider-openstack
-  does the same (`pkg/openstack/loadbalancer.go`, `ensureOctaviaLoadBalancer`, v1.34.0: an error while the
-  balancer's provisioning status is not `ACTIVE`, the status only after it).
+  Service's config: one appliance was enough, and every config reaches the standby first. Kubernetes' own service
+  controller does the same: it patches the status with what the provider's `EnsureLoadBalancer` returned, and a
+  provider returns it once its balancer is provisioned (`k8s.io/cloud-provider`
+  `controllers/service/controller.go`, `syncLoadBalancerIfNeeded`, v0.34.0).
 - **A change the API was applying when it stopped goes live a minute later, not three** (`cloud_lb_pve.go`,
   `cloud_lb_cluster_pve.go`, `cloud_lb_pair_pve.go`; drill N3-9: 190 to 209 s). The balancer's own lock
   (`lb-<externalId>`) was taken for three minutes whatever happened to its holder. It is a lease of one minute that
