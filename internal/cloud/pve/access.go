@@ -142,6 +142,27 @@ func (c *Client) MintClusterTokens(ctx context.Context, clusterID string, sc Clu
 	return t, nil
 }
 
+// SandboxPool holds the sandbox machines of a managed platform (platformlife, spec.sandbox): the node group `sandbox` of
+// the platform cluster (shared) or the workers of the platform's own cluster pc-sandbox (separate). A pool of its own
+// and not SystemPool, where the portal token holds NoAccess: the provider sync writes the VM firewall of a sandbox VM
+// with the portal token. The root script writes no row for it: the portal holds PlatformRole on it through /pool.
+const SandboxPool = "proxcloud-sbx"
+
+// SandboxPoolPrivileges is what the portal token must hold on SandboxPool to make the pool and to write the one row of
+// SetSandboxPoolAccess (or a minted token's, MintClusterTokens): Pool.Allocate and every privilege of ProxCloudCAPI,
+// which PVE takes in place of Permissions.Modify below /pool (docs/proxmox-permissions.md, "The mint grant in M1").
+// It holds them through PlatformACLs' row on /pool unless a row of its own on the pool replaces that one.
+func SandboxPoolPrivileges() PrivCheck {
+	return PrivCheck{Path: "/pool/" + SandboxPool, Privs: slices.Concat([]string{"Pool.Allocate"}, ManagedRoles[0].Privs)}
+}
+
+// SetSandboxPoolAccess writes (or with del removes) the one ACL row that lets the platform's own CAPMOX build machines
+// in SandboxPool: ProxCloudCAPI for the token CAPITokenID, on that pool alone. The user capmox@pve holds the role on
+// /pool already (ManagedACLs); a privilege-separated token holds the intersection, so this row is what opens the pool.
+func (c *Client) SetSandboxPoolAccess(ctx context.Context, del bool) error {
+	return c.SetACL(ctx, "/pool/"+SandboxPool, roleCAPI, []string{CAPITokenID}, del)
+}
+
 // RevokeClusterTokens deletes the tokens, each after its own ACL rows (DeleteAPIToken).
 func (c *Client) RevokeClusterTokens(ctx context.Context, clusterID string) error {
 	return errors.Join(c.DeleteAPIToken(ctx, capiUser, clusterID), c.RevokeClusterCSIToken(ctx, clusterID))

@@ -56,6 +56,9 @@ func (in *Installation) ClusterNodes() []string {
 			nodes = append(nodes, g.Nodes...)
 		}
 	}
+	for _, g := range in.Spec.sandboxGroups() { // of either mode: they boot the same node image
+		nodes = append(nodes, g.Nodes...)
+	}
 	return slices.Compact(slices.Sorted(slices.Values(nodes)))
 }
 

@@ -90,6 +90,7 @@ sync/refresh afterward. Unrelated projects with a single owner are not blocked.
 | `pc-templates` | OS and k8s node templates |
 | `proxcloud-system` | management VMs, the services cluster and its storage VMs. The platform token gets `NoAccess` here. Its name must **not** start with `poolPrefix`. |
 | `proxcloud-seed` | [managed services](#managed-services) from the console only: the seed VM (k3s with Cluster API, CAPMOX and ArgoCD). Only `capmox@pve!capi` holds a role there; the portal token and every `csi@pve` token get `NoAccess`. That fences the seed VM, not its disks on the boot store ([what the seed pool does not fence](#what-the-seed-pool-does-not-fence)). Its name must **not** start with `poolPrefix`. |
+| `proxcloud-sbx` | [managed services](#managed-services) with `spec.sandbox` only: the sandbox machines of the managed platform, a node group of the platform cluster or the workers of its own cluster `pc-sandbox`. Created and deleted by the portal token; no script names it ([sandboxes on the managed platform](#sandboxes-on-the-managed-platform)). Its name must **not** start with `poolPrefix`. |
 | `proxcloud-sandbox` | `sandbox.enabled` only: the sandbox cluster's workers ([managed-sandbox.md](managed-sandbox.md)). No project owns it, so nothing in it is synced or billed to a tenant. Its name must **not** start with `poolPrefix`. |
 | `proxcloud-sandbox-entry` | `sandbox.entry.public.bridge` set: the sandbox entry appliance (HAProxy, stage 56). The platform token holds only `ProxCloudSandboxEntry` there. Its name must **not** start with `poolPrefix`. |
 
@@ -453,6 +454,49 @@ The rows are `pve.ManagedACLs` (`internal/cloud/pve/access.go`). Installer stage
 The other rows (`/`, `/nodes`, `/pool/pc-templates`, `/sdn/zones`, the two `/storage` rows of `capmox@pve!capi`, and `/pool` and `/storage` for both users) are those of [ProxCloudCAPI](#proxcloudcapi) and [ProxCloudCSI](#proxcloudcsi).
 
 The portal checks a site against the same tables (`internal/cloud/pve/access.go`), each with a client on that token: `MissingPrivileges` with `CAPIPrivileges`, `CSIPrivileges` and `KubeMintPrivileges` (which reads the paths a mint writes and not their parents alone: the template pool, `/nodes`, `/sdn/zones/localnetwork`, each zone of the provider, and the ISO store, the import store and every boot store of the provider's storage profiles; a failed line on a single store or zone says that a row of the portal's own hides the mint role there); `ISOVisibilityProblem`, which asks PVE per `iso` store whether the CAPI token sees it and wants exactly `isoStorage` (CAPMOX puts each bootstrap ISO on the first `iso` store its token sees, as stage 10 checks for the services cluster); and `CheckBootISOGrant` for `capmox@pve`. They are the rows `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `iso-store-visibility` and `boot-iso-grant` of the page's Check step and of a run's first stage, next to `mint-scope`, which fails when the portal token holds `User.Modify` or `Permissions.Modify` on `/`, `/access` or `/access/groups` or `Permissions.Modify` on `/pool` (`HeldPrivileges` with `KubeMintForbidden`; Test connection warns on the same), or when `capmox@pve` or `csi@pve` is not in the group `proxcloud-kube` (`KubeMintGroupProblems`: PVE then refuses every token create or delete for that user), `pool-fence`, which fails when the portal token holds any privilege on `/pool/proxcloud-system` or `/pool/proxcloud-seed`, or `csi@pve!csi` on `/pool/proxcloud-seed`, and `token-scope`, which fails when `capmox@pve!capi` or `csi@pve!csi` holds any privilege on `/pool`, `/storage` or `/vms` as a whole (no row of the tables above gives one; an older setup wrote some, the script removes no row, and stage 10 removes only the CAPI token's old rows on `/storage` and on the NAS template store, so the message gives the `pveum acl delete` command; a token made without privilege separation fails it on its user's `/pool` and `/storage` rows and has no row of its own on those paths or above them with propagate to remove (its rows on the platform pools and stores stay), and the message then gives `pveum user token modify … --privsep 1`). A row of the two tokens on a single tenant pool or store is not compared with the tables ([managed-services.md](managed-services.md#step-3-check)).
+
+### Sandboxes on the managed platform
+
+With `spec.sandbox` ([managed-services.md](managed-services.md#presets-and-the-control-plane-count); no release
+offers it yet) the sandbox machines go to a pool of their own, `proxcloud-sbx`, in both placements. Not
+`proxcloud-system`: the provider sync writes the VM firewall of a sandbox machine with the portal token, which
+holds `NoAccess` there.
+
+**No new role, no new privilege, and no row for root to add.** The portal token makes the pool and writes what
+opens it, with rights the two scripts above already grant it for tenant pools:
+
+| What the run does (portal token) | Call | The right it rests on | Granted by |
+|---|---|---|---|
+| create and delete the pool | `POST /pools`, `DELETE /pools/proxcloud-sbx` | `Pool.Allocate` on `/pool` | the portal token script (`ProxCloudPlatform` on `/pool`, propagate) |
+| `shared`: one row, `capmox@pve!capi` with `ProxCloudCAPI` on `/pool/proxcloud-sbx` (propagate), and its removal | `PUT /access/acl` | below `/pool` PVE takes `Pool.Allocate` in place of `Permissions.Modify` for a role whose every privilege the caller holds there with propagate: `ProxCloudPlatform` holds all 19 of `ProxCloudCAPI` | the portal token script, as for a tenant pool ([the mint grant](#the-mint-grant-in-m1)) |
+| `separate`: the token `capmox@pve!pc-sandbox` and its removal | `POST`, `DELETE /access/users/capmox@pve/token/pc-sandbox` | `User.Modify` on `/access/groups/proxcloud-kube` | the managed-services script |
+| `separate`: that token's rows: `ProxCloudCAPI` on `/pool/proxcloud-sbx`, `/storage/<bootStorage>`, `/nodes`, `/sdn/zones/localnetwork` and, where the platform network is an SDN vnet, `/sdn/zones/<zone>/<vnet>`; `PVETemplateUser` on `/pool/pc-templates`; `PVEDatastoreAdmin` on `/storage/<isoStorage>` | `PUT /access/acl` | `Pool.Allocate` below `/pool`; `ProxCloudKubeMint` (`Permissions.Modify`) on `/storage`, `/sdn/zones` (propagate) and `/nodes` | both scripts, exactly as for a tenant cluster's token |
+
+What each principal then holds on `/pool/proxcloud-sbx`:
+
+| Principal | Holds | Why |
+|---|---|---|
+| `proxcloud@pve!platform` | `ProxCloudPlatform`, inherited from `/pool` | It reads the sandbox machines and writes their VM firewall, as on a tenant pool. This is the difference from the installer's `proxcloud-sandbox`, where root narrows the portal to `ProxCloudSandboxGuard`: here the portal must hold `Pool.Allocate` on the pool to write the row at all, and root is not asked a second time. A stolen portal token can do to a sandbox machine what it can do to a tenant's VM (console, guest agent, disks, power). **With `shared` that machine is a node of the platform cluster**: the token so reaches the position of code that escaped a sandbox there (a kubelet's and a Cilium agent's credential on the cluster that runs every tenant's control plane), which `NoAccess` on `proxcloud-system` keeps it from on every other platform node. With `separate` it reaches the sandbox cluster alone. |
+| `capmox@pve!capi` | `shared`: `ProxCloudCAPI` (the one row). `separate` and no sandboxes: nothing | The platform's own Cluster API builds the group's machines. Its user `capmox@pve` holds the role on `/pool` already; a privilege-separated token holds the intersection, so the row is what opens the pool, and its removal closes it. |
+| `capmox@pve!pc-sandbox` | `separate`: `ProxCloudCAPI` | The sandbox cluster's own token, in one Secret on the platform cluster (`pc-sandbox/pc-sandbox-pve`). It never sits on a sandbox machine. |
+| `csi@pve!csi` | nothing | Its rows are on `proxcloud-system` and the boot store. No volume is attached to a sandbox machine: the proxmox-csi node plugin is kept off the group, and `pc-sandbox` has no CSI. |
+| `csi@pve` (user) | `ProxCloudCSI`, inherited from `/pool` | No `NoAccess` row as on the installer's sandbox pool: only root could write one (PVE takes `NoAccess` from a caller with `Permissions.Modify` alone), and on a console-managed site no `csi@pve` token holds a row on `/pool` that would reach the pool. A site that made `csi@pve!gateway` by hand with `/pool` can cap it: `pveum acl modify /pool/proxcloud-sbx --users csi@pve --roles NoAccess --propagate 1`, after an apply made the pool. |
+
+**An existing site** needs nothing run again when its Check passes: the row `sandbox` reads, with the portal token,
+exactly the rights of the first table on the paths the run writes (and with `shared` on an installed group, with
+`capmox@pve!capi`, the row itself). It fails on a site whose scripts ran before these rows existed, whose rows were
+changed since, or that gave the portal's user or token a row of its own on `/pool/proxcloud-sbx`, on the platform's
+boot or ISO store or on the platform network's zone (such a row replaces what the parent passes down). The fix it
+names is the root step of every such case: **run the managed-services script again as root on a node**
+(`GET /api/v1/admin/setup/proxmox-script?managedServices=true&bootStorage=<store>&isoStorage=<store>`, or step 2 of
+the Managed services page). It writes the scripts' rows again, the mint role next to a row of the portal's own
+included; a row on `/pool/proxcloud-sbx` itself it does not touch: delete it
+(`pveum acl delete /pool/proxcloud-sbx --tokens '<the portal token>' --roles <role>`, and `--users` for the user's).
+An apply that meets the refusal stops at `sandbox_access_failed` with nothing of the cluster changed.
+
+Not run on a lab. The `ProxCloudCAPI` row on a pool is the write every tenant cluster create makes on its own pool,
+and [the mint grant](#the-mint-grant-in-m1) says how far Proxmox taking `Pool.Allocate` for it is verified; it has not
+been made on this pool, and no site has built sandboxes this way.
 
 ### What the seed pool does not fence
 

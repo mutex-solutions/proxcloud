@@ -35,12 +35,17 @@ var (
 // Secrets is one platformSecret document (id = the installation's). No route returns it and it is never passed to
 // audit.RecordSnapshots; every secret value is sealed at rest.
 type Secrets struct {
-	ID             string           `json:"id"`
-	CAPI           *TokenCredential `json:"capi,omitempty"` // capmox@pve!capi
-	CSI            *TokenCredential `json:"csi,omitempty"`  // csi@pve!csi
-	K3sToken       string           `json:"k3sToken,omitempty"`
-	SeedKubeconfig *SeedKubeconfig  `json:"seedKubeconfig,omitempty"`
-	BootstrapToken string           `json:"bootstrapToken,omitempty"` // wiped once the seed's identity is stored
+	ID   string           `json:"id"`
+	CAPI *TokenCredential `json:"capi,omitempty"` // capmox@pve!capi
+	CSI  *TokenCredential `json:"csi,omitempty"`  // csi@pve!csi
+	// Sandbox is the token of the separate sandbox cluster, capmox@pve!pc-sandbox, which a run mints (sandbox_run.go).
+	Sandbox *TokenCredential `json:"sandbox,omitempty"`
+	// SandboxTLSCert and SandboxTLSKey are the self-signed certificate of sandbox-proxy a run made, and its key.
+	SandboxTLSCert string          `json:"sandboxTlsCert,omitempty"`
+	SandboxTLSKey  string          `json:"sandboxTlsKey,omitempty"`
+	K3sToken       string          `json:"k3sToken,omitempty"`
+	SeedKubeconfig *SeedKubeconfig `json:"seedKubeconfig,omitempty"`
+	BootstrapToken string          `json:"bootstrapToken,omitempty"` // wiped once the seed's identity is stored
 	// EnrolledAt is the time (of the node's clock) the last stored enrollment line was printed: a line that is not
 	// newer is a replay and is refused (SaveEnrollment). 0 = no line was stored.
 	EnrolledAt int64     `json:"enrolledAt,omitempty"`
@@ -264,7 +269,8 @@ func (s *Store) seal(sec Secrets, f func(string) string) Secrets {
 		}
 		return f(v)
 	}
-	for _, t := range []**TokenCredential{&sec.CAPI, &sec.CSI} {
+	sec.SandboxTLSKey = opt(sec.SandboxTLSKey)
+	for _, t := range []**TokenCredential{&sec.CAPI, &sec.CSI, &sec.Sandbox} {
 		if *t != nil {
 			c := **t
 			c.Secret = opt(c.Secret)

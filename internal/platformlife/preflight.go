@@ -30,7 +30,7 @@ const (
 
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, scheduler (a warning, present only while the job scheduler is off), spec, network, bridge (a failure before the
 // first install, a warning after it), isolation,
-// tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), csi-vmid (a warning or ok, never a failure), credentials,
+// tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), sandbox (present while spec.sandbox asks for sandboxes), csi-vmid (a warning or ok, never a failure), credentials,
 // machines (a warning or ok, never a failure; absent while the installation has no VM), nodes (a warning or ok, never a failure; absent while the platform cluster cannot be read), certificates (a warning or ok, never a failure; absent while the seed or the platform cluster cannot be read), capacity (a failure before the first install; after it a warning, and a failure only where the settings make a control plane larger than the one a run built and it does not fit; a warning when it cannot be read; absent while the CAPI token is not stored), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, argocd-access (present while spec.access.argocd is set: a failure on an address or networks Validate refuses, a warning when the operator networks contain a Proxmox node's address), boot-store (a failure when the store is missing or takes no disk image, a warning
 // when it holds other VMs' disks), pve-api-rule (a warning or ok, never a failure), seed-backup (a warning or ok, never a failure; present once the installation has a seed VM), images. A run's first stage fails preflight_failed with the failed rows as its items, or
@@ -68,7 +68,7 @@ const providerDisabled = "the provider is disabled, and a provider sync skips a 
 // SiteOf is the site of a Proxmox provider, without the live management networks.
 func SiteOf(es *externalservice.ExternalService) Site {
 	n := es.PVENetworkConfig()
-	site := Site{CIDRPool: n.CIDRPool, Blocked: n.BlockedCIDRs, Sandbox: n.SandboxCIDRs}
+	site := Site{CIDRPool: n.CIDRPool, Blocked: n.BlockedCIDRs, Sandbox: n.SandboxCIDRs, PoolPrefix: es.PVEPoolPrefix()}
 	for _, p := range n.PublicNetworks {
 		site.Public = append(site.Public, p.CIDR)
 	}
@@ -152,6 +152,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 			s.Network.VLAN, bom.Release, ClusterChartVersion(bom), kamaji.VLANChartVersion))
 	}
 	spec = append(spec, in.ControlPlaneCountProblems()...)
+	spec = append(spec, in.SandboxProblems()...)
 	row("spec", spec, "The installation is complete and consistent.")
 
 	mgmt, complete, err := p.Portal.C.ManagementCIDRs(ctx)
@@ -261,7 +262,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	// A warning, never a failure, and absent before the first machine exists: after a node reboot Proxmox starts only
 	// the VMs with onboot, and a stopped machine is started in Proxmox, not by a run.
 	if p.CAPI != nil {
-		vms, err := platformVMs(ctx, p.CAPI, in.ID)
+		vms, err := platformVMs(ctx, p.CAPI, in)
 		var bad []string
 		for _, vm := range vms {
 			if vm.err != nil {
@@ -326,6 +327,10 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	// of these lines the script does not fix.
 	if c := &out[len(out)-1]; c.ID == "privileges:kubemint" && c.Status == CheckFail && (strings.Contains(c.Message, " on /storage/") || strings.Contains(c.Message, " on /sdn/zones/")) {
 		c.Message += "\n" + pve.KubeMintShadowed
+	}
+
+	if c := p.sandboxCheck(ctx); c != nil {
+		out = append(out, *c)
 	}
 
 	// The mint grant reaches the users of pve.KubeMintGroup alone. On /access/groups itself (where sites set up before
@@ -444,6 +449,9 @@ func (p Preflight) Run(ctx context.Context) []Check {
 					nodes = append(nodes, g.Nodes...)
 				}
 			}
+			for _, g := range s.sandboxGroups() {
+				nodes = append(nodes, g.Nodes...)
+			}
 		}
 		for _, n := range slices.Compact(slices.Sorted(slices.Values(nodes))) {
 			if !templateupdates.PlacementAllowed(opts, n, s.Storage.Import, s.Storage.Boot) {
@@ -518,7 +526,7 @@ func (p Preflight) bootStore(ctx context.Context, defs []pve.StorageDef, defsErr
 		return c
 	}
 	own := map[int]bool{}
-	vms, _ := platformVMs(ctx, p.CAPI, in.ID)
+	vms, _ := platformVMs(ctx, p.CAPI, in)
 	for _, vm := range vms {
 		own[vm.vmid] = true
 	}
@@ -537,6 +545,9 @@ func (p Preflight) bootStore(ctx context.Context, defs []pve.StorageDef, defsErr
 		for _, g := range cl.NodeGroups {
 			nodes = append(nodes, g.Nodes...)
 		}
+	}
+	for _, g := range in.Spec.sandboxGroups() {
+		nodes = append(nodes, g.Nodes...)
 	}
 	var foreign []int
 	for _, node := range slices.Compact(slices.Sorted(slices.Values(nodes))) {
@@ -666,6 +677,9 @@ func (p Preflight) bridge(ctx context.Context) Check {
 		for _, g := range c.NodeGroups {
 			nodes = append(nodes, g.Nodes...)
 		}
+	}
+	for _, g := range in.Spec.sandboxGroups() {
+		nodes = append(nodes, g.Nodes...)
 	}
 	nodes = slices.DeleteFunc(slices.Compact(slices.Sorted(slices.Values(nodes))), func(s string) bool { return s == "" })
 	bridges, err := p.Portal.C.NodeBridges(ctx)

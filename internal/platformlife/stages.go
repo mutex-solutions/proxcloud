@@ -72,14 +72,7 @@ func (x *acq) images(ctx context.Context) error {
 		wants = append(wants, want{"seed:" + sp.Seed.Node, sp.Seed.Node, x.bom.Seed.Image})
 	}
 	if sp.NodeImage.Mode == ImageBOM {
-		var nodes []string
-		for _, c := range sp.Clusters {
-			nodes = append(nodes, c.ControlPlane.Node)
-			for _, g := range c.NodeGroups {
-				nodes = append(nodes, g.Nodes...)
-			}
-		}
-		for _, n := range slices.Compact(slices.Sorted(slices.Values(nodes))) {
+		for _, n := range x.in.ClusterNodes() {
 			wants = append(wants, want{"node:" + n, n, x.bom.Kubernetes.NodeImage})
 		}
 	}

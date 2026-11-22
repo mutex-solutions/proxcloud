@@ -4,8 +4,9 @@ package platformlife
 // spec leaves out and is not stored: the saved spec names every machine, count and size itself, and an apply never
 // asks which preset it came from. web/admin/src/pages/platform/model.ts holds the same figures for the form.
 //
-// When the sandbox service ships, a preset is also where its placement gets its default (Spec.Sandbox): homelab
-// shared, standard separate. Nothing sets it today.
+// A preset is also where a sandbox block the spec holds gets its defaults (Spec.Sandbox): homelab shared with one
+// machine of the smallest size, standard separate with two machines and a system machine. A preset never adds the
+// block: sandboxes are off until the operator asks for them.
 
 import "fmt"
 
@@ -20,12 +21,22 @@ type presetSize struct{ cores, memoryMiB, diskGiB int }
 // A preset's figures. homelab is the smallest machine Validate takes (minCores, minMemMiB), one control plane machine
 // and one machine per group and node: what the lab runs. standard is three control plane machines and at least two
 // machines per group, with the sizes the form has always started from.
+//
+// Sandboxes (measured on the spike of 2026-11-21: a node's own pods ask for about one core, an idle sandbox takes 35 to
+// 50 MiB): homelab's one machine of 2 cores and 4 GiB holds ONE sandbox of one vCPU, which is what a lab of 5 GiB nodes
+// has room for; a homelab that wants several names 4 cores or more itself. standard's two machines of 4 cores hold
+// about three each, and its system machine runs sandbox-proxy and the sandbox controller.
 var presets = map[string]struct {
 	seed, controlPlane, group presetSize
 	replicas, perGroup        int
+	sandboxPlacement          string
+	sandbox, sandboxSystem    presetSize
+	sandboxCount              int
 }{
-	PresetHomelab:  {presetSize{minCores, minMemMiB, 30}, presetSize{minCores, minMemMiB, 30}, presetSize{minCores, minMemMiB, 40}, 1, 1},
-	PresetStandard: {presetSize{2, 6144, 30}, presetSize{2, 4096, 30}, presetSize{4, 8192, 40}, 3, 2},
+	PresetHomelab: {presetSize{minCores, minMemMiB, 30}, presetSize{minCores, minMemMiB, 30}, presetSize{minCores, minMemMiB, 40}, 1, 1,
+		SandboxShared, presetSize{minCores, minMemMiB, 40}, presetSize{}, 1},
+	PresetStandard: {presetSize{2, 6144, 30}, presetSize{2, 4096, 30}, presetSize{4, 8192, 40}, 3, 2,
+		SandboxSeparate, presetSize{4, 8192, 40}, presetSize{minCores, minMemMiB, 30}, 2},
 }
 
 func (z presetSize) fill(cores, mem, disk *int) {
@@ -93,6 +104,33 @@ func ApplyPreset(preset string, s *Spec, three bool) error {
 			}
 			p.group.fill(&g.Cores, &g.MemoryMiB, &g.DiskGiB)
 			oneNode = oneNode && len(g.Nodes) == 1 && g.Nodes[0] == s.Seed.Node
+		}
+	}
+	if sb := s.Sandbox; sb != nil && sb.Placement != SandboxOff {
+		if sb.Placement == "" {
+			sb.Placement = p.sandboxPlacement
+		}
+		node := s.Clusters[0].ControlPlane.Node
+		fill := func(m *SandboxMachines, z presetSize, count int) {
+			if len(m.Nodes) == 0 {
+				m.Nodes = []string{node}
+			}
+			if m.Count == 0 {
+				m.Count = max(count, len(m.Nodes))
+			}
+			z.fill(&m.Cores, &m.MemoryMiB, &m.DiskGiB)
+			oneNode = oneNode && len(m.Nodes) == 1 && m.Nodes[0] == s.Seed.Node
+		}
+		fill(&sb.SandboxMachines, p.sandbox, p.sandboxCount)
+		if sb.Placement == SandboxSeparate {
+			if sb.System == nil {
+				sb.System = &SandboxMachines{}
+			}
+			z := p.sandboxSystem
+			if z == (presetSize{}) { // homelab asked for separate: the smallest machine
+				z = presetSize{minCores, minMemMiB, 30}
+			}
+			fill(sb.System, z, 1)
 		}
 	}
 	if n := &s.Network; preset == PresetHomelab && oneNode && n.Mode == "" && n.Bridge == "" && n.VLAN == 0 {

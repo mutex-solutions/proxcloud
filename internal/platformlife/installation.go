@@ -46,10 +46,10 @@ type Spec struct {
 	Clusters  []ClusterSpec `json:"clusters"`
 	NodeImage NodeImage     `json:"nodeImage"`
 	Tenants   Tenants       `json:"tenants,omitzero"`
-	// Sandbox is where the sandbox service will run, a choice the install offers once that service ships: placement
-	// shared (a node group of the platform cluster, the homelab choice) or separate (a cluster of its own). No release
-	// builds it yet, so Validate refuses the block; a spec without it means "no sandbox service" and keeps meaning that,
-	// which makes the later release an addition for every stored record.
+	// Sandbox is where the sandbox service runs (sandbox.go): placement shared (a node group of the platform cluster,
+	// the homelab choice), separate (a cluster of its own, pc-sandbox) or off. A spec without the block means "no
+	// sandbox service" on a new installation; a PUT without it for an installed platform keeps the stored block
+	// (KeepSandbox), so only the explicit placement off switches sandboxes off.
 	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
 	// Access is what the operator opens to named networks. Not fixed: it may be set, changed and cleared on an
 	// installed platform, and the next apply makes it so.
@@ -72,11 +72,6 @@ type ArgoCDAccess struct {
 
 // URL is where the block makes ArgoCD answer.
 func (a *ArgoCDAccess) URL() string { return "https://" + a.Address }
-
-// SandboxSpec is the placement of the sandbox service (see Spec.Sandbox).
-type SandboxSpec struct {
-	Placement string `json:"placement"` // shared | separate
-}
 
 // Storage: boot holds every platform disk and is the std StorageClass; iso is the node-local store of bootstrap ISOs;
 // import is where Template updates downloads the two images.
@@ -189,6 +184,8 @@ type Status struct {
 	// and MetalLB did not give the address (argocd_address_unavailable).
 	ArgoCDURL     string   `json:"argocdUrl,omitempty"`
 	ArgoCDSources []string `json:"argocdSources,omitempty"`
+	// Sandbox is what a run built for spec.sandbox (sandbox.go); nil = nothing, also after the apply that removed it.
+	Sandbox *SandboxStatus `json:"sandbox,omitempty"`
 }
 
 // BOMRef names an embedded BOM by release and file sha256.
@@ -294,6 +291,7 @@ const (
 
 	SandboxShared   = "shared"
 	SandboxSeparate = "separate"
+	SandboxOff      = "off"
 
 	RoleKamaji = "kamaji"
 	RoleDBaaS  = "dbaas"
@@ -301,7 +299,8 @@ const (
 	DefaultClusterName = "pc-platform"
 )
 
-// NodeGroupNames is the fixed set of node groups in M1 (no sandbox group until its shape is decided).
+// NodeGroupNames is the fixed set of node groups of spec.clusters[]. The sandbox group is not one of them: it comes
+// from spec.sandbox (Spec.platformCluster), so a stored spec and an older console keep naming exactly these three.
 var NodeGroupNames = []string{"system", "kamaji", "dbaas"}
 
 // Bounds of a machine: the lab profile (2 cores, 4 GiB) is the smallest; the node image is a 20 GiB disk and a clone
@@ -350,6 +349,9 @@ func (in *Installation) Normalize() {
 	}
 	if a := s.Access.ArgoCD; a != nil && a.Address == "" && len(a.Sources) == 0 {
 		s.Access.ArgoCD = nil // an empty block says what no block says
+	}
+	if sb := s.Sandbox; sb != nil && sb.Placement != SandboxOff && sb.TLS == nil {
+		sb.TLS = &SandboxTLS{Mode: TLSSelfSigned}
 	}
 	for i := range s.Clusters {
 		if s.Clusters[i].Name == "" {
@@ -411,14 +413,6 @@ func (in *Installation) Validate() error {
 		bad("layout %q is not shared", in.Layout)
 	}
 	s := in.Spec
-	if s.Sandbox != nil {
-		switch s.Sandbox.Placement {
-		case SandboxShared, SandboxSeparate:
-			bad("spec.sandbox: the sandbox service on the platform comes in a later release; leave spec.sandbox out")
-		default:
-			bad("spec.sandbox.placement %q is neither shared nor separate", s.Sandbox.Placement)
-		}
-	}
 	if u, err := url.Parse(s.PVEAPIURL); err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		bad("spec.pveApiUrl %q is not an https:// URL with a host", s.PVEAPIURL)
 	}
@@ -464,6 +458,9 @@ func (in *Installation) Validate() error {
 			for _, g := range c.NodeGroups {
 				nodes = append(nodes, g.Nodes...)
 			}
+		}
+		for _, g := range s.sandboxGroups() {
+			nodes = append(nodes, g.Nodes...)
 		}
 		if nodes = slices.Compact(slices.Sorted(slices.Values(nodes))); len(nodes) > 1 {
 			bad("spec.network.mode routed is a layout for one Proxmox node, and the settings place machines on %s: put the seed, the control plane and every node group on one node, or use mode bridge",
@@ -641,7 +638,7 @@ func (in *Installation) Validate() error {
 			}
 		case ImageTemplates:
 			want := []string{cp.Node}
-			for _, g := range c.NodeGroups {
+			for _, g := range append(slices.Clone(c.NodeGroups), s.sandboxGroups()...) {
 				want = append(want, g.Nodes...)
 			}
 			for _, nd := range want {
@@ -651,6 +648,9 @@ func (in *Installation) Validate() error {
 			}
 		default:
 			bad("spec.nodeImage.mode %q is neither bom nor templates", s.NodeImage.Mode)
+		}
+		if ci == 0 {
+			s.validateSandbox(bad, prefix, map[string]netip.Addr{"spec.network.gateway": gw, "spec.seed.address": seedAddr, f + ".endpoint": vip}, c, nodes, lbs, nodesOK && lbsOK)
 		}
 	}
 	return errors.Join(errs...)
@@ -662,8 +662,10 @@ type Site struct {
 	CIDRPool string
 	Blocked  []string // config.network.blockedCidrs
 	Sandbox  []string
-	Public   []string // the public networks' CIDRs
-	Mgmt     []string // the nodes' management networks (live; nil when not read)
+	// PoolPrefix is the start of every project pool's name (config.poolPrefix).
+	PoolPrefix string
+	Public     []string // the public networks' CIDRs
+	Mgmt       []string // the nodes' management networks (live; nil when not read)
 	// NodeAddrs: every address the nodes hold, as /32 (live; read for a routed network only).
 	NodeAddrs []string
 	// DefaultZone is the zone a tenant network is made in (config.network.defaultZone) and DefaultZoneKind its kind
@@ -685,11 +687,14 @@ func (in *Installation) SiteProblems(site Site) []string {
 	if err != nil {
 		return []string{"spec.network.prefix is not valid"}
 	}
+	own := in.Spec.sandboxRange()
+	out = append(out, in.sandboxSiteProblems(site)...)
 	tenant := map[string][]string{"cidrPool": {site.CIDRPool}, "sandboxCidrs": site.Sandbox, "public networks": site.Public}
 	for _, what := range []string{"cidrPool", "sandboxCidrs", "public networks"} {
 		for _, c := range tenant[what] {
 			p, err := netip.ParsePrefix(strings.TrimSpace(c))
-			if err != nil {
+			// The installation's own sandbox range is a part of the platform network by design (sandboxSiteProblems).
+			if err != nil || (what == "sandboxCidrs" && own.IsValid() && p == own) {
 				continue
 			}
 			if p.Overlaps(prefix) {
@@ -838,7 +843,7 @@ func FixedChanges(old, next *Installation) []string {
 		}
 		same(f+".nodeGroups", groups(c.NodeGroups), groups(n.NodeGroups))
 	}
-	return out
+	return append(out, sandboxFixed(old, next)...)
 }
 
 // KeepMachines makes a spec sent for an installed platform keep the stored machines where it names none: no cluster at

@@ -1,0 +1,157 @@
+application:
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    finalizers:
+      - resources-finalizer.argocd.argoproj.io
+    labels:
+      app.kubernetes.io/managed-by: proxcloud-platform
+      proxcloud.io/bom-release: 0.0.0-synthetic
+      proxcloud.io/component: pc-sandbox
+      proxcloud.io/platform-installation: pi-0123abcd
+    name: pc-sandbox
+    namespace: argocd
+  spec:
+    destination:
+      namespace: pc-sandbox
+      server: https://192.0.2.10:6443
+    project: proxcloud-platform
+    source:
+      chart: proxmox-kamaji-cluster
+      helm:
+        releaseName: pc-sandbox
+        valuesObject:
+          addonCharts:
+            sandbox:
+              chart: proxcloud-sandbox
+              repoURL: oci://ghcr.io/mutex-solutions/charts
+              version: 0.1.0
+          addons:
+            certManager:
+              enabled: false
+            ingress:
+              enabled: false
+            metricsServer:
+              enabled: false
+            sandbox:
+              enabled: true
+              values:
+                guardrail:
+                  extraDeny:
+                    - 192.0.2.0/24
+                proxy:
+                  address: 192.0.2.150
+                  domain: sbx.example.org
+          cloudCredentialsSecretName: pc-sandbox-pve
+          clusterNetwork:
+            pods: 10.244.0.0/16
+            services: 10.96.0.0/12
+          kamajiControlPlane:
+            dataStoreName: default
+            network:
+              serviceType: LoadBalancer
+            replicas: 1
+          kubernetesVersion: 1.36.6
+          nodeGroups:
+            - machineCores: 4
+              machineCount: 2
+              machineImageId: pve2=9101,pve3=9102
+              machineLabels:
+                node-restriction.kubernetes.io/proxcloud-sandbox-worker: "true"
+              machineMemoryMiB: 8192
+              machineRootVolume:
+                diskSize: 40
+              machineTags:
+                - proxcloud
+                - pc-platform
+                - pc-platform-pi-0123abcd
+                - pc-sandbox
+              name: sandbox
+              nodeLabels:
+                proxcloud.io/sandbox: cpu
+              taints:
+                - effect: NoSchedule
+                  key: proxcloud.io/unsecured
+                  value: "true"
+            - machineCores: 2
+              machineCount: 1
+              machineImageId: pve1=9100
+              machineLabels:
+                node-restriction.kubernetes.io/proxcloud-system: "true"
+              machineMemoryMiB: 4096
+              machineRootVolume:
+                diskSize: 30
+              machineTags:
+                - proxcloud
+                - pc-platform
+                - pc-platform-pi-0123abcd
+                - pc-sandbox
+              name: sandbox-system
+              nodeLabels:
+                proxcloud.io/sandbox: system
+              taints:
+                - effect: NoSchedule
+                  key: proxcloud.io/unsecured
+                  value: "true"
+                - effect: NoSchedule
+                  key: proxcloud.io/sandbox-system
+                  value: "true"
+          proxmox:
+            csi:
+              configSecretName: ""
+              storageClasses: []
+            metallb:
+              addresses:
+                - 192.0.2.150-192.0.2.150
+              speakerTolerations:
+                - effect: NoSchedule
+                  key: proxcloud.io/sandbox-system
+                  operator: Exists
+            network:
+              addresses:
+                - 192.0.2.64/28
+              bridge: vmbr1
+              dnsServers:
+                - 192.0.2.53
+              gateway: 192.0.2.1
+              mtu: 0
+              prefix: 24
+            pool: proxcloud-sbx
+            region: az1
+            storage: local-zfs
+          sandboxBandwidth: true
+      repoURL: ghcr.io/mutex-solutions/charts
+      targetRevision: 0.1.18
+    syncPolicy:
+      automated:
+        prune: true
+        selfHeal: true
+      managedNamespaceMetadata:
+        annotations:
+          scheduler.alpha.kubernetes.io/defaultTolerations: '[{"effect":"NoSchedule","key":"proxcloud.io/node-group","operator":"Equal","value":"kamaji"}]'
+          scheduler.alpha.kubernetes.io/node-selector: node-restriction.kubernetes.io/proxcloud-node-group=kamaji
+      retry:
+        backoff:
+          duration: 30s
+          factor: 2
+          maxDuration: 5m
+        limit: 10
+      syncOptions:
+        - CreateNamespace=true
+        - ServerSideApply=true
+credentials:
+  apiVersion: v1
+  kind: Secret
+  metadata:
+    labels:
+      app.kubernetes.io/managed-by: proxcloud-platform
+      proxcloud.io/bom-release: 0.0.0-synthetic
+      proxcloud.io/component: pc-sandbox
+      proxcloud.io/platform-installation: pi-0123abcd
+    name: pc-sandbox-pve
+    namespace: pc-sandbox
+  stringData:
+    secret: PLANT-sandbox-secret-0009
+    token: capmox@pve!pc-sandbox
+    url: https://192.0.2.11:8006
+  type: Opaque

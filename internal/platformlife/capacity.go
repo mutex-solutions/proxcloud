@@ -39,9 +39,16 @@ func (in *Installation) PlannedMemoryMiB() (need, spare map[string]int) {
 	if s.Seed.Mode == SeedVM {
 		need[s.Seed.Node] += s.Seed.MemoryMiB
 	}
-	for _, c := range s.Clusters {
+	for ci, c := range s.Clusters {
 		need[c.ControlPlane.Node] += (c.ControlPlane.Count() + 1) * c.ControlPlane.MemoryMiB
-		for _, g := range c.NodeGroups {
+		groups := c.NodeGroups
+		if ci == 0 {
+			groups = s.machineGroups() // with the sandbox machines of either mode
+		}
+		for _, g := range groups {
+			if len(g.Nodes) == 0 {
+				continue
+			}
 			for i, node := range g.Nodes {
 				n := g.Count / len(g.Nodes)
 				if i < g.Count%len(g.Nodes) {
@@ -76,6 +83,10 @@ func (p Preflight) capacity(ctx context.Context) Check {
 		if from, to := in.controlPlaneGrowth(i); to > 0 {
 			grows[c.ControlPlane.Node] = fmt.Sprintf(" The settings take the control plane of %s from %d to %d machines there: an apply stops at this row until they fit.", in.Status.Clusters[i].Name, from, to)
 		}
+	}
+	// Sandbox machines no run has built are not placed either: the row fails for them as for a control plane that grows.
+	for _, node := range in.sandboxGrowth() {
+		grows[node] += " The settings place sandbox machines there that no run has built yet: an apply stops at this row until they fit."
 	}
 	var short, tight, unknown, fits []string
 	grown := false // a node is short where a control plane grows
@@ -168,7 +179,7 @@ func rollRoom(ctx context.Context, capi *pve.Client, in *Installation) (short st
 		return "", nil, fmt.Errorf("could not read %s with %s: %w", what, pve.CAPITokenID, err)
 	}
 	disk := map[string]int64{} // node -> free bytes on the boot store, when it could be read
-	for _, u := range rollUnits(in.Spec.Clusters[0]) {
+	for _, u := range rollUnits(in.Spec.platformCluster()) {
 		if u.Machines == 0 {
 			continue
 		}
