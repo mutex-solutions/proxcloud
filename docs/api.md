@@ -204,8 +204,11 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
     (a TLS hello: healthy when the server answers with TLS, down when it answers in clear) or `none` (no check:
     every server always gets traffic, and `GET_HEALTH` reads `no check`; it takes no other field); `port` 1 to
     65535 or absent for the member's port; `path` for `http` and `https`, starting with `/` and with no space;
-    `interval` and `timeout` in seconds, 1 to 300 (absent: every 3 s, the answer due within the interval); `rise`
-    and `fall`, 1 to 10 checks (absent: 2 and 2).
+    `interval` and `timeout` in seconds, 1 to 300 (absent: every 3 s, connection and answer due within the
+    interval); `rise` and `fall`, 1 to 10 checks (absent: 2 and 2). `timeout` is the time the answer may take once
+    the check is connected: with it set, the connection must come within `timeoutMemberConnect` (2 s when absent)
+    or the interval, whichever is shorter, so on a `tcp` check, which waits for no answer, it only shortens that
+    wait.
   - **The protocol of a listener decides the protocol of its pool**: a `tcp` listener needs a `tcp` pool, an `http`
     listener an `http` pool (`400` otherwise, naming both), so a pool serves listeners of one protocol. The model
     also knows `udp`, `tls` and `https` listeners (with `certificates` on the last two) and `udp` pools: until a

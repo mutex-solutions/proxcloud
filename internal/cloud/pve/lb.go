@@ -580,7 +580,11 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 				fmt.Fprintf(&b, "  default-server inter %ds fall %d rise %d\n", cmp.Or(inter, 3), cmp.Or(fall, 2), cmp.Or(rise, 2))
 			}
 			if hc.Type == "none" {
+				// Nothing brings a member without a check back up, so what the last process knew of it is not read:
+				// a member that was down when its check was taken away would stay down for good, and at every reload
+				// after it (the state is saved again as it stands). HAProxy 3.0.11 and 3.2.25 both do that.
 				check = ""
+				b.WriteString("  load-server-state-from-file none\n")
 			}
 		}
 		if t := p.TimeoutMemberConnect; t != 0 && lbTimeoutOK(t) {

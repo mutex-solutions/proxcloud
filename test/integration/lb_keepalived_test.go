@@ -143,8 +143,8 @@ func TestLBPairConfigsPassTheirChecks(t *testing.T) {
 // in the same container: two plain ones that answer their name, one that keeps the first line it is sent, and two
 // that speak TLS (openssl s_server, one of them TLS 1.3 only). Shown: a PROXY v1 header reaches the member; source
 // persistence keeps a client on one member where round robin uses both; an HTTPS check and a TLS hello check take a
-// TLS member for up and a plain one for down; a pool without a check reads "no check"; a listener's connection limit
-// is the frontend's.
+// TLS member for up and a plain one for down; a pool without a check reads "no check" and serves, whatever the state
+// saved before the reload says of its member; a listener's connection limit is the frontend's.
 func lbLayer4Behaves(ctx context.Context, t *testing.T, c testcontainers.Container, run func(string) string) {
 	t.Helper()
 	run("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssl socat >/dev/null")
@@ -183,6 +183,10 @@ func lbLayer4Behaves(ctx context.Context, t *testing.T, c testcontainers.Contain
 	if err := c.CopyToContainer(ctx, []byte(pve.RenderHAProxy(spec)), "/tmp/l4.cfg", 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// What the apply saved before this reload says the member of the pool without a check was down (it had a check
+	// then, and failed it). Nothing would ever bring it back, so that pool must not read the saved state.
+	run(`mkdir -p /var/lib/haproxy && printf '1\n# be_id be_name srv_id srv_name srv_addr srv_op_state srv_admin_state srv_uweight srv_iweight srv_time_since_last_change srv_check_status srv_check_result srv_check_health srv_check_state srv_agent_state bk_f_forced_id srv_f_forced_id srv_fqdn srv_port srvrecord srv_use_ssl srv_check_port srv_check_addr srv_agent_addr srv_agent_port\n` +
+		`5 p-proxy 1 m103p9083 127.0.0.1 0 0 1 1 4 8 2 0 6 0 0 0 - 9083 - 0 0 - - 0\n' > /var/lib/haproxy/server-state`)
 	run("mkdir -p /run/haproxy && haproxy -D -f /tmp/l4.cfg")
 	ask := func(port int) string {
 		return strings.TrimSpace(run(fmt.Sprintf("echo hello | socat -t3 - TCP:127.0.0.1:%d", port)))

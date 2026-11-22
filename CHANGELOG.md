@@ -59,8 +59,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     goldens of before are byte for byte the same, so the upgrade pushes nothing because of this.
   - Limits: source persistence is kept by each HAProxy process, so it starts afresh after a change of the
     configuration and after the other appliance takes over; a TLS hello check takes any TLS answer for healthy and
-    looks at no certificate; a pool with check `none` never takes a server out. A Kubernetes cluster's balancer
-    does not take these options from its Services yet.
+    looks at no certificate; a pool with check `none` never takes a server out, and its backend reads no saved
+    state at a reload (`load-server-state-from-file none`): a server that was down when its check was taken away
+    would otherwise stay down for good, as nothing brings it back. A health check's `timeout` is HAProxy's
+    `timeout check`, the time the answer may take once the check is connected; with one set, the connection itself
+    must come within the pool's connect timeout (2 s when none is named) or the interval, whichever is shorter, so
+    on a `tcp` check it only shortens the wait. A Kubernetes cluster's balancer does not take these options from
+    its Services yet.
   - Tests: the validation table (the matrix and every range), a line-by-line test of what each option adds to the
     config, three new goldens, and the HAProxy of both appliance images (3.0 on Debian 13, 3.2 on Ubuntu 26.04)
     running `haproxy -dW -c` on every golden and then a rendered config against members in the same container: a

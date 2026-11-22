@@ -18,7 +18,9 @@ UDP) cut to one pool protocol per listener protocol, PROXY being a pool option h
 refuses `udp`, `tls` and `https` until an appliance serves them, and `lbFrontendMode` what the renderer and
 `ParseHAProxyStat` ask before they count on a HAProxy frontend. `renderHAProxy` writes the options
 (`maxconn`, `timeout client`, `timeout connect`, `timeout server`, `timeout check`, `default-server inter fall rise`,
-`stick-table` with `stick on src`, `send-proxy`, `check-ssl verify none`, `option ssl-hello-chk`, no `check`).
+`stick-table` with `stick on src`, `send-proxy`, `check-ssl verify none`, `option ssl-hello-chk`, and for a pool
+without a check no `check` and `load-server-state-from-file none`, so that a member saved as down is not kept down
+with nothing to raise it).
 `internal/platform/project`: `lbSpecOfRequest` reads the body of `UPDATE_CONFIG`. `web/client`: the load balancer
 page edits all of it.
 

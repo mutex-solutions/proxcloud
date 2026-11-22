@@ -62,9 +62,9 @@ Every server is checked every 3 seconds, by default with a TCP connection to its
 
 - **HTTP GET** or **HTTPS GET** on a path you choose: any 2xx or 3xx answer is healthy. The HTTPS check speaks TLS to the server and does not verify its certificate.
 - **TLS hello**: the server is healthy when it answers a TLS hello with TLS. Use it for a TCP pool whose servers end TLS themselves. It does not look at the certificate.
-- **None**: no check. Every server always gets traffic and reads `no check`; use it only when a check would disturb the service.
+- **None**: no check. Every server always gets traffic and reads `no check`, also one that was down before you chose it; use it only when a check would disturb the service.
 - On **another port** than the one traffic goes to.
-- With your own figures: how often (**Every**, 1 to 300 seconds), how long an answer may take (**Timeout**), and how many checks in a row bring a server back (**Up after**) or take it out (**Down after**), 1 to 10 each.
+- With your own figures: how often (**Every**, 1 to 300 seconds), how long a server may take to answer once the check is connected (**Timeout**; with one set, the connection itself must come within the pool's connect timeout), and how many checks in a row bring a server back (**Up after**) or take it out (**Down after**), 1 to 10 each.
 
 If you delete a server that is in a pool, it stays listed as `gone` and receives no traffic until you remove it.
 

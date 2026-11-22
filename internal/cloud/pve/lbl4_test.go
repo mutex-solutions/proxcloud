@@ -94,7 +94,7 @@ func TestRenderHAProxyEachOption(t *testing.T) {
 		"check: https": {set: hc(LBHealthCheck{Type: "https", Port: 8443, Path: "/ready"}),
 			add: []string{"  option httpchk GET /ready", member + " check port 8443 check-ssl verify none weight 1"}, gone: []string{member + " check weight 1"}},
 		"check: tls-hello": {set: hc(LBHealthCheck{Type: "tls-hello"}), add: []string{"  option ssl-hello-chk"}},
-		"check: none":      {set: hc(LBHealthCheck{Type: "none"}), add: []string{member + " weight 1"}, gone: []string{member + " check weight 1"}},
+		"check: none":      {set: hc(LBHealthCheck{Type: "none"}), add: []string{"  load-server-state-from-file none", member + " weight 1"}, gone: []string{member + " check weight 1"}},
 		"check: interval":  {set: hc(LBHealthCheck{Type: "tcp", Interval: 10}), add: []string{"  default-server inter 10s fall 2 rise 2"}},
 		"check: rise":      {set: hc(LBHealthCheck{Type: "tcp", Rise: 5}), add: []string{"  default-server inter 3s fall 2 rise 5"}},
 		"check: fall":      {set: hc(LBHealthCheck{Type: "tcp", Fall: 1}), add: []string{"  default-server inter 3s fall 1 rise 2"}},
@@ -127,6 +127,22 @@ func TestRenderHAProxyEachOption(t *testing.T) {
 	}
 	if !strings.Contains(haproxyGlobal, "\n  maxconn 20000\n") || lbMaxConnections != 20000 {
 		t.Error("a listener's largest limit is not the appliance's global maxconn")
+	}
+}
+
+// A stored row no validation saw, whose listener names another protocol than its pool speaks: that listener gets no
+// frontend, the others keep theirs, and the health read does not report it as a listener HAProxy failed to load.
+func TestRenderHAProxySkipsAMismatchedListener(t *testing.T) {
+	for _, protocol := range []string{"http", "tls"} { // in front of the tcp pool: the wrong one, and one not served
+		s := legacyGoldenSpec()
+		s.Listeners[1].Protocol = protocol
+		cfg := RenderHAProxy(s)
+		if strings.Contains(cfg, "frontend l5432") || !strings.Contains(cfg, "\nfrontend l80\n") || !strings.Contains(cfg, "\nbackend p-db\n") {
+			t.Errorf("%s in front of a tcp pool:\n%s", protocol, cfg)
+		}
+		if _, notLoaded, err := ParseHAProxyStat("# pxname,svname,status\nl80,FRONTEND,OPEN\n", s); err != nil || len(notLoaded) != 0 {
+			t.Errorf("%s in front of a tcp pool: read as not loaded %q %v", protocol, notLoaded, err)
+		}
 	}
 }
 
