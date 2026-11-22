@@ -65,8 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - An annotation that cannot be read never refuses a Service, so a Service that `v0.11.0` served keeps its address
     over the cluster's upgrade whatever annotations were left on it: a value over 256 characters is not obeyed and
     named in `InvalidAnnotation`, and any number of annotations the table does not know is named (the first 32) and
-    counted in `AnnotationNotSupported`. The internal annotation is the one that takes an address back. The
-    controller sends only the annotations of the two prefixes and the internal one, a value over 256 characters cut.
+    counted in `AnnotationNotSupported`. The forwarded-for header asked for next to the PROXY header is not added
+    and named in `InvalidAnnotation`; the PROXY header holds. The internal annotation is the one that takes an
+    address back. The controller sends only the annotations of the two prefixes and the internal one, a value over
+    256 characters cut.
   - A state over the gateway's 64 KiB is refused as a whole and changes nothing: the balancer and every address stay
     as they are until the state fits, and each Service gets a Warning Event `TooLarge` that says so.
   - A node selector's terms may have spaces around `=` (`pool = edge`); OCCM drops them around a term only and

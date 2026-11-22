@@ -14,13 +14,16 @@ relation, no field of the protocol changed.
   no longer refuses a Service for a value that is too long, for more than 32 annotations or for a name that is not
   the load balancer's: the first is not obeyed and named in the `InvalidAnnotation` Event, the count is no limit
   (`maxNamed`, 32, is how many names the `AnnotationNotSupported` Event lists before it counts), the third is not
-  looked at. The internal annotation is read first and still refuses.
+  looked at. The internal annotation is read first and still refuses. The forwarded-for header asked for together
+  with PROXY no longer refuses either: PROXY holds, the header is not added, and the `InvalidAnnotation` Event names
+  the annotation. Of the annotations, the internal one alone refuses a Service now.
 - `internal/cloud/lbgw/gateway.go`: the refusal of a body over 64 KiB says what stays and what to do; it reaches
   every Service as an Event.
 - `cmd/lb-controller`: `gateway.put` sends the whole request every time and the request of protocol 1 only after an
   older portal's `400`, for that request; the `peer` it remembered is gone. `readService` sends a value over the
-  limit cut to one character more, and reads the node selector through `lbgw.Read`. `parseSelector` drops the
-  spaces around `=` too.
+  limit cut to one character more, after the spaces around it are dropped (the portal's readers drop them, and the
+  cut must not take the `true` off an internal annotation that came with spaces before it), and reads the node
+  selector through `lbgw.Read`. `parseSelector` drops the spaces around `=` too.
 - Diagrams: none. `c4-code.md` (the `lbgw` and `cmd/lb-controller` rows) says the same.
 
 **Why:**
@@ -29,6 +32,15 @@ relation, no field of the protocol changed.
   Service could carry any others of the two prefixes. Refusing such a Service at the cluster's upgrade took it out
   of the state, and its address went back to the pool. Only the internal annotation is worth that: obeying it
   halfway would publish a Service that asked not to be.
+- *A pair that contradicts itself is not worth an address either.* The entry below counted the forwarded-for
+  header together with PROXY as the second real refusal, "as OCCM refuses it". OCCM does not give anything back for
+  it: `loadbalancer.go`:1627-1631 returns an error, the sync fails, and a balancer that exists keeps its address and
+  its listeners. A gateway refusal takes the Service out of the state. And the pair is what an upgrade can meet:
+  v0.11.0 obeyed `proxcloud.io/lb-proxy-protocol: "true"` and read no alias, so a manifest that came from a cluster
+  with OCCM could carry `x-forwarded-for` beside it and was served with PROXY. It still is. PROXY is the one kept
+  because it is the one such a Service already has, and because the header would turn its TCP ports into HTTP
+  listeners. What differs from OCCM is a new Service with both: it gets an address here (the fifteenth difference
+  in the guide).
 - *No limit on the count.* The table has 14 knobs under two names: it looks up at most 30 names, whatever else is
   there. A limit of 32 could only pick which annotation the table knows to drop, by the order of names. What the
   count costs is the size of the request, which has its own limit, and the length of the Event, which is capped.
@@ -101,6 +113,7 @@ and the portal carries more, in both directions, and the portal reads what a Ser
 - *A value that is not understood is not obeyed, and the Service is served.* A gateway refusal takes a Service out
   of the state, and its address goes back to the pool: too much for a typing mistake in a timeout. The two real
   refusals are a request the balancer cannot honour at all (an internal address) and one that contradicts itself.
+  (Superseded the same day, entry above: the pair that contradicts itself is not obeyed and no longer refuses.)
 - *A protocol 1 state renders as before.* `lbClusterServiceSpec` writes no field for an option at its default, a
   TCP listener still names no protocol, and a UDP pool has a name of its own (`-udp`: Kubernetes gives a TCP and a
   UDP port of one number the same node port). So no cluster's balancer is reloaded by this change.

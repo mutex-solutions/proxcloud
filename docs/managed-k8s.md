@@ -852,7 +852,7 @@ call for its own cluster, and minting it again rotates it.
 - Each Service is checked on its own, and a refused one gets a reason the controller turns into an Event: a UDP port
   from a controller that speaks protocol 1 refuses the whole Service (`UDPNotSupported`), a port that is neither TCP
   nor UDP too (`ProtocolNotSupported`), the annotation `service.beta.kubernetes.io/openstack-internal-load-balancer` (`InternalNotSupported`),
-  the forwarded-for header asked for together with the PROXY header (`InvalidAnnotation`), IPv6 or dual stack
+  IPv6 or dual stack
   (`IPFamilyNotSupported`), node port 0,
   a node port outside 30000-32767 or policy Local without a health port (`NoNodePort`), source ranges that do not fit
   one firewall rule of 512 characters (`TooManySourceRanges`; `0.0.0.0/0` means any), more than 50 Services or 20 ports
@@ -1087,7 +1087,7 @@ has the nodes' labels.
 | `method` | `lb-method` | `roundrobin`, `leastconn`, `source`, or `ROUND_ROBIN`, `LEAST_CONNECTIONS`, `SOURCE_IP` (either spelling under either name) | the algorithm; anything else (`SOURCE_IP_PORT`) raises `LoadBalancerLbMethodUnknown` and balances round robin |
 | `connection-limit` | `connection-limit` | 1 to 20000, `-1` = none | open connections per listener; per node on a UDP port |
 | `timeout-client-data`, `timeout-member-connect`, `timeout-member-data` | the same | 1000 to 86400000 ms | the three timeouts of the TCP ports; unset, the cluster balancer's hour of idle time holds |
-| `x-forwarded-for` | `x-forwarded-for` | `true` | the TCP ports become HTTP listeners that add `X-Forwarded-For`; refused together with the PROXY header (`InvalidAnnotation`), as OCCM refuses it |
+| `x-forwarded-for` | `x-forwarded-for` | `true` | the TCP ports become HTTP listeners that add `X-Forwarded-For`; not added when the PROXY header is asked for too: the PROXY header holds and `InvalidAnnotation` says so (OCCM fails such a Service's sync) |
 | `enable-health-monitor` | `enable-health-monitor` | `true`, `false` | `false` = no health check; not obeyed, with an Event, for policy Local |
 | `health-monitor-delay`, `-timeout`, `-max-retries`, `-max-retries-down` | the same | 1 to 300 s, 1 to 300 s, 1 to 10, 1 to 10 | the check's interval, timeout, good checks to come up, bad checks to go down. A UDP port takes no "up" count (keepalived brings a node back at its first good check) and goes down after 2 bad checks at least |
 | `node-selector` | `node-selector` | `key=value, key` | only the nodes with every one of these labels are behind the Service; none = no member and `UnAvailableLoadBalancer`. Spaces around a term and around `=` are dropped |
@@ -1110,10 +1110,14 @@ has the nodes' labels.
   however many others there are, and `AnnotationNotSupported` names the first 32 of the others by name and counts
   the rest. So a Service that v0.11.0 served with such annotations left on it is served as before after the
   cluster's upgrade. The one annotation that takes an address back is the internal one, above.
+- The same holds for two annotations that contradict each other: the forwarded-for header asked for next to the
+  PROXY header. The Service is served and keeps its address, the PROXY header holds (v0.11.0 served it for
+  `proxcloud.io/lb-proxy-protocol: "true"`), the forwarded-for header is not added, and `InvalidAnnotation` names
+  the annotation. A value with more than 256 characters only because of the spaces around it is read without them.
 - Only annotations of the two prefixes and the internal one are sent to the portal. Any other annotation of a
   Service, however large, is not in the request.
 
-The fourteen places where a Service behaves differently than with OCCM, on
+The fifteen places where a Service behaves differently than with OCCM, on
 purpose:
 
 1. **One pair per cluster.** All Services of a cluster share one appliance pair; each still has an address of its
@@ -1142,6 +1146,10 @@ purpose:
 14. **A node selector written `key = value` selects the nodes labelled `key=value`.** OCCM drops the spaces around
     a term only (`StringToMap`, `pkg/util/util.go`), reads the key as `key ` with its space, which no node has, and
     leaves the Service without a member. A selector that matches nodes with OCCM matches the same nodes here.
+15. **The forwarded-for header asked for next to the PROXY header does not stop the Service.** OCCM fails the
+    Service's sync: a balancer that exists stays as it was, a new Service gets none. Here a refused Service leaves
+    the cluster's state and its address goes back, so the Service is served with the PROXY header alone and a
+    Warning Event; a new Service with both annotations gets an address too.
 
 Modes. A **new** cluster gets the controller in **default** mode when every gate holds: this portal has the gateway's
 store, a gateway URL (`PROXCLOUD_CSI_GATEWAY_URL`) and the controller image (`PROXCLOUD_LB_CONTROLLER_IMAGE`, the API's
