@@ -4,6 +4,44 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: the managed platform registers its sandbox provider and fences its machines (dark)
+
+**What changed:** no new container. Two new relations and one changed trust boundary.
+
+- **Platform run to the provider rows.** `internal/platformlife/sandbox_provider.go` (new): a run writes the
+  sandbox settings of its own Proxmox provider row (`Runner.SandboxSite`, implemented by
+  `admin.Handler.PlatformSandboxSite` in `internal/platform/admin/platform_sandbox.go`: `config.sandbox`,
+  `config.network.sandboxCidrs`, `secret.sandboxKubeconfig`, never over a block of another owner) and registers a
+  sandbox provider, DISABLED (`SandboxProviderBody`, through the existing `Runner.Register`). `ProviderIDs.Sandbox`
+  and `Status.SandboxAttach` record it. `AdoptProvider` never gives a sandbox provider its status back.
+- **Platform run to the sandbox cluster.** With `separate` the run reads the admin kubeconfig Kamaji keeps for
+  `pc-sandbox` on the platform cluster, uses it for two reads (the token Secrets of the chart's identities) and one
+  write (the proxy's certificate Secret), and stores it nowhere.
+- **Provider sync to the sandbox machines.** `internal/cloud/pve/sandboxfw.go`: `SandboxFirewall` gains `Bridge`,
+  `VLAN` (the machines' NIC on the platform network, no vnet lookup) and `Peers` (the shared rule set);
+  `RemoveSandboxFirewall`. `internal/cloud/syncjob/{sandboxfw,sandboxgate}.go`: the provider's new keys, and on a
+  shared cluster a RuntimeClass read ahead of the fence gate (`checkSandboxClass`).
+  `internal/platform/externalservice/proxmox.go`: `PVESandbox.{Owner,Mode,Bridge,VLAN,Peers,Deny}`.
+- **Portal to a shared cluster.** `internal/cloud/sandbox`: `Config.Shared`; the service binds
+  `proxcloud-sandbox-namespace` in each `sb-<project>` namespace and lists across projects namespace by namespace;
+  `CheckNetworkGuard` reads the sandbox group's Nodes alone. `kamajik8s.Client.GetClusterScoped` (new).
+- `deploy/embed.go` embeds `deploy/templates/images.yaml` (the API image copies it): the run resolves template
+  images by digest in Go, where the installer resolves `pin:<name>`.
+- `internal/platform/pricing/billagg.go`: `ScaleUpItems` sums the sandbox items that round to 0.00 per project.
+- `web/admin/src/pages/platform`: the Sandboxes block of the settings and the sandbox provider on the Ready card.
+- Diagrams: none redrawn. `c3-components.md` names the two files in "Platform installations" and "Platform runs".
+
+**Trust boundaries, as they are now:** with `shared`, the sandbox machines are inside the platform cluster's trust
+boundary on the network (a Cilium peer) and outside it for the portal (its identity there is held to `sb-*`
+namespaces by RBAC and admission policies). The VM firewall is the boundary between a sandbox machine and
+everything else on the platform network; it is written by the portal token, selected by pool alone, and enforced
+by Proxmox only while the datacenter firewall is on, which the Check now reads. The provider's sandbox kubeconfig
+(Nodes read and patch) and the sandbox provider's kubeconfig rest sealed in their provider rows, as the tenant
+providers' do.
+
+**Why:** the sandbox group or cluster a run builds (2026-11-22) ran nothing until the portal fenced its machines
+and held a provider for them. Nothing of it is offered: no BOM pins the sandbox chart.
+
 ## 2026-11-23: TLS termination and certificates on a load balancer (#434)
 
 **What changed:** no new container. One new trust relation and one new store: the portal now holds tenants' TLS

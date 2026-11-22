@@ -10,7 +10,11 @@ package platformlife
 // built, or, when the settings switched sandboxes off, the row or token and the empty pool are deleted.
 //
 // Stage workload-platform: the proxy's certificate before the sandbox chart's wave (sandboxCertificate, shared), and
-// after the last wave the separate cluster (sandboxCluster), which needs Kamaji and the tenants' Cluster API there.
+// after the last wave the separate cluster (sandboxCluster), which needs Kamaji and the tenants' Cluster API there,
+// with the same certificate written inside it.
+//
+// What the portal needs to run sandboxes on them (the provider's sandbox network and pool in stage cluster, the two
+// identities' kubeconfigs and the sandbox provider in stage register, their removal) is sandbox_provider.go.
 //
 // Remove deletes the separate cluster before the platform cluster, then what was written on Proxmox (remove.go).
 
@@ -256,10 +260,11 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 }
 
 // sandboxCertificate writes, with placement shared, the Secret sandbox-proxy reads its wildcard certificate from,
-// before the wave of the sandbox chart: the chart mounts it, and its Deployment never becomes available without. The
-// run makes a self-signed one (and a new one for another domain or 30 days before it ends); its key is sealed, the
-// certificate is in the status for clients to trust. An operator's certificate (tls.mode secret) has no route that
-// stores it yet: the save refuses it (SandboxProblems), and a record that names it all the same stops here.
+// before the wave of the sandbox chart: the chart mounts it, and its Deployment never becomes available without
+// (separate: sandboxCluster writes it inside pc-sandbox). The run makes a self-signed one (and a new one for another
+// domain or 30 days before it ends); its key is sealed, the certificate is in the status for clients to trust. An
+// operator's certificate (tls.mode secret) has no route that stores it yet: the save refuses it (SandboxProblems),
+// and a record that names it all the same stops in applySandboxTLS.
 func (x *acq) sandboxCertificate(ctx context.Context, wl *kamajik8s.Client) error {
 	if x.in.Spec.sandboxMode() != SandboxShared {
 		return nil

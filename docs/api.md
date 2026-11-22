@@ -805,6 +805,20 @@ are several, `errors.details.problems`.
   platform network, apart from every other range, `cidrPool`, the blocked, management and public networks. Once a run
   built sandboxes (`status.sandbox {placement, nodeRange, proxyAddress, count, nodes, systemCount, systemNodes, chartVersion, certificate,
   builtAt}`), `placement` changes only to `off` and `nodeRange` and `proxyAddress` not at all (`409 fixed_fields`).
+  `placement: off` (or an emptied placement) on a platform with built sandboxes is refused while the sandbox provider
+  a run registered (`status.providers.sandbox`) is not DISABLED: `409 sandbox_provider_live`, problems
+  `["spec.sandbox.placement"]`. A provider that already holds a `config.sandbox` of another owner (the installer's
+  sandbox cluster, or another installation) or another `sandboxCidrs` entry refuses the save (`400
+  invalid_installation`). A run registers the sandbox provider in stage `register`, DISABLED, records its id in
+  `status.providers.sandbox` and the attach choice applied to it in `status.sandboxAttach`; it writes on the
+  installation's Proxmox provider `config.network.sandboxCidrs` (`[nodeRange]`), `config.sandbox` (`pool`, `nodes`,
+  `dns`, `unsecuredMinAgeMinutes`, and for the platform network `platformInstallationId`, `mode`, `bridge`, `vlan`,
+  `deny`; `shared`: `peers`, `kubeletSources`; `separate`: `loadBalancers`, `proxy`) and `secret.sandboxKubeconfig`,
+  and takes them away when sandboxes are switched off or the platform is removed
+  ([managed-services.md](managed-services.md#the-sandbox-provider)). A sandbox provider with
+  `config.platformInstallationId` is refused a status other than DISABLED while the job scheduler is off (`409`), on
+  top of its release gates; `config.sandbox.mode: shared` on a sandbox provider tells the portal that its identity
+  holds namespaced rights only where it bound them.
 - `GET|PUT /installations/{id}`: the PUT replaces `name` and `spec` and names
   the `rev` it read (`409 rev_conflict` otherwise). It is refused during a run
   (`409 run_active`) and for a fixed field (`409 fixed_fields`): `serviceId`

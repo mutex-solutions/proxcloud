@@ -37,6 +37,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Managed platform: the sandbox provider, and the fence of its machines on the platform network (not offered yet:
+  no BOM pins the sandbox chart).** With `spec.sandbox`, a run now does the portal side as well
+  (`internal/platformlife/sandbox_provider.go`, `docs/managed-services.md`, "The sandbox provider"):
+  - Stage `cluster` writes the sandbox range (`config.network.sandboxCidrs`) and the sandbox pool
+    (`config.sandbox`) on the installation's Proxmox provider before a sandbox machine exists; stage `register`
+    adds the firewall identity's kubeconfig and registers "\<name> Sandboxes", **DISABLED**, with this release's
+    template images by digest (`deploy/templates/images.yaml`, now embedded). A run never sets the provider live.
+  - The provider sync fences every VM of pool `proxcloud-sbx`, and no other, on the platform's bridge and tag
+    (no vnet of their own). A `shared` group gets a rule set of its own: the Cilium tunnel, health and ICMP with
+    the cluster's machines, TCP 6443 to the API address and to every machine of the cluster (the `kubernetes`
+    Service is rewritten to a control plane machine's address inside the VM), the kubelet from the cluster alone,
+    no MetalLB and no proxy entry. The platform prefix is denied in both placements.
+  - On a `shared` cluster the fence gate first requires the RuntimeClass to select the sandbox group and tolerate
+    the sandbox taint alone, then asks for that group's Nodes only; the network guard gate counts only them; the
+    portal's identity binds its namespaced role in each `sb-<project>` namespace and lists through them, so a
+    stolen token reads nothing outside `sb-*`.
+  - A platform's sandbox provider is refused "live" while the job scheduler is off (`409`), and the Check's
+    `scheduler` row says why. `placement: off` is refused while the provider is live (`409
+    sandbox_provider_live`); off and Remove take the provider's sandbox settings and the pool's firewall groups
+    and IP sets away.
+  - `separate`: the proxy's certificate is written inside `pc-sandbox`. The Check's `sandbox` row also fails for a
+    datacenter firewall that is off and for a `proxyAddress` a Service already holds; a sandbox pool of another
+    owner on the provider fails the save; the `capacity` row warns for small `kamaji` machines.
+  - Console: a Sandboxes block in the settings (off, shared node group, separate cluster; machines, range,
+    proxy address, domain) for a release whose BOM has the chart. `shared` prints what it gives up in full and is
+    saved only with a tick. The Ready card shows the provider, reads its release gates and offers the certificate.
+  - Nothing of this ran on a lab: the drill list is in `docs/managed-services.md`, "Not verified on a lab yet".
+
 - **Load balancers: TLS and HTTPS listeners, and a project's certificates** (`internal/cloud/pve/lbtls.go`,
   `internal/platform/project/cloud_lb_certs.go`, the tenant console's Certificates page and load balancer page).
   A listener takes `protocol: "tls"` (TLS ends on the load balancer, TCP to the servers) or `"https"` (TLS ends on
@@ -226,6 +254,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `main`, none of them rolling. No apply on such a platform was run on a lab by this change.
 
 ### Fixed
+
+- **Sandboxes worth less than half a cent each were invoiced 0.00.** Every sandbox is a bill item of its own, and a
+  sent bill rounds each item to two decimals, so 10,000 one-minute sandboxes at 0.0002 accrued 2.00 and were
+  invoiced nothing. At the send, what the sandbox items that round to 0.00 accrued is now summed per project and
+  added as one item, "Sandbox runs below 0.005 each (n)", rounded once (`pricing.ScaleUpItems`). The items
+  themselves stay on the bill at 0.00 with their minutes. A bill without such an item is sent as before; it applies
+  to bills sent from now on and never to one already sent.
 
 - **The sandbox network guard accepts Cilium's CNI hand-over per node** (`cmd/sandbox-netguard`,
   `internal/ciliumcni`, `internal/cloud/sandbox/netguard.go`, `deploy/sandbox-cluster/telemetry.yaml`). `node-setup`'s
