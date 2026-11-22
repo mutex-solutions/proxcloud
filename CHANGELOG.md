@@ -37,6 +37,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Managed platform: the code that builds sandboxes from the install settings, not offered yet**
+  (`internal/platformlife/sandbox.go`, `sandbox_run.go`). `spec.sandbox` takes `placement` `shared`, `separate` or
+  `off`, the machines, their own address range, the proxy address and the domain. **No release's BOM names the
+  sandbox chart, so every installation is refused the block** (`400 invalid_installation`, "has no sandbox chart");
+  nothing changes for a site until the release that pins it.
+  - `shared` is a node group `sandbox` of the platform cluster, added through one function that the render, the
+    roll, the capacity row and every machine count read, so it is ordered and gated like the other groups and is the
+    last unit of a roll. `separate` is a cluster of its own, `pc-sandbox`, with a Kamaji control plane on the `kamaji`
+    group. Both put their machines into the new Proxmox pool `proxcloud-sbx`, with addresses from `nodeRange`.
+  - `nodeRange` is one aligned IPv4 CIDR inside the platform network, apart from every other range and from the
+    tenant pool, the blocked, management and public networks: the provider fences it as a sandbox network, and a
+    range its isolation refuses would break every tenant's network create.
+  - **No new Proxmox privilege and no second root action.** The portal token makes the pool and writes one ACL row
+    for the platform's own CAPMOX token (`shared`) or mints the sandbox cluster's token as it mints a tenant
+    cluster's (`separate`), with the rights the two setup scripts already grant for tenant pools. The new Check row
+    `sandbox` reads those rights and, where they are missing, says to run the managed-services script again as root
+    ([docs/proxmox-permissions.md](docs/proxmox-permissions.md#sandboxes-on-the-managed-platform)).
+  - The capacity row fails, also on an installed platform, for sandbox machines no run has built on a node without
+    the room. The plan lists the machines, the pool and the ACL row or token before an apply, says how many sandboxes
+    a machine holds by CPU (a machine of 2 cores holds one), and what `off` deletes.
+  - A PUT without the block keeps the stored one; `off` is explicit. Built, `placement` changes only to `off`, and
+    `nodeRange` and `proxyAddress` not at all. `tls.mode: secret` is refused at the save: the run makes a
+    self-signed certificate for `*.<domain>`, and no route stores an operator's own yet.
+  - The sandbox chart is the one component an upgrade may add to an installed platform (plan class `added`): a chart
+    of our own marked with a feature, rendered only for settings that ask for it. Every other added or removed
+    component stays refused. An upgrade that replaces the platform's machines is refused while `pc-sandbox` exists
+    (it is not upgraded in place: `off`, the upgrade, then `separate` again) and while a `shared` group is asked for
+    and not built.
+  - Not in this change: the sandbox provider's registration, the VM firewall of the sandbox machines and its gates,
+    the provider's `sandboxCidrs` entry, the proxy's Secret inside `pc-sandbox`, an operator's own certificate, and
+    the console's form. Run on fakes and against the two charts' renders; on no lab. The figures for what a machine
+    holds are from the spike of 2026-11-21 on a throwaway tenant cluster.
 - **Load balancers: a protocol per listener and the layer 4 options** (`internal/cloud/pve/lb.go`,
   `internal/platform/project/cloud_lb_pve.go`, the tenant console's load balancer page). `UPDATE_CONFIG` and the
   page take, on a single appliance and on a pair:

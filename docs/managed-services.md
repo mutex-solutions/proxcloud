@@ -906,15 +906,106 @@ run built with three goes back to one only by Remove and a new install. On a pla
 release builds one machine, 3 is refused at the save (`400 invalid_installation`), so it cannot be
 stored where every apply would then fail.
 
-**Where the sandbox service will go.** The install is to offer two placements for the sandbox
-service once it ships: `shared`, a node group of this platform cluster (the homelab choice), and
-`separate`, a cluster of its own. No release builds either. The settings have the place for the
-choice, `spec.sandbox.placement`, and the API refuses the block until then with that reason, so a
-stored installation never carries a choice that did nothing. A spec without the block means "no
-sandbox service" and keeps meaning that: the later release adds the two values and changes no
-stored record. It is not the field `layout`, which is about the two services of today (one cluster
-for tenant control planes and databases, or one each) and takes `shared` only. The presets then get
-a default for it: Homelab `shared`, Standard `separate`.
+**Sandboxes (`spec.sandbox`): built by the code, offered by no release yet.** The settings take
+the block, the run builds it, and every installation is still refused it: the block needs a BOM
+that names the sandbox chart, and no BOM does until the release that pins it. Until then the save
+answers `400 invalid_installation` ("the platform's BOM … has no sandbox chart") and the Check's
+`spec` row says the same. A spec without the block means "no sandboxes" on a new installation. On
+an installed platform a PUT without the block keeps the stored one, so a console from before the
+block never switches sandboxes off: off is the explicit `placement: off`. It is not the field
+`layout`, which is about the two services of today and takes `shared` only.
+
+```json
+"sandbox": {
+  "placement": "shared",
+  "nodes": ["pve1"], "count": 1, "cores": 2, "memoryMiB": 4096, "diskGiB": 40,
+  "nodeRange": "192.168.140.64/28",
+  "dns": ["1.1.1.1"],
+  "proxyAddress": "192.168.140.150",
+  "domain": "sbx.example.org",
+  "tls": {"mode": "selfsigned"},
+  "system": {"nodes": ["pve2"], "count": 1, "cores": 2, "memoryMiB": 4096, "diskGiB": 30}
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `placement` | `shared`: a node group `sandbox` of the platform cluster. `separate`: a cluster of its own, `pc-sandbox`, whose control plane runs as pods on the `kamaji` group. `off`: no sandboxes; nothing else of the block is read. |
+| `nodes`, `count`, `cores`, `memoryMiB`, `diskGiB` | The machines that run sandboxes, with a node group's bounds (2 cores, 4096 MiB, 20 GiB at least). |
+| `nodeRange` | The machines' own addresses: **one aligned IPv4 CIDR** inside the platform network (`192.168.140.64/28`, not first-last). It holds neither the gateway, the seed, the API address nor an address of `nodeRange` or `metallbRange`, and it has an address for every sandbox machine and one more per node. |
+| `dns` | Up to three resolvers of the sandbox machines; none takes the platform network's. |
+| `proxyAddress` | Where sandbox-proxy answers. `shared`: an address of `metallbRange` (not ArgoCD's). `separate`: a host address of the platform network outside every range, which the sandbox cluster's own MetalLB announces. |
+| `domain` | A sandbox answers at `https://<port>-<id>.<domain>`. |
+| `tls.mode` | `selfsigned` (also what an absent block means): the run makes one certificate for `*.<domain>`, keeps its key sealed and shows the certificate in `status.sandbox.certificate`. `secret` (the operator's certificate) is refused at the save: no route stores one yet. |
+| `system` | `separate` only, and required there: the machines for sandbox-proxy and the sandbox controller, which never share a machine with a sandbox. |
+
+**How many sandboxes a machine holds.** By CPU a machine of n cores holds about n-1 sandboxes of
+one vCPU: the node's own pods ask for about one core. A machine of 2 cores holds ONE (measured on
+a node of 2 vCPU on 2026-11-21, where an idle sandbox took 35 to 50 MiB of memory). Take 4 cores
+or more for several; the plan's `sandbox` row says the figure for the size chosen. The presets
+fill a block the settings hold and never add one: Homelab `shared` with one machine of 2 cores,
+4 GiB and 40 GiB (one sandbox: what a lab of 5 GiB nodes has room for), Standard `separate` with
+two machines of 4 cores, 8 GiB and 40 GiB and a system machine of 2 cores, 4 GiB and 30 GiB.
+
+**The range and the provider.** The provider fences the range as a sandbox network
+(`config.network.sandboxCidrs`), and its isolation refuses a sandbox network that overlaps the
+tenant pool or a blocked network. It answers that refusal to every network create of every tenant,
+so one bad range would break tenant networks provider-wide. The save and the Check's `network` row
+therefore refuse a range that overlaps `cidrPool`, a public network, an entry of `blockedCidrs` or
+a management network, and a provider that already names another sandbox network. The save never
+adds the range to `blockedCidrs`, and the Proxmox API rule never names it as a source.
+
+**What a run writes.** In stage `cluster`, before the platform cluster's Application names the
+pool: the Proxmox pool `proxcloud-sbx` and what opens it, both written by the portal token with the
+rights the setup scripts gave it for tenant pools
+([proxmox-permissions.md](proxmox-permissions.md#sandboxes-on-the-managed-platform)). `shared`: one
+ACL row, `capmox@pve!capi` with `ProxCloudCAPI` on `/pool/proxcloud-sbx`; the group is then built
+like the three others, with its machines in that pool, addresses from `nodeRange`, the taints
+`proxcloud.io/sandbox` and `proxcloud.io/unsecured` in place of the group taint, and the
+proxmox-csi node plugin kept off it. In stage `workload-platform` the run writes the Secret
+`sandbox-system/sandbox-proxy-tls` and then syncs the sandbox chart (Application
+`pc-platform-sandbox`), which installs runsc on the group's nodes and puts sandbox-proxy on the
+`system` group. `separate`: a token `capmox@pve!pc-sandbox`, minted as a tenant cluster's with the
+sandbox pool, the template pool, the platform's boot and ISO stores, `/nodes` and the platform
+network's vnet in its scope; after the last wave the namespace `pc-sandbox` on the platform
+cluster, the Secret `pc-sandbox-pve` with that token, and the Application `pc-sandbox` (the tenant
+cluster chart, with the sandbox chart as its add-on). The stage is done when every machine of the
+cluster is Running. A new sandbox machine takes sandboxes only once the provider sync has written
+its VM firewall and taken the `unsecured` taint off.
+
+**Changing it.** Nodes, count, sizes, `dns` and `domain` change with an apply. Fixed once a run
+built it (`409 fixed_fields`): `placement`, which goes only to `off`, `nodeRange` and
+`proxyAddress`. From `shared` to `separate`: `off`, apply, then `separate`. With `off` the run
+deletes the Application (the sandbox chart's with everything it deployed, or the cluster's with
+its machines), the group, and once the pool holds no VM the ACL row or the token and the pool.
+**Remove** deletes `pc-sandbox` before anything of the platform cluster, because its machines
+need the platform cluster's Cluster API and Kamaji, and the access and the pool at the end.
+
+**Upgrades.** The sandbox chart is the one component an upgrade adds to an installed platform
+(plan class `added`): it is rendered only for settings that ask for it, so for every other
+installation the move changes nothing of it. A `shared` group rolls with the platform cluster's
+machines as its last unit, and every sandbox on a replaced machine ends. An upgrade that replaces
+the machines is refused while the group is asked for and not built (build it first, or leave the
+block out until the upgrade is done), and **while `separate` exists or is asked for**: no run
+upgrades `pc-sandbox` in place. Set `placement: off` and apply, make the upgrade, then set
+`separate` again: the cluster is built new. Its cluster chart stays the version it was built with.
+
+**What `shared` gives up.** Code that escapes gVisor there is root on a machine of the cluster
+that runs kamaji-etcd, every tenant's API server and every tenant database. The machine is a peer
+of the cluster's pod network and holds a Cilium agent's and a kubelet's credential; what protects
+the other workloads then is their own authentication. `separate` limits the same escape to the
+sandbox cluster. The same holds for a stolen portal token: it holds its platform role on the
+sandbox pool, so with `shared` it reaches one node of the platform cluster (through that
+machine's console, guest agent or disks), where on `proxcloud-system` it holds `NoAccess`.
+`shared` is the homelab choice: one operator, no outside tenants.
+
+**Not in this release's code yet:** the sandbox provider's registration, the VM firewall of the
+sandbox machines on the platform network and its gates, `config.network.sandboxCidrs` for the
+range, the proxy's Secret inside `pc-sandbox`, the operator's own certificate, the Check rows for
+the datacenter firewall, a `config.sandbox` of another owner and a taken `proxyAddress`, the
+refusal of `off` while the sandbox provider is enabled or holds a sandbox, and the console's form.
+Until they exist a sandbox machine keeps its `unsecured` taint and runs no sandbox, and with
+`separate` sandbox-proxy does not start (it has no certificate).
 
 **Lab tests owed** (nothing of this section was run on a lab):
 
@@ -962,6 +1053,7 @@ line (`PC-ENROLL:…`) into the page and press **Store the secrets**
 | `tenant-network` | Never. It reads the provider's default zone in Proxmox and **warns** when the zone has DHCP, when it does not exist yet and is configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones could not be read: a tenant Kubernetes cluster create on a network of such a zone is refused with a `400` (not on a Kubernetes provider with shared workers, `cluster.shared`, which uses no tenant network). The row is `ok` for a zone without DHCP and absent when the provider names no zone | Nothing for the install or for databases. Before tenants create clusters: give the provider an EVPN or a VLAN zone as its default zone, or a `simple` zone without DHCP (Cloud providers, `config.network.zones` and `defaultZone`; [Prerequisites](#2-prerequisites)) |
 | `tenant-path` | Never, and absent when the provider names no zone. It reads the layout and **warns** when a node that translates tenant traffic (a `simple` default zone: the node of the tenant's VM; an EVPN default zone: its exit nodes) also hosts a platform machine and does not route the platform network itself, or when Proxmox could not be read: a tenant's TCP connection to the platform network is then dropped on that node, tenant Kubernetes workers never join and tenants cannot reach managed databases. It opens no connection: `ok` is not proof, and a leg added on a node by hand is not seen. It is `ok` for a platform network of mode `routed`. **Test the tenant path** below the rows opens the path on an installed platform. For a VLAN default zone that test is refused (`409 vlan_zone`), so the row names what to do instead: `curl -k -m 5 https://<a tenant cluster's API address>:6443/healthz` from a tenant's server | Nothing for the install. Before tenants create clusters or databases: one of the two layouts of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform) |
 | `csi-vmid` | Never. It **warns** when a guest of the cluster has VM id 9999, the id proxmox-csi names its volumes after, or when that could not be read | Nothing for the install. Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ([VM id 9999 and the CSI volumes](#vm-id-9999-and-the-csi-volumes)) |
+| `sandbox` | Present while the settings ask for sandboxes. The portal token lacks, on `/pool/proxcloud-sbx`, `Pool.Allocate` or a privilege of `ProxCloudCAPI` (it holds them through its platform role on `/pool`), or with `separate` the mint role on the platform's boot or ISO store, `/nodes` or the platform network's zone or vnet; the provider's `poolPrefix` is the start of the pool's name; or the pool holds a VM without this installation's tag. A warning when the ACL row of a built `shared` group is gone | Run the managed-services script again as root on a node (it names no sandbox pool: it restores the rows of the portal token that these rights come from); move the foreign VM to another pool; an apply writes a lost row again |
 | `capacity` | Before the first install, when a node has less memory than the settings place on it; absent while the CAPI token is not stored. It reads the nodes and their VMs with the CAPI token and counts as CAPMOX counts before each clone: the node's memory less the configured memory of every VM that is not a template and every container on it, running or not (this installation's own machines are part of the plan and are not counted twice). Against that it puts the seed, the control plane machines plus one, and each group's machines on the node: the one more is what a rolling update of the control plane makes before it removes an old machine. A node that holds those and not one more machine of each group on it as well **warns** and does not stop the install. On an installed platform a finding about what a run already placed **warns**, and so does a node whose memory could not be read; the row **fails** there only when the settings ask for more control plane machines than a run built and their node has no room for them (the message names both counts). A VM the CAPI token cannot see is not counted, so `ok` is the scheduler's answer, not a promise that the node has the memory free | Smaller or fewer machines, one control plane machine in place of three, other nodes, or free memory on the node (a stopped VM counts with its configured memory). Then save and check again |
 | `credentials` | A token secret is not stored | Run the root command of step 2 on a node and paste the `PC-ENROLL` line it prints |
 | `machines` | Never, and absent while the installation has no VM. It reads the installation's VMs with the CAPI token and **warns** with one line per VM that is stopped or that does not start when its node boots (`onboot` off) or that the token could not read (the others are still listed, and an apply still sets `onboot` on them), or when the pools could not be read | A stopped VM: start it in Proxmox, or `qm start <vmid>` as root on its node ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)). `onboot` off: **Apply this release** sets it at the end of stage 7, or `qm set <vmid> --onboot 1` |
@@ -1458,6 +1550,8 @@ stage is still trying.
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
 | `stage_unavailable` | any | A run recorded by another release names a stage this one does not have | No action in this release |
 | `tenants_exist` | Remove | Tenant clusters or databases still run on the platform (the message names up to five) | Delete them, **Remove again** |
+| `sandbox_refused` | 7 | The settings ask for another sandbox placement than the one a run built, or the run's BOM has no sandbox chart. Nothing was changed | Set `placement: off`, apply, then the other placement; or leave `spec.sandbox` out |
+| `sandbox_access_failed` | 7 | Proxmox refused pool `proxcloud-sbx`, the ACL row of the sandbox group or the token of the sandbox cluster. The portal token writes them with the rights the setup scripts gave it. Nothing of the cluster was changed | The Check's `sandbox` row names what is missing: run the managed-services script again as root on a node, then **Retry** |
 | `machine_delete_stuck` | Remove | Cluster API is still deleting machines after 45 minutes, or (missing seed) a tagged VM could not be stopped or deleted | Delete the VM the message names in Proxmox, **Remove again** |
 | `volume_delete_failed` | Remove | A recorded volume could not be deleted with the CSI token | Check `csi@pve!csi` and the storage the message names, **Remove again** |
 | `<stage>_timeout` | any | A stage's time limit passed while it had stored no code, for example `validate_timeout` | **Retry** |
@@ -3162,6 +3256,17 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 - **No per-namespace RBAC for the providers' service account** on the shared cluster.
 
 ## Not verified on a lab yet
+
+**Sandboxes on the platform (`spec.sandbox`)** have run on no site: no BOM names the sandbox chart,
+so no installation can save the block. What the code does was run against fakes and against the
+two charts' renders only. A lab must still show, for each placement: the portal token making pool
+`proxcloud-sbx` and writing the ACL row or minting the token (Proxmox accepting `Pool.Allocate`
+for a `ProxCloudCAPI` row there is run for tenant pools, not for this one); CAPMOX giving a
+sandbox machine its address from `nodeRange` and none from the cluster's range; the group built
+on an installed platform with no other machine replaced; the sandbox chart Healthy with the
+run's certificate; `pc-sandbox` built on the kamaji group and the memory its control plane takes
+there; `off` taking all of it away, and Remove in the order it promises; a roll with a `shared`
+group as its last unit; the mint on a platform network that is an SDN vnet.
 
 **The address of the platform cluster's ArgoCD** (`spec.access.argocd`) was run once on a lab
 (2026-11-20, v0.10.0-rc.1; bridge mode, a VLAN tenant zone, no SNAT): set on an installed platform

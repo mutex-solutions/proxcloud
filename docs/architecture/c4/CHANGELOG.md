@@ -4,6 +4,45 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-22: the managed platform builds a sandbox node group or cluster from its settings (dark)
+
+**What changed:** no new container. Component "Platform installations" gains `internal/platformlife/sandbox.go` and
+component "Platform runs" `internal/platformlife/sandbox_run.go`; one new relation, from the platform run to Proxmox
+with the portal token for a pool and its access.
+- Data model: `Spec.Sandbox` (`SandboxSpec`: placement `shared | separate | off`, the machines, `nodeRange` as one
+  CIDR, `proxyAddress`, `domain`, `tls`, `system`), `Status.Sandbox` (`SandboxStatus`: what a run built, written before
+  anything is built), `Secrets.Sandbox` (the separate cluster's token) and the sealed key of the proxy's certificate.
+  `Component.Feature` in the BOM marks a component that only an installation whose settings ask for it renders.
+- `Spec.platformCluster` is the one place the shared group joins the cluster: `renderInput`, `rollUnits`, `rollRoom`,
+  `PlannedMemoryMiB` (through `machineGroups`, which also counts the separate cluster's machines), the machine and
+  node counts of stage `cluster` and `machineDeployments` read through it. `BOM.For` is the one place a marked
+  component is left out; the run renders from it (`acq.bom`) and keeps the whole BOM beside it (`acq.full`).
+- Renders: `ClusterValues` gives the group its pool, range, resolvers, kubelet label and two taints
+  (`sandboxGroupValues`); `componentPart` has `workload/sandbox` (no namespace placement) and keeps the proxmox-csi
+  node plugin off the group; `SandboxApplication`, `SandboxClusterValues` and `SandboxCredentials` are the separate
+  cluster on the seed's ArgoCD.
+- Runs: `sandboxAccess` (stage `cluster`, before the cluster's Application) makes the pool `proxcloud-sbx` and writes
+  one ACL row (`pve.SetSandboxPoolAccess`) or mints a token (`pve.MintClusterTokens`, with the platform network's
+  vnet in its scope); `sandboxSettled` ends the stage; `sandboxCertificate` and `sandboxCluster` are in stage
+  `workload-platform`; `removeSandboxCluster` and `removeSandboxAccess` are the Remove. `rolloutGate` lets the
+  templates of a group no run has built through at step 0.
+- Rules: `validateSandbox`, `sandboxSiteProblems`, `SandboxProblems` (refused while the BOM has no sandbox chart, and
+  for `tls.mode: secret`),
+  `KeepSandbox`, `sandboxFixed`, `sandboxChanges` (plan rows), `sandboxGrowth` (the capacity row fails for machines
+  not built), `sandboxCheck` (Check row `sandbox`); `Classify` has class `added` for a marked chart of our own, and
+  `move` refuses a machine-replacing upgrade while the separate cluster exists.
+
+**Why:** v0.12.0 offers sandboxes on the managed platform in two placements. This is the lifecycle half; it stays
+dark because no BOM names the sandbox chart. A pool of its own because the provider sync must write the VM firewall
+of a sandbox machine with the portal token, which holds `NoAccess` on `proxcloud-system`. The group goes through the
+render's own group list because a group added beside it would render at the new version at the first step of a roll
+and be stopped by the gate. The separate cluster is a Kamaji cluster on the platform cluster and not a second
+kubeadm cluster from the seed: one more control plane VM is what a small site lacks, and the roll, the stages and
+Remove are written for one cluster. No run upgrades a tenant-style cluster, so it is rebuilt instead.
+
+**Diagrams updated:** [c3-components.md](c3-components.md) (the two components' files and responsibilities). No
+diagram edge changes: the run already talks to Proxmox with the portal token.
+
 ## 2026-11-22: a load balancer's listeners get a protocol, and the layer 4 options (#431)
 
 **What changed:** no new component, container or relation; the data model of a `LOAD_BALANCER` row grew.
