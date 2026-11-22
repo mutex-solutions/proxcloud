@@ -132,3 +132,53 @@ func TestShedLockWait(t *testing.T) {
 	}
 	release2()
 }
+
+// TestShedLockHoldOutlivesItsLeaseAndADeadHolderDoesNot is N2-3 of the v0.11.0-rc.1 drill at the lock: a cluster's
+// converge took its lock for the longest a pass can take (20 minutes), the API was restarted in the middle of one, and
+// the lock stayed held for all of it. A lock taken with Hold lasts a lease: a holder that works longer keeps it by
+// extending it, and one that died (its context ended, its release never ran) loses it one lease later.
+func TestShedLockHoldOutlivesItsLeaseAndADeadHolderDoesNot(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	const lease = 900 * time.Millisecond
+	holder, other := lock.New(db), lock.New(db)
+
+	alive, die := context.WithCancel(ctx)
+	defer die()
+	release, ok, err := holder.Hold(alive, "lbc-c1", lease, 0)
+	if err != nil || !ok {
+		t.Fatalf("hold: ok=%v err=%v", ok, err)
+	}
+	// Three leases of work: nobody else gets in.
+	for end := time.Now().Add(3 * lease); time.Now().Before(end); time.Sleep(lease / 4) {
+		if _, ok, err := other.Hold(ctx, "lbc-c1", lease, 0); err != nil || ok {
+			t.Fatalf("a working holder lost its lock after its first lease: ok=%v err=%v", ok, err)
+		}
+	}
+	// The holder dies. Its lock is free within one lease and a margin, not after the 20 minutes its work could take.
+	die()
+	died := time.Now()
+	taken, ok, err := other.Hold(ctx, "lbc-c1", lease, 3*lease)
+	if err != nil || !ok {
+		t.Fatalf("a dead holder's lock was not taken over within three leases: ok=%v err=%v", ok, err)
+	}
+	if waited := time.Since(died); waited > 2*lease {
+		t.Fatalf("the dead holder's lock lasted %s, want about one lease (%s)", waited, lease)
+	}
+	// The dead holder's release, should it still run, frees nothing of the new owner's.
+	release()
+	if _, ok, _ := holder.Hold(ctx, "lbc-c1", lease, 0); ok {
+		t.Fatal("a late release of the dead holder freed the next owner's lock")
+	}
+	// A release frees the lock at once, and stops the extends: nothing holds it afterwards.
+	taken()
+	again, ok, err := holder.Hold(ctx, "lbc-c1", lease, 0)
+	if err != nil || !ok {
+		t.Fatalf("after a release: ok=%v err=%v", ok, err)
+	}
+	again()
+	time.Sleep(lease / 2) // an extend still running would push lockUntil out again
+	if ok, err := other.Lock(ctx, "lbc-c1", lease, time.Now().UTC()); err != nil || !ok {
+		t.Fatalf("the lock was held after its release: ok=%v err=%v", ok, err)
+	}
+}

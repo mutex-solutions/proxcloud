@@ -852,13 +852,33 @@ call for its own cluster, and minting it again rotates it.
   is not TCP refuses the whole Service (`UDPNotSupported`), IPv6 or dual stack (`IPFamilyNotSupported`), node port 0,
   a node port outside 30000-32767 or policy Local without a health port (`NoNodePort`), source ranges that do not fit
   one firewall rule of 512 characters (`TooManySourceRanges`; `0.0.0.0/0` means any), more than 50 Services or 20 ports
-  (`TooLarge`). A node whose address is not one of the cluster's 16 worker addresses (the 8 MetalLB addresses of the
-  reservation included) is answered `NotAWorker` and never becomes a member.
+  (`TooLarge`). A node whose address is not one of the cluster's 16 worker addresses is answered `NotAWorker` and never
+  becomes a member; so is one of the reservation's 8 MetalLB addresses, which are not worker addresses.
 - The answer is the state as it is: per Service `ready` with its address, `building`, or `refused`. Nothing is built in
-  the request: the state is stored (`lbGatewayState`) and a converge starts (lock `lbc-<clusterId>`; the provider sync
-  runs it too). A project that is suspended or being deleted is refused with 409 `ProjectNotEnabled` and nothing
-  changes; its state is applied after the resume. A controller older than the gateway takes is answered
-  `ControllerTooOld`, which says to bump the cluster. Refusals are audit events (`LB_GATEWAY` / `DENY`), once per change.
+  the request: the state is stored (`lbGatewayState`) and a converge starts when there is something to converge. The
+  controller sends its state every 10 s whether it changed or not, and a pass over the pair costs about 16 Proxmox
+  calls, so a PUT starts one only when the state is not the one the last pass applied, when that pass left the
+  balancer unsettled (building, `DEGRADED`, an address still to give back), or when the last look at a settled
+  balancer is a minute old (`lbPassDue`; kept per API process, so the first PUT after a restart always starts one).
+  That look is what finds an appliance someone stopped: the other appliance takes the address within seconds, and the
+  stopped one is started again within about 70 s (the provider sync starts it too). A quota raised for a Service
+  refused `QuotaExceeded` is seen by the same look.
+- One converge runs per cluster, under the lock `lbc-<clusterId>`. The lock lasts one minute and its holder extends it
+  while it works, so an API that is restarted in the middle of a pass (an upgrade, a change of the gateway listener)
+  keeps the cluster's balancer from converging for a minute at most; PUTs are stored meanwhile and the first one after
+  that minute is applied.
+- A project that is suspended or being deleted is refused with 409 `ProjectNotEnabled` and nothing changes; its state
+  is applied after the resume. A controller older than the gateway takes is answered `ControllerTooOld`, which says to
+  bump the cluster.
+- Refusals are audit events (`LB_GATEWAY` / `DENY`). One of an authenticated controller (a Service or node refused,
+  the whole request refused) is audited once per change. A refused credential is always the same 401 to the caller;
+  the API log line (`lb gateway: refused credential`) names the cluster the header claimed, when it has the form of a
+  cluster id, and the reason: `malformed`, `unknown cluster`, `revoked` (the cluster was released, or its credential
+  was minted again and the controller still presents the old one, which lasts until it reads the new Secret) or
+  `wrong secret`. `revoked` and `wrong secret` for a cluster that has a credential are also audit events of that
+  cluster's project, at most one per cluster and reason a minute. A header that names no known cluster is only
+  logged: it belongs to no project, and anyone who reaches the listener could fill the audit log with them. The
+  secret is in neither.
 - The cluster's balancer is one load balancer row, always a pair, built with the first Service from the Kubernetes
   provider's `config.cluster.loadBalancer` (`publicNetworkId`, `flavorId`; checked on save: an active flavor, and a
   public network of the workers' compute provider with a gateway, on a plain bridge). It stays until the cluster is
@@ -877,14 +897,63 @@ call for its own cluster, and minting it again rotates it.
   rows, the row and the state go.
 - What the tenant pays: the two appliances are `SERVER` rows of the project with their `VOLUME` rows, billed from the
   first Service until the cluster is deleted, and each address is a billed `FLOATING_IP`. Only the addresses are
-  checked against the quota (`floatingIps`); the appliances are not checked against the server quota. What HA means is
+  checked against the quota (`floatingIps`); the appliances are not checked against the server quota. **The quota
+  caps the cluster's Services**: a project's public addresses count together (its servers', its own load balancers',
+  each Service's), and the quota the seed gives a provider is 5 (`deploy/seed`, `floatingIps`), so a cluster in
+  default mode gets at most five Services of type LoadBalancer, each NGINX Gateway Fabric Gateway included; the next
+  one stays `<pending>` with a Warning `QuotaExceeded`. Raise it for one project on its admin **Quota** tab
+  (`PUT /api/v1/admin/project/{id}/quota`), or for every project without a quota of its own in the compute
+  provider's default quota (`config.provisioning.quota`, `PUT /api/v1/admin/service/{id}/quota`); the refused Service
+  gets its address within about a minute. What HA means is
   that of any pair ([cloud-integration.md](cloud-integration.md#high-availability-a-pair-of-appliances)): where both
   appliances run on one node (a one-node site, a `simple` zone, or the appliance image on one node only) the balancer
   survives an appliance failure, not the loss of that node, and the cluster page says so.
 - On Docker Compose the listener is opt-in, with a certificate the API makes itself
   (`proxcloud-up.sh install --cluster-gateway <address>`, [managed-services.md](managed-services.md#9-limits-on-the-compose-install)).
 
-Not run on a lab: any of it. Tested against Postgres and a fake Proxmox (`TestLBClusterStateConverges`).
+Run on one lab, in two drills (v0.11.0-rc.1 on 2026-11-21, v0.11.0-rc.2 on 2026-11-22; a nested three-node Proxmox
+cluster, both appliances on one node, Ubuntu 26.04 appliances with packages from apt through the lab's router, one
+cluster with one or two workers, clients outside the cluster; a sample, not a promise):
+
+- **The first Service** had its address in `status` 3 min 25 s to 4 min 22 s after it was applied and answered from
+  outside after 6 min 7 s to 6 min 37 s, most of it the two appliance builds. The address is written before anything
+  answers on it (3 min 12 s before, on rc.2): a tool that waits for `status.loadBalancer.ingress` takes the Service
+  for ready too early. The Event stays `EnsuringLoadBalancer` until it serves.
+- **Listeners follow a Service's ports** (rc.2): a port added to a live Service answered after 16.8 s; a changed
+  `targetPort` after 0.5 s, with nothing to change on the balancer; a changed `nodePort` was followed in 12.7 s; a
+  removed port lost its firewall rule after 9.5 s and left the HAProxy config after 14.4 s; a second Service had its
+  own address and answered after 32 s, and its address was out of the balancer 33.6 s after its delete. Each change
+  is one reload of both appliances, the standby first.
+- **The other listeners through those changes** (rc.2): the first port, under 10 new connections a second, lost 0
+  requests, and one long-lived connection on it survived six reloads. This was shown for listener and Service
+  changes with `externalTrafficPolicy: Cluster` and every node healthy, and holds for nothing wider.
+- **Members follow the nodes, and requests are lost when they change** (rc.2, once per direction). A new worker was
+  a member 14 s after its Node object appeared, 53 s before it was Ready, and HAProxy takes a new member for healthy
+  until two checks fail: 22 of 44 requests failed in 4.4 s. A removed worker left the config 14 s after its Node was
+  gone, but its VM had stopped before: 52 requests failed in 10.3 s. The same is to be expected at every worker
+  replacement.
+- **A member that is down is tried again after every reload** (rc.2, twice). With a policy `Local` Service on a
+  cluster where one node has no local endpoint, each change of another Service of the cluster cost that Service 11 to
+  12 requests in 2.2 to 2.4 s: a reload starts every member as up. A dead node across a reload was not run.
+- **A stopped master appliance** cost 3.1 to 3.5 s. The portal started it again 31 s later on rc.2, with no sync and
+  no tenant action (one run; the bound is about 70 s, the look once a minute).
+- **The controller's cost** (rc.2, one idle cluster with one Service): 18.6 Proxmox calls a minute, against 132 on
+  rc.1, where every PUT started a pass.
+- **An API stopped during a change** (rc.2, three times): the cluster's lock ran out after about 58 s, and the change
+  was live 190 to 209 s after the stop, because the balancer's own lock is held for up to 3 minutes. On rc.1 the
+  cluster's lock was held for 20 minutes (24.7 minutes without a converge). Traffic was not touched in either.
+- **A refused credential** (rc.2): after a rotation the old one was refused with one log line that names the cluster
+  and the reason, and one audit row; the controller had the new one after 75 s.
+- **On rc.1, not run again:** five Services on five addresses of one pair; the refusals as Events (UDP, no node port,
+  `loadBalancerIP`, quota); class `proxcloud.io/internal` on MetalLB; PROXY protocol v2; an allowed source range;
+  policy `Local` health checks; an idle TCP connection of 330 s; Nodes that are not the cluster's workers refused and
+  audited; a suspended project; the gateway down during a Service's delete; the clean-up at a Service's and a
+  cluster's delete; enable on an existing cluster in class-only mode, with its MetalLB address unchanged.
+
+Not run on a lab: the refusal of a source address outside `loadBalancerSourceRanges`, NGINX Gateway Fabric in default
+mode, a cluster made on chart 0.1.16 and then enabled, two nodes (VRRP across nodes, the loss of a node), the default
+Debian 13 appliance image, a project's delete with a balancer, the consoles (every step went through the API), the
+installer path, and a production site. UDP ports and TLS termination are not in this release.
 
 **Load balancers of a cluster's Services: the controller.** Each cluster that has one runs its load balancer
 controller (`cmd/lb-controller`) on the services cluster next to its control plane, as the proxmox-csi controller:
@@ -901,13 +970,23 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   half-filled cache (a watch when a cluster has hundreds of Services). It owns a Service of type LoadBalancer of class
   `proxcloud.io/lb`, and in default mode also one without a class; never `proxcloud.io/internal` or another class.
   Nodes labelled `node.kubernetes.io/exclude-from-external-load-balancers` and nodes being deleted are left out; the
-  balancer's health check decides whether a node serves. The oldest Service is sent first, so a full balancer refuses
+  balancer's health check decides whether a node serves, so a node that is not Ready yet is sent too (the lab's
+  figures below say what that costs). The oldest Service is sent first, so a full balancer refuses
   the newest.
 - An owned Service gets the finalizer `proxcloud.io/load-balancer` before it is first sent. A Service deleted, turned
   into another type or of another class keeps it until a PUT without it is accepted, then loses it (and its address in
   the status); while the gateway cannot be reached it stays `Terminating`, as with any cloud controller.
-- `status.loadBalancer.ingress` gets the address once the portal has one, `ipMode: Proxy` with the annotation
-  `proxcloud.io/lb-proxy-protocol: "true"` (in-cluster clients then go through the balancer too) and `VIP` otherwise.
+- `status.loadBalancer.ingress` gets the address once the portal has one, which for a cluster's first Service is
+  minutes before the pair serves it; `ipMode: Proxy` with the annotation
+  `proxcloud.io/lb-proxy-protocol: "true"` and `VIP` otherwise. **With `VIP`, a client inside the cluster never
+  reaches the balancer**: kube-proxy treats an address with that mode as one of the Service's own and sends a pod's or
+  a node's connection to it straight to an endpoint. Such a client does not see an outage of the pair or a switch
+  between its appliances, never meets the appliance's firewall, which is what holds clients from outside to
+  `loadBalancerSourceRanges`, and proves nothing about the path from outside: test a Service from outside the
+  cluster. With `Proxy`, kube-proxy installs no such rule, so in-cluster clients leave the cluster and
+  come back through the pair like anyone else (seen by the backend as the worker's address, after the tenant
+  network's gateway); that is what a backend that requires the PROXY header needs, and it means the Service's
+  ClusterIP no longer works for that backend, which gets no header on the direct path.
 - The answers become Events on the Service, one per change: `EnsuringLoadBalancer`, `EnsuredLoadBalancer` with the
   address, and a Warning with the gateway's reason (`UDPNotSupported`, `NoNodePort`, `TooManySourceRanges`,
   `IPFamilyNotSupported`, `QuotaExceeded`, `PublicNetworkUnavailable`, `TooLarge`; for the whole request
@@ -959,7 +1038,9 @@ above, or a rotation on a cluster that has a controller.
 
 The platform BOM pins chart 0.1.17 from v0.11.0 (`tenantCharts.kubernetes`, record only on an installed platform: the
 upgrade run writes it on the provider, so clusters created after it get the controller when every gate holds; the
-platform cluster `pc-platform` stays on 0.1.16). Not run on a lab. Tested: the reconcile against a fake tenant
+platform cluster `pc-platform` stays on 0.1.16). On one lab that run took 39.6 s from the BOM `0.10.2-rc.1` to
+`0.11.0-rc.1` (two record-only rows, nothing written on Proxmox), and a cluster created after it got chart 0.1.17
+and its controller in default mode; no move to the BOM `0.11.0` itself was run. Tested: the reconcile against a fake tenant
 API and the gateway client against a TLS server (`cmd/lb-controller`), the chart's renders (goldens for default mode,
 class-only and off), the values, the Secret, the enable action and the bump (`internal/cloud/kamaji`), and the enable
 action against Postgres with a fake management cluster, the token passing the real gateway handler

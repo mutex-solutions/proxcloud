@@ -101,6 +101,9 @@ type Handler struct {
 	csiGW *CSIGateway
 	// lbGW holds the credentials and states of the clusters' load balancers (SetLBGateway; nil = no cluster balancer).
 	lbGW *lbgw.Store
+	// lbPasses is the last finished pass over each cluster's balancer (cluster id -> lbPass), by which a controller's
+	// PUT that changes nothing starts no pass of its own (lbPassDue).
+	lbPasses sync.Map
 	// sandboxFor builds the sandbox service for a sandbox provider (sandbox-cluster client from
 	// the provider's kubeconfig). SetSandbox; nil = sandbox provisioning and writes are off.
 	sandboxFor func(es *externalservice.ExternalService) (*sandbox.Service, error)

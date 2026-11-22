@@ -18,6 +18,51 @@ nodes of the platform cluster hand the CNI config to netguard, through a `Cilium
 kept node-setup from ever becoming Ready there.
 
 **Diagrams:** C3 (a read edge from sandbox-netguard to the sandbox cluster).
+## 2026-11-22: the services sync keeps running when an appliance is down
+
+**What changed:** no new component, container or relation. `internal/cloud/pve`: a load balancer's appliance is never
+asked for its addresses (`vmInventory.addresses`, `Service.ServerAddresses`), so a pair's public address no longer
+enters a SERVER row, and a VM that Proxmox reports stopped or paused counts as known to have no guest agent
+(`ServerSyncProvider.List`). `internal/cloud/syncjob`: a project's unproved inventory holds back that project's own
+sync and the two provider passes that delete on a list (the seed sweep, the sandbox pass's sweep); the other
+projects, the load balancer pass, provider isolation, worker firewalls, start at boot and the sandbox fence run
+(`detectProxmoxCapabilities`, `syncProxmoxService`, `reconcileSandboxWorkers`), and the load balancer pass calls an
+appliance gone only when its VMID is free in the cluster (`lbVMUnseen`). `internal/platform/lock`:
+`ShedLock.Hold`, a lock taken for a lease and extended while its holder works. `internal/platform/project`: the
+cluster converge takes `lbc-<clusterId>` with it (one minute, was 20), a controller's PUT starts a pass only when
+the state changed, the balancer is not settled or the last look is a minute old (`lbPassDue`), and a cluster's pair
+never takes a third appliance (`lbClusterBuild`). `internal/cloud/lbgw`: a refused credential is logged with the
+cluster it claimed and the reason, and audited for a known cluster's revoked credential or wrong secret
+(`authenticate`, `auditDenied`).
+
+**Why:** the drill of v0.11.0-rc.1 (findings N2-1, N2-3, N2-4, N1-3): a stopped master appliance whose SERVER row had
+cached the pair's address made its project's inventory unproved at every sync, which left out the load balancer pass
+that starts it, and the isolation rules, worker firewalls, start at boot and sandbox pass of every tenant of the
+provider; an API restart during a converge kept a cluster's balancer from converging for 24.7 minutes; every PUT of
+a controller cost about 16 Proxmox calls.
+
+**Diagrams:** none (C4.0's table gains the rows of the sync job and of `vmInventory.addresses`; C4.2a's rows of
+`lbgw.Handler` and `Handler.LBClusterState`).
+
+## 2026-11-22: a load balancer's config is recorded only when the appliance serves it
+
+**What changed:** no new component, container or relation. Inside `internal/cloud/pve` the appliance's apply
+(`haproxyReload`, `lbKeepalivedApply`) now proves what it did before it answers: HAProxy is started when stopped and
+reloaded through its master socket in every case, and every `bind` of the pushed file must be a listening socket of
+HAProxy (`lbServingFn`); keepalived must run after its change; files the guest agent wrote get root and 0644 (scripts
+0755). An appliance is ready when dpkg reports the packages installed, no package manager runs and the units exist
+(`lbReadyScript`). `ReadVRRPState` and the new `HAProxyServing` report whether HAProxy listens on every bind of its
+config, and `LBHealth` the listeners and members the running HAProxy does not hold. In `internal/platform/project`
+the converge (`lbApplyLocked`, `lbApplyPair`) asks every appliance with a recorded hash what it runs and pushes again
+where a service is stopped or runs another config than its file, and records the pair's own hash only when an appliance is up with
+the config; `lbPairStatus` names the cause and its remedy; `lbTakeOut` and `lbPutIn` state the row's status again
+during a replace.
+
+**Why:** the drill of v0.11.0-rc.1 (findings N2-2, N2-5, N2-6, N2-7): a pair refused every connection for 458 s after
+Replace appliances while its row read `ACTIVE`, because the first config push met the haproxy package's own first
+start and its hash was recorded without HAProxy ever loading the file.
+
+**Diagrams:** none (the C4.2a table's rows of `PushHAProxy`, `lbApplyPair` and `lbReplace`).
 
 ## 2026-11-21: new clusters are offered the product load balancer
 

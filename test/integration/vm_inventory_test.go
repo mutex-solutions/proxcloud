@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -38,6 +39,21 @@ type vmInventoryWire struct {
 	// on /access or /vms, NoAccess on the fenced pools.
 	documented bool
 	nextids    int
+	// What the drill of v0.11.0-rc.1 saw and this fake did not model (N2-1). power "stopped" or "paused": Proxmox says
+	// so, and the guest agent of such a VM answers nobody. lb: the VM is a load balancer's appliance (its tag), with
+	// the address the product configured on net0. agentIPs: what a running guest reports on its second NIC, as the
+	// master of a pair reports the balancer's address. agentAsked counts the agent reads.
+	power      string
+	lb         bool
+	agentIPs   []string
+	agentAsked int
+}
+
+func (f *vmInventoryWire) tags() string {
+	if f.lb {
+		return "proxcloud;pc-c-1;pc-lb-abc"
+	}
+	return "proxcloud;pc-c-1"
 }
 
 // held reports whether a guest holds the VMID anywhere in the cluster, seen or not.
@@ -74,6 +90,12 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	elsewhere := f.mode == "moved-elsewhere" || f.mode == "reused-elsewhere" || f.mode == "moved-no-smbios"
 	switch {
 	case strings.HasSuffix(path, "/agent/network-get-interfaces"):
+		f.agentAsked++
+		if f.power != "" { // PVE: "VM 101 is not running" for a stopped VM, a timeout turned into 500 for a paused one
+			w.WriteHeader(500)
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": nil, "message": "QEMU guest agent is not running\n"})
+			return
+		}
 		switch f.mode {
 		case "agent-null":
 			write(nil)
@@ -90,7 +112,18 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "agent-403":
 			w.WriteHeader(403)
 		default:
-			write(map[string]any{"result": []any{}})
+			if len(f.agentIPs) == 0 {
+				write(map[string]any{"result": []any{}})
+				return
+			}
+			var ips []any
+			for _, ip := range f.agentIPs {
+				ips = append(ips, map[string]any{"ip-address": ip, "ip-address-type": "ipv4", "prefix": 24})
+			}
+			write(map[string]any{"result": []any{
+				map[string]any{"name": "eth0", "hardware-address": "AA:BB:CC:DD:EE:01", "ip-addresses": []any{map[string]any{"ip-address": "10.0.0.31", "ip-address-type": "ipv4", "prefix": 24}}},
+				map[string]any{"name": "eth1", "hardware-address": "AA:BB:CC:DD:EE:02", "ip-addresses": ips},
+			}})
 		}
 		return
 	case strings.Contains(path, "/replication/") && strings.HasSuffix(path, "/status"):
@@ -188,6 +221,12 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if f.mode == "migration" {
 			row["lock"] = "migrate"
+		}
+		if f.lb {
+			row["tags"] = f.tags()
+		}
+		if f.power == "stopped" { // a paused VM reads "running" here: only status/current tells
+			row["status"] = "stopped"
 		}
 		write([]any{row})
 	case path == "/nodes":
@@ -291,7 +330,11 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if template {
 			t = 1
 		}
-		cfg := map[string]any{"name": fmt.Sprintf("vm-%d", id), "smbios1": "uuid=" + uuid, "tags": "proxcloud;pc-c-1", "template": t, "scsi0": fmt.Sprintf("z:vm-%d-disk-0,size=8G", id), "net0": "virtio=AA:BB:CC:DD:EE:01,bridge=v1"}
+		cfg := map[string]any{"name": fmt.Sprintf("vm-%d", id), "smbios1": "uuid=" + uuid, "tags": f.tags(), "template": t, "scsi0": fmt.Sprintf("z:vm-%d-disk-0,size=8G", id), "net0": "virtio=AA:BB:CC:DD:EE:01,bridge=v1"}
+		if f.lb || len(f.agentIPs) > 0 { // the address the product gave net0; a pair's public NIC has none of its own
+			cfg["ipconfig0"] = "ip=10.0.0.31/24,gw=10.0.0.1"
+			cfg["net1"] = "virtio=AA:BB:CC:DD:EE:02,bridge=vmbr1"
+		}
 		if f.mode == "cfg-template-null" {
 			cfg["template"] = nil
 		}
@@ -345,7 +388,14 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write([]any{})
 		}
 	case strings.HasSuffix(path, "/status/current"):
-		write(map[string]any{"status": "running", "qmpstatus": "running"})
+		switch f.power {
+		case "stopped":
+			write(map[string]any{"status": "stopped", "qmpstatus": "stopped"})
+		case "paused":
+			write(map[string]any{"status": "running", "qmpstatus": "paused"})
+		default:
+			write(map[string]any{"status": "running", "qmpstatus": "running"})
+		}
 	default:
 		write([]any{}) // optional agent/protection/snapshot reads carry no proof
 	}
@@ -866,5 +916,121 @@ func TestVMInventoryLBAddressIsNoOrphanAndIsBilled(t *testing.T) {
 	}
 	if fip, _ := fips[0].Data["floatingIp"].(map[string]any); fip["server_id"] != "lb:abc" || fip["floating_ip_address"] != "198.51.100.9" {
 		t.Fatalf("FLOATING_IP row = %+v", fips[0].Data)
+	}
+}
+
+// serverAddrs is the addresses of the fixture's SERVER row, sorted.
+func serverAddrs(t *testing.T, repo *cloud.Repo, id string) []string {
+	t.Helper()
+	row, err := repo.FindByID(context.Background(), id)
+	if err != nil || row == nil {
+		t.Fatalf("row: %v", err)
+	}
+	srv, _ := row.Data["server"].(map[string]any)
+	groups, _ := srv["addresses"].(map[string]any)
+	var out []string
+	for _, g := range groups {
+		list, _ := g.([]any)
+		for _, e := range list {
+			a, _ := e.(map[string]any)["addr"].(string)
+			out = append(out, a)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// N2-1 (v0.11.0-rc.1 drill, D3): the master appliance of a pair held the balancer's address when a sync read its guest
+// agent, and its SERVER row cached it. The appliance was then stopped. A stopped VM has no agent, the cached address
+// was "missing", and the project's inventory was declared untrusted at every sync, for as long as the VM stayed down:
+// the sync that would have started it again never ran its load balancer pass. Here the row is poisoned the same way,
+// and in every state of the VM the read is trusted and leaves the row with the appliance's own address only. A running
+// appliance is not asked either, so its row cannot cache the address again.
+func TestVMInventoryApplianceRowNeverHoldsTheBalancersAddress(t *testing.T) {
+	const own, vip = "10.0.0.31", "198.51.100.9"
+	for _, tc := range []struct{ name, power, mode string }{
+		{"master stopped", "stopped", ""},
+		{"master paused", "paused", ""},
+		{"running, agent refuses", "", "agent-403"},
+		{"running, holds the address", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := freshPG(t)
+			repo := cloud.NewRepo(db)
+			old := vmCached(t, db, cloud.TypeServer)
+			old.Data["server"].(map[string]any)["addresses"] = map[string]any{
+				"private": []any{map[string]any{"addr": own, "version": 4}, map[string]any{"addr": vip, "version": 4}}}
+			if _, err := db.C("cloudResource").SetByID(ctx, old.ID, pgdoc.M{"data": old.Data}, nil); err != nil {
+				t.Fatal(err)
+			}
+			f := &vmInventoryWire{mode: tc.mode, power: tc.power, lb: true, agentIPs: []string{vip}}
+			s := vmTestService(t, f)
+			for round := 0; round < 2; round++ {
+				if _, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC()); err != nil {
+					t.Fatalf("round %d: the appliance made the inventory untrusted: %v", round, err)
+				}
+				if got := serverAddrs(t, repo, old.ID); !slices.Equal(got, []string{own}) {
+					t.Fatalf("round %d: row addresses %v, want only the appliance's own %s", round, got, own)
+				}
+			}
+			if f.agentAsked != 0 {
+				t.Fatalf("the appliance's agent was asked for addresses %d times", f.agentAsked)
+			}
+			// What a look at the server or an action writes back (pveRefreshServerRow) is built the same way.
+			page, err := s.C.ClusterResources(ctx, "vm")
+			if err != nil || len(page) != 1 {
+				t.Fatalf("page: %v %v", page, err)
+			}
+			if got := fmt.Sprint(s.ServerAddresses(ctx, page[0])); strings.Contains(got, vip) || !strings.Contains(got, own) {
+				t.Fatalf("refresh addresses %s", got)
+			}
+		})
+	}
+}
+
+// The same veto, off an appliance: a tenant's VM whose agent reported an address its config does not carry (a
+// container bridge, a second address) and which is then stopped or paused has no agent to ask. That is known, not
+// unknown: the row goes back to the configured addresses, as it does after a stop through the portal, and the
+// project's sync goes on. While the VM runs and its agent does not answer, the cached address still stays
+// (TestVMInventoryUnknownAgentPreservesDynamicAddressesAndLegacy).
+func TestVMInventoryStoppedVMIsKnownToHaveNoAgent(t *testing.T) {
+	const own, dynamic = "10.0.0.31", "172.17.0.1"
+	for _, power := range []string{"stopped", "paused"} {
+		t.Run(power, func(t *testing.T) {
+			ctx := context.Background()
+			db := freshPG(t)
+			repo := cloud.NewRepo(db)
+			old := vmCached(t, db, cloud.TypeServer)
+			f := &vmInventoryWire{agentIPs: []string{dynamic}}
+			s := vmTestService(t, f)
+			// A sync of the running VM learns the address from its agent.
+			if _, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			if got := serverAddrs(t, repo, old.ID); !slices.Equal(got, []string{own, dynamic}) {
+				t.Fatalf("running: %v", got)
+			}
+			f.power = power
+			for round := 0; round < 2; round++ {
+				if _, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC()); err != nil {
+					t.Fatalf("round %d: a %s VM made the inventory untrusted: %v", round, power, err)
+				}
+			}
+			if got := serverAddrs(t, repo, old.ID); !slices.Equal(got, []string{own}) {
+				t.Fatalf("%s: row addresses %v, want the configured %s", power, got, own)
+			}
+			// Running again with an agent that does not answer yet: unknown, and nothing is lost meanwhile.
+			f.power, f.agentIPs = "", []string{dynamic}
+			if _, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			f.mode = "agent-403"
+			_, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC())
+			var unknown *cloud.InventoryUntrustedError
+			if !errors.As(err, &unknown) {
+				t.Fatalf("a running VM whose agent refuses lost its cached address: %v", err)
+			}
+		})
 	}
 }

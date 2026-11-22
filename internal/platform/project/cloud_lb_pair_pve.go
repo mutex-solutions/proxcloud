@@ -284,6 +284,11 @@ func lbPeerOf(lb *loadBalancer, a *lbAppliance) *lbAppliance {
 // running appliance first, so a VIP is in both sets before keepalived can take it; then per appliance, standby first,
 // keepalived and HAProxy; then a VIP no longer served leaves the sets, once keepalived let go of it; then each one's
 // state is read back. Rules and sets are compared on every pass, so one changed by hand is put back.
+//
+// A recorded hash is the product's word that the appliance runs that config, so each pass asks the appliance first:
+// one whose HAProxy does not serve its config (stopped, or running another one, as after the package's own first
+// start) or whose keepalived stopped is pushed again, which starts the service with the current config. They are the
+// product's own services, and nobody else starts them.
 func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, lb *loadBalancer) error {
 	ps, err := h.pveFor(es)
 	if err != nil {
@@ -300,6 +305,9 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		a.Reason = ""
 		vm, listed := vms[a.ServerID]
 		switch {
+		case !listed && lbVMUnseen(ctx, ps, a.ServerID):
+			a.State, a.Reason = lbAppDown, "the platform cannot see its VM"
+			continue
 		case !listed || vm.Pool != pool || (!vm.NodeDown && pve.LBOfTags(vm.Tags) != lb.ID):
 			a.State, a.Role, a.HoldsVIP, a.Reason = lbAppGone, "", false, "its VM is gone"
 			continue
@@ -377,9 +385,34 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		}
 		leftover[a] = extra
 	}
+	vip := ""
+	if len(lb.VIPs) > 0 {
+		vip = lb.VIPs[0]
+	}
+	seen := map[*lbAppliance]pve.VRRPState{} // as read before the pushes
+	started := map[*lbAppliance]string{}     // what this pass found not running and pushed again
+	for _, a := range running {
+		if a.HAProxyHash == "" && a.KeepalivedHash == "" {
+			continue
+		}
+		vmid, _ := strconv.Atoi(a.ServerID)
+		if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip); err == nil {
+			seen[a] = st
+		}
+	}
+	pushed := map[*lbAppliance]bool{}
 	keepalivedCurrent := map[*lbAppliance]bool{}
 	for _, a := range lbPushOrder(running) {
 		vmid, _ := strconv.Atoi(a.ServerID)
+		st, known := seen[a]
+		// keepalived stopped by a replace's planned switch may be started again here before its VM goes: it comes
+		// back as BACKUP and stays so (nopreempt), the address has moved already.
+		restartKeepalived := known && a.KeepalivedHash != "" && st.State == "STOPPED"
+		reloadHAProxy := known && a.HAProxyHash != "" && !st.Serving
+		if restartKeepalived || reloadHAProxy {
+			slog.Warn("load balancer: an appliance does not run what its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID,
+				"keepalived", st.State, "haproxyServing", st.Serving)
+		}
 		// keepalived needs the peer; an appliance whose peer left keeps the config it has, and the address.
 		if peer := lbPeerOf(lb, a); peer != nil && pn != nil {
 			conf, kerr := pve.RenderKeepalived(pve.LBKeepalived{RouterID: lbRouterID(lb.ID), Self: a.PrivateIP, Peer: peer.PrivateIP,
@@ -387,7 +420,8 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			if kerr != nil {
 				return kerr
 			}
-			if khash := lbHash(conf + pve.LBPairFilesDigest(a.PublicIface)); khash != a.KeepalivedHash {
+			if khash := lbHash(conf + pve.LBPairFilesDigest(a.PublicIface)); khash != a.KeepalivedHash || restartKeepalived {
+				pushed[a] = true
 				if err := ps.PushKeepalived(ctx, a.Node, vmid, conf, a.PublicIface); err != nil {
 					if errors.Is(err, pve.ErrLBNotReady) {
 						a.State, a.Reason = lbAppBuilding, "it is installing HAProxy and keepalived"
@@ -397,10 +431,14 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 					continue
 				}
 				a.KeepalivedHash = khash
+				if restartKeepalived {
+					started[a] = "keepalived"
+				}
 			}
 			keepalivedCurrent[a] = true
 		}
-		if hhash != a.HAProxyHash {
+		if hhash != a.HAProxyHash || reloadHAProxy {
+			pushed[a] = true
 			if err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy); err != nil {
 				if errors.Is(err, pve.ErrLBNotReady) {
 					a.State, a.Reason = lbAppBuilding, "it is installing HAProxy and keepalived"
@@ -410,6 +448,9 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 				continue
 			}
 			a.HAProxyHash = hhash
+			if reloadHAProxy {
+				started[a] = strings.TrimPrefix(started[a]+" and HAProxy", " and ")
+			}
 		}
 	}
 	for a, extra := range leftover {
@@ -428,19 +469,19 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			lb.settled = false
 		}
 	}
-	vip := ""
-	if len(lb.VIPs) > 0 {
-		vip = lb.VIPs[0]
-	}
 	for _, a := range running {
 		if a.State == lbAppBuilding && a.HAProxyHash == "" {
 			continue
 		}
-		vmid, _ := strconv.Atoi(a.ServerID)
-		st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip)
-		if err != nil {
-			a.State, a.Reason = lbAppDown, "it does not answer"
-			continue
+		// What the appliance says now: read again after a push, which changed it.
+		st, known := seen[a]
+		if !known || pushed[a] {
+			vmid, _ := strconv.Atoi(a.ServerID)
+			var err error
+			if st, err = ps.ReadVRRPState(ctx, a.Node, vmid, vip); err != nil {
+				a.State, a.Reason = lbAppDown, "it does not answer"
+				continue
+			}
 		}
 		a.Role, a.HoldsVIP = st.State, st.HoldsVIP
 		if vip == "" { // a cluster's pair before its first Service, or after its last: the master holds the placeholder
@@ -449,6 +490,8 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		switch {
 		case !st.HAProxy:
 			a.State, a.Reason = lbAppDown, "HAProxy is not running"
+		case !st.Serving:
+			a.State, a.Reason = lbAppDown, "HAProxy does not serve its configuration"
 		case st.State != "MASTER" && st.State != "BACKUP":
 			a.State, a.Reason = lbAppDown, "keepalived is "+strings.ToLower(st.State)
 		case a.HAProxyHash != hhash:
@@ -456,12 +499,18 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		default:
 			a.State, a.Reason = lbAppUp, ""
 		}
+		if what := started[a]; what != "" && a.State != lbAppUp {
+			a.Reason += "; " + what + " did not run its configuration and the platform loaded it again"
+		}
 	}
-	lb.Status, lb.StatusMessage = lbPairStatus(lb.Appliances, lbStuck(cr))
+	lb.Status, lb.StatusMessage = lbPairStatus(lb.Appliances, lbStuck(cr), lbReplacing(lb, time.Now().UTC()))
 	if refused != nil {
 		lb.Status, lb.StatusMessage = lbStatusError, refused.Error()
 	}
-	if lb.Status == lbStatusActive || lb.Status == lbStatusDegraded {
+	// The row's hash says that an appliance serves this config (a cluster's Services are ready by it). The status
+	// alone does not: both appliances holding the address is DEGRADED whatever they run.
+	serves := slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.State == lbAppUp })
+	if serves && (lb.Status == lbStatusActive || lb.Status == lbStatusDegraded) {
 		lb.AppliedHash = hhash
 	}
 	return nil
@@ -470,7 +519,10 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 // lbPairStatus sums the appliances up. ACTIVE: both answer and one holds the address. DEGRADED: one answers, or both
 // hold the address, which happens when they cannot hear each other's adverts; nothing is changed for it, and it heals
 // when they hear each other again (the one with the lower address yields, RFC 5798). DOWN: neither answers.
-func lbPairStatus(apps []lbAppliance, stuck bool) (string, string) {
+//
+// The message names what is wrong with the other appliance and what puts it right: Replace appliances only when one
+// is missing, since everything else the platform's next pass repairs by itself.
+func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 	up, holders, building, gone, applied := 0, 0, 0, 0, false
 	var reasons []string
 	for _, a := range apps {
@@ -488,7 +540,7 @@ func lbPairStatus(apps []lbAppliance, stuck bool) (string, string) {
 		if a.HAProxyHash != "" {
 			applied = true
 		}
-		if a.State != lbAppUp {
+		if a.State != lbAppUp && a.Reason != "" {
 			reasons = append(reasons, fmt.Sprintf("appliance %s: %s", a.ServerID, a.Reason))
 		}
 	}
@@ -508,7 +560,15 @@ func lbPairStatus(apps []lbAppliance, stuck bool) (string, string) {
 		if why != "" {
 			why = " (" + why + ")"
 		}
-		return lbStatusDegraded, "One appliance carries the traffic, with no standby" + why + ". Replace appliances builds the missing one again."
+		switch {
+		case replacing:
+			return lbStatusDegraded, "One appliance carries the traffic while the other is being replaced" + why + "."
+		case gone > 0 || len(apps) < 2:
+			return lbStatusDegraded, "One appliance carries the traffic, with no standby" + why + ". Replace appliances builds the missing one again."
+		case building > 0:
+			return lbStatusDegraded, "One appliance carries the traffic, with no standby" + why + ". The other one is still being prepared."
+		}
+		return lbStatusDegraded, "One appliance carries the traffic, with no standby" + why + ". The platform puts the other one right at its next pass; if this stays, Replace appliances builds a new one."
 	case gone == len(apps):
 		return lbStatusError, "Both appliances are gone. Replace appliances builds them again, or delete this load balancer."
 	}
@@ -550,6 +610,9 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 		}
 		if st, err := ps.ReadVRRPState(ctx, vm.Node, vm.VMID, vip); err == nil {
 			a.Role, a.HoldsVIP = st.State, st.HoldsVIP
+			if a.State == lbAppUp && !st.Serving { // the row's word is older than this read
+				a.State, a.Reason = lbAppDown, "HAProxy does not serve its configuration"
+			}
 		}
 		apps = append(apps, seen{app: a, vm: vm})
 	}
@@ -561,16 +624,28 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 	out["appliances"] = list
 	for _, s := range apps {
 		if s.vm != nil && s.app.HoldsVIP && s.app.HAProxyHash != "" {
-			health, err := ps.LBHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec)
+			health, notLoaded, err := ps.LBHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec)
 			if err != nil {
 				slog.Warn("load balancer: health", "project", proj.ID, "lb", lb.ID, "err", err)
 				return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's active appliance did not answer")
 			}
 			out["result"] = health
+			lbHealthNotLoaded(out, notLoaded)
 			break
 		}
 	}
 	return out, nil
+}
+
+// lbHealthNotLoaded adds to a GET_HEALTH answer the listeners the appliance does not run, and says so: member states
+// alone would read as nothing wrong.
+func lbHealthNotLoaded(out map[string]any, notLoaded []string) {
+	if len(notLoaded) == 0 {
+		return
+	}
+	out["notLoaded"] = notLoaded
+	out["message"] = "The appliance does not run this load balancer's configuration: listener " + strings.Join(notLoaded, ", ") +
+		" is not loaded. The platform loads it again at its next pass."
 }
 
 // pveLBReplace starts REPLACE_APPLIANCES: new VMs from the current image, one at a time, the standby first, so the
@@ -713,10 +788,7 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 				time.Sleep(2 * time.Second)
 			}
 		}
-		if _, err := h.lbEdit(ctx, es, externalID, func(lb *loadBalancer) {
-			lb.Appliances = slices.DeleteFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID == old })
-			lbPairLegacyFields(lb)
-		}); err != nil {
+		if _, err := h.lbEdit(ctx, es, externalID, func(lb *loadBalancer) { lbTakeOut(lb, old) }); err != nil {
 			return err.Error()
 		}
 		if vm, ok := vms[old]; ok && pve.LBOfTags(vm.Tags) == lb.ID && vm.Pool == ps.PoolFor(proj.ID) {
@@ -733,10 +805,7 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 	if err != nil {
 		return "a new appliance could not be built: " + err.Error()
 	}
-	if _, err := h.lbEdit(ctx, es, externalID, func(lb *loadBalancer) {
-		lb.Appliances = append(lb.Appliances, *app)
-		lbPairLegacyFields(lb)
-	}); err != nil {
+	if _, err := h.lbEdit(ctx, es, externalID, func(lb *loadBalancer) { lbPutIn(lb, *app) }); err != nil {
 		// The balancer went meanwhile: the new VM is nobody's.
 		if derr := h.lbDestroyVM(ctx, es, proj, app.ServerID); derr != nil {
 			slog.Error("load balancer: remove an appliance built for a balancer that went", "lb", externalID, "vm", app.ServerID, "err", derr)
@@ -763,6 +832,22 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 		case <-time.After(lbConvergeEvery):
 		}
 	}
+}
+
+// lbTakeOut removes an appliance from the row of a pair being replaced, and lbPutIn adds the one built in its
+// place. The row's status is of the appliances it lists, so both state it again: a row that said ACTIVE of two
+// appliances does not keep saying it with one (drill N2-7).
+func lbTakeOut(lb *loadBalancer, serverID string) {
+	lb.Appliances = slices.DeleteFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID == serverID })
+	lbPairLegacyFields(lb)
+	lb.Status, lb.StatusMessage = lbPairStatus(lb.Appliances, false, true)
+}
+
+func lbPutIn(lb *loadBalancer, app lbAppliance) {
+	app.Reason = "it is booting"
+	lb.Appliances = append(lb.Appliances, app)
+	lbPairLegacyFields(lb)
+	lb.Status, lb.StatusMessage = lbPairStatus(lb.Appliances, false, true)
 }
 
 // lbPairLegacyFields keeps the single appliance's fields (ServerID, PrivateIP) on an appliance of the pair: a replace

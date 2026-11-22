@@ -22,7 +22,7 @@
 # may stay one minor behind this file and are never ahead of it. They are at 1.35.10 while this file names 1.36.6 (the
 # installer path takes a minor step in a release of its own), and the kubectl in images.clusterctl follows them.
 schemaVersion: 1
-release: 0.11.0-dev                # "-dev" on main between releases; at a stable tag deploy/charts/proxcloud appVersion without "v" (a candidate keeps the chart of the last stable release)
+release: 0.12.0-dev                # "-dev" on main between releases; at a stable tag deploy/charts/proxcloud appVersion without "v" (a candidate keeps the chart of the last stable release)
 kubernetes:
   version: 1.36.6
   nodeImage: {package: proxcloud-vm-ubuntu-2604-k8s, tag: ubuntu-2604-k8s-1.36.6-20261116194043-72f0eaa3d0d4, digest: "sha256:53740d320b09de54fc3bae4a4ed68068a3ca9c7a45cf97e632dc771f5a3d738a"}
