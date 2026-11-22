@@ -261,7 +261,13 @@ type fakePVE struct {
 	subnets map[string][]pve.SDNSubnet
 	probe   *probeEnv // the tenant path test's routes (tenantprobe_test.go)
 	keepVM  bool      // a VM delete is refused
-	maxMem  int64     // every node's memory in bytes (0: the nodes report none)
+	// Pools made, ACL writes ("<path> <role> <token> delete=<0|1>") and tokens ("<user>!<name>") that exist, as the
+	// sandbox code writes them; refuseACL answers the next ACL write with 403.
+	pools     []string
+	acl       []string
+	tokens    []string
+	refuseACL bool
+	maxMem    int64 // every node's memory in bytes (0: the nodes report none)
 }
 
 // sdn answers the /cluster/sdn routes and the node's network lists; false when path is not one.
@@ -656,6 +662,42 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			f.iso = slices.DeleteFunc(f.iso, func(n string) bool { return n == name })
 		}
 		data(f.upid("imgdel", 0))
+	case path == "/pools" && r.Method == http.MethodPost:
+		f.pools = append(f.pools, r.Form.Get("poolid"))
+		data(nil)
+	case path == "/pools/"+pve.SandboxPool && r.Method == http.MethodDelete:
+		f.pools = slices.DeleteFunc(f.pools, func(p string) bool { return p == pve.SandboxPool })
+		data(nil)
+	case path == "/pools/"+pve.SandboxPool:
+		data(map[string]any{"poolid": pve.SandboxPool, "members": []any{}})
+	case path == "/access/acl" && r.Method == http.MethodPut:
+		if f.refuseACL {
+			f.refuseACL = false
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"data":null,"message":"Permission check failed (/pool/proxcloud-sbx, Permissions.Modify|Pool.Allocate)"}`)
+			return
+		}
+		del := "0"
+		if r.Form.Get("delete") == "1" {
+			del = "1"
+		}
+		f.acl = append(f.acl, r.Form.Get("path")+" "+r.Form.Get("roles")+" "+r.Form.Get("tokens")+" delete="+del)
+		data(nil)
+	case path == "/access/acl":
+		data([]any{})
+	case strings.HasPrefix(path, "/access/users/") && strings.Contains(path, "/token"):
+		parts := strings.Split(strings.TrimPrefix(path, "/access/users/"), "/token")
+		id := parts[0] + "!" + strings.TrimPrefix(parts[1], "/")
+		switch r.Method {
+		case http.MethodPost:
+			f.tokens = append(f.tokens, id)
+			data(map[string]any{"full-tokenid": id, "value": "minted-" + strings.TrimPrefix(parts[1], "/") + "-secret-0001"})
+		case http.MethodDelete:
+			f.tokens = slices.DeleteFunc(f.tokens, func(t string) bool { return t == id })
+			data(nil)
+		default:
+			data([]any{})
+		}
 	default:
 		f.t.Errorf("fake PVE: no route %s %s", r.Method, path)
 		w.WriteHeader(http.StatusNotImplemented)
