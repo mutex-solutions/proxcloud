@@ -192,7 +192,9 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
   runs): answers the row with `replacing` set and rebuilds the appliances one at a time, the standby first. A
   delete answers `409` while it runs. Refused while the project is suspended, like any change.
 - **`GET_HEALTH`** answers `result` (each member's state as HAProxy sees it; for a pair, the appliance holding the
-  address) and, for a pair, `appliances` as just read.
+  address) and, for a pair, `appliances` as just read. A member the stored configuration holds and the running
+  HAProxy does not has `status` `NOT LOADED`; the answer then also has `notLoaded` (the listeners HAProxy does not
+  run, each as `port` or `address:port`) and `message`. A member whose server left has `status` `""`.
 
 Project invitations (`/api/v1/project-invites`, customer realm):
 

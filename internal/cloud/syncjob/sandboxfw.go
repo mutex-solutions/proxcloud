@@ -24,8 +24,10 @@ type SandboxNodes interface {
 // reconcileSandboxWorkers is layer 1 of the sandbox network (docs/managed-sandbox.md §2): the VM firewall of every
 // worker in the provider's sandbox pool, then the unsecured taint off each worker that is fenced, pinned to its own
 // address and older than the join token on its disk. A worker that fails any step keeps its taint, and one already
-// cleared that fails a later pass gets it back.
-func (j *Job) reconcileSandboxWorkers(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error {
+// cleared that fails a later pass gets it back. sweep also removes the firewall generations no listed worker refers to
+// any more: the one step that deletes on the word of a list, which the sync leaves out of a run in which a project's
+// inventory could not be proved.
+func (j *Job) reconcileSandboxWorkers(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, sweep bool) error {
 	cfg, ok := es.PVESandboxConfig()
 	if !ok {
 		return nil
@@ -37,7 +39,7 @@ func (j *Job) reconcileSandboxWorkers(ctx context.Context, ps *pve.Service, es *
 	if err != nil {
 		return fmt.Errorf("sandbox: kubeconfig: %w", err)
 	}
-	err = j.fenceSandbox(ctx, ps, es, cfg, kc)
+	err = j.fenceSandbox(ctx, ps, es, cfg, kc, sweep)
 	// The entry appliance passes traffic only where the workers' rule admits it, so it follows the fence either way.
 	if cfg.Proxy.EntryVMID > 0 {
 		if eerr := ps.SandboxEntry(ctx, cfg.Proxy.EntryVMID, cfg.Proxy.EntryPool, cfg.Pool, cfg.Proxy.Address, cfg.Proxy.Port); eerr != nil {
@@ -47,7 +49,7 @@ func (j *Job) reconcileSandboxWorkers(ctx context.Context, ps *pve.Service, es *
 	return err
 }
 
-func (j *Job) fenceSandbox(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, cfg externalservice.PVESandbox, kc SandboxNodes) error {
+func (j *Job) fenceSandbox(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, cfg externalservice.PVESandbox, kc SandboxNodes, sweep bool) error {
 	f, err := sandboxFirewall(ctx, ps, es.PVENetworkConfig(), cfg, kc.Server())
 	if err != nil {
 		return err
@@ -91,6 +93,9 @@ func (j *Job) fenceSandbox(ctx context.Context, ps *pve.Service, es *externalser
 			continue
 		}
 		j.log.Info("syncjob: sandbox worker fenced, open to tenant pods", "serviceId", es.ID, "node", w.Name, "address", addr, "group", pass.Group())
+	}
+	if !sweep {
+		return nil
 	}
 	return pass.Sweep(ctx)
 }

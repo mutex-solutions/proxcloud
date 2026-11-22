@@ -307,13 +307,13 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		if !ok || l.Port < 1 || l.Port > 65535 {
 			continue
 		}
-		on, name := binds, fmt.Sprintf("l%d", l.Port)
-		if l.VIP != "" { // one Service's address: two Services may share a port
-			a, err := netip.ParseAddr(l.VIP)
-			if err != nil || !a.Is4() {
-				continue
-			}
-			on, name = []string{a.String()}, fmt.Sprintf("l%s_%d", a, l.Port)
+		name, vip, ok := lbFrontend(l)
+		if !ok {
+			continue
+		}
+		on := binds
+		if vip != "" { // one Service's address: two Services may share a port
+			on = []string{vip}
 		}
 		listeners++
 		m := mode(s.Pools[i])
@@ -352,8 +352,8 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 			extra = " send-proxy-v2"
 		}
 		for _, m := range p.Members {
-			addr, err := netip.ParseAddr(m.Address)
-			if m.Missing || err != nil || !addr.Is4() || m.Port < 1 || m.Port > 65535 || (!m.Node && !lbServerIDRe.MatchString(m.ServerID)) {
+			addr, ok := lbMemberAddr(m)
+			if !ok {
 				continue
 			}
 			w := m.Weight
@@ -366,37 +366,108 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 	return b.String()
 }
 
+// lbFrontend is a listener's frontend in the config: its name, and the one address it binds when it has its own
+// (a Service's). ok false: the listener is not rendered.
+func lbFrontend(l LBListener) (name, vip string, ok bool) {
+	if l.VIP == "" {
+		return fmt.Sprintf("l%d", l.Port), "", true
+	}
+	a, err := netip.ParseAddr(l.VIP)
+	if err != nil || !a.Is4() {
+		return "", "", false
+	}
+	return fmt.Sprintf("l%s_%d", a, l.Port), a.String(), true
+}
+
+// lbMemberAddr is a member's address in the config. ok false: the member is not rendered (its server left, or the
+// row holds a value no validation saw).
+func lbMemberAddr(m LBMember) (netip.Addr, bool) {
+	addr, err := netip.ParseAddr(m.Address)
+	if m.Missing || err != nil || !addr.Is4() || m.Port < 1 || m.Port > 65535 || (!m.Node && !lbServerIDRe.MatchString(m.ServerID)) {
+		return netip.Addr{}, false
+	}
+	return addr, true
+}
+
 // ErrLBNotReady: the appliance is still booting or installing HAProxy. It clears by itself.
 var ErrLBNotReady = errors.New("the appliance is not ready yet")
 
 const (
 	haproxyConfig = "/etc/haproxy/haproxy.cfg"
-	// haproxyReload checks the new file before it replaces the one in use, and puts the old one back if the
-	// reload still fails, as for a port the check cannot see is taken, so the next boot does not read a config
-	// that never ran. systemctl cannot tell: it reports a reload HAProxy gave up on as done, so this asks the
-	// master process, whose reload answers Success=0 or 1 (HAProxy 2.7 or newer). Nothing a tenant wrote is in
-	// this command. sshd goes first: nobody logs in to an appliance, and a listener may want its port.
+	// lbServingFn defines serving(): HAProxy is active and listens on every TCP bind line of the config on disk; it
+	// prints what is missing otherwise. A master with a worker is not enough: the package's own first start runs
+	// the package's config, with no listener of the product's (drill N2-2: a pair refused connections for 458 s
+	// and read "up"). ss prints a bind without an address as 0.0.0.0. The unix socket of an idle config is no
+	// listener of a tenant's and is left out.
+	lbServingFn = `serving() {
+  systemctl is-active -q haproxy || { echo "HAProxy is not running"; return 1; }
+  l=$(ss -Hltnp | awk '/"haproxy"/{print $4}')
+  for b in $(awk '$1=="bind" && $2 !~ /^unix@/{print $2}' ` + haproxyConfig + `); do
+    case "$b" in :*) b="0.0.0.0$b" ;; esac
+    echo "$l" | grep -qxF -e "$b" || { echo "HAProxy does not listen on $b"; return 1; }
+  done
+}
+`
+	// haproxyReload checks the new file before it replaces the one in use, makes HAProxy run it, and proves that
+	// it does before it answers 0: only then is the config's hash recorded. HAProxy is started when it does not
+	// run, and then reloaded all the same: a start that was already under way (the package's own, at install) has
+	// read the file that was there before, and "systemctl start" only joins it. The reload goes through the master
+	// process, whose answer is Success=0 or 1 (HAProxy 2.7 or newer); systemctl cannot tell, it reports a reload
+	// HAProxy gave up on as done. The master's socket refuses connections for a moment after a start (HAProxy 3.0
+	// of Debian 13, seen in test/integration/lb_appliance_test.go), so the connection is tried again for a few
+	// seconds. Then serving() must hold. If any of it fails the old file goes back and is
+	// loaded again, so the next boot does not read a config that never ran, and the answer is 1: not applied.
+	// The agent creates a file with mode 0666, so the mode is set here. Nothing a tenant wrote is in this
+	// command. sshd goes first: nobody logs in to an appliance, and a listener may want its port.
 	haproxyReload = `systemctl disable --now ssh ssh.socket 2>/dev/null
 set -e
 F=` + haproxyConfig + `
+chown root:root $F.new
+chmod 0644 $F.new
 haproxy -c -q -f $F.new
 cp $F $F.old
 mv $F.new $F
-swap() {
-  systemctl is-active -q haproxy || { systemctl start haproxy; return; }
-  out=$(printf 'reload\n' | socat -t30 - /run/haproxy-master.sock)
+` + lbServingFn + `swap() {
+  systemctl is-active -q haproxy || systemctl start haproxy || return 1
+  n=0
+  until out=$(printf 'reload\n' | socat -t30 - /run/haproxy-master.sock 2>/dev/null); do
+    n=$((n+1))
+    [ $n -lt 20 ] || { echo "HAProxy's master socket does not answer" >&2; return 1; }
+    sleep 0.3
+  done
   case "$out" in Success=1*) ;; *) echo "$out" | grep ALERT >&2; return 1 ;; esac
+  n=0
+  until why=$(serving); do
+    n=$((n+1))
+    [ $n -lt 10 ] || { echo "$why" >&2; return 1; }
+    sleep 0.5
+  done
 }
-swap || { mv $F.old $F; swap; exit 1; }`
+swap || { mv $F.old $F; swap; exit 1; }
+chmod 0644 $F $F.old
+[ "$(stat -c %a:%U:%G $F)" = 644:root:root ]`
 	// haproxyInstall prepares a stock image from its repositories, over the public NIC.
 	// ponytail: a site with no egress bakes haproxy and socat into the image config.lbImage names.
-	haproxyInstall = "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat; }"
-	haproxyReady   = "command -v haproxy && command -v socat"
+	haproxyInstall = "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat iproute2; }"
 	guestTimeout   = 30 * time.Second
+	// lbBusyExit is a ready check's answer while the guest's package manager runs: wait, and start no install.
+	lbBusyExit = 3
 )
 
+// lbReadyScript answers 0 when an appliance can take a config: dpkg has every package installed and configured,
+// no apt or dpkg runs, and the units exist. That the binaries exist is not enough: they do from the moment apt
+// unpacks them, while dpkg still configures the package and starts its service (drill N2-2).
+func lbReadyScript(packages, units string) string {
+	return "pgrep -x 'apt-get|apt|dpkg' >/dev/null && exit " + strconv.Itoa(lbBusyExit) + "\n" +
+		"for p in " + packages + "; do [ \"$(dpkg-query -W -f='${Status}' $p 2>/dev/null)\" = 'install ok installed' ] || exit 1; done\n" +
+		"command -v ss >/dev/null && systemctl cat " + units + " >/dev/null 2>&1"
+}
+
+var haproxyReady = lbReadyScript("haproxy socat", "haproxy.service")
+
 // PushHAProxy installs config on a running appliance, and HAProxy first if the image lacks it. A guest
-// without its agent or without HAProxy yet answers ErrLBNotReady.
+// without its agent or without HAProxy yet answers ErrLBNotReady. It answers nil only when the running HAProxy
+// was seen to serve config: any other answer means not applied, and the caller records nothing.
 func (s *Service) PushHAProxy(ctx context.Context, node string, vmid int, config string) error {
 	if err := s.lbReady(ctx, node, vmid, haproxyReady, haproxyInstall); err != nil {
 		return err
@@ -413,13 +484,16 @@ func (s *Service) lbReady(ctx context.Context, node string, vmid int, ready, ins
 		}
 		return fmt.Errorf("%w: %v", ErrLBNotReady, err)
 	}
-	if exit != 0 {
-		if _, err := s.C.GuestStart(ctx, node, vmid, "sh", "-c", install); err != nil {
-			return fmt.Errorf("%w: %v", ErrLBNotReady, err)
-		}
-		return ErrLBNotReady
+	switch exit {
+	case 0:
+		return nil
+	case lbBusyExit:
+		return fmt.Errorf("%w: its package manager is running", ErrLBNotReady)
 	}
-	return nil
+	if _, err := s.C.GuestStart(ctx, node, vmid, "sh", "-c", install); err != nil {
+		return fmt.Errorf("%w: %v", ErrLBNotReady, err)
+	}
+	return ErrLBNotReady
 }
 
 func (s *Service) swapHAProxy(ctx context.Context, node string, vmid int, config string) error {
@@ -431,9 +505,26 @@ func (s *Service) swapHAProxy(ctx context.Context, node string, vmid int, config
 		return err
 	}
 	if exit != 0 {
-		return fmt.Errorf("HAProxy refused the change, the last config stays in use: %s", strings.TrimSpace(stderr))
+		return fmt.Errorf("HAProxy did not take the change, the last config stays in use: %s", strings.TrimSpace(stderr))
 	}
 	return nil
+}
+
+// HAProxyServing asks a single appliance whether HAProxy runs and listens on every bind of its config, and what is
+// missing when it does not.
+func (s *Service) HAProxyServing(ctx context.Context, node string, vmid int) (serving bool, why string, err error) {
+	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbServingFn+"serving && echo ok")
+	if err != nil {
+		return false, "", err
+	}
+	out = strings.TrimSpace(out)
+	switch {
+	case exit == 0 && out == "ok":
+		return true, "", nil
+	case out == "":
+		return false, "", fmt.Errorf("haproxy state: exit %d %s", exit, strings.TrimSpace(stderr))
+	}
+	return false, out, nil
 }
 
 // SetVMInboundPorts makes the VM's direct firewall rules open exactly these TCP ports. New rules go
@@ -607,37 +698,42 @@ func (s *Service) SetLBRules(ctx context.Context, node string, vmid int, want []
 	return nil
 }
 
+// LBNotLoaded is a member's status when the stored config holds it and the running HAProxy does not: the appliance
+// does not run the stored config. A member the config leaves out (its server left) keeps "".
+const LBNotLoaded = "NOT LOADED"
+
 // LBMemberHealth is one member as HAProxy sees it.
 type LBMemberHealth struct {
 	Pool     string `json:"pool"`
 	ServerID string `json:"serverId"`
 	Address  string `json:"address,omitempty"` // a cluster's worker
 	Port     int    `json:"port"`
-	Status   string `json:"status"` // UP, DOWN, ... as HAProxy says; "" = not in the running config
+	Status   string `json:"status"` // UP, DOWN, ... as HAProxy says; LBNotLoaded; "" = the config leaves it out
 }
 
-// LBHealth reads the running HAProxy's view of every member.
-func (s *Service) LBHealth(ctx context.Context, node string, vmid int, spec LBSpec) ([]LBMemberHealth, error) {
+// LBHealth reads the running HAProxy's view of every member, and the listeners of spec it does not run (each as
+// "port" or "address:port"): none when it runs the stored config.
+func (s *Service) LBHealth(ctx context.Context, node string, vmid int, spec LBSpec) ([]LBMemberHealth, []string, error) {
 	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", `echo "show stat" | socat - /run/haproxy/admin.sock`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if exit != 0 {
-		return nil, fmt.Errorf("haproxy stats: %s", strings.TrimSpace(stderr))
+		return nil, nil, fmt.Errorf("haproxy stats: %s", strings.TrimSpace(stderr))
 	}
 	return ParseHAProxyStat(out, spec)
 }
 
-// ParseHAProxyStat maps `show stat` CSV back to the spec's members.
-func ParseHAProxyStat(out string, spec LBSpec) ([]LBMemberHealth, error) {
+// ParseHAProxyStat maps `show stat` CSV back to the spec's members and listeners.
+func ParseHAProxyStat(out string, spec LBSpec) ([]LBMemberHealth, []string, error) {
 	r := csv.NewReader(strings.NewReader(strings.TrimPrefix(strings.TrimSpace(out), "# ")))
 	r.FieldsPerRecord = -1
 	rows, err := r.ReadAll()
 	if err != nil {
-		return nil, fmt.Errorf("haproxy stats: %w", err)
+		return nil, nil, fmt.Errorf("haproxy stats: %w", err)
 	}
 	if len(rows) == 0 {
-		return nil, fmt.Errorf("haproxy stats: empty")
+		return nil, nil, fmt.Errorf("haproxy stats: empty")
 	}
 	col := map[string]int{}
 	for i, name := range rows[0] {
@@ -651,17 +747,30 @@ func ParseHAProxyStat(out string, spec LBSpec) ([]LBMemberHealth, error) {
 		}
 	}
 	health := []LBMemberHealth{}
+	pools := map[string]bool{}
 	for i, p := range spec.Pools {
+		pools[p.Name] = true
 		for _, m := range p.Members {
 			addr := ""
 			if m.Node {
 				addr = m.Address
 			}
-			health = append(health, LBMemberHealth{
-				Pool: p.Name, ServerID: m.ServerID, Address: addr, Port: m.Port,
-				Status: status["p"+strconv.Itoa(i)+"/"+lbServerName(m)],
-			})
+			state, running := status["p"+strconv.Itoa(i)+"/"+lbServerName(m)]
+			if _, rendered := lbMemberAddr(m); rendered && !running {
+				state = LBNotLoaded
+			}
+			health = append(health, LBMemberHealth{Pool: p.Name, ServerID: m.ServerID, Address: addr, Port: m.Port, Status: state})
 		}
 	}
-	return health, nil
+	var notLoaded []string
+	for _, l := range spec.Listeners {
+		name, vip, ok := lbFrontend(l)
+		if !ok || !pools[l.Pool] || l.Port < 1 || l.Port > 65535 {
+			continue
+		}
+		if _, running := status[name+"/FRONTEND"]; !running {
+			notLoaded = append(notLoaded, strings.TrimPrefix(vip+":"+strconv.Itoa(l.Port), ":"))
+		}
+	}
+	return health, notLoaded, nil
 }

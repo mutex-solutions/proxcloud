@@ -165,7 +165,27 @@ type Handler struct {
 	Log   *slog.Logger
 
 	mu      sync.Mutex
-	audited map[string]string // cluster -> the refusals last audited
+	audited map[string]string    // cluster -> the refusals last audited
+	denied  map[string]time.Time // known cluster and reason -> when a refused credential was last audited
+	now     func() time.Time     // the tests' clock; nil = time.Now
+}
+
+// Why a credential was refused. The caller is told none of it: every refusal is the same 401.
+const (
+	denyMalformed   = "malformed"       // no header of the expected shape, or an id that is not a cluster id
+	denyUnknown     = "unknown cluster" // no credential was ever minted for the cluster it names
+	denyRevoked     = "revoked"         // the cluster was released, or its credential was minted again since
+	denyWrongSecret = "wrong secret"
+	deniedEvery     = time.Minute
+)
+
+// denial is a refused credential: the cluster it claimed ("" unless the header named one in the form of a cluster id,
+// so nothing a caller made up reaches a log line), why, and the cluster's own credential row when it has one. That
+// row says whose cluster the caller claimed to be; it authenticates nobody.
+type denial struct {
+	cluster string
+	why     string
+	known   *Credential
 }
 
 func (h *Handler) log() *slog.Logger {
@@ -185,16 +205,16 @@ var (
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	w.Header().Set(ProtocolHeader, strconv.Itoa(Protocol))
-	cred, err := h.authenticate(ctx, r.Header.Get("Authorization"))
+	cred, deny, err := h.authenticate(ctx, r.Header.Get("Authorization"))
 	if err != nil {
-		var rf *Refusal
-		if errors.As(err, &rf) {
-			h.log().Warn("lb gateway: refused credential", "remote", r.RemoteAddr)
-			writeRefusal(w, rf)
-			return
-		}
 		h.log().Error("lb gateway: credential lookup", "err", err)
 		writeRefusal(w, &Refusal{http.StatusServiceUnavailable, "", "lb gateway: try again"})
+		return
+	}
+	if deny != nil {
+		h.log().Warn("lb gateway: refused credential", "remote", r.RemoteAddr, "cluster", deny.cluster, "reason", deny.why)
+		h.auditDenied(deny, r.RemoteAddr)
+		writeRefusal(w, &Refusal{http.StatusUnauthorized, "", "authentication failure"})
 		return
 	}
 	if cred.LastSeenAt == nil || time.Since(*cred.LastSeenAt) > seenEvery {
@@ -225,27 +245,26 @@ func writeRefusal(w http.ResponseWriter, rf *Refusal) {
 }
 
 // authenticate reads `PVEAPIToken=lb@proxcloud!<clusterId>=<secret>`, the CSI gateway's header shape. The cluster comes
-// from the credential alone.
-func (h *Handler) authenticate(ctx context.Context, header string) (*Credential, error) {
-	unauth := &Refusal{http.StatusUnauthorized, "", "authentication failure"}
+// from the credential alone. It returns the credential, or why there is none (a denial), or the lookup's error.
+func (h *Handler) authenticate(ctx context.Context, header string) (*Credential, *denial, error) {
 	tok, ok := strings.CutPrefix(header, "PVEAPIToken=")
 	if !ok {
 		tok, ok = strings.CutPrefix(header, "PVEAPIToken ")
 	}
 	if !ok {
-		return nil, unauth
+		return nil, &denial{why: denyMalformed}, nil
 	}
 	id, secret, ok := strings.Cut(tok, "=")
-	if !ok || secret == "" {
-		return nil, unauth
+	clusterID, isLB := strings.CutPrefix(id, TokenUser+"!")
+	if !isLB || !clusterIDRe.MatchString(clusterID) {
+		return nil, &denial{why: denyMalformed}, nil
 	}
-	clusterID, ok := strings.CutPrefix(id, TokenUser+"!")
-	if !ok || !clusterIDRe.MatchString(clusterID) {
-		return nil, unauth
+	if !ok || secret == "" {
+		return nil, &denial{cluster: clusterID, why: denyMalformed}, nil
 	}
 	cred, err := h.Reg.Credential(ctx, clusterID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The hash is compared for an unknown cluster too, so the answer takes as long whether the id exists or not.
 	want := noSecretHash
@@ -253,10 +272,47 @@ func (h *Handler) authenticate(ctx context.Context, header string) (*Credential,
 		want = cred.SecretSHA256
 	}
 	match := subtle.ConstantTimeCompare([]byte(hashSecret(secret)), []byte(want)) == 1
-	if cred == nil || cred.RevokedAt != nil || !match {
-		return nil, unauth
+	switch {
+	case cred == nil:
+		return nil, &denial{cluster: clusterID, why: denyUnknown}, nil
+	case cred.RevokedAt != nil:
+		return nil, &denial{cluster: clusterID, why: denyRevoked, known: cred}, nil
+	case !match:
+		return nil, &denial{cluster: clusterID, why: denyWrongSecret, known: cred}, nil
 	}
-	return cred, nil
+	return cred, nil, nil
+}
+
+// auditDenied audits a credential refused for a cluster that has one: a revoked credential still in use (a controller
+// that kept its old Secret after a rotation, or one that outlived its cluster) and a wrong secret (someone guessing,
+// or another cluster's Secret). At most one event per cluster and reason in deniedEvery, since a controller comes
+// back every ten seconds; the log line has every refusal. A header that names no known cluster is only logged: it
+// has no project to belong to, and anyone who reaches the listener could fill the audit log with them. The secret
+// is never part of either.
+// ponytail: the last time is kept per process, for the clusters that have a credential (two reasons each).
+func (h *Handler) auditDenied(d *denial, remote string) {
+	if d.known == nil {
+		return
+	}
+	now := time.Now()
+	if h.now != nil {
+		now = h.now()
+	}
+	key := d.cluster + " " + d.why
+	h.mu.Lock()
+	if h.denied == nil {
+		h.denied = map[string]time.Time{}
+	}
+	last, seen := h.denied[key]
+	due := !seen || now.Sub(last) >= deniedEvery
+	if due {
+		h.denied[key] = now
+	}
+	h.mu.Unlock()
+	if due {
+		h.audit(d.known, "credential refused: "+d.why, map[string]any{"clusterId": d.cluster, "status": http.StatusUnauthorized,
+			"reason": d.why, "remote": remote, "authenticated": false})
+	}
 }
 
 func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Request, cred *Credential) (*Answer, error) {

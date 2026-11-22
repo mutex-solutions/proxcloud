@@ -352,7 +352,7 @@ func (h *Handler) ReconcileLoadBalancers(ctx context.Context, _ *pve.Service, es
 		// A cluster's balancer converges from its cluster's state, which checks the project itself. In the background:
 		// a pass may build an appliance (up to lbBuildTimeout), which must not hold up the rest of the sync.
 		if lb, err := lbOfRow(&rows[i]); err == nil && lb.Cluster != nil && h.lbGW != nil {
-			go h.lbClusterConverge(context.WithoutCancel(ctx), lb.Cluster.ID)
+			go h.lbClusterConverge(context.WithoutCancel(ctx), lb.Cluster.ID, true)
 			continue
 		}
 		proj, err := h.svc.GetProjectByID(ctx, rows[i].ProjectID)
@@ -383,6 +383,21 @@ func lbVMs(ctx context.Context, ps *pve.Service) (map[string]pve.ClusterResource
 		}
 	}
 	return out, nil
+}
+
+// lbVMUnseen says that an appliance missing from the VM list is not known to be gone: a guest the platform's token
+// does not see still holds its VMID (the token lost sight of the pool, or the VM was moved out of it), or Proxmox
+// did not say. Only a free VMID proves a VM gone, as for a SERVER row (docs/vm-inventory-safety.md): the list is
+// filtered by what the token may see, and a pass that read a filtered list as an absence would tell the tenant to
+// delete, or to replace, a balancer that is serving. The services sync runs this pass whether or not it could prove
+// the project's inventory, so the pass proves its one absence itself.
+func lbVMUnseen(ctx context.Context, ps *pve.Service, serverID string) bool {
+	id, err := strconv.Atoi(serverID)
+	if err != nil {
+		return false
+	}
+	free, err := ps.C.VMIDFree(ctx, id)
+	return err != nil || !free
 }
 
 // lbMemberAddress returns the address of a member's server if it may serve this balancer, "" if not.
@@ -486,6 +501,10 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 		return err // nothing is known, so nothing changes
 	}
 	vm, listed := vms[lb.ServerID]
+	if lb.ServerID != "" && !listed && lbVMUnseen(ctx, ps, lb.ServerID) {
+		lb.Status, lb.StatusMessage = lbStatusDown, "The platform cannot see the load balancer's VM, and changes nothing until it can."
+		return nil
+	}
 	if lb.ServerID == "" || !listed || vm.Pool != ps.PoolFor(proj.ID) || (!vm.NodeDown && pve.LBOfTags(vm.Tags) != lb.ID) {
 		if lb.ServerID != "" || lbStuck(cr) { // no server yet: the create is still on it
 			lb.Status, lb.StatusMessage = lbStatusError, "The load balancer's VM is gone. Delete this load balancer and create it again."
@@ -534,8 +553,20 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 	config := pve.RenderHAProxy(lb.LBSpec)
 	hash := lbHash(config)
 	if hash == lb.AppliedHash {
-		lb.Status, lb.StatusMessage = lbStatusActive, ""
-		return nil
+		// The recorded hash is the product's word that the appliance serves this config, so ask it. One that does
+		// not (HAProxy stopped, or running the package's own config) is pushed again below, which starts HAProxy
+		// with the config: it is the product's own service. No answer says nothing new.
+		serving, why, err := ps.HAProxyServing(ctx, vm.Node, vm.VMID)
+		switch {
+		case err != nil:
+			slog.Warn("load balancer: state", "project", proj.ID, "lb", lb.ID, "err", err)
+			return nil
+		case serving:
+			lb.Status, lb.StatusMessage = lbStatusActive, ""
+			return nil
+		}
+		slog.Warn("load balancer: the appliance does not serve what its row records; pushing it again", "project", proj.ID, "lb", lb.ID, "why", why)
+		lb.Status, lb.StatusMessage = lbStatusDown, why+". The platform is loading the configuration again."
 	}
 	if err := ps.SetLBRules(ctx, vm.Node, vm.VMID, pve.LBListenerRules(lb.Listeners, nil)); err != nil {
 		return err
@@ -548,7 +579,7 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 			lb.Status, lb.StatusMessage = lbStatusError, "The load balancer's VM did not become ready. Its image needs the guest agent, and HAProxy and socat installed or reachable from its repositories."
 		case lb.AppliedHash == "":
 			lb.Status, lb.StatusMessage = lbStatusBuild, ""
-		default:
+		case hash != lb.AppliedHash: // the last config is served meanwhile; one found not served keeps its message
 			lb.StatusMessage = "A change is waiting for the load balancer's VM"
 		}
 		return nil
@@ -623,13 +654,15 @@ func (h *Handler) pveLoadBalancerAction(w http.ResponseWriter, r *http.Request, 
 			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's VM cannot be reached"))
 			return true
 		}
-		health, err := ps.LBHealth(ctx, vm.Node, vm.VMID, lb.LBSpec)
+		health, notLoaded, err := ps.LBHealth(ctx, vm.Node, vm.VMID, lb.LBSpec)
 		if err != nil {
 			slog.Warn("load balancer: health", "project", proj.ID, "lb", cr.ExternalID, "err", err)
 			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's VM did not answer"))
 			return true
 		}
-		httpx.OK(w, map[string]any{"result": health})
+		out := map[string]any{"result": health}
+		lbHealthNotLoaded(out, notLoaded)
+		httpx.OK(w, out)
 		return true
 	}
 	return false

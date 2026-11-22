@@ -1,12 +1,12 @@
 # CI, template builds and release operations
 
 This page describes the checked-in workflows, not a guarantee that a release has
-already been published. As of **2026-11-21**, GHCR has public development images,
+already been published. As of **2026-11-22**, GHCR has public development images,
 the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
 the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and the release candidates
-`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease, the stable `v0.10.0` and the two candidates of `v0.10.1`, `v0.10.1-rc.1` and `v0.10.1-rc.2`, prereleases (tags 2026-11-20), and the stable `v0.10.1`, the first candidate of `v0.10.2`, `v0.10.2-rc.1`, a prerelease, the stable `v0.10.2` and the first candidate of `v0.11.0`, `v0.11.0-rc.1`, a prerelease (tags 2026-11-21). Pushing the next tag runs the app image/chart publication and GitHub Release
+`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease, the stable `v0.10.0` and the two candidates of `v0.10.1`, `v0.10.1-rc.1` and `v0.10.1-rc.2`, prereleases (tags 2026-11-20), and the stable `v0.10.1`, the first candidate of `v0.10.2`, `v0.10.2-rc.1`, a prerelease, the stable `v0.10.2` and the first candidate of `v0.11.0`, `v0.11.0-rc.1`, a prerelease (tags 2026-11-21), and its second candidate, `v0.11.0-rc.2`, a prerelease, and the stable `v0.11.0` (tags 2026-11-22). Pushing the next tag runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -158,7 +158,7 @@ The configured destination for app Helm publication is
 `0.4.0` stable charts).
 On an app release tag, the workflow sets chart version to the tag without `v` and
 appVersion to the full tag, matching the image tags. The release contract is app
-chart `0.10.2`, appVersion/image tag and installer BOM `v0.10.2`, platform BOM `release: 0.10.2`, and the same tag as
+chart `0.11.0`, appVersion/image tag and installer BOM `v0.11.0`, platform BOM `release: 0.11.0`, and the same tag as
 `DEFAULT_VERSION` of the Docker Compose install (`deploy/compose/proxcloud-up.sh`).
 Keep `images.build: true` until the exact chart and images are published and
 verified; use `false` explicitly for released-artifact evaluation after that.
@@ -351,7 +351,15 @@ set the BOM on `main` to `0.11.0-dev` again and added `deploy/platform/previous/
 `v0.11.0-rc.1` sets the release to `0.11.0-rc.1` (checked on 2026-11-21 on that commit: `--release`
 prints `all pins match`, on the BOM and on the fourteen previous BOMs). The pull request after that
 tag set the BOM on `main` to `0.11.0-dev` again and added `deploy/platform/previous/0.11.0-rc.1.yaml`,
-so `main` cannot be tagged until the next release commit drops `-dev`. The gate does not
+so `main` could not be tagged until the next release commit dropped `-dev`: the commit of the candidate
+`v0.11.0-rc.2` sets the release to `0.11.0-rc.2` (checked on 2026-11-22 on that commit: `--release`
+prints `all pins match`, on the BOM and on the fifteen previous BOMs). The pull request after that
+tag set the BOM on `main` to `0.11.0-dev` again and added `deploy/platform/previous/0.11.0-rc.2.yaml`,
+so `main` could not be tagged until the next release commit dropped `-dev`: the release commit of
+`v0.11.0` sets the release to `0.11.0` (checked on 2026-11-22 on that commit: `--release` prints
+`all pins match`, on the BOM and on the sixteen previous BOMs). The pull request after that tag
+set the BOM on `main` to `0.12.0-dev` and added `deploy/platform/previous/0.11.0.yaml`, so
+`main` cannot be tagged until the next release commit drops `-dev`. The gate does not
 compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
@@ -569,8 +577,39 @@ balancer pair, the gateway's cluster state, the load balancer controller and the
 commit `8164d6ee`; the `docker` and `helm` runs of the tag succeeded on the first attempt, and the GitHub Release is a
 prerelease, with `v0.10.2` still the latest (read on 2026-11-21). The pull request after it added
 `deploy/platform/previous/0.11.0-rc.1.yaml` and set the BOM on `main` back to `0.11.0-dev`, with the pins of the
-candidate. Nothing of it has run on a lab; only the spike before the code did (one node, a pair set up by hand), and
-the candidate exists for the drill.
+candidate. Its drill ran on one lab on 2026-11-21, in full once the lab had a public test range: the pair, 15
+failovers under their targets (0.7 to 3.5 s), a cluster's controller, the billing rows and the clean-up passed, and
+two faults block a release. Replace appliances left the address refusing connections for 458 s while the row read
+`ACTIVE`, or `DEGRADED` while the second appliance was built, and a stopped master appliance was started again by
+the services sync in 1 of 6 tries.
+
+`v0.11.0-rc.2` is the second candidate of `v0.11.0`, cut from `main` after the corrections of that drill (#424, the
+appliance apply; #425, the services sync, the cluster lock, the converge rate and the gateway's audit trail). Its
+commit takes the BOM from `0.11.0-dev` to `0.11.0-rc.2`, with the pins of `0.11.0-rc.1` and the `release` line alone
+different. No chart of the product changed since its tag (`git diff` against `proxmox-kamaji-cluster-v0.1.17`,
+`database-cluster-v0.5.2` and `proxcloud-platform-v0.1.3` prints nothing on its commit), so the BOM needs no new
+chart version. The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION` stay on `v0.10.2`. Its tag is on
+the commit `82759e1a`; the `docker` and `helm` runs of the tag succeeded on the first attempt, and the GitHub Release
+is a prerelease, with `v0.10.2` still the latest (read on 2026-11-22). The pull request after it added
+`deploy/platform/previous/0.11.0-rc.2.yaml` and set the BOM on `main` back to `0.11.0-dev`, with the pins of the
+candidate. Its drill ran on the same lab on 2026-11-22, on its published images, and a read-only audit followed: the
+portal upgrade from `v0.11.0-rc.1` (27.6 s) and the platform run to `0.11.0-rc.2` (one record-only row, 8.5 s, no VM
+restarted); balancers that served not pushed by the upgrade; Replace appliances under load three times with one
+switch of 0.7 to 0.8 s each; a stopped master started by the next sync three times of three; and a cluster's
+controller following a Service's ports with no request lost on the other listener. It also found what the release
+lists as known issues: requests lost for seconds when a worker is added or removed and, for a policy `Local`
+Service, at each reload; a change cut by an API stop live only after 190 to 209 s; a paused VM that still leaves its
+project's inventory unproved; and a Service's address written before the pair serves it.
+
+`v0.11.0` is the release those candidates prepared, cut from `main`: its release commit takes the BOM from
+`0.11.0-dev` to `0.11.0`, with the pins of `0.11.0-rc.2` and the `release` line alone different. No chart of the
+product changed since its tag (`git diff` against `proxmox-kamaji-cluster-v0.1.17`, `database-cluster-v0.5.2` and
+`proxcloud-platform-v0.1.3` prints nothing on the release commit), so the BOM needs no new chart version. The app
+chart, the installer's ProxCloud pin and `DEFAULT_VERSION` move to `0.11.0` / `v0.11.0`; the installer's k3s and
+Kubernetes pins stay at 1.35.10. The code is that of `v0.11.0-rc.2`; the release adds the texts its drill asked
+for. Its tag is on the commit `a20575cb`; the `docker` and `helm` runs of the tag succeeded on the first attempt, and
+the GitHub Release is the latest (read on 2026-11-22). The pull request after it added
+`deploy/platform/previous/0.11.0.yaml` and set the BOM on `main` to `0.12.0-dev`, with the pins of the release.
 
 Not verified on a lab: anything on the published images of `v0.9.0` or `v0.9.1`, the move
 of a platform from a candidate's BOM to that of `0.9.0`, and any move to that of `0.9.1`.
@@ -581,7 +620,8 @@ published images of `v0.9.0`
 production site of one Proxmox node moved from `0.10.0` to `0.10.1`, both parts (2026-11-20). Not
 verified either: the move to Kubernetes 1.36.6 from a BOM older than `0.10.0`, anything on the
 published images of `v0.10.2`, any move to the BOM `0.10.2`, and the moves to it from `0.10.1-rc.1`
-and `0.10.1-rc.2`.
+and `0.10.1-rc.2`; anything on the published images of `v0.11.0`, and any move to the BOM `0.11.0` (the
+lab moved to `0.11.0-rc.1` and from it to `0.11.0-rc.2`, which have its pins).
 
 ## Previous BOMs
 
@@ -636,7 +676,7 @@ that no later build carries, so its platform is refused after an upgrade
 been removed yet; when one is, the platforms of that release are refused again,
 so it needs a release note.
 
-The previous BOMs are `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.1`, `0.10.2-rc.1`, `0.10.2` and `0.11.0-rc.1`. `0.8.0` was added by hand from its tag
+The previous BOMs are `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.1`, `0.10.2-rc.1`, `0.10.2`, `0.11.0-rc.1`, `0.11.0-rc.2` and `0.11.0`. `0.8.0` was added by hand from its tag
 (sha256 `8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6`, the
 value a platform installed by v0.8.0 records). `0.8.1` is the first one the
 procedure above added (sha256
@@ -787,9 +827,31 @@ pins match` on the fifteen previous BOMs on 2026-11-21. It sorts before `0.8.0`
 too. A platform moved to it (the candidate's drill) records it, so a later build
 needs this file to go on with that platform.
 
+`0.11.0-rc.2` has the pins of `0.11.0-rc.1` (sha256
+`1c31634d18e5888d0974cf34e6b06c7bc6563c0d9035b326cc0e70ac41e72705`). It was
+copied from the tag `v0.11.0-rc.2` (`82759e1a`), after the tag existed:
+`git show v0.11.0-rc.2:deploy/platform/platform-bom.yaml | sha256sum` gives that
+hash. Its goldens equal the current goldens at the tag, file for file (`cmp`),
+and differ from the 0.11.0-rc.1 ones in the release label only.
+`bom_verify.py --release` printed `all pins match` on the sixteen previous BOMs
+on 2026-11-22. It sorts before `0.8.0` too. A platform moved to it (the second
+drill of the candidate) records it, so a later build needs this file to go on
+with that platform.
+
+`0.11.0` has the pins of `0.11.0-rc.2` (sha256
+`d8e37db2fd204a6a58a4d6357f4c54bb6dccc82de52430340f2c8c7ca0e0d7ff`). It was
+copied from the tag `v0.11.0` (`a20575cb`), after the tag existed:
+`git show v0.11.0:deploy/platform/platform-bom.yaml | sha256sum` gives that
+hash. Its goldens equal the current goldens at the tag, file for file (`cmp`),
+and differ from the 0.11.0-rc.2 ones in the release label only.
+`bom_verify.py --release` printed `all pins match` on the seventeen previous BOMs
+on 2026-11-22. It sorts before `0.8.0` too. A platform installed by `v0.11.0` or
+moved to its BOM records it, so a later build needs this file to go on with that
+platform.
+
 Not verified: an apply on a platform that `v0.8.1` or `v0.8.2`
 installed, an install by `v0.8.1` or `v0.8.2`, and an apply on a platform that
-is on the BOM `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0`, `0.10.1-rc.2`, `0.10.1`, `0.10.2-rc.1`, `0.10.2` or `0.11.0-rc.1`, installed by that build or moved to it, and a whole move to `0.10.1-rc.1` (its drill on one lab, 2026-11-20, did part "seed" and stopped in part "platform").
+is on the BOM `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0`, `0.10.1-rc.2`, `0.10.1`, `0.10.2-rc.1`, `0.10.2`, `0.11.0-rc.1`, `0.11.0-rc.2` or `0.11.0`, installed by that build or moved to it, and a whole move to `0.10.1-rc.1` (its drill on one lab, 2026-11-20, did part "seed" and stopped in part "platform").
 One apply with a
 previous BOM was run on a lab (2026-11-18, a platform installed by the released
 `v0.8.0`, on the build `dev-751a190` of `main`): it succeeded and `status.bom`
@@ -896,15 +958,56 @@ What a release must do when it changes a pin, before its tag:
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
 
-The pairs of the BOM on `main` today (the fourteen below and 0.11.0-rc.1 to it). `main` has the pins of the
-candidate `v0.11.0-rc.1`, so the pair from 0.11.0-rc.1 differs in the release line alone: `Classify` gives one
-change, the release, record only, with no seed part and no machine replaced. The fourteen older pairs are the ones
-the candidate had, below. `TestUpgradeRollsNoMachine` compares six of the fifteen and passes, none of them at step 0
-of a roll, and `TestPreviousBOMsMoveAsTheirPinsDiffer` and `TestPreviousBOMsMoveCertManager` hold each pair to its
-answer (2026-11-21). A development BOM carries nothing: on a build of `main`, an installation on 0.10.0 that stands
-in the replacement of its machines toward 0.10.1-rc.1, 0.10.1-rc.2 or 0.10.1 goes on to that target with a Retry, by
-the kept file, with nothing to confirm (`TestRollTowardAKeptCandidateGoesOn`). On `main` the release gate refuses
-`-dev` alone.
+The pairs of the BOM on `main` today (the sixteen below and 0.11.0 to it). `main` has the pins of the release
+`v0.11.0`, so the pair from 0.11.0 differs in the release line alone, and so do the pairs from 0.11.0-rc.2 and
+0.11.0-rc.1: `Classify` gives one change, the release, record only, with no seed part and no machine replaced. The
+fourteen older pairs are the ones the release had, below. `TestUpgradeRollsNoMachine` compares eight of the
+seventeen and passes, none of them at step 0 of a roll, and `TestPreviousBOMsMoveAsTheirPinsDiffer` and
+`TestPreviousBOMsMoveCertManager` hold each pair to its answer (2026-11-22). A development BOM carries nothing: on
+a build of `main`, an installation on 0.10.0 that stands in the replacement of its machines toward 0.10.1-rc.1,
+0.10.1-rc.2 or 0.10.1 goes on to that target with a Retry, by the kept file, with nothing to confirm
+(`TestRollTowardAKeptCandidateGoesOn`). On `main` the release gate refuses `-dev` alone.
+
+The pairs of the BOM of the release `v0.11.0` (the fifteen below and 0.11.0-rc.2 to it). It has the pins of the
+candidates `v0.11.0-rc.1` and `v0.11.0-rc.2`, so the pairs from those two differ in the release line alone:
+`Classify` gives one change, the release, record only, with no seed part and no machine replaced, phrase
+`upgrade <name> to 0.11.0`. The fourteen older pairs are the ones the candidates had, below, with the release
+`0.11.0` in place of the candidate's: from 0.10.2 and 0.10.2-rc.1 two changes (the release and
+`tenantCharts.kubernetes` 0.1.16 to 0.1.17, both record only), from 0.10.1 and 0.10.1-rc.2 four (those and the two
+cert-manager rows), from 0.10.1-rc.1 five (also `pc-platform` 0.1.15 to 0.1.16), all allowed with no part; from the
+nine BOMs on Kubernetes 1.35.10 refused by the pair gate on both cert-manager rows (`Classify` on the embedded BOMs,
+2026-11-22, on the release commit). `TestUpgradeRollsNoMachine` compares seven of the sixteen and passes, none of
+them at step 0 of a roll, and `TestPreviousBOMsMoveAsTheirPinsDiffer` and `TestPreviousBOMsMoveCertManager` hold
+each pair to its answer. Like the candidates', this BOM carries no unfinished target: an installation on 0.10.0 that
+stands in the replacement of its machines toward 0.10.1-rc.1, 0.10.1-rc.2 or 0.10.1 goes on to that target with a
+Retry, by the kept file, because the move from 0.10.0 to 0.11.0 is refused by the pair gate
+(`TestRollTowardAKeptCandidateGoesOn`). The moves from 0.10.2-rc.1 to 0.11.0-rc.1 and from 0.11.0-rc.1 to
+0.11.0-rc.2, with these pins, ran on a lab; no move to 0.11.0 itself was run.
+
+The pairs of the BOM on `main` after the second candidate (the fifteen below and 0.11.0-rc.2 to it). `main` had the
+pins of the candidate `v0.11.0-rc.2`, so the pairs from 0.11.0-rc.2 and 0.11.0-rc.1 differed in the release line
+alone: `Classify` gave one change, the release, record only. A development BOM carries nothing: on a build of
+`main`, an installation on 0.10.0 that stands in the replacement of its machines toward 0.10.1-rc.1, 0.10.1-rc.2 or
+0.10.1 goes on to that target with a Retry, by the kept file, with nothing to confirm
+(`TestRollTowardAKeptCandidateGoesOn`). On `main` the release gate refuses `-dev` alone.
+
+The pairs of the BOM of the candidate `v0.11.0-rc.2` (the fifteen previous BOMs to it). It has the pins of the
+candidate `v0.11.0-rc.1`, so the pair from 0.11.0-rc.1 differs in the release line alone: `PlanFor` gives one change,
+the release, record only, allowed, with no seed part and no machine replaced, phrase
+`upgrade <name> to 0.11.0-rc.2` (2026-11-22, on the candidate's commit, one control plane machine and one machine per
+group). The fourteen older pairs are the ones `v0.11.0-rc.1` had, below, with the release `0.11.0-rc.2` in place of
+`0.11.0-rc.1`: two, four and five changes allowed, and 21, 22 or 25 refused by the pair gate.
+`TestUpgradeRollsNoMachine` compares six of the fifteen and passes, none of them at step 0 of a roll, and
+`TestPreviousBOMsMoveAsTheirPinsDiffer` and `TestPreviousBOMsMoveCertManager` hold each pair to its answer. This BOM
+carries no unfinished target (`TestRollTowardAKeptCandidateGoesOn`). The move from 0.11.0-rc.1 to 0.11.0-rc.2 ran on
+one lab (2026-11-22: one record-only row, 8.5 s, no VM restarted); the others were read, not run.
+
+The pairs of the BOM on `main` before that candidate (the fourteen below and 0.11.0-rc.1 to it). `main` had the pins
+of the candidate `v0.11.0-rc.1`, so the pair from 0.11.0-rc.1 differed in the release line alone: `Classify` gave one
+change, the release, record only, with no seed part and no machine replaced. A development BOM carries nothing: on a
+build of `main`, an installation on 0.10.0 that stands in the replacement of its machines toward 0.10.1-rc.1,
+0.10.1-rc.2 or 0.10.1 goes on to that target with a Retry, by the kept file, with nothing to confirm
+(`TestRollTowardAKeptCandidateGoesOn`). On `main` the release gate refuses `-dev` alone.
 
 The pairs of the BOM of the candidate `v0.11.0-rc.1` (the fourteen previous BOMs to it). It has the pins `main`
 had: those of the release `v0.10.2` but `tenantCharts.kubernetes` 0.1.17. `PlanFor` gives (2026-11-21, on the
@@ -916,8 +1019,8 @@ refused by the pair gate on both cert-manager rows. `TestUpgradeRollsNoMachine` 
 passes, none of them at step 0 of a roll, and `TestPreviousBOMsMoveAsTheirPinsDiffer` and
 `TestPreviousBOMsMoveCertManager` hold each pair to its answer. Like 0.10.2's, this BOM carries no unfinished target:
 an installation on 0.10.0 that stands in the replacement of its machines toward 0.10.1-rc.1, 0.10.1-rc.2 or 0.10.1
-goes on to that target with a Retry, by the kept file (`TestRollTowardAKeptCandidateGoesOn`). No move to 0.11.0-rc.1
-was run anywhere.
+goes on to that target with a Retry, by the kept file (`TestRollTowardAKeptCandidateGoesOn`). The move from
+0.10.2-rc.1 to 0.11.0-rc.1 ran on one lab on 2026-11-21: two record-only rows, 39.6 s, no Proxmox write.
 
 The pairs of the BOM on `main` before the candidate (the thirteen below and 0.10.2 to it). After the `v0.10.2` tag
 `main` had the pins of that release, so the pair from 0.10.2 differed in the release line alone; #418 then moved
@@ -1460,7 +1563,7 @@ file (`docker.yml`, job `release`, step "Assemble release notes"). Without the
 file the step prints a warning and falls back to the `## [X.Y.Z]` section of
 `CHANGELOG.md`, as every release up to `v0.8.2` did; the script test below fails
 when a changelog section of a release from `0.8.0` on has no file, so only an rc tag
-without a file takes that path (`v0.9.0-rc.1`, `v0.9.0-rc.2`, `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1` and `v0.11.0-rc.1` have one). An empty file, or one over 120000 characters, fails
+without a file takes that path (`v0.9.0-rc.1`, `v0.9.0-rc.2`, `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1` and `v0.11.0-rc.2` have one). An empty file, or one over 120000 characters, fails
 the step, and no Release is created. GitHub's generated commit and pull request
 list (`--generate-notes`) follows the body either way.
 

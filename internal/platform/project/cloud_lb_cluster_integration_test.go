@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,8 +51,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 
 	ext := lbClusterExternalID("c1")
 	id := ext[len("lb-"):]
-	f := &pairWire{t: t, tag: pve.LBTag(id), rules: map[string][]pve.FirewallRule{}, sets: map[string][]string{},
-		vrrp: map[string]string{"301": "BACKUP 1 0", "302": "MASTER 1 1"}, runs: map[int]string{}}
+	f := newPairWire(t, pve.LBTag(id))
 	srv := httptest.NewServer(f)
 	defer srv.Close()
 	ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
@@ -120,7 +120,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 	converge := func(what string, done func(*loadBalancer) bool) *loadBalancer {
 		t.Helper()
 		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-			h.lbClusterConverge(ctx, "c1")
+			h.lbClusterConverge(ctx, "c1", true)
 			if lb := read(); done(lb) {
 				return lb
 			}
@@ -215,6 +215,174 @@ func TestLBClusterStateConverges(t *testing.T) {
 		t.Fatalf("a repeated PUT took %v", got)
 	}
 
+	// N2-4 (v0.11.0-rc.1 drill): the controller sends its state every ten seconds, and every PUT started a full pass,
+	// about 16 Proxmox calls each. A PUT that changes nothing on a settled balancer starts none; once the last look is
+	// a minute old, six of them make one; a changed state is applied by its own PUT; and a balancer that is not
+	// settled (here an appliance someone stopped) is passed over at every PUT until it is.
+	passes := func() int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.pages
+	}
+	lockedUntil := func() time.Time {
+		var row struct {
+			LockUntil time.Time `json:"lockUntil"`
+		}
+		if _, err := db.C("shedLock").Get(ctx, "lbc-c1", &row); err != nil {
+			t.Fatal(err)
+		}
+		return row.LockUntil
+	}
+	// quiet waits for the passes the PUTs started in the background to end, and returns the count.
+	quiet := func() int {
+		t.Helper()
+		for last, same := passes(), 0; ; time.Sleep(100 * time.Millisecond) {
+			if now := passes(); now != last || lockedUntil().After(time.Now()) {
+				last, same = now, 0
+			} else if same++; same == 5 {
+				return now
+			}
+		}
+	}
+	until := func(what string, done func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(20 * time.Second); !done(); time.Sleep(100 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				lb := read()
+				t.Fatalf("%s: %s %q %+v\n%s", what, lb.Status, lb.StatusMessage, lb.Cluster, strings.Join(f.log, "\n"))
+			}
+		}
+	}
+	a := svc("a", 80, 30080)
+	base := quiet()
+	h.lbClusterConverge(ctx, "c1", true)
+	perPass := passes() - base
+	if perPass < 1 {
+		t.Fatalf("a pass read the VM list %d times", perPass)
+	}
+	base = quiet()
+	for i := 0; i < 6; i++ {
+		if ans := state(a); ans.Services[0].State != lbgw.StateReady || ans.Services[0].Address != vipA {
+			t.Fatalf("an equal PUT is still answered with the Service's state: %+v", ans.Services)
+		}
+	}
+	if got := quiet() - base; got != 0 {
+		t.Fatalf("six equal PUTs on a settled balancer started %d passes, want none", got/perPass)
+	}
+	aged := func() {
+		v, _ := h.lbPasses.Load("c1")
+		last := v.(lbPass)
+		last.at = time.Now().Add(-2 * lbPassEvery)
+		h.lbPasses.Store("c1", last)
+	}
+	aged()
+	for i := 0; i < 6; i++ {
+		state(a)
+	}
+	if got := quiet() - base; got != perPass {
+		t.Fatalf("six equal PUTs a minute after the last look started %d passes, want one", got/perPass)
+	}
+	// A changed state: its own PUT applies it, with no sync and no second PUT.
+	state(svc("a", 80, 30081))
+	until("a changed state applied by its PUT", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.files[len(f.files)-1], worker1+":30081 check")
+	})
+	state(a)
+	until("the state put back", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.files[len(f.files)-1], worker1+":30080 check")
+	})
+	base = quiet()
+	// An appliance stopped behind a settled balancer: the next look starts it, and the PUTs after it pass over the
+	// balancer again without waiting a minute, until it is whole.
+	f.set("301", func(g *lbGuest) { g.stopped = true })
+	state(a)
+	if got := quiet() - base; got != 0 {
+		t.Fatalf("an equal PUT inside the minute started %d passes", got/perPass)
+	}
+	aged()
+	state(a)
+	until("the stopped appliance started by the next look", func() bool { return f.count("301 start") == 1 })
+	quiet()
+	if lb := read(); lb.Status != lbStatusDegraded || !strings.Contains(lb.StatusMessage, "appliance 301: its VM is stopped; starting it") {
+		t.Fatalf("after the look that found it: %s %q", lb.Status, lb.StatusMessage)
+	}
+	state(a) // no minute has passed: the balancer is not settled, so this PUT passes over it
+	until("whole again one PUT later", func() bool { return read().Status == lbStatusActive })
+	quiet()
+
+	// N2-3 (v0.11.0-rc.1 drill): the converge lock was taken for 20 minutes, the longest a pass can take, and an API
+	// restarted in the middle of a pass left it held: for 24.7 minutes every PUT was stored and none applied. A pass
+	// holds it for a lease it extends while it works. What a pass leaves behind when its API dies is what it holds at
+	// that moment: one lease.
+	lease := lbcLease
+	lbcLease = 1500 * time.Millisecond
+	defer func() { lbcLease = lease }()
+	gate := make(chan struct{})
+	var openGate sync.Once
+	open := func() {
+		openGate.Do(func() {
+			f.mu.Lock()
+			f.gate = nil
+			f.mu.Unlock()
+			close(gate)
+		})
+	}
+	defer open() // a failed check must not leave the fake holding a request
+	f.mu.Lock()
+	f.gate = gate
+	f.mu.Unlock()
+	passDone := make(chan struct{})
+	go func() { h.lbClusterConverge(ctx, "c1", true); close(passDone) }()
+	until("a pass in the middle of its work", func() bool { return lockedUntil().After(time.Now()) })
+	first := lockedUntil()
+	if left := time.Until(first); left > lbcLease {
+		t.Fatalf("an API that dies now leaves the cluster locked for %s, want a lease (%s) at most", left, lbcLease)
+	}
+	time.Sleep(2 * lbcLease) // the pass works on, longer than a lease
+	if now := lockedUntil(); !now.After(time.Now()) || !now.After(first) {
+		t.Fatalf("a pass still at work lost its lock: until %s, first %s", now, first)
+	}
+	open()
+	<-passDone
+	if lockedUntil().After(time.Now()) {
+		t.Fatal("the lock outlived its pass")
+	}
+	// The lock of a pass whose API died: held, extended by nobody. The state the controller sends meanwhile is stored
+	// and not applied; it is applied by a PUT a lease later.
+	if ok, err := h.sdnLock.Lock(ctx, "lbc-c1", lbcLease, time.Now().UTC()); err != nil || !ok {
+		t.Fatalf("lock: %v %v", ok, err)
+	}
+	died := time.Now()
+	changed := svc("a", 80, 30082)
+	state(changed)
+	time.Sleep(300 * time.Millisecond)
+	f.mu.Lock()
+	early := strings.Contains(f.files[len(f.files)-1], ":30082 check")
+	f.mu.Unlock()
+	if early {
+		t.Fatal("a state was applied while another holder had the cluster")
+	}
+	until("the state applied once the dead holder's lease ran out", func() bool {
+		state(changed) // the controller comes back
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.files[len(f.files)-1], worker1+":30082 check")
+	})
+	if waited := time.Since(died); waited > 4*lbcLease {
+		t.Fatalf("the cluster's balancer stood still for %s after its API died, want about a lease (%s)", waited, lbcLease)
+	}
+	state(a)
+	until("the state put back", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.files[len(f.files)-1], worker1+":30080 check")
+	})
+	quiet()
+
 	// a goes, b comes: b gets an address of its own, and a's goes back to the pool once neither appliance has it.
 	f.mu.Lock()
 	mark := len(f.log)
@@ -266,7 +434,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 	if st, _ := store.State(ctx, "c3"); st == nil || len(st.Nodes) != 0 {
 		t.Fatalf("another project's cluster stored nodes: %+v", st)
 	}
-	if err := h.lbClusterPass(ctx, "c3"); err != nil {
+	if err := h.lbClusterPass(ctx, "c3", true); err != nil {
 		t.Fatal(err)
 	}
 	if got := read().VIPs; !slices.Equal(got, vipsBefore) || len(owned()) != 2 {
@@ -290,7 +458,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 		if after, _ := store.State(ctx, "c1"); !after.UpdatedAt.Equal(*before.UpdatedAt) || len(after.Services) != 3 {
 			t.Fatalf("%s project: the state changed", status)
 		}
-		if err := h.lbClusterPass(ctx, "c1"); err != nil || len(read().Cluster.Services) != 3 {
+		if err := h.lbClusterPass(ctx, "c1", true); err != nil || len(read().Cluster.Services) != 3 {
 			t.Fatalf("%s project: converge %v", status, err)
 		}
 	}
@@ -347,7 +515,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 	if err := store.PutState(ctx, &lbgw.State{ID: "c1", Services: []lbgw.Service{svc("a", 80, 30080)}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.lbClusterPass(ctx, "c1"); err != nil {
+	if err := h.lbClusterPass(ctx, "c1", true); err != nil {
 		t.Fatal(err)
 	}
 	if cr, _ := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", ext); cr != nil {

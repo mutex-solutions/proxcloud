@@ -194,7 +194,10 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 				r.Status = "paused"
 			}
 			addrs, agentOK := p.inventory.addresses(ctx, r)
-			p.inventory.addressUnknown[r.VMID] = !agentOK
+			// Only a running VM has an agent to ask. One that Proxmox reports stopped or paused is known to have
+			// none: its row holds its configured addresses, as after a stop through the portal (ServerAddresses), and
+			// that is no reason to distrust the project's inventory for as long as it stays down.
+			p.inventory.addressUnknown[r.VMID] = !agentOK && r.Status == "running"
 			data = ServerData(r, addrs, GPUSpecsFromConfig(cfg, p.gpuAlias))
 			protection, err := p.svc.inventoryProtection(ctx, r, cfg)
 			if err != nil {

@@ -54,7 +54,7 @@ func TestSandboxFenceLive(t *testing.T) {
 			time.Sleep(every)
 		}
 		start := time.Now()
-		if err := j.reconcileSandboxWorkers(context.Background(), ps, es); err != nil {
+		if err := j.reconcileSandboxWorkers(context.Background(), ps, es, true); err != nil {
 			t.Errorf("pass %d: %v", i, err)
 			continue
 		}
