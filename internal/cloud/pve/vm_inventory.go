@@ -77,7 +77,9 @@ func (c *Client) inventoryVMPage(ctx context.Context, pool string) ([]ClusterRes
 					return nil, errors.New("template classification is malformed")
 				}
 			}
-			if r.Status != "running" && r.Status != "stopped" {
+			// "paused" is what Proxmox lists for a VM someone paused, and for every VM of a suspended project
+			// (drill N3-5): a state as known as the other two.
+			if r.Status != "running" && r.Status != "stopped" && r.Status != "paused" {
 				return nil, errors.New("project VM status unknown")
 			}
 			for _, k := range []string{"maxcpu", "maxmem", "maxdisk"} {

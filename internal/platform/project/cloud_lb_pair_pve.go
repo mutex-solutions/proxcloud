@@ -254,6 +254,9 @@ func (h *Handler) lbAbandon(ctx context.Context, es *externalservice.ExternalSer
 	}
 }
 
+// lbReasonPaused is an appliance's reason while its VM is paused.
+const lbReasonPaused = "its VM is paused"
+
 // lbPushOrder is the order configs reach a pair: the standby first, the one holding the address last, so a config
 // that breaks HAProxy shows on the standby before it can reach the traffic.
 func lbPushOrder(apps []*lbAppliance) []*lbAppliance {
@@ -323,7 +326,9 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		}
 		switch {
 		case st.QMPStatus == "paused":
-			a.State, a.Reason = lbAppDown, "its VM is paused"
+			// A paused VM sends no adverts and its peer has taken the address: what the row says it held is of
+			// before the pause (drill N3-6: the row read "both appliances hold the address").
+			a.State, a.HoldsVIP, a.Reason = lbAppDown, false, lbReasonPaused
 			continue
 		case st.Status == "stopped":
 			a.State, a.HoldsVIP, a.Reason = lbAppDown, false, "its VM is stopped; starting it"
@@ -437,7 +442,10 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			}
 			keepalivedCurrent[a] = true
 		}
-		if hhash != a.HAProxyHash || reloadHAProxy {
+		// A config an appliance refused goes to no other one in this pass: the standby comes first (lbPushOrder), so
+		// what HAProxy does not take there never reaches the appliance that holds the address. One that does not
+		// serve at all has nothing to lose and is pushed.
+		if (hhash != a.HAProxyHash && refused == nil) || reloadHAProxy {
 			pushed[a] = true
 			if err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy); err != nil {
 				if errors.Is(err, pve.ErrLBNotReady) {
@@ -524,11 +532,14 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 // is missing, since everything else the platform's next pass repairs by itself.
 func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 	up, holders, building, gone, applied := 0, 0, 0, 0, false
+	paused, holderUp := false, false
 	var reasons []string
 	for _, a := range apps {
+		paused = paused || a.Reason == lbReasonPaused
 		switch a.State {
 		case lbAppUp:
 			up++
+			holderUp = holderUp || a.HoldsVIP
 		case lbAppBuilding:
 			building++
 		case lbAppGone:
@@ -561,8 +572,15 @@ func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 			why = " (" + why + ")"
 		}
 		switch {
+		case holders == 1 && !holderUp:
+			// The one that holds the address is the one that is not right (it runs the config of before a change
+			// it could not take yet, and serves that), and the standby is: "no standby" would be the wrong way
+			// round (drill N3-4).
+			return lbStatusDegraded, "The appliance that holds the address is the one that is not in order" + why + "; the other one is ready, as its standby. The platform puts it right at its next pass."
 		case replacing:
 			return lbStatusDegraded, "One appliance carries the traffic while the other is being replaced" + why + "."
+		case paused:
+			return lbStatusDegraded, "One appliance carries the traffic, with no standby" + why + ". A paused VM serves again when it is resumed in Proxmox; Replace appliances builds a new one."
 		case gone > 0 || len(apps) < 2:
 			return lbStatusDegraded, "One appliance carries the traffic, with no standby" + why + ". Replace appliances builds the missing one again."
 		case building > 0:
@@ -625,6 +643,9 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 	for _, s := range apps {
 		if s.vm != nil && s.app.HoldsVIP && s.app.HAProxyHash != "" {
 			health, notLoaded, err := ps.LBHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec)
+			if errors.Is(err, pve.ErrLBNoHAProxy) {
+				return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, lbNoHAProxyMsg)
+			}
 			if err != nil {
 				slog.Warn("load balancer: health", "project", proj.ID, "lb", lb.ID, "err", err)
 				return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's active appliance did not answer")
@@ -651,7 +672,7 @@ func lbHealthNotLoaded(out map[string]any, notLoaded []string) {
 // pveLBReplace starts REPLACE_APPLIANCES: new VMs from the current image, one at a time, the standby first, so the
 // address keeps being served.
 func (h *Handler) pveLBReplace(ctx context.Context, u *user.User, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) *httpx.HTTPError {
-	release, ok, err := h.sdnLock.Wait(ctx, "lb-"+cr.ExternalID, lbLockMaxFor, lbLockWait)
+	release, ok, err := h.lbLock(ctx, cr.ExternalID, lbLockWait)
 	if err != nil {
 		return httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "Load balancers cannot be changed right now")
 	}
@@ -686,7 +707,7 @@ func (h *Handler) pveLBReplace(ctx context.Context, u *user.User, es *externalse
 // lbEdit changes a pair's row under its lock; edit nil only reads it.
 func (h *Handler) lbEdit(ctx context.Context, es *externalservice.ExternalService, externalID string, edit func(*loadBalancer)) (*loadBalancer, error) {
 	if edit != nil {
-		release, ok, err := h.sdnLock.Wait(ctx, "lb-"+externalID, lbLockMaxFor, lbLockMaxFor)
+		release, ok, err := h.lbLock(ctx, externalID, lbLockMaxFor)
 		if err != nil {
 			return nil, err
 		}
@@ -795,6 +816,11 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 			if err := h.lbDestroyVM(ctx, es, proj, old); err != nil {
 				return "the old appliance " + old + " could not be removed: " + err.Error()
 			}
+		}
+		// The one that is left is read now: the build that follows takes minutes, and the row would show its role
+		// of before the switch for all of them (drill N3-1: "BACKUP, holds no address" while it served).
+		if _, err := h.pveLBApply(ctx, es, proj, externalID); err != nil {
+			slog.Warn("load balancer: apply during replace", "lb", externalID, "err", err)
 		}
 	}
 	lb, err := h.lbEdit(ctx, es, externalID, nil)

@@ -415,7 +415,7 @@ func (h *Handler) lbClusterBuild(ctx context.Context, es *externalservice.Extern
 // says that it left nothing for a next pass: the balancer is ACTIVE, every Service has its answer (ready or refused),
 // and no address waits to be given back.
 func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.ExternalService, proj *Project, ext string, st *lbgw.State) (settled bool, err error) {
-	release, ok, err := h.sdnLock.Wait(ctx, "lb-"+ext, lbLockMaxFor, lbLockWait)
+	release, ok, err := h.lbLock(ctx, ext, lbLockWait)
 	if err != nil || !ok {
 		return false, err // another apply is on it
 	}
@@ -439,7 +439,10 @@ func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.Extern
 	if err == nil && lb.settled && len(lb.Cluster.Releasing) > 0 {
 		err = h.lbReleaseVIPs(ctx, es, proj, lb)
 	}
-	applied := lb.AppliedHash == lbHash(lbRender(lb)) && (lb.Status == lbStatusActive || lb.Status == lbStatusDegraded)
+	// A Service is ready when the appliance that holds the addresses serves this config: the controller writes the
+	// Service's address into its status on that word (drill N3-7), and the standby gets every config first.
+	applied := lb.AppliedHash == lbHash(lbRender(lb)) && (lb.Status == lbStatusActive || lb.Status == lbStatusDegraded) &&
+		slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.State == lbAppUp && a.HoldsVIP })
 	for i := range lb.Cluster.Services {
 		if s := &lb.Cluster.Services[i]; s.State != lbgw.StateRefused {
 			s.State = lbgw.StateBuilding
@@ -498,7 +501,7 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 		if vip == "" {
 			vip = lbSizePlaceholder
 		}
-		trial := lbClusterServiceSpec(spec, i, w, vip, st.Nodes)
+		trial := lbClusterServiceSpec(spec, w, vip, st.Nodes)
 		if len(pve.RenderClusterHAProxy(trial, append(slices.Clone(vips), vip))) > pve.LBMaxConfig {
 			refuse(lbgw.ReasonTooLarge, "The load balancer's config would be too large with this Service: use fewer Services, ports or workers")
 			continue
@@ -522,7 +525,7 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 				continue
 			}
 			s.VIP = ip.IP
-			trial = lbClusterServiceSpec(spec, i, w, s.VIP, st.Nodes)
+			trial = lbClusterServiceSpec(spec, w, s.VIP, st.Nodes)
 		}
 		spec, vips = trial, append(vips, s.VIP)
 	}
@@ -534,14 +537,17 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 	return nil
 }
 
-// lbClusterServiceSpec adds Service w, the i-th of the row, to spec: a listener on its address per port, in mode tcp,
-// to a pool of the workers' node port. Policy Local is checked over HTTP on healthCheckNodePort, which kube-proxy
-// answers 200 only with a local endpoint; a check on its own port is sent without the PROXY header (C14). Names are
-// generated: nothing of the Service's reaches the config.
-func lbClusterServiceSpec(spec pve.LBSpec, i int, w lbgw.Service, vip string, nodes []string) pve.LBSpec {
+// lbClusterServiceSpec adds Service w to spec: a listener on its address per port, in mode tcp, to a pool of the
+// workers' node port. Policy Local is checked over HTTP on healthCheckNodePort, which kube-proxy answers 200 only
+// with a local endpoint; a check on its own port is sent without the PROXY header (C14). Names are generated:
+// nothing of the Service's reaches the config. A pool is named by its Service (a digest of the UID) and its node
+// port, not by their places in the state (it was s<i>-<j>): HAProxy keeps a member's state over a reload by the
+// pool's name, and a port or a Service that comes or goes must not rename the pools after it (drill N3-8).
+func lbClusterServiceSpec(spec pve.LBSpec, w lbgw.Service, vip string, nodes []string) pve.LBSpec {
 	out := pve.LBSpec{Listeners: slices.Clone(spec.Listeners), Pools: slices.Clone(spec.Pools)}
-	for j, p := range w.Ports {
-		pool := pve.LBPool{Name: "s" + strconv.Itoa(i) + "-" + strconv.Itoa(j), Protocol: "tcp", Algorithm: "roundrobin", ProxyProtocol: w.ProxyProtocol}
+	uid := sha256.Sum256([]byte(w.UID))
+	for _, p := range w.Ports {
+		pool := pve.LBPool{Name: "s" + hex.EncodeToString(uid[:4]) + "-" + strconv.Itoa(p.NodePort), Protocol: "tcp", Algorithm: "roundrobin", ProxyProtocol: w.ProxyProtocol}
 		if w.ExternalTrafficPolicy == "Local" {
 			pool.HealthCheck = &pve.LBHealthCheck{Type: "http", Port: w.HealthCheckNodePort, Path: "/"}
 		}
@@ -630,7 +636,7 @@ func (h *Handler) LBReleaseCluster(ctx context.Context, computeID, projectID, cl
 		if perr != nil { // a project already torn down: its pool and addresses are gone, the row is all that is left
 			proj = &Project{ID: projectID}
 		}
-		unlock, ok, err := h.sdnLock.Wait(ctx, "lb-"+ext, lbLockMaxFor, lbLockWait)
+		unlock, ok, err := h.lbLock(ctx, ext, lbLockWait)
 		if err != nil {
 			return err
 		}

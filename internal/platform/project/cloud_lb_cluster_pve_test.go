@@ -68,21 +68,29 @@ func TestLBClusterGuard(t *testing.T) {
 func TestLBClusterServiceSpec(t *testing.T) {
 	w := lbgw.Service{UID: "u", Ports: []lbgw.Port{{Port: 80, NodePort: 30080}, {Port: 443, NodePort: 30443}},
 		ExternalTrafficPolicy: "Local", HealthCheckNodePort: 32000, ProxyProtocol: true, SourceRanges: []string{"198.51.100.0/24"}}
-	spec := lbClusterServiceSpec(pve.LBSpec{Pools: []pve.LBPool{{Name: "s0-0"}}}, 1, w, "203.0.113.10", []string{"10.0.0.250", "10.0.0.249"})
+	spec := lbClusterServiceSpec(pve.LBSpec{Pools: []pve.LBPool{{Name: "s0-0"}}}, w, "203.0.113.10", []string{"10.0.0.250", "10.0.0.249"})
 	if len(spec.Pools) != 3 || len(spec.Listeners) != 2 {
 		t.Fatalf("%+v", spec)
 	}
 	p := spec.Pools[2]
-	if p.Name != "s1-1" || p.Protocol != "tcp" || !p.ProxyProtocol || p.HealthCheck == nil || p.HealthCheck.Port != 32000 ||
+	if !pve.LBNameOK(p.Name) || !strings.HasSuffix(p.Name, "-30443") || p.Name == spec.Pools[1].Name || p.Protocol != "tcp" || !p.ProxyProtocol || p.HealthCheck == nil || p.HealthCheck.Port != 32000 ||
 		len(p.Members) != 2 || !p.Members[0].Node || p.Members[0].Port != 30443 || p.Members[1].Address != "10.0.0.249" {
 		t.Fatalf("pool %+v", p)
 	}
-	if l := spec.Listeners[1]; l.VIP != "203.0.113.10" || l.Port != 443 || l.Pool != "s1-1" || l.SourceRanges[0] != "198.51.100.0/24" {
+	if l := spec.Listeners[1]; l.VIP != "203.0.113.10" || l.Port != 443 || l.Pool != p.Name || l.SourceRanges[0] != "198.51.100.0/24" {
 		t.Fatalf("listener %+v", l)
 	}
 	w.ExternalTrafficPolicy = "Cluster"
-	if spec := lbClusterServiceSpec(pve.LBSpec{}, 0, w, "203.0.113.10", nil); spec.Pools[0].HealthCheck != nil {
+	if spec := lbClusterServiceSpec(pve.LBSpec{}, w, "203.0.113.10", nil); spec.Pools[0].HealthCheck != nil {
 		t.Fatal("policy Cluster takes the TCP check on the node port")
+	}
+	// A pool is named by its Service and its node port, not by its place: the same pool whatever comes before it and
+	// whichever of the Service's ports it is, and another Service's pool on another name (drill N3-8).
+	other := lbgw.Service{UID: "v", Ports: []lbgw.Port{{Port: 80, NodePort: 31080}}}
+	alone := lbClusterServiceSpec(pve.LBSpec{}, lbgw.Service{UID: "u", Ports: w.Ports[1:]}, "203.0.113.10", nil).Pools[0].Name
+	after := lbClusterServiceSpec(lbClusterServiceSpec(pve.LBSpec{}, other, "203.0.113.11", nil), w, "203.0.113.10", nil)
+	if alone != p.Name || after.Pools[2].Name != p.Name || after.Pools[0].Name == after.Pools[1].Name {
+		t.Fatalf("pool names move: %q alone, %q after another Service, was %q", alone, after.Pools[2].Name, p.Name)
 	}
 }
 

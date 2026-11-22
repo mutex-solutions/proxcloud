@@ -39,7 +39,8 @@ const (
 	lbStatusDown   = "DOWN"
 	lbStatusError  = "ERROR"
 
-	// lbLockMaxFor outlives one apply; a holder that dies frees the row after it.
+	// lbLockMaxFor is the longest anyone waits for a balancer's lock (lbEdit: a replace or a build that has to
+	// write its step down).
 	lbLockMaxFor = 3 * time.Minute
 	lbLockWait   = 30 * time.Second
 	// lbBuildTimeout is how long a new appliance gets to boot and install HAProxy.
@@ -47,6 +48,17 @@ const (
 	// lbConvergeEvery paces the first config push after a create.
 	lbConvergeEvery = 10 * time.Second
 )
+
+// lbLease is how long a balancer's lock (lb-<externalId>) lasts without its holder, who extends it while it works
+// (lock.ShedLock.Hold). It was taken for three minutes whatever happened to the holder: a change the API was applying
+// when it stopped went live 190 to 209 s later (v0.11.0-rc.2 drill, N3-9). With the cluster's converge lease
+// (lbcLease) the same minute, both are free a minute after the stop.
+var lbLease = time.Minute
+
+// lbLock takes a balancer's lock, waiting up to wait for it.
+func (h *Handler) lbLock(ctx context.Context, externalID string, wait time.Duration) (release func(), acquired bool, err error) {
+	return h.sdnLock.Hold(ctx, "lb-"+externalID, lbLease, wait)
+}
 
 // loadBalancer is the row's data.loadbalancer.
 type loadBalancer struct {
@@ -446,6 +458,9 @@ func lbMemberIP(held []PublicIP, projectID string, lb *loadBalancer) string {
 	return ""
 }
 
+// lbNoHAProxyMsg answers GET_HEALTH when the appliance runs and its HAProxy does not.
+const lbNoHAProxyMsg = "HAProxy is not running on the load balancer's VM. The platform starts it at its next pass"
+
 // lbStuck: older than any create can take.
 func lbStuck(cr *cloud.CloudResource) bool {
 	return cr.CreatedAt != nil && time.Since(*cr.CreatedAt) > lbBuildTimeout
@@ -459,7 +474,7 @@ func lbHash(config string) string {
 // pveLBApply brings one balancer in line with its row, and returns the status it ends on ("" = no such
 // row). It is the only writer of what an appliance runs, one at a time per balancer.
 func (h *Handler) pveLBApply(ctx context.Context, es *externalservice.ExternalService, proj *Project, externalID string) (string, error) {
-	release, ok, err := h.sdnLock.Wait(ctx, "lb-"+externalID, lbLockMaxFor, lbLockWait)
+	release, ok, err := h.lbLock(ctx, externalID, lbLockWait)
 	if err != nil {
 		return lbStatusBuild, err
 	}
@@ -655,6 +670,10 @@ func (h *Handler) pveLoadBalancerAction(w http.ResponseWriter, r *http.Request, 
 			return true
 		}
 		health, notLoaded, err := ps.LBHealth(ctx, vm.Node, vm.VMID, lb.LBSpec)
+		if errors.Is(err, pve.ErrLBNoHAProxy) { // the VM answered, HAProxy did not (drill N3-2)
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, lbNoHAProxyMsg))
+			return true
+		}
 		if err != nil {
 			slog.Warn("load balancer: health", "project", proj.ID, "lb", cr.ExternalID, "err", err)
 			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's VM did not answer"))
@@ -685,7 +704,7 @@ func (h *Handler) pveLBUpdateConfig(ctx context.Context, es *externalservice.Ext
 	if err != nil {
 		return httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox client not ready")
 	}
-	release, ok, err := h.sdnLock.Wait(ctx, "lb-"+cr.ExternalID, lbLockMaxFor, lbLockWait)
+	release, ok, err := h.lbLock(ctx, cr.ExternalID, lbLockWait)
 	if err != nil {
 		return err
 	}
@@ -756,7 +775,7 @@ func (h *Handler) pveDeleteLoadBalancer(ctx context.Context, es *externalservice
 	if err != nil {
 		return err
 	}
-	release, ok, err := h.sdnLock.Wait(ctx, "lb-"+cr.ExternalID, lbLockMaxFor, lbLockWait)
+	release, ok, err := h.lbLock(ctx, cr.ExternalID, lbLockWait)
 	if err != nil {
 		return err
 	}

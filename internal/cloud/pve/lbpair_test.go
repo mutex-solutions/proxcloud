@@ -46,17 +46,15 @@ func legacyGoldenSpec() LBSpec {
 	}
 }
 
-// testdata/lb-legacy.cfg was rendered by origin/main (f0a1afe8) before the pair: a single appliance's config must
-// not change by a byte, or every existing balancer would be pushed again at the next sync.
-func TestRenderHAProxyLegacyUnchanged(t *testing.T) {
-	want, err := os.ReadFile("testdata/lb-legacy.cfg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, got := range []string{RenderHAProxy(legacyGoldenSpec()), RenderHAProxyOn(legacyGoldenSpec(), nil)} {
-		if got != string(want) {
-			t.Fatalf("the single appliance's config changed:\n%s", got)
-		}
+// A single appliance's config. A change of one byte here pushes every existing balancer again at the next sync, one
+// reload each: the file changes only when a release means that and says so in its upgrade notes. It did in v0.11.1
+// (drill N3-8: the members' state kept over a reload, redispatch, the connect timeout, backends named by their
+// pool), from what v0.10.2 and v0.11.0 rendered (origin/main at f0a1afe8).
+func TestRenderHAProxySingle(t *testing.T) {
+	got := RenderHAProxy(legacyGoldenSpec())
+	golden(t, "lb-legacy.cfg", got)
+	if on := RenderHAProxyOn(legacyGoldenSpec(), nil); on != got {
+		t.Fatalf("a single appliance's config has two renders:\n%s", on)
 	}
 }
 

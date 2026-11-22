@@ -2,11 +2,16 @@ package project
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"maps"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
@@ -328,5 +333,154 @@ func TestLBApplianceOutOfSightIsNotGone(t *testing.T) {
 	}
 	if single.Status != lbStatusError || !strings.Contains(single.StatusMessage, "is gone. Delete this load balancer") {
 		t.Fatalf("a single appliance that is gone: %s %q", single.Status, single.StatusMessage)
+	}
+}
+
+// Drill N3-8 of v0.11.0: a reload started every member UP, so a member that was DOWN (a node without an endpoint of a
+// policy Local Service, a dead node) took its share of the requests again after every change of any Service of the
+// cluster, until its checks had failed: 2.2 to 2.4 s, 11 or 12 requests each time. Now the apply saves the members'
+// state and the config reads it back, under names that do not move when another Service's pools come and go. The
+// fake's HAProxy keeps a state per member and loses it at a reload exactly as the real one does (lbGuest).
+func TestLBReloadKeepsADownMemberDown(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	nodes := []string{"10.0.0.250", "10.0.0.249"}
+	web := lbgw.Service{UID: "u-web", Ports: []lbgw.Port{{Port: 80, NodePort: 30080}}}
+	local := lbgw.Service{UID: "u-local", Ports: []lbgw.Port{{Port: 80, NodePort: 31080}}, ExternalTrafficPolicy: "Local", HealthCheckNodePort: 32000}
+	lb.VIPs = []string{"203.0.113.10", "203.0.113.11"}
+	spec := func() pve.LBSpec {
+		return lbClusterServiceSpec(lbClusterServiceSpec(pve.LBSpec{}, web, "203.0.113.10", nodes), local, "203.0.113.11", nodes)
+	}
+	lb.LBSpec = spec()
+	apply := func() {
+		t.Helper()
+		if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || lb.Status != lbStatusActive {
+			t.Fatalf("apply: %s %q %v", lb.Status, lb.StatusMessage, err)
+		}
+	}
+	// What each appliance's HAProxy says of the Local Service's two members right now, with no check run since.
+	members := func(when string, want ...string) {
+		t.Helper()
+		ps, _ := h.pveFor(es)
+		for i, vm := range []int{301, 302} {
+			health, notLoaded, err := ps.LBHealth(ctx, fmt.Sprintf("n%d", i+1), vm, lb.LBSpec)
+			if err != nil || len(notLoaded) != 0 {
+				t.Fatalf("%s: health of %d: %q %v", when, vm, notLoaded, err)
+			}
+			var got []string
+			for _, m := range health {
+				if m.Port == 31080 {
+					got = append(got, m.Address+" "+m.Status)
+				}
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("%s: appliance %d says %v, want %v", when, vm, got, want)
+			}
+		}
+	}
+	// The second node has no endpoint of the Local Service: its check on the health port fails.
+	for _, vm := range []string{"301", "302"} {
+		f.set(vm, func(g *lbGuest) { g.dead = []string{"10.0.0.249:31080"} })
+	}
+	apply()
+	members("a first load: nothing to carry over, every member starts UP", "10.0.0.250 UP", "10.0.0.249 UP")
+	for _, vm := range []string{"301", "302"} {
+		f.set(vm, func(g *lbGuest) { g.check() })
+	}
+	members("after its checks", "10.0.0.250 UP", "10.0.0.249 DOWN")
+
+	// The other Service gets a port, the drill's change: its new pool comes before the Local Service's.
+	web.Ports = append(web.Ports, lbgw.Port{Port: 8080, NodePort: 30081})
+	lb.LBSpec = spec()
+	reloads := f.count("302 haproxy reload")
+	apply()
+	if f.count("302 haproxy reload") != reloads+1 {
+		t.Fatalf("the change did not reload the appliance that holds the address: %v", f.log)
+	}
+	members("right after the reload", "10.0.0.250 UP", "10.0.0.249 DOWN")
+	// And loses it, the same way round.
+	web.Ports = web.Ports[:1]
+	lb.LBSpec = spec()
+	apply()
+	members("right after the second reload", "10.0.0.250 UP", "10.0.0.249 DOWN")
+
+	// The fake does tell: a HAProxy that was stopped has no state to save, and starts every member UP.
+	f.set("301", func(g *lbGuest) { g.haproxy = false })
+	apply()
+	if got := f.guests["301"].members; len(got) != 4 || slices.Contains(slices.Collect(maps.Values(got)), "DOWN") {
+		t.Fatalf("a HAProxy started from nothing: %v", got)
+	}
+}
+
+// A config that the standby's HAProxy does not take never reaches the appliance that holds the address: the release
+// that changes what every balancer's config says pushes every balancer once (v0.11.1), the standby first.
+func TestLBRefusedConfigStopsAtTheStandby(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || lb.Status != lbStatusActive {
+		t.Fatalf("first apply: %s %v", lb.Status, err)
+	}
+	served, running := lb.AppliedHash, f.guests["302"].loaded
+	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 81, Pool: "web"})
+	f.set("301", func(g *lbGuest) { g.applyFails = "HAProxy does not listen on 203.0.113.10:81" })
+	for range 2 { // and not at the pass after either
+		if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+			t.Fatal(err)
+		}
+		if lb.Status != lbStatusError || !strings.Contains(lb.StatusMessage, "does not listen on 203.0.113.10:81") || lb.AppliedHash != served ||
+			f.count("302 haproxy reload") != 1 || f.guests["302"].loaded != running || !f.guests["302"].serving() {
+			t.Fatalf("the standby refused the config: %s %q, holder reloads %d, log %v", lb.Status, lb.StatusMessage, f.count("302 haproxy reload"), f.log)
+		}
+	}
+	f.set("301", func(g *lbGuest) { g.applyFails = "" })
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || lb.Status != lbStatusActive || lb.AppliedHash == served || f.count("302 haproxy reload") != 2 {
+		t.Fatalf("once the standby takes it: %s %q %v, log %v", lb.Status, lb.StatusMessage, err, f.log)
+	}
+}
+
+// Drill N3-6: the master of a pair was paused, the standby took the address, and the row read "Both appliances hold
+// the address: they cannot hear each other", from what the paused one held before. The row names the pause.
+func TestLBPairWithAPausedMaster(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || lb.Status != lbStatusActive || !lb.Appliances[1].HoldsVIP {
+		t.Fatalf("a whole pair: %s %v %+v", lb.Status, err, lb.Appliances)
+	}
+	f.set("302", func(g *lbGuest) { g.paused = true })
+	f.set("301", func(g *lbGuest) { g.role, g.holds = "MASTER", true })
+	writes := len(f.log)
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+		t.Fatal(err)
+	}
+	if lb.Status != lbStatusDegraded || !strings.Contains(lb.StatusMessage, "One appliance carries the traffic, with no standby (appliance 302: its VM is paused)") ||
+		!strings.Contains(lb.StatusMessage, "resumed") || strings.Contains(lb.StatusMessage, "Both appliances hold") ||
+		lb.Appliances[1].HoldsVIP || !lb.Appliances[0].HoldsVIP || len(f.log) != writes {
+		t.Fatalf("a paused master: %s %q, %+v, wrote %v", lb.Status, lb.StatusMessage, lb.Appliances, f.log[writes:])
+	}
+	// Resumed: it comes back as the standby, and the pair is whole.
+	f.set("302", func(g *lbGuest) { g.paused, g.role, g.holds = false, "BACKUP", false })
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || lb.Status != lbStatusActive {
+		t.Fatalf("after the resume: %s %q %v", lb.Status, lb.StatusMessage, err)
+	}
+}
+
+// Drill N3-2: the health read of an appliance whose HAProxy is stopped says that, not that the VM did not answer.
+func TestLBHealthOfAStoppedHAProxy(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	if err := h.lbApplyPair(ctx, es, &Project{ID: "p1"}, &cloud.CloudResource{}, lb); err != nil {
+		t.Fatal(err)
+	}
+	ps, _ := h.pveFor(es)
+	f.set("301", func(g *lbGuest) { g.haproxy = false })
+	if _, _, err := ps.LBHealth(ctx, "n1", 301, lb.LBSpec); !errors.Is(err, pve.ErrLBNoHAProxy) {
+		t.Fatalf("HAProxy stopped: %v", err)
+	}
+	f.set("301", func(g *lbGuest) { g.agentDown = true })
+	if _, _, err := ps.LBHealth(ctx, "n1", 301, lb.LBSpec); err == nil || errors.Is(err, pve.ErrLBNoHAProxy) {
+		t.Fatalf("the VM does not answer: %v", err)
 	}
 }

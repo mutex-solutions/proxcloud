@@ -86,7 +86,7 @@ func TestParseHAProxyStat(t *testing.T) {
 		Listeners: []LBListener{{Port: 80, Pool: "web"}, {Port: 443, Pool: "web"}, {Port: 80, Pool: "web", VIP: "203.0.113.11"}, {Port: 81, Pool: "none"}},
 		Pools: []LBPool{{Name: "web", Members: []LBMember{{ServerID: "101", Port: 80, Address: "10.0.0.1"}, {ServerID: "102", Port: 80, Address: "10.0.0.2"},
 			{ServerID: "103", Port: 80, Address: "10.0.0.3"}, {ServerID: "104", Port: 80, Address: "10.0.0.4", Missing: true}}}}}
-	out := "# pxname,svname,status,weight\nl80,FRONTEND,OPEN,\np0,m101p80,UP,1\np0,m102p80,DOWN,1\np0,BACKEND,UP,1\n"
+	out := "# pxname,svname,status,weight\nl80,FRONTEND,OPEN,\np-web,m101p80,UP,1\np-web,m102p80,DOWN,1\np-web,BACKEND,UP,1\n"
 	got, notLoaded, err := ParseHAProxyStat(out, spec)
 	if err != nil {
 		t.Fatal(err)
@@ -104,6 +104,67 @@ func TestParseHAProxyStat(t *testing.T) {
 	got, notLoaded, err = ParseHAProxyStat("# pxname,svname,status,weight\n", spec)
 	if err != nil || len(notLoaded) != 3 || got[0].Status != LBNotLoaded {
 		t.Errorf("default config: %+v %q %v", got, notLoaded, err)
+	}
+}
+
+// A member's state lives through a reload under the names of its backend and of the member (HAProxy's
+// server_state.c), so a pool's backend keeps its name whatever happens to the pools around it: drill N3-8 lost
+// requests of one Service at each change of another, whose port had moved every backend after it one place on.
+func TestBackendNamesDoNotMoveWithOtherPools(t *testing.T) {
+	member := []LBMember{{Node: true, Address: "10.0.0.250", Port: 30080, Weight: 1}}
+	a, b, c := LBPool{Name: "s1a2b3c4d-30080", Members: member}, LBPool{Name: "s1a2b3c4d-30443", Members: member}, LBPool{Name: "s9f8e7d6c-31080", Members: member}
+	backendOf := func(pools []LBPool, name string) string {
+		t.Helper()
+		cfg := RenderClusterHAProxy(LBSpec{Listeners: []LBListener{{Port: 80, Pool: name, VIP: "203.0.113.10"}}, Pools: pools}, []string{"203.0.113.10"})
+		_, rest, ok := strings.Cut(cfg, "default_backend ")
+		backend, _, _ := strings.Cut(rest, "\n")
+		if !ok || !strings.Contains(cfg, "\nbackend "+backend+"\n") {
+			t.Fatalf("no backend for pool %s:\n%s", name, cfg)
+		}
+		return backend
+	}
+	want := backendOf([]LBPool{a, b, c}, c.Name)
+	for when, pools := range map[string][]LBPool{"a pool before it left": {a, c}, "it is the only one": {c}, "one came before it": {b, a, c}} {
+		if got := backendOf(pools, c.Name); got != want {
+			t.Errorf("%s: backend %s, was %s", when, got, want)
+		}
+	}
+	// The health read finds a member under the same name.
+	health, _, err := ParseHAProxyStat("# pxname,svname,status\n"+want+",n10.0.0.250p30080,DOWN\n", LBSpec{Pools: []LBPool{a, c}})
+	if err != nil || health[0].Status != LBNotLoaded || health[1].Status != "DOWN" {
+		t.Fatalf("health = %+v %v", health, err)
+	}
+	// A name off the rule never reaches the config, and two pools of one name do not share a backend.
+	names := lbBackends([]LBPool{{Name: "web"}, {Name: "x\n  bind :22"}, {Name: "web"}, {Name: ""}})
+	if names[0] != "p-web" || names[2] != "p2" || slices.Contains(names[:3], names[3]) || strings.ContainsAny(names[1]+names[3], " \n:") {
+		t.Fatalf("backends = %q", names)
+	}
+}
+
+// What keeps a request when a member goes away or HAProxy is reloaded is in every config (drill N3-8): the members'
+// state is read back at a reload from the file the apply saves it to, a connection a member does not take is tried on
+// another one, and the connect timeout is what that costs a client.
+func TestRenderHAProxyKeepsRequests(t *testing.T) {
+	for name, cfg := range map[string]string{"single": RenderHAProxy(legacyGoldenSpec()), "pair": RenderHAProxyOn(legacyGoldenSpec(), []string{"203.0.113.10"}),
+		"cluster": RenderClusterHAProxy(LBSpec{}, nil)} {
+		global, defaults, _ := strings.Cut(cfg, "\ndefaults\n")
+		defaults, _, _ = strings.Cut(defaults, "\n\n")
+		if !strings.Contains(global, "\n  server-state-file "+haproxyState+"\n") {
+			t.Errorf("%s: global names no state file:\n%s", name, global)
+		}
+		for _, want := range []string{"  load-server-state-from-file global\n", "  option redispatch 1\n", "  retries 3\n", "  timeout connect 2s\n"} {
+			if !strings.Contains(defaults+"\n", want) {
+				t.Errorf("%s: defaults lack %q:\n%s", name, want, defaults)
+			}
+		}
+		if strings.Contains(cfg, "init-state") { // HAProxy 3.1 or newer; Debian 13 ships 3.0
+			t.Errorf("%s: the config needs HAProxy 3.1", name)
+		}
+	}
+	// The apply saves the state before it checks and reloads, and a save that fails leaves no file behind.
+	save, check := strings.Index(haproxyReload, "show servers state"), strings.Index(haproxyReload, "haproxy -c")
+	if save < 0 || check < save || !strings.Contains(haproxyReload, "> $S.new") || !strings.Contains(haproxyReload, "rm -f $S $S.new") {
+		t.Errorf("the apply does not save the members' state before its reload:\n%s", haproxyReload)
 	}
 }
 
