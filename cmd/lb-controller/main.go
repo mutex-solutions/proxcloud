@@ -336,8 +336,8 @@ func readService(obj map[string]any, defaultClass bool) *service {
 // stableNodeSetPredicates, v0.34.0; KEP-3458): a Ready condition that flaps must not reconfigure every balancer, and
 // a node whose kubelet is silent may still forward. The second half is kept: a member that goes NotReady stays, and
 // its health check decides. The first half is not: HAProxy starts a member new to its config as UP ("init-state
-// down" needs 3.1, Debian 13 ships 3.0), so a node sent before it is Ready took its share of the requests until two
-// checks had failed (drill N3-8 of v0.11.0: 4.4 s, 22 of 44 requests, at each worker added or replaced).
+// down" needs 3.1, Debian 13 ships 3.0), so a node sent before it is Ready took its share of the requests until its
+// first check had failed (drill N3-8 of v0.11.0: 4.4 s, 22 of 44 requests, at each worker added or replaced).
 func readNodes(items []map[string]any, members map[string]bool) []lbgw.Node {
 	out := []lbgw.Node{}
 	seen := map[string]bool{}

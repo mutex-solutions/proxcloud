@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Every load balancer is reloaded once after the upgrade.** The HAProxy config the platform renders changed (see
+  "No request is lost" under Fixed), for a single appliance too, whose config had not changed since its first release,
+  and so did the pair's keepalived track script. The first services sync after the upgrade (and, for a cluster's
+  balancer, the controller's next PUT) pushes each balancer once: one HAProxy reload per appliance and one keepalived
+  reload per appliance of a pair. That reload is the last one that starts every member as up: the config it loads
+  names its backends differently, so the state saved from the old one matches nothing. A Service with
+  `externalTrafficPolicy: Local`, or a balancer with a dead member, sees the known 2 to 4 seconds once more. Open
+  connections are kept (a reload, not a restart). **Run a services sync right after the upgrade**, at a time of your
+  choosing, on a site without a scheduler.
+- **The push is safe to fail.** The standby gets the config first, and a config its HAProxy does not take is not sent
+  to the appliance that holds the address (new in this release: it was sent there too, where the apply's own check
+  put the old file back). On each appliance the apply checks the file (`haproxy -c`), reloads, proves that HAProxy
+  listens on every bind of it, and puts the old file back otherwise; a hash is recorded only for a config that is
+  served. The new directives are checked against the HAProxy of both appliance images (3.0 on Debian 13, 3.2 on
+  Ubuntu 26.04) by the container test, not on a lab.
+- **Until its push, `GET_HEALTH` of a balancer lists its members as `NOT LOADED`**: the stored config names its
+  backends by pool, and the appliance still runs the names of before. The listeners are not affected.
+- **The controller's two fixes need the controller of this release.** A cluster keeps the controller image it has
+  until it is moved to the provider's chart version (the cluster's update) or given "Enable load balancer
+  controller" again, which also replaces its credential. Until then it sends a node before it is Ready and writes a
+  Service's address when it is allocated, as in `v0.11.0`; what the balancer does (state kept over a reload,
+  redispatch) applies from its push on. The portal works with either controller: the protocol of `/lb/v1` did not
+  change.
+- **Pool names of a cluster's balancer changed** from `s<service>-<port>` by position to `s<digest of the Service's
+  UID>-<node port>`, in the row and in `GET_HEALTH`. Nothing reads them but people.
+
+### Fixed
+
+- **No request is lost at a reload or when a node changes** (`internal/cloud/pve/lb.go`,
+  `internal/platform/project/cloud_lb_cluster_pve.go`, `cmd/lb-controller`). `v0.11.0` shipped with this as a known
+  issue (drill N3-8): a scale-up lost 22 of 44 requests in 4.4 s, a scale-down 52 in 10.3 s, and a Service with
+  `externalTrafficPolicy: Local` lost 11 to 12 requests in 2.2 to 2.4 s at every change of any other Service of its
+  cluster. Three causes, each fixed:
+  - *A reload started every member as up.* The config now names a state file (`server-state-file
+    /var/lib/haproxy/server-state` in `global`, `load-server-state-from-file global` in `defaults`), and the apply
+    writes `show servers state` to it just before the reload, so a member that was down is down from the first
+    moment of the new process. HAProxy finds a member again by the names of its backend and of the server
+    (`src/server_state.c`: the key is `be_name srv_name`; the address in the file is not applied to a server the
+    config gives an address). Backends were named by position (`p0`, `p1`): a port added to one Service renamed the
+    backends of every Service after it, which is the very change the drill measured. A backend is now named by its
+    pool (`p-<pool name>`), and a cluster's pool by its Service and node port. A HAProxy that does not answer has no
+    state to save, and the file is removed. `init-state down` is not used: it needs HAProxy 3.1, and Debian 13 ships
+    3.0.
+  - *The controller sent a node before it was Ready.* It sends a node from its first turn Ready on, and then for as
+    long as the node exists, Ready or not. Kubernetes' own service controller hands a balancer every node that is
+    not deleted, not excluded and not tainted for removal, Ready or not (`k8s.io/cloud-provider`
+    `controllers/service/controller.go`, `stableNodeSetPredicates`, v0.34.0; KEP-3458), so that a flapping Ready
+    condition does not reconfigure every balancer. The second half is kept: a member that goes NotReady stays, and
+    its health check decides. The first half is not, because HAProxy before 3.1 starts a member new to its config as
+    up. The memory of what was sent is the controller process's: after its restart a member that is NotReady at that
+    moment is left out until it is Ready again.
+  - *A member that just went away kept its share of the connections until two checks had failed.* `option redispatch
+    1` with `retries 3` and `timeout connect 2s` (it was 5 s): a connection a member does not take is tried on
+    another member at once. A member that stopped costs a client the connect timeout, 2 seconds, not its answer.
+    Only the connect is tried again, never a request that was sent. An open connection to a VM that stops is still
+    cut, as with any balancer.
+
+  What is left: a member new to a config still starts as up, so a node that is Ready and does not forward yet (or
+  has no local endpoint of a `Local` Service) gets connections until its first check fails, each of which waits the
+  connect timeout and is then answered by another member. Not run on a lab: the figures above are those of
+  `v0.11.0`, and the fix is shown by tests, on real HAProxy 3.0 and 3.2 in the container test.
+- **A Service's address is written when it is served** (`cmd/lb-controller`,
+  `internal/platform/project/cloud_lb_cluster_pve.go`; drill N3-7). The controller wrote
+  `status.loadBalancer.ingress` as soon as the portal had allocated an address, 3 min 12 s before the first Service
+  of a cluster answered: `helm --wait`, Argo CD's health and external-dns took the Service for reachable. It writes
+  it when the portal answers `ready`, keeps an address already written while a later change is building, and
+  removes it when the portal names none. `ready` now means that the appliance holding the address serves the
+  Service's config: one appliance was enough, and every config reaches the standby first. cloud-provider-openstack
+  does the same (`pkg/openstack/loadbalancer.go`, `ensureOctaviaLoadBalancer`, v1.34.0: an error while the
+  balancer's provisioning status is not `ACTIVE`, the status only after it).
+- **A change the API was applying when it stopped goes live a minute later, not three** (`cloud_lb_pve.go`,
+  `cloud_lb_cluster_pve.go`, `cloud_lb_pair_pve.go`; drill N3-9: 190 to 209 s). The balancer's own lock
+  (`lb-<externalId>`) was taken for three minutes whatever happened to its holder. It is a lease of one minute that
+  its holder extends while it works (`ShedLock.Hold`, as the cluster's converge lock since `v0.11.0`), at all seven
+  places that take it. The locks are not released when the API is told to stop: the bound is the lease.
+- **A paused VM is a known state** (`internal/cloud/pve/vm_inventory.go`; drill N3-5). Proxmox lists a paused VM as
+  `paused`, and the VM inventory accepted `running` and `stopped` only: the project's SERVER sync was held back, and
+  with it the provider's seed sweep and sandbox sweep, for as long as the pause lasted, which is every VM of a
+  project an operator suspends. The row reads `PAUSED`, and the project stays trusted. The check is the one of
+  `v0.10.2`; the fakes listed a paused VM as `running`, and now list it as Proxmox does.
+- **A pair with a paused appliance names the pause** (`cloud_lb_pair_pve.go`; drill N3-6). The row of a pair whose
+  former master was paused read "Both appliances hold the address: they cannot hear each other", from what the
+  paused one held before the pause. A paused appliance holds nothing, and the row reads "One appliance carries the
+  traffic, with no standby (appliance N: its VM is paused). A paused VM serves again when it is resumed in Proxmox;
+  Replace appliances builds a new one." The platform still does not resume a paused appliance.
+- **An appliance whose HAProxy has no listeners gives up the address** (`internal/cloud/pve/lbpair.go`; drill N3-3:
+  it kept the address for 25 s, until the next pass). keepalived's track script asked only whether HAProxy's master
+  has a worker. It also asks whether the first address the config binds is listened on (`ss`, one bind, no process
+  names: it runs every second), except for the ten seconds after an apply put a file in place, while HAProxy loads
+  it. Only a hand edit makes that state.
+- **Three messages** (drills N3-1, N3-2, N3-4). During Replace appliances the row showed the appliance that carries
+  the traffic with its role of before the switch ("BACKUP", no address) for as long as the build took: it is read
+  again once the old one is out. `GET_HEALTH` of a balancer whose HAProxy is stopped answered 409 "The load
+  balancer's VM did not answer": it says that HAProxy is not running and that the next pass starts it. A pair whose
+  address holder runs the config of before a change it could not take yet read "One appliance carries the traffic,
+  with no standby", with the healthy standby as the one listed up: it reads "The appliance that holds the address is
+  the one that is not in order (...); the other one is ready, as its standby".
+
 ### Changed
 
 - **The platform BOM on `main` is `0.12.0-dev`, and the build carries the BOM of `0.11.0`**

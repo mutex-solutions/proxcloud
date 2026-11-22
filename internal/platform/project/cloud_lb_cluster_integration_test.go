@@ -224,15 +224,16 @@ func TestLBClusterStateConverges(t *testing.T) {
 		defer f.mu.Unlock()
 		return f.pages
 	}
-	lockedUntil := func() time.Time {
+	lockUntil := func(name string) time.Time {
 		var row struct {
 			LockUntil time.Time `json:"lockUntil"`
 		}
-		if _, err := db.C("shedLock").Get(ctx, "lbc-c1", &row); err != nil {
+		if _, err := db.C("shedLock").Get(ctx, name, &row); err != nil {
 			t.Fatal(err)
 		}
 		return row.LockUntil
 	}
+	lockedUntil := func() time.Time { return lockUntil("lbc-c1") }
 	// quiet waits for the passes the PUTs started in the background to end, and returns the count.
 	quiet := func() int {
 		t.Helper()
@@ -318,9 +319,13 @@ func TestLBClusterStateConverges(t *testing.T) {
 	// restarted in the middle of a pass left it held: for 24.7 minutes every PUT was stored and none applied. A pass
 	// holds it for a lease it extends while it works. What a pass leaves behind when its API dies is what it holds at
 	// that moment: one lease.
-	lease := lbcLease
-	lbcLease = 1500 * time.Millisecond
-	defer func() { lbcLease = lease }()
+	//
+	// N3-9 (v0.11.0-rc.2 drill): the balancer's own lock (lb-<id>), which the pass takes inside the cluster's, was
+	// still taken for three minutes whatever happened to its holder, so a change the API was applying when it stopped
+	// went live 190 to 209 s later. It is a lease now, like the cluster's.
+	lease, rowLease := lbcLease, lbLease
+	lbcLease, lbLease = 1500*time.Millisecond, 1500*time.Millisecond
+	defer func() { lbcLease, lbLease = lease, rowLease }()
 	gate := make(chan struct{})
 	var openGate sync.Once
 	open := func() {
@@ -337,24 +342,32 @@ func TestLBClusterStateConverges(t *testing.T) {
 	f.mu.Unlock()
 	passDone := make(chan struct{})
 	go func() { h.lbClusterConverge(ctx, "c1", true); close(passDone) }()
-	until("a pass in the middle of its work", func() bool { return lockedUntil().After(time.Now()) })
-	first := lockedUntil()
+	until("a pass in the middle of its work", func() bool { return lockedUntil().After(time.Now()) && lockUntil("lb-"+ext).After(time.Now()) })
+	first, firstRow := lockedUntil(), lockUntil("lb-"+ext)
 	if left := time.Until(first); left > lbcLease {
 		t.Fatalf("an API that dies now leaves the cluster locked for %s, want a lease (%s) at most", left, lbcLease)
+	}
+	if left := time.Until(firstRow); left > lbLease {
+		t.Fatalf("an API that dies now leaves the balancer locked for %s, want a lease (%s) at most", left, lbLease)
 	}
 	time.Sleep(2 * lbcLease) // the pass works on, longer than a lease
 	if now := lockedUntil(); !now.After(time.Now()) || !now.After(first) {
 		t.Fatalf("a pass still at work lost its lock: until %s, first %s", now, first)
 	}
+	if now := lockUntil("lb-" + ext); !now.After(time.Now()) || !now.After(firstRow) {
+		t.Fatalf("a pass still at work lost the balancer's lock: until %s, first %s", now, firstRow)
+	}
 	open()
 	<-passDone
-	if lockedUntil().After(time.Now()) {
-		t.Fatal("the lock outlived its pass")
+	if lockedUntil().After(time.Now()) || lockUntil("lb-"+ext).After(time.Now()) {
+		t.Fatal("a lock outlived its pass")
 	}
-	// The lock of a pass whose API died: held, extended by nobody. The state the controller sends meanwhile is stored
-	// and not applied; it is applied by a PUT a lease later.
-	if ok, err := h.sdnLock.Lock(ctx, "lbc-c1", lbcLease, time.Now().UTC()); err != nil || !ok {
-		t.Fatalf("lock: %v %v", ok, err)
+	// The locks of a pass whose API died in its apply: held, extended by nobody. The state the controller sends
+	// meanwhile is stored and not applied; it is applied by a PUT a lease later.
+	for _, name := range []string{"lbc-c1", "lb-" + ext} {
+		if ok, err := h.sdnLock.Lock(ctx, name, lbcLease, time.Now().UTC()); err != nil || !ok {
+			t.Fatalf("lock %s: %v %v", name, ok, err)
+		}
 	}
 	died := time.Now()
 	changed := svc("a", 80, 30082)
@@ -380,6 +393,40 @@ func TestLBClusterStateConverges(t *testing.T) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		return strings.Contains(f.files[len(f.files)-1], worker1+":30080 check")
+	})
+	quiet()
+
+	// N3-7 (v0.11.0-rc.2 drill): the controller writes a Service's address into its status when the Service is
+	// answered "ready", so ready means that the appliance holding the address serves the Service's config. Here the
+	// holder cannot take a change yet (its package manager runs) and the standby has it: the Service is not ready,
+	// keeps its address, and the row says which appliance is behind (N3-4: it said "no standby").
+	loaded := func(vm string) string {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.guests[vm].loaded
+	}
+	f.set("302", func(g *lbGuest) { g.aptRunning = true })
+	moved := svc("a", 80, 30084)
+	state(moved)
+	lb = converge("the standby serves the change, the holder does not", func(lb *loadBalancer) bool {
+		return lb.Status == lbStatusDegraded && strings.Contains(loaded("301"), worker1+":30084 check")
+	})
+	if s := lb.Cluster.Services[0]; s.State != lbgw.StateBuilding || s.VIP != vipA || strings.Contains(loaded("302"), ":30084") ||
+		!strings.Contains(lb.StatusMessage, "The appliance that holds the address is the one that is not in order (appliance 302: it runs an older configuration)") {
+		t.Fatalf("ready before the holder serves it: %+v, %s %q", s, lb.Status, lb.StatusMessage)
+	}
+	if ans := state(moved); ans.Services[0].State != lbgw.StateBuilding || ans.Services[0].Address != vipA {
+		t.Fatalf("the controller is answered %+v", ans.Services[0])
+	}
+	f.set("302", func(g *lbGuest) { g.aptRunning = false })
+	converge("ready once the holder serves it", func(lb *loadBalancer) bool {
+		return lb.Status == lbStatusActive && lb.Cluster.Services[0].State == lbgw.StateReady && strings.Contains(loaded("302"), worker1+":30084 check")
+	})
+	state(a)
+	until("the state put back", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.files[len(f.files)-1], worker1+":30080 check") && strings.Contains(f.guests["302"].loaded, worker1+":30080 check")
 	})
 	quiet()
 
