@@ -90,13 +90,14 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 	}
 	// The record first: a Remove or an off after a run that failed further on knows what to take away.
 	sb := sp.Sandbox
-	next := SandboxStatus{Placement: want, NodeRange: sb.NodeRange, ProxyAddress: sb.ProxyAddress, Count: sb.Count}
+	// The counts and nodes of this run, not the largest ever: after a smaller group, a larger one is machines nothing
+	// has placed, and the capacity row must fail for them again (sandboxGrowth).
+	next := SandboxStatus{Placement: want, NodeRange: sb.NodeRange, ProxyAddress: sb.ProxyAddress, Count: sb.Count, Nodes: slices.Clone(sb.Nodes)}
 	if built != nil {
-		next.Count, next.SystemCount = max(sb.Count, built.Count), built.SystemCount
 		next.ChartVersion, next.Certificate, next.BuiltAt = built.ChartVersion, built.Certificate, built.BuiltAt
 	}
 	if want == SandboxSeparate {
-		if next.SystemCount = max(next.SystemCount, sb.System.Count); next.ChartVersion == "" {
+		if next.SystemCount, next.SystemNodes = sb.System.Count, slices.Clone(sb.System.Nodes); next.ChartVersion == "" {
 			next.ChartVersion = x.full.TenantCharts.Kubernetes.Version
 		}
 	}

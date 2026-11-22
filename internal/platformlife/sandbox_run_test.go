@@ -91,7 +91,7 @@ func TestApplyBuildsTheSharedSandbox(t *testing.T) {
 	}
 	st := in.Status.Sandbox
 	if st == nil || st.Placement != SandboxShared || st.NodeRange != "10.200.200.64/28" || st.ProxyAddress != "10.200.200.210" || st.Count != 1 || st.BuiltAt == nil ||
-		st.Certificate != sec.SandboxTLSCert {
+		st.Certificate != sec.SandboxTLSCert || !slices.Equal(st.Nodes, []string{"pve1"}) {
 		t.Fatalf("status %+v", st)
 	}
 	if !slices.ContainsFunc(in.Status.Components, func(c ComponentStatus) bool { return c.Name == "sandbox" && c.Cluster == ClusterWorkload }) {
@@ -109,6 +109,35 @@ func TestApplyBuildsTheSharedSandbox(t *testing.T) {
 	}
 	if _, _, sec := p.state.snapshot(); sec.SandboxTLSCert != cert || len(p.pve.acl) < 2 {
 		t.Errorf("second apply: a new certificate, or the row was not written again (%v)", p.pve.acl)
+	}
+	// The record holds what the last run handed to Cluster API, not the largest count ever: after an apply with fewer
+	// machines, more machines are machines nothing has placed, and the capacity row fails for them again.
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Status.Sandbox.Count = 3 })
+	p.again(stageCluster)
+	if end := p.until(30); end != "complete" {
+		t.Fatalf("third apply: %s", end)
+	}
+	_, in, _ = p.state.snapshot()
+	if in.Status.Sandbox.Count != 1 {
+		t.Fatalf("the record keeps a count no run asks for any more: %+v", in.Status.Sandbox)
+	}
+	in.Spec.Sandbox.Count = 3
+	if got := in.sandboxGrowth(); !slices.Equal(got, []string{"pve1"}) {
+		t.Errorf("growth after a smaller group: %v", got)
+	}
+}
+
+// A record that holds the block under a BOM without the sandbox chart (every released one: the save refuses it, so only
+// a record written past the save can): the run builds nothing and asks nothing of Proxmox.
+func TestSandboxRunIsDark(t *testing.T) {
+	p := newPlatform(t, RunApply)
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Spec.Sandbox = sharedSandbox() })
+	p.upTo(stageCluster)
+	if end := p.until(5); end != "fail:"+CodeSandboxRefused || len(p.pve.pools)+len(p.pve.acl)+len(p.pve.tokens) != 0 || p.seed.obj(appsPath+"pc-platform") != nil {
+		t.Fatalf("end %s: %+v; pools %v, acl %v", end, p.stage(stageCluster), p.pve.pools, p.pve.acl)
+	}
+	if s := p.stage(stageCluster); !strings.Contains(s.Message, "has no sandbox chart") {
+		t.Errorf("stage %+v", s)
 	}
 }
 

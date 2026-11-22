@@ -760,7 +760,7 @@ are several, `errors.details.problems`.
   `tls.mode: secret` (an operator's own certificate) is refused at the save too: no route stores one yet. On an
   installed platform a PUT without the block keeps the stored one. `nodeRange` is one aligned IPv4 CIDR inside the
   platform network, apart from every other range, `cidrPool`, the blocked, management and public networks. Once a run
-  built sandboxes (`status.sandbox {placement, nodeRange, proxyAddress, count, systemCount, chartVersion, certificate,
+  built sandboxes (`status.sandbox {placement, nodeRange, proxyAddress, count, nodes, systemCount, systemNodes, chartVersion, certificate,
   builtAt}`), `placement` changes only to `off` and `nodeRange` and `proxyAddress` not at all (`409 fixed_fields`).
 - `GET|PUT /installations/{id}`: the PUT replaces `name` and `spec` and names
   the `rev` it read (`409 rev_conflict` otherwise). It is refused during a run

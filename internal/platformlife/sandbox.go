@@ -95,14 +95,17 @@ type SandboxTLS struct {
 }
 
 // SandboxStatus is what a run built for spec.sandbox, written before anything is built so that a later run and a
-// Remove know what to take away. Count and SystemCount are the largest machine counts a run handed to Cluster API:
-// the capacity row fails for the machines the settings ask for beyond them, which nothing has placed yet.
+// Remove know what to take away. Count and SystemCount are the machine counts the last run handed to Cluster API,
+// Nodes and SystemNodes the Proxmox nodes it placed them on: the capacity row fails for the machines the settings ask
+// for beyond them or on another node, which nothing has placed yet.
 type SandboxStatus struct {
-	Placement    string `json:"placement"`
-	NodeRange    string `json:"nodeRange"`
-	ProxyAddress string `json:"proxyAddress"`
-	Count        int    `json:"count"`
-	SystemCount  int    `json:"systemCount,omitempty"`
+	Placement    string   `json:"placement"`
+	NodeRange    string   `json:"nodeRange"`
+	ProxyAddress string   `json:"proxyAddress"`
+	Count        int      `json:"count"`
+	Nodes        []string `json:"nodes,omitempty"`
+	SystemCount  int      `json:"systemCount,omitempty"`
+	SystemNodes  []string `json:"systemNodes,omitempty"`
 	// ChartVersion is the cluster chart the separate cluster was built with: its Application keeps that version on
 	// every later apply, whatever tenant chart the installation's BOM names by then.
 	ChartVersion string `json:"chartVersion,omitempty"`
@@ -379,18 +382,25 @@ func sandboxFixed(old, next *Installation) []string {
 }
 
 // sandboxGrowth are the Proxmox nodes on which the settings place sandbox machines no run has handed to Cluster API
-// yet: all of the block's nodes before the first build, the nodes of a group whose count went up after it.
+// yet: all of the block's nodes before the first build, the nodes of a group whose count went up after it, and a node
+// the last run placed no machine of the group on.
 func (in *Installation) sandboxGrowth() []string {
 	if !in.Installed() || in.Spec.sandboxMode() == "" {
 		return nil
 	}
 	built, sb := in.Status.Sandbox, in.Spec.Sandbox
-	var nodes []string
-	if built == nil || sb.Count > built.Count {
-		nodes = append(nodes, sb.Nodes...)
+	if built == nil {
+		built = &SandboxStatus{}
 	}
-	if sb.System != nil && in.Spec.sandboxMode() == SandboxSeparate && (built == nil || sb.System.Count > built.SystemCount) {
-		nodes = append(nodes, sb.System.Nodes...)
+	unbuilt := func(m SandboxMachines, count int, on []string) []string {
+		if m.Count > count {
+			return m.Nodes
+		}
+		return slices.DeleteFunc(slices.Clone(m.Nodes), func(n string) bool { return slices.Contains(on, n) })
+	}
+	nodes := unbuilt(sb.SandboxMachines, built.Count, built.Nodes)
+	if sb.System != nil && in.Spec.sandboxMode() == SandboxSeparate {
+		nodes = append(nodes, unbuilt(*sb.System, built.SystemCount, built.SystemNodes)...)
 	}
 	return slices.Compact(slices.Sorted(slices.Values(nodes)))
 }

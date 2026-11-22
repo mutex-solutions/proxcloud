@@ -461,7 +461,8 @@ func TestSandboxPlanRows(t *testing.T) {
 	}
 	// Built and unchanged: no row. More machines: the row again. Off: what is deleted. Another placement: refused.
 	now := in.CreatedAt
-	in.Status.Sandbox = &SandboxStatus{Placement: SandboxSeparate, NodeRange: "10.200.200.64/28", ProxyAddress: "10.200.200.150", Count: 1, SystemCount: 1, BuiltAt: &now}
+	in.Status.Sandbox = &SandboxStatus{Placement: SandboxSeparate, NodeRange: "10.200.200.64/28", ProxyAddress: "10.200.200.150", Count: 1, Nodes: []string{"pve1"},
+		SystemCount: 1, SystemNodes: []string{"pve2"}, BuiltAt: &now}
 	if r := rows(); len(r) != 0 {
 		t.Errorf("built: %+v", r)
 	}
@@ -790,13 +791,18 @@ func TestCapacityFailsForUnbuiltSandboxMachines(t *testing.T) {
 	if got := p.GrowthBlocking(ctx); len(got) != 1 {
 		t.Errorf("the plan's blocking: %v", got)
 	}
-	in.Status.Sandbox = &SandboxStatus{Placement: SandboxShared, Count: 1}
+	in.Status.Sandbox = &SandboxStatus{Placement: SandboxShared, Count: 1, Nodes: []string{"pve1"}}
 	if c := p.capacity(ctx); c.Status != CheckWarn {
 		t.Errorf("built: %+v", c)
 	}
 	in.Spec.Sandbox.Count = 2
 	if c := p.capacity(ctx); c.Status != CheckFail {
 		t.Errorf("one more machine than built: %+v", c)
+	}
+	// The same count on a node the last run placed no sandbox machine on: nothing is built there either.
+	in.Spec.Sandbox.Count, in.Status.Sandbox.Nodes = 1, []string{"pve2"}
+	if c := p.capacity(ctx); c.Status != CheckFail || !slices.Equal(in.sandboxGrowth(), []string{"pve1"}) {
+		t.Errorf("the group moved to another node: %+v, growth %v", c, in.sandboxGrowth())
 	}
 	// Separate: the system group's node counts the same way.
 	in.Spec.Sandbox, in.Status.Sandbox = separateSandbox(), nil
