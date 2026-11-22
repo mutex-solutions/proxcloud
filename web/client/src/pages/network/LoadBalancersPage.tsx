@@ -22,6 +22,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { apiFetch, type CloudScope } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
 import { useCloudList, useCloudScope, useProjectId } from "@/lib/hooks"
+import { certificatesKey, ExpiryNote, fetchCertificates } from "./CertificatesPage"
 import type { CloudResource } from "@/lib/types"
 
 // node: a worker of a Kubernetes cluster, named by its address alone.
@@ -42,6 +43,8 @@ interface Pool {
 // vip: the one address a cluster Service's listener binds.
 interface Listener {
   port: number; protocol?: string; pool: string; sourceRanges?: string[] | null; vip?: string
+  // certificates: the ids of the certificates a tls or https listener presents, the first one by default.
+  certificates?: string[]
   connectionLimit?: number; timeoutClientData?: number
 }
 // One VM of a load balancer with high availability, as the last apply saw it.
@@ -126,7 +129,10 @@ export function ClusterServices({ lb, health }: { lb: LB; health?: Health[] }) {
 const BUSY = new Set(["BUILD"])
 // The listener protocols a load balancer serves today. UDP is served by a pair of appliances only: a load balancer
 // on one VM has no keepalived, which is what fills the kernel's table for UDP.
-const PROTOCOLS = [{ value: "tcp", label: "TCP" }, { value: "http", label: "HTTP" }]
+// A TLS or HTTPS listener ends TLS on the load balancer and speaks plain TCP or HTTP to its pool.
+const PROTOCOLS = [{ value: "tcp", label: "TCP" }, { value: "tls", label: "TLS" }, { value: "http", label: "HTTP" }, { value: "https", label: "HTTPS" }]
+const POOL_PROTOCOL: Record<string, string> = { tcp: "tcp", tls: "tcp", http: "http", https: "http", udp: "udp" }
+const endsTLS = (protocol: string) => protocol === "tls" || protocol === "https"
 const UDP = { value: "udp", label: "UDP" }
 // A UDP pool's checks are keepalived's, not HAProxy's: its own, a datagram to the port, or a TCP or HTTP check of a
 // port the service also has.
@@ -382,6 +388,7 @@ export function LoadBalancerDetailPage() {
     () => ((servers.data ?? []) as CloudResource[]).filter((s) => !s.data?.server?.loadBalancerId),
     [servers.data],
   )
+  const certs = useQuery({ queryKey: certificatesKey(pid), queryFn: () => fetchCertificates(pid), enabled: !!pid })
   const [listeners, setListeners] = useState<Listener[]>([])
   const [pools, setPools] = useState<Pool[]>([])
   const [dirty, setDirty] = useState(false)
@@ -411,22 +418,26 @@ export function LoadBalancerDetailPage() {
   }
   const setListener = (i: number, patch: Partial<Listener>) => edit(() => setListeners(listeners.map((x, j) => (j === i ? { ...x, ...patch } : x))))
   const protocolOf = (l: Listener) => l.protocol ?? pools.find((p) => p.name === l.pool)?.protocol ?? "http"
-  // A pool speaks one protocol to its servers, the one its listeners need: the pool and its other listeners follow.
+  // A pool speaks one protocol to its servers, the one its listeners need (plain TCP behind TLS, HTTP behind HTTPS):
+  // the pool follows, and so do its other listeners that need another one.
   const setProtocol = (i: number, protocol: string) => edit(() => {
     const pool = listeners[i].pool
+    const speaks = POOL_PROTOCOL[protocol]
     // UDP and the TCP family share no option but the algorithm, persistence and the members: what the other side
     // does not take (PROXY, the timeouts, its kind of check) goes with the change.
     const crosses = (from: string) => (from === "udp") !== (protocol === "udp")
     setListeners(listeners.map((x, j) => {
-      if (j !== i && x.pool !== pool) return x
-      const next = { ...x, protocol }
+      if (j !== i && (x.pool !== pool || POOL_PROTOCOL[protocolOf(x)] === speaks)) return x
+      const next = { ...x, protocol: j === i ? protocol : speaks }
       if (crosses(protocolOf(x))) delete next.timeoutClientData
+      if (!endsTLS(next.protocol)) delete next.certificates
+      else next.certificates ??= []
       return next
     }))
     setPools(pools.map((p) => {
       if (p.name !== pool) return p
-      if (!crosses(p.protocol)) return { ...p, protocol }
-      return { name: p.name, protocol, algorithm: p.algorithm, members: p.members, sessionPersistence: p.sessionPersistence, healthCheck: null, proxyProtocol: false }
+      if (!crosses(p.protocol)) return { ...p, protocol: speaks }
+      return { name: p.name, protocol: speaks, algorithm: p.algorithm, members: p.members, sessionPersistence: p.sessionPersistence, healthCheck: null, proxyProtocol: false }
     }))
   })
 
@@ -438,6 +449,7 @@ export function LoadBalancerDetailPage() {
     onSuccess: () => {
       toast.success("Configuration saved")
       setDirty(false)
+      void qc.invalidateQueries({ queryKey: certificatesKey(pid) }) // which balancer uses which certificate changed
       void qc.invalidateQueries({ queryKey: ["cloud-resource", pid, resourceId] })
       void qc.invalidateQueries({ queryKey: ["lb-health", pid, resourceId] })
     },
@@ -632,7 +644,7 @@ export function LoadBalancerDetailPage() {
                   </div></>}
                 </div>
                 <p className="text-xs text-muted-foreground" data-testid={`pool-protocol-${i}`}>
-                  Its servers are spoken to in {p.protocol === "udp" ? "UDP" : p.protocol === "tcp" ? "TCP" : "HTTP"}, as its listeners say. An empty figure is the load balancer's own.
+                  Its servers are spoken to in {p.protocol === "udp" ? "UDP" : p.protocol === "tcp" ? "TCP" : "HTTP"}, as its listeners say (plain, also behind a TLS or HTTPS listener). An empty figure is the load balancer's own.
                 </p>
                 {p.protocol === "udp" && (
                   <p className="text-xs text-muted-foreground" data-testid={`pool-udp-${i}`}>
@@ -688,7 +700,12 @@ export function LoadBalancerDetailPage() {
                 </Select>
                 <Input className="w-24" type="number" aria-label="Listener port" value={l.port} onChange={(e) => setListener(i, { port: Number(e.target.value) })} />
                 <span className="text-sm text-muted-foreground">forwards to</span>
-                <Select value={l.pool} onValueChange={(v) => setListener(i, { pool: v, protocol: pools.find((p) => p.name === v)?.protocol })}>
+                <Select value={l.pool} onValueChange={(v) => {
+                  // The listener keeps its protocol when the new pool speaks what it needs, and takes the pool's otherwise.
+                  const speaks = pools.find((p) => p.name === v)?.protocol
+                  const keeps = POOL_PROTOCOL[protocolOf(l)] === speaks
+                  setListener(i, { pool: v, protocol: keeps ? protocolOf(l) : speaks, certificates: keeps ? l.certificates : undefined })
+                }}>
                   <SelectTrigger className="w-44" aria-label="Pool"><SelectValue /></SelectTrigger>
                   <SelectContent>{pools.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}</SelectContent>
                 </Select>
@@ -705,6 +722,38 @@ export function LoadBalancerDetailPage() {
                     onChange={(e) => setListener(i, { timeoutClientData: numberOf(e.target.value, 1000) })} />
                 </>}
                 <Button variant="ghost" size="sm" onClick={() => edit(() => setListeners(listeners.filter((_, j) => j !== i)))}>Remove</Button>
+                {endsTLS(protocolOf(l)) && (
+                  <div className="flex basis-full flex-wrap items-center gap-2 pl-1" data-testid={`listener-certificates-${i}`}>
+                    <span className="text-sm text-muted-foreground">presents</span>
+                    {(l.certificates ?? []).map((id, k) => {
+                      const c = certs.data?.find((x) => x.id === id)
+                      return (
+                        <span key={id} className="inline-flex items-center gap-2 rounded-md border px-2 py-1 text-sm">
+                          <span className="font-medium">{c?.name ?? "A certificate that was deleted"}</span>
+                          {c && <span className="text-xs text-muted-foreground">{c.dnsNames.join(", ")}</span>}
+                          {k === 0 && <span className="text-xs text-muted-foreground">default</span>}
+                          {c && <ExpiryNote cert={c} />}
+                          <button type="button" className="text-muted-foreground hover:text-foreground" aria-label={`Take certificate ${c?.name ?? id} off the listener`}
+                            onClick={() => setListener(i, { certificates: (l.certificates ?? []).filter((x) => x !== id) })}>×</button>
+                        </span>
+                      )
+                    })}
+                    <Select value="" onValueChange={(v) => setListener(i, { certificates: [...(l.certificates ?? []), v] })}>
+                      <SelectTrigger className="w-56" aria-label="Add a certificate"><SelectValue placeholder="Add a certificate" /></SelectTrigger>
+                      <SelectContent>
+                        {(certs.data ?? []).filter((c) => !(l.certificates ?? []).includes(c.id)).map((c) => (
+                          <SelectItem key={c.id} value={c.id}>{c.name} ({c.dnsNames.join(", ") || c.subject})</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {!(l.certificates ?? []).length && <span className="text-xs text-destructive">{protocolOf(l) === "https" ? "An HTTPS" : "A TLS"} listener needs a certificate.</span>}
+                    {!certs.data?.length && <Link className="text-xs underline" to={`/p/${pid}/certificates`}>Upload one on the Certificates page</Link>}
+                    <span className="basis-full text-xs text-muted-foreground">
+                      A client gets the certificate that holds the name it asks for, and the first one otherwise. TLS 1.2 and 1.3.
+                      {protocolOf(l) === "https" ? " The servers are spoken to in HTTP and read the client's address in X-Forwarded-For and the scheme in X-Forwarded-Proto." : " The servers are spoken to in plain TCP."}
+                    </span>
+                  </div>
+                )}
               </div>
             ))}
           </CardContent>

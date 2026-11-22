@@ -43,6 +43,7 @@ export const routes: RouteEntry[] = [
   { path: `${P}/security-groups`, name: "security-groups", hasTable: true, hasDialogs: true },
   { path: `${P}/security-groups/res-security-group-001`, name: "security-group-detail", hasTable: true, hasDialogs: true },
   { path: `${P}/load-balancers`, name: "load-balancers", hasTable: true, hasDialogs: true },
+  { path: `${P}/certificates`, name: "certificates", hasTable: true, hasDialogs: true },
   { path: `${P}/dns`, name: "dns-zones", hasTable: true, hasDialogs: true },
   { path: `${P}/dns/res-dns-zone-001`, name: "dns-zone-detail", hasTable: true, hasDialogs: true },
 
