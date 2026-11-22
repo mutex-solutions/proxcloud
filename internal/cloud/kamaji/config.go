@@ -79,6 +79,13 @@ func ChartHasNodeDeletionTimeout(v string) bool {
 	return chartAtLeast(v, NodeDeletionTimeoutChartVersion)
 }
 
+// GroupPoolChartVersion is the first cluster chart with a node group's own pool, address range and DNS servers, and
+// with addons.sandbox: what the platform's sandbox group and its sandbox cluster are rendered with.
+const GroupPoolChartVersion = "0.1.18"
+
+// ChartHasGroupPool reports a cluster chart that gives one node group a pool, an address range and DNS servers.
+func ChartHasGroupPool(v string) bool { return chartAtLeast(v, GroupPoolChartVersion) }
+
 // LBControllerChartVersion is the first cluster chart that renders the load balancer controller (loadBalancer,
 // templates/lb-controller.yaml) and MetalLB's class proxcloud.io/internal in default mode. An older chart ignores the
 // block: a cluster on it gets no controller, so none is minted for it.

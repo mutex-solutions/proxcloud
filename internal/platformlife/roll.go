@@ -108,7 +108,7 @@ func k8sStep(from, to string) string {
 // site. deleteFirst are the units replaced by deleting the machine first; templates the target image's template VMID
 // per node when the site was read; databases the number of one-instance databases on the cluster, -1 when not read.
 func rollRows(in *Installation, from, to *BOM, deleteFirst []string, templates map[string]int, databases int) []PlanChange {
-	c := in.Spec.Clusters[0]
+	c := in.Spec.platformCluster()
 	units := rollUnits(c)
 	fromV, toV := from.Kubernetes.Version, to.Kubernetes.Version
 	if fromV == toV { // a rebuilt image of the same version
@@ -147,6 +147,10 @@ func rollRows(in *Installation, from, to *BOM, deleteFirst []string, templates m
 			if databases >= 0 {
 				text += fmt.Sprintf(" The platform cluster holds %d databases with one instance.", databases)
 			}
+		case u.Group == SandboxGroup:
+			text = "Every sandbox running on this machine ENDS: a sandbox is not moved, and its files are gone with the machine. New sandboxes start on the new " +
+				"machine only after the sandbox chart's node setup has installed runsc there and the provider sync has written its VM firewall and taken its " +
+				"unsecured taint off (not before the machine is 20 minutes old). Tenant clusters and databases are not on this group."
 		default:
 			text = "Every pod on this machine restarts on the new one."
 		}
@@ -407,7 +411,7 @@ func ReadRoll(ctx context.Context, in *Installation, to *BOM, s RollSite) RollRe
 			bad = append(bad, "the Machines could not be read ("+clip(err.Error())+")")
 		}
 		want := 0
-		for _, u := range rollUnits(in.Spec.Clusters[0]) {
+		for _, u := range rollUnits(in.Spec.platformCluster()) {
 			want += u.Machines
 		}
 		for _, m := range machines {
@@ -504,7 +508,7 @@ func apiAway(err error) error {
 // be Ready and every tenant that was healthy before the first step healthy again. A Cancel is honoured between
 // looks; a machine in flight is finished by Cluster API on its own.
 func (x *acq) roll(ctx context.Context, seed *kamajik8s.Client, templates []StageItem) error {
-	units := rollUnits(x.in.Spec.Clusters[0])
+	units := rollUnits(x.in.Spec.platformCluster())
 	wl, err := x.workload(ctx, seed)
 	if err != nil {
 		return err
@@ -637,7 +641,7 @@ func (x *acq) progress(ctx context.Context, items []StageItem) error {
 			s.Items = items
 		}
 		if r := rollOf(x.in); r != nil {
-			s.Progress = fmt.Sprintf("step %d of %d", min(r.Step, len(rollUnits(x.in.Spec.Clusters[0]))), len(rollUnits(x.in.Spec.Clusters[0])))
+			s.Progress = fmt.Sprintf("step %d of %d", min(r.Step, len(rollUnits(x.in.Spec.platformCluster()))), len(rollUnits(x.in.Spec.platformCluster())))
 		}
 		s.LastProgressAt, s.Deadline = &now, &d
 	})

@@ -336,3 +336,21 @@ func TestRevokeClusterCSITokenOnlyWhenMinted(t *testing.T) {
 		t.Fatalf("list refused: err %v, deletes sent %v, want the delete sent", err, sent)
 	}
 }
+
+// The sandbox pool gets no row from a script: the portal token opens it with what ProxCloudPlatform passes down from
+// /pool. So the role must hold Pool.Allocate and every privilege of ProxCloudCAPI (PVE takes those in place of
+// Permissions.Modify for an ACL row below /pool), or the Check's row sandbox could never pass on a site the scripts set up.
+func TestPlatformRoleOpensTheSandboxPool(t *testing.T) {
+	role := PlatformRolePrivileges()
+	for _, p := range SandboxPoolPrivileges().Privs {
+		if !slices.Contains(role, p) {
+			t.Errorf("%s lacks %s, which the portal token needs on /pool/%s", PlatformRole, p, SandboxPool)
+		}
+	}
+	if !slices.ContainsFunc(PlatformACLs, func(a PlatformACL) bool { return a.Path == "/pool" && a.Role == PlatformRole && a.Propagate }) {
+		t.Errorf("no propagated %s row on /pool: nothing passes the role down to /pool/%s", PlatformRole, SandboxPool)
+	}
+	if slices.ContainsFunc(PlatformACLs, func(a PlatformACL) bool { return a.Path == "/pool/"+SandboxPool }) {
+		t.Errorf("a script row on /pool/%s: docs/proxmox-permissions.md says no script names the pool", SandboxPool)
+	}
+}

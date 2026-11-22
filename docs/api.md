@@ -766,8 +766,15 @@ are several, `errors.details.problems`.
   and `seed.mode: existing` are refused until a later release. `controlPlane` is `{node, replicas, cores, memoryMiB,
   diskGiB}`: `replicas` is 1 or 3 (a spec without it means 1, and the answer names it), all machines on `node`; 3
   need a BOM whose cluster chart is 0.1.14 or newer (the preflight's `spec` row). `controlPlane.nodes` (machines on
-  several nodes) is refused unless it is `[node]`, and `spec.sandbox {placement: shared|separate}`, the place for the
-  sandbox service's placement, is refused until the release that builds it.
+  several nodes) is refused unless it is `[node]`, and `spec.sandbox` (`{placement: shared|separate|off, nodes, count, cores, memoryMiB, diskGiB, nodeRange, dns,
+  proxyAddress, domain, tls: {mode}, system}`: [managed-services.md](managed-services.md#presets-and-the-control-plane-count))
+  is refused while the installation's BOM names no sandbox chart, which no release's does yet
+  (`400 invalid_installation`, "has no sandbox chart"); `placement: off` and no block are always taken.
+  `tls.mode: secret` (an operator's own certificate) is refused at the save too: no route stores one yet. On an
+  installed platform a PUT without the block keeps the stored one. `nodeRange` is one aligned IPv4 CIDR inside the
+  platform network, apart from every other range, `cidrPool`, the blocked, management and public networks. Once a run
+  built sandboxes (`status.sandbox {placement, nodeRange, proxyAddress, count, nodes, systemCount, systemNodes, chartVersion, certificate,
+  builtAt}`), `placement` changes only to `off` and `nodeRange` and `proxyAddress` not at all (`409 fixed_fields`).
 - `GET|PUT /installations/{id}`: the PUT replaces `name` and `spec` and names
   the `rev` it read (`409 rev_conflict` otherwise). It is refused during a run
   (`409 run_active`) and for a fixed field (`409 fixed_fields`): `serviceId`
@@ -812,7 +819,7 @@ are several, `errors.details.problems`.
   changes nothing. No answer quotes the line.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
   with rows `flags`, `scheduler` (a `warn` that says what tenants miss and the command that turns the job scheduler
-  on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `credentials`, `machines`, `nodes`, `certificates`, `capacity`,
+  on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `sandbox` (present while `spec.sandbox` asks for sandboxes: whether the portal token can make pool `proxcloud-sbx` and open it for the sandbox machines, and whether the pool is free; a warning when the ACL row of a built shared group is gone), `credentials`, `machines`, `nodes`, `certificates`, `capacity`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
   `pve-api-rule`, `seed-backup`, `argocd-access` and `images`. `argocd-access` is present while the spec has
@@ -843,6 +850,8 @@ are several, `errors.details.problems`.
   refused with a `400`, except on a Kubernetes provider with shared workers
   (`cluster.shared`), which uses no tenant network. It is `ok` for a zone without
   DHCP, and absent when the provider names no zone.
+  `capacity` counts the sandbox machines of `spec.sandbox` too, and fails, also on an installed platform, for sandbox
+  machines no run has built on a node without the room (as for a control plane that grows).
   `capacity` is absent while the CAPI token is not stored. It fails before the first install when a node's memory,
   less the configured memory of the other VMs and containers on it as the CAPI token lists them, is smaller than what
   the settings place there with one spare machine for the control plane. It is `warn` when that fits and one spare
@@ -936,6 +945,10 @@ are several, `errors.details.problems`.
   when `spec.access.argocd` differs from what a run built (`status.argocdUrl`, `status.argocdSources`): `from` and
   `to` are the URLs (`to` empty: the address is removed; both equal: only the sources change), and `impact` says
   whether ArgoCD restarts, the address MetalLB announces and the networks let in. It also holds
+  `{cluster, name: "sandbox", from, to, class: "machines", stage: "cluster", impact}` with
+  `{name: "sandbox-pool", class: "site"}` and `{name: "sandbox-access", class: "site"}` while `spec.sandbox` differs
+  from what a run built (adding lists the machines per node, the pool and the ACL row or token; `to: "off"` lists what
+  is deleted; another placement than the built one is `class: "refused"` with `blocking`), and
   `{name: "pve-api-rule", to, class: "site", stage: "seed-vm", impact}` while the cluster firewall of
   Proxmox does not hold the rule `proxcloud:pve-api:<installation>` as the settings name it (a platform
   installed by 0.8.x, or a rule deleted or changed by hand): the run writes that one rule in stage 3.
@@ -956,6 +969,8 @@ are several, `errors.details.problems`.
   - `changes[]` lists every difference of the two BOMs:
     `{cluster, name, from, to, class, stage, wave, impact, blocking}`. `class` is
     `chart` (the run syncs a new chart version in `stage`, at `wave`),
+    `added` (a component the target BOM adds that is rendered only for settings that ask for its feature: the sandbox
+    chart; every other added component is `refused`),
     `record only` (nothing of the platform is synced for it), `refused`, `seed` (the entry `seed.k3s`, from and to a
     k3s version: stage `seed-k3s` replaces k3s on the running seed VM), or `site` (a write on the site outside the
     platform's clusters: the entry `pve-api-rule` above, which is no difference of the BOMs, and next to a `seed`
@@ -1079,6 +1094,9 @@ are several, `errors.details.problems`.
   Stage 9 fails with `argocd_address_unavailable` when the spec names an ArgoCD address and MetalLB did not give it
   to the platform cluster's `argocd-server` Service before the wave's deadline; the message names the Service that
   holds it when one does.
+  Stage 7 fails with `sandbox_refused` when the settings ask for another placement than the one a run built or the
+  run's BOM has no sandbox chart, and with `sandbox_access_failed` when Proxmox refuses the pool, the ACL row or the
+  token of the sandbox machines; nothing of the cluster was changed in either case.
   An upgrade run has `fromBom`; its codes `unexpected_rollout`, `capacity_short` and `rollout_stalled` (stage 7) and
   `tenants_unhealthy` (stage 9, and stage 7 between two units of a replacement of machines) are in
   [managed-services.md](managed-services.md#upgrade-between-boms).

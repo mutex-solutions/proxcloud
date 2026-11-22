@@ -1,0 +1,84 @@
+application:
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    labels:
+      app.kubernetes.io/managed-by: proxcloud-platform
+      proxcloud.io/bom-release: 0.0.0-synthetic
+      proxcloud.io/component: sandbox
+      proxcloud.io/platform-installation: pi-0123abcd
+    name: pc-platform-sandbox
+    namespace: argocd
+  spec:
+    destination:
+      namespace: sandbox-system
+      server: https://192.0.2.10:6443
+    project: proxcloud-platform
+    source:
+      chart: proxcloud-sandbox
+      helm:
+        releaseName: sandbox
+        valuesObject:
+          guardrail:
+            extraDeny:
+              - 192.0.2.0/24
+          mode: shared
+          proxy:
+            address: 192.0.2.245
+            domain: sbx.example.org
+      repoURL: ghcr.io/mutex-solutions/charts
+      targetRevision: 0.1.0
+    syncPolicy:
+      automated:
+        prune: true
+        selfHeal: true
+      retry:
+        backoff:
+          duration: 30s
+          factor: 2
+          maxDuration: 5m
+        limit: 10
+      syncOptions:
+        - CreateNamespace=true
+        - ServerSideApply=true
+csiNode:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: proxcloud.io/node-group
+                operator: NotIn
+                values:
+                  - sandbox
+  tolerations:
+    - operator: Exists
+nodeGroup:
+  addresses:
+    - 192.0.2.64/28
+  dnsServers:
+    - 192.0.2.53
+  machineCores: 2
+  machineCount: 1
+  machineImageId: pve2=9101
+  machineLabels:
+    node-restriction.kubernetes.io/proxcloud-node-group: sandbox
+  machineMemoryMiB: 4096
+  machineRootVolume:
+    diskSize: 40
+  machineTags:
+    - proxcloud
+    - pc-platform
+    - pc-platform-pi-0123abcd
+    - pc-sandbox
+  name: sandbox
+  nodeLabels:
+    proxcloud.io/sandbox: cpu
+  pool: proxcloud-sbx
+  taints:
+    - effect: NoSchedule
+      key: proxcloud.io/sandbox
+      value: "true"
+    - effect: NoSchedule
+      key: proxcloud.io/unsecured
+      value: "true"
