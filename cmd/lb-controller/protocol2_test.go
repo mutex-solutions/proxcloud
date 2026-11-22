@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -276,9 +277,24 @@ func TestEventsOfProtocol2(t *testing.T) {
 	}
 }
 
+// gatewayDir is the gateway Secret a controller mounts, for the test's portal.
+func gatewayDir(t *testing.T, ts *httptest.Server) string {
+	t.Helper()
+	dir := t.TempDir()
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
+	if err := os.WriteFile(filepath.Join(dir, "ca.crt"), ca, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte("lb@proxcloud!pc-c-1=s3cr3t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // A portal older than the controller (a portal rolled back to v0.11.0) decodes the request strictly and refuses a
-// field it does not know. It says its protocol on every answer, and the next request is the one protocol 1 had.
-func TestGatewayPutFallsBackToProtocol1(t *testing.T) {
+// field it does not know, naming its protocol. The controller then sends it the request protocol 1 had, in the same
+// turn and for that request only: the first request a portal that came back gets is the whole one again.
+func TestGatewayPutStepsDownForOneRequestOnly(t *testing.T) {
 	// v0.11.0's request, as its gateway decodes it (internal/cloud/lbgw/gateway.go at v0.11.0: DisallowUnknownFields).
 	type oldService struct {
 		UID, Namespace, Name  string
@@ -289,8 +305,32 @@ func TestGatewayPutFallsBackToProtocol1(t *testing.T) {
 		ProxyProtocol         bool
 		IPFamilies            []string
 	}
-	var got []oldService
+	var (
+		old      = true        // the portal is v0.11.0
+		refuse   bool          // the portal of this release refuses the request
+		requests int           // since the test last looked
+		got      []oldService  // what the old portal took
+		whole    *lbgw.Request // what the portal of this release got
+	)
+	refusal := func(w http.ResponseWriter, msg string) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"reason": lbgw.ReasonInvalid, "message": msg})
+	}
+	ready := func(w http.ResponseWriter, uid string) {
+		_ = json.NewEncoder(w).Encode(lbgw.Answer{Services: []lbgw.ServiceStatus{{UID: uid, State: lbgw.StateReady, Address: "203.0.113.5"}}})
+	}
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if !old {
+			w.Header().Set(lbgw.ProtocolHeader, "2")
+			whole = &lbgw.Request{}
+			if err := json.NewDecoder(r.Body).Decode(whole); err != nil || refuse {
+				refusal(w, "lb gateway: a Service needs its uid, and Kubernetes names")
+				return
+			}
+			ready(w, whole.Services[0].UID)
+			return
+		}
 		w.Header().Set(lbgw.ProtocolHeader, "1")
 		var req struct {
 			Services []oldService
@@ -299,31 +339,29 @@ func TestGatewayPutFallsBackToProtocol1(t *testing.T) {
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"reason": lbgw.ReasonInvalid, "message": "lb gateway: the body is not a state: " + err.Error()})
+			refusal(w, "lb gateway: the body is not a state: "+err.Error())
+			return
+		}
+		if len(req.Nodes) > lbgw.MaxNodes {
+			refusal(w, "lb gateway: at most 64 nodes")
 			return
 		}
 		got = req.Services
-		_ = json.NewEncoder(w).Encode(lbgw.Answer{Services: []lbgw.ServiceStatus{{UID: req.Services[0].UID, State: lbgw.StateReady, Address: "203.0.113.5"}}})
+		ready(w, req.Services[0].UID)
 	}))
 	defer ts.Close()
-	dir := t.TempDir()
-	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
-	if err := os.WriteFile(filepath.Join(dir, "ca.crt"), ca, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "token"), []byte("lb@proxcloud!pc-c-1=s3cr3t\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	g := &gateway{url: ts.URL, dir: dir}
+	g := &gateway{url: ts.URL, dir: gatewayDir(t, ts)}
 	req := &lbgw.Request{Services: []lbgw.Service{{UID: "u-1", Ports: []lbgw.Port{{Protocol: "TCP", Port: 80, NodePort: 30080}}, ProxyProtocol: true,
 		Annotations: map[string]string{"proxcloud.io/lb-proxy-protocol": "true"}, SessionAffinity: "ClientIP", SessionAffinityTimeout: 600, Nodes: &[]string{"10.0.0.11"}}}}
-	if _, err := g.put(context.Background(), req); err == nil {
-		t.Fatal("the old portal took a field it does not know: the test's portal is not v0.11.0's")
+	put := func() (*lbgw.Answer, error) {
+		requests = 0
+		return g.put(context.Background(), req)
 	}
-	ans, err := g.put(context.Background(), req)
-	if err != nil || len(ans.Services) != 1 || ans.Services[0].Address != "203.0.113.5" {
-		t.Fatalf("second request: %+v %v", ans, err)
+
+	// The old portal: served in the turn that finds it, with a second request.
+	ans, err := put()
+	if err != nil || len(ans.Services) != 1 || ans.Services[0].Address != "203.0.113.5" || requests != 2 {
+		t.Fatalf("the old portal: %+v %v after %d requests", ans, err, requests)
 	}
 	if len(got) != 1 || !got[0].ProxyProtocol || got[0].Ports[0].NodePort != 30080 {
 		t.Fatalf("the old portal got %+v", got)
@@ -335,11 +373,42 @@ func TestGatewayPutFallsBackToProtocol1(t *testing.T) {
 	// give the Service a public address.
 	req.Services = append(req.Services, lbgw.Service{UID: "u-2", Ports: []lbgw.Port{{Protocol: "TCP", Port: 80, NodePort: 30081}},
 		Annotations: map[string]string{lbgw.InternalAnnotation: "true"}})
-	if _, err := g.put(context.Background(), req); err != nil || len(got) != 1 || got[0].UID != "u-1" {
+	if _, err := put(); err != nil || len(got) != 1 || got[0].UID != "u-1" {
 		t.Fatalf("an internal Service reached a portal of protocol 1: %+v %v", got, err)
 	}
 	if len(req.Services) != 2 {
 		t.Fatal("the caller's request was changed")
+	}
+	// The old portal refuses the short request too: its refusal is the answer.
+	for i := range lbgw.MaxNodes + 1 {
+		req.Nodes = append(req.Nodes, lbgw.Node{Address: "10.0.1." + strconv.Itoa(i)})
+	}
+	var rf *lbgw.Refusal
+	if _, err := put(); !errors.As(err, &rf) || rf.Status != http.StatusBadRequest || rf.Message != "lb gateway: at most 64 nodes" || requests != 2 {
+		t.Fatalf("refused twice: %v after %d requests", err, requests)
+	}
+	req.Nodes = nil
+	// A request with nothing of protocol 2 that the old portal refuses is not sent a second time.
+	plain := &lbgw.Request{Services: []lbgw.Service{}, Nodes: make([]lbgw.Node, lbgw.MaxNodes+1)}
+	requests = 0
+	if _, err := g.put(context.Background(), plain); !errors.As(err, &rf) || requests != 1 {
+		t.Fatalf("the same request went out again: %v after %d requests", err, requests)
+	}
+
+	// The portal is back on this release: its first request is the whole one, the internal Service too (this
+	// portal refuses it itself).
+	old = false
+	if _, err := put(); err != nil || requests != 1 {
+		t.Fatalf("the portal that came back: %v after %d requests", err, requests)
+	}
+	if first := whole.Services[0]; len(whole.Services) != 2 || first.Annotations["proxcloud.io/lb-proxy-protocol"] != "true" ||
+		first.SessionAffinity != "ClientIP" || first.SessionAffinityTimeout != 600 || first.Nodes == nil || !slices.Equal(*first.Nodes, []string{"10.0.0.11"}) {
+		t.Fatalf("the portal that came back was sent the request of protocol 1: %+v", whole.Services)
+	}
+	// What a portal of this release refuses is not tried again in the shorter form.
+	refuse = true
+	if _, err := put(); !errors.As(err, &rf) || rf.Status != http.StatusBadRequest || requests != 1 {
+		t.Fatalf("a refusal of this release's portal: %v after %d requests", err, requests)
 	}
 }
 

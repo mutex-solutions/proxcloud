@@ -91,12 +91,8 @@ func main() {
 
 // gateway is the portal's side. The token and the CA are read again for each call, so a rotation (the operator's
 // "Enable load balancer controller" again) reaches a running controller when the kubelet updates the Secret volume.
-//
-// peer is the protocol the portal last answered with (0: not heard yet). A portal older than this controller, which
-// is a portal rolled back, refuses a field it does not know, so it is sent the request protocol 1 had.
 type gateway struct {
 	url, dir string
-	peer     int
 }
 
 // protocol1 is req without what protocol 2 added, and without the Services that ask for an internal balancer: a
@@ -132,39 +128,59 @@ func (g *gateway) put(ctx context.Context, req *lbgw.Request) (*lbgw.Answer, err
 		Transport:     &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}, DisableKeepAlives: true},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	if g.peer == 1 {
-		req = protocol1(req)
+	// send is one request: the answer's status, the protocol the portal says it speaks (0: it did not say) and
+	// the answer's body.
+	send := func(body []byte) (status, peer int, raw []byte, err error) {
+		r, err := http.NewRequestWithContext(ctx, http.MethodPut, strings.TrimRight(g.url, "/")+lbgw.StatePath, bytes.NewReader(body))
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		r.Header.Set("Authorization", "PVEAPIToken="+strings.TrimSpace(string(token)))
+		r.Header.Set(lbgw.ProtocolHeader, strconv.Itoa(lbgw.Protocol))
+		r.Header.Set("Content-Type", "application/json")
+		res, err := client.Do(r)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		defer res.Body.Close()
+		peer, _ = strconv.Atoi(res.Header.Get(lbgw.ProtocolHeader))
+		raw, err = io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		return res.StatusCode, peer, raw, err
 	}
+	// The whole request first, every time. A portal older than this controller, which is a portal rolled back,
+	// decodes strictly and refuses a field it does not know with 400, naming its protocol: only then, and for this
+	// request only, it is sent the request protocol 1 had. Nothing is remembered: the first request a portal that
+	// came back gets is the whole one, so no Service is served a turn without its options.
+	// ponytail: while the portal is rolled back, a turn whose Services use protocol 2 costs two requests, and that
+	// portal audits the refused one each turn (its audit is once per change, and the two answers alternate). A
+	// rollback is short; remember the step-down, with a way for the newer portal to refuse the short request, if
+	// one ever is not.
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	r, err := http.NewRequestWithContext(ctx, http.MethodPut, strings.TrimRight(g.url, "/")+lbgw.StatePath, bytes.NewReader(body))
+	status, peer, raw, err := send(body)
 	if err != nil {
 		return nil, err
 	}
-	r.Header.Set("Authorization", "PVEAPIToken="+strings.TrimSpace(string(token)))
-	r.Header.Set(lbgw.ProtocolHeader, strconv.Itoa(lbgw.Protocol))
-	r.Header.Set("Content-Type", "application/json")
-	res, err := client.Do(r)
-	if err != nil {
-		return nil, err
+	if status == http.StatusBadRequest && peer > 0 && peer < lbgw.Protocol {
+		old, err := json.Marshal(protocol1(req))
+		if err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(old, body) { // the same request: the refusal is about something else
+			if status, _, raw, err = send(old); err != nil {
+				return nil, err
+			}
+		}
 	}
-	defer res.Body.Close()
-	if v, err := strconv.Atoi(res.Header.Get(lbgw.ProtocolHeader)); err == nil {
-		g.peer = v
-	}
-	raw, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if err != nil {
-		return nil, err
-	}
-	if res.StatusCode < 200 || res.StatusCode > 299 {
+	if status < 200 || status > 299 {
 		var rf struct{ Reason, Message string }
 		_ = json.Unmarshal(raw, &rf)
 		if rf.Message == "" {
-			rf.Message = fmt.Sprintf("the gateway answered %d", res.StatusCode)
+			rf.Message = fmt.Sprintf("the gateway answered %d", status)
 		}
-		return nil, &lbgw.Refusal{Status: res.StatusCode, Reason: rf.Reason, Message: rf.Message}
+		return nil, &lbgw.Refusal{Status: status, Reason: rf.Reason, Message: rf.Message}
 	}
 	var ans lbgw.Answer
 	if err := json.Unmarshal(raw, &ans); err != nil {
