@@ -199,14 +199,16 @@ func TestLBSpecValidateLayer4(t *testing.T) {
 		"both, tcp":            {listener: "tcp", pool: "tcp", wantListener: "tcp", wantPool: "tcp"},
 		"tcp in front of http": {listener: "tcp", pool: "http", refused: "a tcp listener needs a tcp pool, and pool web is http"},
 		"http in front of tcp": {listener: "http", pool: "tcp", refused: "an http listener needs an http pool, and pool web is tcp"},
-		"udp":                  {listener: "udp", refused: lbNotServed["udp"]},
-		"udp, both":            {listener: "udp", pool: "udp", refused: "Pool web: " + lbNotServed["udp"]},
-		"a udp pool":           {pool: "udp", refused: lbNotServed["udp"]},
+		"udp":                  {listener: "udp", wantListener: "udp", wantPool: "udp"},
+		"udp, both":            {listener: "udp", pool: "udp", wantListener: "udp", wantPool: "udp"},
+		"a udp pool":           {pool: "udp", wantListener: "udp", wantPool: "udp"},
+		"udp in front of tcp":  {listener: "udp", pool: "tcp", refused: "a udp listener needs a udp pool, and pool web is tcp"},
+		"tcp in front of udp":  {listener: "tcp", pool: "udp", refused: "a tcp listener needs a tcp pool, and pool web is udp"},
 		"tls":                  {listener: "tls", pool: "tcp", refused: lbNotServed["tls"]},
 		"https":                {listener: "https", refused: lbNotServed["https"]},
-		"sctp":                 {listener: "sctp", refused: "protocol must be tcp or http"},
-		"upper case":           {listener: "TCP", refused: "protocol must be tcp or http"},
-		"a pool off the list":  {pool: "https", refused: "protocol must be http or tcp"},
+		"sctp":                 {listener: "sctp", refused: "protocol must be tcp, udp or http"},
+		"upper case":           {listener: "TCP", refused: "protocol must be tcp, udp or http"},
+		"a pool off the list":  {pool: "https", refused: "protocol must be http, tcp or udp"},
 	} {
 		s := base()
 		s.Listeners[0].Protocol, s.Pools[0].Protocol = c.listener, c.pool

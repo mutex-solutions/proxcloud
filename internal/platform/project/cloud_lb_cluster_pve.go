@@ -441,7 +441,7 @@ func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.Extern
 	}
 	// A Service is ready when the appliance that holds the addresses serves this config: the controller writes the
 	// Service's address into its status on that word (drill N3-7), and the standby gets every config first.
-	applied := lb.AppliedHash == lbHash(lbRender(lb)) && (lb.Status == lbStatusActive || lb.Status == lbStatusDegraded) &&
+	applied := lb.AppliedHash == lbAppliedHash(lb) && (lb.Status == lbStatusActive || lb.Status == lbStatusDegraded) &&
 		slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.State == lbAppUp && a.HoldsVIP })
 	for i := range lb.Cluster.Services {
 		if s := &lb.Cluster.Services[i]; s.State != lbgw.StateRefused {

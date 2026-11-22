@@ -51,10 +51,13 @@ type lbAppliance struct {
 	// What the appliance runs, by hash of the rendered file.
 	HAProxyHash    string `json:"haproxyHash,omitempty"`
 	KeepalivedHash string `json:"keepalivedHash,omitempty"`
-	Role           string `json:"role,omitempty"` // keepalived's state: MASTER, BACKUP, FAULT, STOPPED, UNKNOWN
-	HoldsVIP       bool   `json:"holdsVip,omitempty"`
-	State          string `json:"state,omitempty"` // up, down, building, gone
-	Reason         string `json:"reason,omitempty"`
+	// LVSHash: the UDP listeners' files (pve.LVSHash). Empty on a pair that never had a UDP listener, whose
+	// appliances hold nothing of them.
+	LVSHash  string `json:"lvsHash,omitempty"`
+	Role     string `json:"role,omitempty"` // keepalived's state: MASTER, BACKUP, FAULT, STOPPED, UNKNOWN
+	HoldsVIP bool   `json:"holdsVip,omitempty"`
+	State    string `json:"state,omitempty"` // up, down, building, gone
+	Reason   string `json:"reason,omitempty"`
 }
 
 // lbPairDemand is what a pair asks of the quota at create: two servers of the flavor and the address.
@@ -291,7 +294,11 @@ func lbPeerOf(lb *loadBalancer, a *lbAppliance) *lbAppliance {
 // A recorded hash is the product's word that the appliance runs that config, so each pass asks the appliance first:
 // one whose HAProxy does not serve its config (stopped, or running another one, as after the package's own first
 // start) or whose keepalived stopped is pushed again, which starts the service with the current config. They are the
-// product's own services, and nobody else starts them.
+// product's own services, and nobody else starts them. The same read says what the config files on the appliance hash
+// to: a file that is not the one recorded (edited by hand, or lost) is pushed again too.
+//
+// UDP listeners are a third file and service of their own (pve.RenderLVS), after HAProxy on each appliance. A pair
+// without one is asked and given nothing of it.
 func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, lb *loadBalancer) error {
 	ps, err := h.pveFor(es)
 	if err != nil {
@@ -372,6 +379,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	}
 	haproxy := lbRender(lb)
 	hhash := lbHash(haproxy)
+	lvs := pve.RenderLVS(lb.LBSpec, lb.VIPs) // "" without a UDP listener
 	pn := pveAllowedPublicNetwork(es, proj, lb.PublicNetworkID)
 	var refused error
 	leftover := map[*lbAppliance][]string{} // set entries of VIPs no longer served, removed after keepalived let go
@@ -405,6 +413,14 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			seen[a] = st
 		}
 	}
+	// differs: the appliance said what its file hashes to, and it is not what the row records for it.
+	differs := func(sum, recorded string) bool { return sum != "" && recorded != "" && sum != recorded }
+	lvsWant := func(a *lbAppliance) string {
+		if lvs == "" {
+			return ""
+		}
+		return pve.LVSHash(lvs, a.TenantIface)
+	}
 	pushed := map[*lbAppliance]bool{}
 	keepalivedCurrent := map[*lbAppliance]bool{}
 	for _, a := range lbPushOrder(running) {
@@ -413,10 +429,12 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		// keepalived stopped by a replace's planned switch may be started again here before its VM goes: it comes
 		// back as BACKUP and stays so (nopreempt), the address has moved already.
 		restartKeepalived := known && a.KeepalivedHash != "" && st.State == "STOPPED"
-		reloadHAProxy := known && a.HAProxyHash != "" && !st.Serving
-		if restartKeepalived || reloadHAProxy {
+		reloadHAProxy := known && a.HAProxyHash != "" && (!st.Serving || differs(st.HAProxySum, a.HAProxyHash))
+		reloadLVS := known && a.LVSHash != "" && lvs != "" && (!st.LVS || differs(st.LVSSum, a.LVSHash))
+		if restartKeepalived || reloadHAProxy || reloadLVS {
 			slog.Warn("load balancer: an appliance does not run what its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID,
-				"keepalived", st.State, "haproxyServing", st.Serving)
+				"keepalived", st.State, "haproxyServing", st.Serving, "haproxyFile", !differs(st.HAProxySum, a.HAProxyHash),
+				"udpServing", st.LVS || a.LVSHash == "", "udpFiles", !differs(st.LVSSum, a.LVSHash))
 		}
 		// keepalived needs the peer; an appliance whose peer left keeps the config it has, and the address.
 		if peer := lbPeerOf(lb, a); peer != nil && pn != nil {
@@ -425,7 +443,11 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			if kerr != nil {
 				return kerr
 			}
-			if khash := lbHash(conf + pve.LBPairFilesDigest(a.PublicIface)); khash != a.KeepalivedHash || restartKeepalived {
+			editedKeepalived := known && a.KeepalivedHash != "" && differs(st.KeepalivedSum, lbHash(conf))
+			if editedKeepalived {
+				slog.Warn("load balancer: an appliance's keepalived config is not the one its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID)
+			}
+			if khash := lbHash(conf + pve.LBPairFilesDigest(a.PublicIface)); khash != a.KeepalivedHash || restartKeepalived || editedKeepalived {
 				pushed[a] = true
 				if err := ps.PushKeepalived(ctx, a.Node, vmid, conf, a.PublicIface); err != nil {
 					if errors.Is(err, pve.ErrLBNotReady) {
@@ -458,6 +480,31 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			a.HAProxyHash = hhash
 			if reloadHAProxy {
 				started[a] = strings.TrimPrefix(started[a]+" and HAProxy", " and ")
+			}
+		}
+		// The UDP listeners, last: their firewall rules are in, and a member change reloads this service alone.
+		switch want := lvsWant(a); {
+		case want == "" && a.LVSHash == "": // never had a UDP listener: nothing of it is on the appliance
+		case want == "":
+			pushed[a] = true
+			if err := ps.RemoveLVS(ctx, a.Node, vmid); err != nil {
+				refused = err
+				continue
+			}
+			a.LVSHash = ""
+		case (want != a.LVSHash && refused == nil) || reloadLVS:
+			pushed[a] = true
+			if err := ps.PushLVS(ctx, a.Node, vmid, lvs, a.TenantIface); err != nil {
+				if errors.Is(err, pve.ErrLBNotReady) {
+					a.State, a.Reason = lbAppBuilding, "it is installing what its UDP listeners need"
+					continue
+				}
+				refused = err
+				continue
+			}
+			a.LVSHash = want
+			if reloadLVS {
+				started[a] = strings.TrimPrefix(started[a]+" and the UDP service", " and ")
 			}
 		}
 	}
@@ -504,6 +551,10 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			a.State, a.Reason = lbAppDown, "keepalived is "+strings.ToLower(st.State)
 		case a.HAProxyHash != hhash:
 			a.State, a.Reason = lbAppDown, "it runs an older configuration"
+		case a.LVSHash != lvsWant(a):
+			a.State, a.Reason = lbAppDown, "its UDP listeners are not loaded yet"
+		case lvs != "" && !st.LVS:
+			a.State, a.Reason = lbAppDown, "its UDP listeners are not served"
 		default:
 			a.State, a.Reason = lbAppUp, ""
 		}
@@ -519,7 +570,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	// alone does not: both appliances holding the address is DEGRADED whatever they run.
 	serves := slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.State == lbAppUp })
 	if serves && (lb.Status == lbStatusActive || lb.Status == lbStatusDegraded) {
-		lb.AppliedHash = hhash
+		lb.AppliedHash = lbAppliedHash(lb)
 	}
 	return nil
 }
@@ -593,6 +644,16 @@ func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 	return lbStatusDown, "No appliance answers (" + why + ")."
 }
 
+// lbAppliedHash is what a pair's row records when an appliance serves its whole config: the HAProxy config's hash,
+// as ever, for a balancer without a UDP listener, and both files' with one.
+func lbAppliedHash(lb *loadBalancer) string {
+	haproxy := lbRender(lb)
+	if lvs := pve.RenderLVS(lb.LBSpec, lb.VIPs); lvs != "" {
+		return lbHash(haproxy + lvs)
+	}
+	return lbHash(haproxy)
+}
+
 // pveNetworkPrefix is the prefix length of a public network's CIDR (32 when it cannot be read).
 func pveNetworkPrefix(pn *externalservice.PVEPublicNetwork) int {
 	if i := strings.IndexByte(pn.CIDR, '/'); i >= 0 {
@@ -649,6 +710,14 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 			if err != nil {
 				slog.Warn("load balancer: health", "project", proj.ID, "lb", lb.ID, "err", err)
 				return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's active appliance did not answer")
+			}
+			if lb.HasUDP() { // the UDP pools' members are in the kernel's table, not in HAProxy
+				udp, udpNotLoaded, err := ps.LVSHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec, lb.VIPs)
+				if err != nil {
+					slog.Warn("load balancer: udp health", "project", proj.ID, "lb", lb.ID, "err", err)
+					return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's active appliance did not answer")
+				}
+				health, notLoaded = append(health, udp...), append(notLoaded, udpNotLoaded...)
 			}
 			out["result"] = health
 			lbHealthNotLoaded(out, notLoaded)

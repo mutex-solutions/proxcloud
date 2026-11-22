@@ -267,17 +267,25 @@ type VRRPState struct {
 	HAProxy  bool   // HAProxy's master has a worker
 	HoldsVIP bool   // the public NIC carries a VIP
 	Serving  bool   // HAProxy listens on every bind of its config (lbServingFn)
+	// What the appliance's files hash to, "" when the guest did not say (sha256, "-" for a missing file): the
+	// HAProxy config, the VRRP keepalived's config, and the LVS files as LVSHash sums them. A pass compares them
+	// with what it recorded: a hash in a row says the appliance runs that file only while the file is still there
+	// (spike of v0.11.1, SP-2: a config edited by hand stayed, since only "listeners are served" was asked).
+	HAProxySum, KeepalivedSum, LVSSum string
+	LVS                               bool // the UDP service runs its config (lvsServingFn)
 }
 
-// ReadVRRPState asks an appliance for its VRRP state, whether HAProxy runs, whether it holds the first VIP, and
-// whether HAProxy serves the config on disk.
+// ReadVRRPState asks an appliance for its VRRP state, whether HAProxy runs, whether it holds the first VIP, whether
+// HAProxy serves the config on disk, what its config files hash to, and whether its UDP service serves its config.
 func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip string) (VRRPState, error) {
 	holds := "v=0"
 	if a, err := netip.ParseAddr(vip); err == nil && a.Is4() {
 		holds = "ip -o -4 addr show | grep -qF ' " + a.String() + "/' && v=1 || v=0"
 	}
-	script := lbServingFn + lbWorkerFn + "s=$(cat " + lbStateFile + " 2>/dev/null); systemctl is-active -q keepalived || s=STOPPED; " +
-		"worker && h=1 || h=0; " + holds + "; serving >/dev/null 2>&1 && c=1 || c=0; echo \"${s:-UNKNOWN} $h $v $c\""
+	script := lbServingFn + lbWorkerFn + lvsServingFn + lvsSumFn + "sum() { [ -f $1 ] && sha256sum < $1 | cut -c1-64 || echo -; }\n" +
+		"s=$(cat " + lbStateFile + " 2>/dev/null); systemctl is-active -q keepalived || s=STOPPED; " +
+		"worker && h=1 || h=0; " + holds + "; serving >/dev/null 2>&1 && c=1 || c=0; lvsserving >/dev/null 2>&1 && l=1 || l=0; " +
+		"echo \"${s:-UNKNOWN} $h $v $c $(sum " + haproxyConfig + ") $(sum /etc/keepalived/keepalived.conf) $(lvssum) $l\""
 	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", script)
 	if err != nil {
 		return VRRPState{}, err
@@ -292,12 +300,15 @@ func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip 
 func ParseVRRPState(out string) VRRPState {
 	f := strings.Fields(out)
 	st := VRRPState{State: "UNKNOWN"}
-	if len(f) == 4 {
+	if len(f) == 4 || len(f) == 8 {
 		switch f[0] {
 		case "MASTER", "BACKUP", "FAULT", "STOP", "STOPPED":
 			st.State = f[0]
 		}
 		st.HAProxy, st.HoldsVIP, st.Serving = f[1] == "1", f[2] == "1", f[3] == "1"
+	}
+	if len(f) == 8 {
+		st.HAProxySum, st.KeepalivedSum, st.LVSSum, st.LVS = f[4], f[5], f[6], f[7] == "1"
 	}
 	if st.State == "STOP" {
 		st.State = "STOPPED"
