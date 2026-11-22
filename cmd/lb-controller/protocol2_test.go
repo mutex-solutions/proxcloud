@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -339,5 +340,26 @@ func TestGatewayPutFallsBackToProtocol1(t *testing.T) {
 	}
 	if len(req.Services) != 2 {
 		t.Fatal("the caller's request was changed")
+	}
+}
+
+// A node selector's terms: spaces around a term as OCCM drops them (StringToMap, its test " k1=v1, k2 "), and around
+// "=" too, where OCCM's reading matches no node.
+func TestParseSelector(t *testing.T) {
+	for in, want := range map[string]map[string]string{
+		"pool=edge,public":       {"pool": "edge", "public": ""},
+		" pool=edge, public ":    {"pool": "edge", "public": ""},
+		" pool = edge , public ": {"pool": "edge", "public": ""},
+		"pool= edge":             {"pool": "edge"},
+		"pool =edge":             {"pool": "edge"},
+		"a=b=c":                  {"a": "b=c"},
+		"public=":                {"public": ""},
+		"":                       {},
+		" , ":                    {},
+		" = edge":                {},
+	} {
+		if got := parseSelector(in); !maps.Equal(got, want) {
+			t.Errorf("%q: %v, want %v", in, got, want)
+		}
 	}
 }

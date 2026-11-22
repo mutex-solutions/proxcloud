@@ -530,13 +530,19 @@ func addressesOf(nodes []lbgw.Node) []string {
 }
 
 // parseSelector reads a node selector annotation as OCCM does ("key=value, key":
-// OCCM v1.37.1 loadbalancer.go:467-470 and matchNodeLabels, :2360-2373): terms
-// between commas, each a label that must have that value, or without "=" a label that must be there.
+// OCCM v1.37.1 loadbalancer.go:467-470, pkg/util/util.go:73-94 StringToMap, and matchNodeLabels,
+// loadbalancer.go:2360-2373): terms between commas, each a label that must have that value, or without "=" a label
+// that must be there. Spaces around a term are dropped, as StringToMap drops them.
+//
+// Spaces around "=" are dropped too, which StringToMap does not do: it reads "pool = edge" as the key "pool " and
+// the value " edge", which no node has, and the Service is left without a member. A label's key and value hold no
+// space, so the term can only mean pool=edge, and a selector OCCM matches nodes with matches the same nodes here.
 func parseSelector(v string) map[string]string {
 	out := map[string]string{}
 	for _, term := range strings.Split(v, ",") {
-		if k, val, _ := strings.Cut(strings.TrimSpace(term), "="); k != "" {
-			out[k] = val
+		k, val, _ := strings.Cut(term, "=")
+		if k = strings.TrimSpace(k); k != "" {
+			out[k] = strings.TrimSpace(val)
 		}
 	}
 	return out
