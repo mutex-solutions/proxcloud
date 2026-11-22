@@ -72,8 +72,8 @@ type LBPool struct {
 	// SessionPersistence nil: every connection is balanced on its own.
 	SessionPersistence *LBPersistence `json:"sessionPersistence,omitempty"`
 	// TimeoutMemberConnect and TimeoutMemberData, in milliseconds (0 = the balancer's own): how long a member may
-	// take to accept a connection, and how long a connection to it may stay idle. They sit on the pool, not on the
-	// listener as in Octavia's API: one HAProxy backend has one pair of them.
+	// take to accept a connection, and how long a connection to it may stay idle. They sit on the pool and not on the
+	// listener: one HAProxy backend has one pair of them.
 	TimeoutMemberConnect int `json:"timeoutMemberConnect,omitempty"`
 	TimeoutMemberData    int `json:"timeoutMemberData,omitempty"`
 }
@@ -145,9 +145,9 @@ var (
 	lbCheckPathRe = regexp.MustCompile(`^/[A-Za-z0-9._~/%=&?:@+-]{0,199}$`)
 
 	// lbPoolProtocolOf is the validation matrix: the protocol a listener's pool must speak, for every listener
-	// protocol of the model. It is Octavia's map (octavia/common/constants.py, VALID_LISTENER_POOL_PROTOCOL_MAP) cut
-	// to one pool protocol per listener protocol: tls and https end TLS on the balancer and speak plain TCP and HTTP
-	// to the members. A pool therefore serves listeners of one family.
+	// protocol of the model, one pool protocol per listener protocol: tls and https end TLS on the balancer and speak
+	// plain TCP and HTTP to the members. A pool therefore serves listeners of one family. (Where the table comes
+	// from: docs/architecture/c4/CHANGELOG.md, 2026-11-22.)
 	lbPoolProtocolOf = map[string]string{"tcp": "tcp", "tls": "tcp", "http": "http", "https": "http", "udp": "udp"}
 
 	// lbNotServed is the switch of the protocols the model knows and no appliance serves yet: a listener or a pool

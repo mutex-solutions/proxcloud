@@ -10,7 +10,10 @@ and rules: [README.md](README.md#maintenance-rule).
 `internal/cloud/pve`: `LBListener` carries `protocol` (`tcp`, `udp`, `tls`, `http`, `https`), `certificates`
 (reserved), `connectionLimit` and `timeoutClientData`; `LBPool` carries `sessionPersistence` (`LBPersistence`, type
 `source_ip`), `proxyVersion` and the two member timeouts; `LBHealthCheck` the types `https`, `tls-hello` and `none`
-and `interval`, `timeout`, `rise`, `fall`. `lbPoolProtocolOf` is the matrix from a listener's protocol to its pool's,
+and `interval`, `timeout`, `rise`, `fall`. `lbPoolProtocolOf` is the matrix from a listener's protocol to its pool's: Octavia's
+`VALID_LISTENER_POOL_PROTOCOL_MAP` (`octavia/common/constants.py`:210-221 at `9718c66`: TCP in front of HTTP, HTTPS,
+PROXY, PROXYV2 or TCP; HTTP in front of HTTP or PROXY; TERMINATED_HTTPS in front of HTTP or PROXY; UDP in front of
+UDP) cut to one pool protocol per listener protocol, PROXY being a pool option here and not a pool protocol;
 `lbFamily` the transport in a listener's key (validation and `LBListenerRules`), `lbNotServed` the one place that
 refuses `udp`, `tls` and `https` until an appliance serves them, and `lbFrontendMode` what the renderer and
 `ParseHAProxyStat` ask before they count on a HAProxy frontend. `renderHAProxy` writes the options
