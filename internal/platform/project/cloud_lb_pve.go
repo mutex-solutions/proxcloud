@@ -687,6 +687,15 @@ func (h *Handler) pveLoadBalancerAction(w http.ResponseWriter, r *http.Request, 
 	return false
 }
 
+// lbUDPNeedsPair is why a balancer cannot take spec: UDP listeners are served by keepalived and LVS, which only an
+// appliance pair runs. "" when it can.
+func lbUDPNeedsPair(spec pve.LBSpec, ha bool) string {
+	if spec.HasUDP() && !ha {
+		return "UDP needs a high-availability load balancer, on two appliances: this one runs on one VM. Create a load balancer with high availability for UDP listeners"
+	}
+	return ""
+}
+
 // lbSpecOfRequest reads the body of UPDATE_CONFIG: listeners and pools with every option of pve.LBSpec. A body from
 // before v0.11.1, with the protocol on the pool alone, reads as it did. What the balancer cannot do is a 400 with
 // the reason, a protocol the model knows and no appliance serves yet among them.
@@ -756,8 +765,8 @@ func (h *Handler) pveLBUpdateConfig(ctx context.Context, es *externalservice.Ext
 			m.Address, m.Stamp = addr, stamp
 		}
 	}
-	if spec.HasUDP() && !lb.HA {
-		return httpx.BadRequest("UDP needs a high-availability load balancer, on two appliances: this one runs on one VM. Create a load balancer with high availability for UDP listeners")
+	if why := lbUDPNeedsPair(spec, lb.HA); why != "" {
+		return httpx.BadRequest(why)
 	}
 	if len(pve.RenderHAProxyOn(spec, lb.VIPs)) > pve.LBMaxConfig || len(pve.RenderLVS(spec, lb.VIPs)) > pve.LBMaxConfig {
 		return httpx.BadRequest("This configuration is too large for a load balancer. Use fewer members")

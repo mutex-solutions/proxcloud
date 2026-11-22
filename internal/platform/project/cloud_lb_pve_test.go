@@ -65,7 +65,8 @@ func TestLBSpecOfRequest(t *testing.T) {
 		}
 	}
 	for name, c := range map[string]struct{ body, say string }{
-		"udp":              {`{"listeners":[{"port":53,"protocol":"udp","pool":"dns"}],"pools":[{"name":"dns","members":[]}]}`, "UDP is not available"},
+		"udp over tcp":     {`{"listeners":[{"port":53,"protocol":"udp","pool":"dns"}],"pools":[{"name":"dns","protocol":"tcp","members":[]}]}`, "a udp listener needs a udp pool"},
+		"udp with PROXY":   {`{"listeners":[{"port":53,"protocol":"udp","pool":"dns"}],"pools":[{"name":"dns","proxyProtocol":true,"members":[]}]}`, "UDP has no PROXY protocol"},
 		"tls":              {`{"listeners":[{"port":443,"protocol":"tls","pool":"web"}],"pools":[{"name":"web","members":[]}]}`, "TLS termination is not available"},
 		"https":            {`{"listeners":[{"port":443,"protocol":"https","pool":"web","certificates":["c1"]}],"pools":[{"name":"web","members":[]}]}`, "TLS termination is not available"},
 		"mismatch":         {`{"listeners":[{"port":80,"protocol":"http","pool":"db"}],"pools":[{"name":"db","protocol":"tcp","members":[]}]}`, "an http listener needs an http pool"},

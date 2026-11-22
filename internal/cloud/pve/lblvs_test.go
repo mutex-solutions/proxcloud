@@ -121,7 +121,7 @@ func TestNoUDPNoLVS(t *testing.T) {
 		t.Errorf("UDP listeners and pools changed the HAProxy config:\n--- with\n%s\n--- without\n%s", got, want)
 	}
 	// HAProxy's health read holds no member of a UDP pool and waits for no frontend of a UDP listener.
-	stat := "# pxname,svname,status\nl203.0.113.10_53,FRONTEND,OPEN\np-dns-tcp,BACKEND,UP\np-dns-tcp,m101p53,UP\n"
+	stat := "# pxname,svname,status\nl53,FRONTEND,OPEN\np-dns-tcp,BACKEND,UP\np-dns-tcp,m101p53,UP\n"
 	health, notLoaded, err := ParseHAProxyStat(stat, with)
 	if err != nil || len(notLoaded) != 0 || len(health) != 1 || health[0].Pool != "dns-tcp" || health[0].Status != "UP" {
 		t.Errorf("HAProxy's health of a spec with UDP: %+v %q %v", health, notLoaded, err)
