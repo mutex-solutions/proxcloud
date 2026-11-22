@@ -126,8 +126,9 @@ func TestSandboxChartGolden(t *testing.T) {
 }
 
 // What the chart takes from deploy/sandbox-cluster stays equal to it: the node-setup script and its runsc pin, the
-// guardrail (with no extraDeny), the warming deny-all, the RuntimeClass handler, the telemetry collector and the
-// vendored agent-sandbox. The installer path and the platform path then install and fence the same way.
+// guardrail (with no extraDeny), the warming deny-all, the RuntimeClass handler, the telemetry collector, the network
+// guard's RBAC and the vendored agent-sandbox. The installer path and the platform path then install and fence the
+// same way.
 func TestSandboxChartEqualsTheInstallerFiles(t *testing.T) {
 	inst := map[string][]map[string]any{}
 	for _, f := range []string{"node-setup.yaml", "network-policy.yaml", "runtimeclass.yaml", "telemetry.yaml"} {
@@ -187,6 +188,12 @@ func TestSandboxChartEqualsTheInstallerFiles(t *testing.T) {
 		for _, k := range []string{"command", "env", "securityContext", "volumeMounts"} {
 			if !reflect.DeepEqual(gc[k], wc[k]) {
 				t.Errorf("%s: telemetry container %s differs", mode, k)
+			}
+		}
+		// What the network guard may read (its Node, the CiliumNodeConfigs of kube-system) is what the installer grants.
+		for _, r := range [][2]string{{"ClusterRole", "sandbox-netguard"}, {"Role", "sandbox-netguard-cilium-read"}} {
+			if g, w := find(t, docs, r[0], r[1])["rules"], find(t, inst["telemetry.yaml"], r[0], r[1])["rules"]; !reflect.DeepEqual(g, w) {
+				t.Errorf("%s: %s %s rules differ from deploy/sandbox-cluster/telemetry.yaml\n got %v\nwant %v", mode, r[0], r[1], g, w)
 			}
 		}
 	}

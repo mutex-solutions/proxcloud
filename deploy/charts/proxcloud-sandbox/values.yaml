@@ -67,11 +67,12 @@ proxy:
   # -- Where the proxy wakes a paused autoResume sandbox: <portal API>/api/v1/internal/sandboxes. Empty = no wake.
   wakeURL: ""
 
-# -- By digest. runtime: envd, sandbox-init and sandbox-netguard (deploy/sandbox-runtime.Dockerfile); proxy:
-# cmd/sandbox-proxy; both CI builds of tag v0.11.0-rc.1. busybox as deploy/sandbox-cluster/registry.yaml, pause as
-# the installer's versions.yml.
+# -- By digest. runtime: envd, sandbox-init and sandbox-netguard (deploy/sandbox-runtime.Dockerfile), the CI build of
+# main d26edd2e, the first whose sandbox-netguard reads a node's CiliumNodeConfig (shared mode needs it: an older one
+# never lets node-setup become Ready there); proxy: cmd/sandbox-proxy, the CI build of tag v0.11.0-rc.1. busybox as
+# deploy/sandbox-cluster/registry.yaml, pause as the installer's versions.yml.
 images:
-  runtime: ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:v0.11.0-rc.1@sha256:7fb46d30a7782f0cc57034bd8b66576c1129986dd8233803759a276b0be27a07
+  runtime: ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:dev-d26edd2@sha256:cd4173bec686383ac25147f0851f7c1633b1ee8a2e68a3e061eea23f5d6873fb
   proxy: ghcr.io/mutex-solutions/proxcloud-sandbox-proxy:v0.11.0-rc.1@sha256:afc0e6e53262ce517d341c428093f7e81106272dda9af0dda6297498bca0e37e
   busybox: docker.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
   pause: registry.k8s.io/pause:3.10@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a

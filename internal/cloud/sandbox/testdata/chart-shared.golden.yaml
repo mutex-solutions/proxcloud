@@ -189,8 +189,8 @@ kind: ClusterRole
 metadata: {name: sandbox-netguard}
 rules:
   - {apiGroups: [""], resources: [pods], verbs: [get]}
-  - {apiGroups: [""], resources: [nodes], verbs: [get]}
   - {apiGroups: [""], resources: [nodes/stats], verbs: [get]}
+  - {apiGroups: [""], resources: [nodes], verbs: [get]}
 ---
 # Source: proxcloud-sandbox/templates/proxy.yaml
 # Pod lookup by the proxcloud.io/sandbox-id label across the sb-<project> namespaces. Nothing else.
@@ -322,7 +322,7 @@ spec:
       initContainers:
       # The copy is atomic (tmp + mv), so a rollout never hands a starting sandbox a half-written binary.
       - name: sandbox-runtime
-        image: ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:v0.11.0-rc.1@sha256:7fb46d30a7782f0cc57034bd8b66576c1129986dd8233803759a276b0be27a07
+        image: ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:dev-d26edd2@sha256:cd4173bec686383ac25147f0851f7c1633b1ee8a2e68a3e061eea23f5d6873fb
         env: [{name: DEST, value: /host/opt/proxcloud-sandbox/bin}]
         resources:
           requests: {cpu: 10m, memory: 16Mi}
