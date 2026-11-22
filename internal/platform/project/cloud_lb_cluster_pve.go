@@ -10,6 +10,7 @@ package project
 // complete by construction, so there is no day of grace as in the approved design.
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -502,7 +503,8 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 			vip = lbSizePlaceholder
 		}
 		trial := lbClusterServiceSpec(spec, w, vip, st.Nodes)
-		if len(pve.RenderClusterHAProxy(trial, append(slices.Clone(vips), vip))) > pve.LBMaxConfig {
+		with := append(slices.Clone(vips), vip)
+		if len(pve.RenderClusterHAProxy(trial, with)) > pve.LBMaxConfig || len(pve.RenderLVS(trial, with)) > pve.LBMaxConfig {
 			refuse(lbgw.ReasonTooLarge, "The load balancer's config would be too large with this Service: use fewer Services, ports or workers")
 			continue
 		}
@@ -537,25 +539,77 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 	return nil
 }
 
-// lbClusterServiceSpec adds Service w to spec: a listener on its address per port, in mode tcp, to a pool of the
-// workers' node port. Policy Local is checked over HTTP on healthCheckNodePort, which kube-proxy answers 200 only
-// with a local endpoint; a check on its own port is sent without the PROXY header (C14). Names are generated:
-// nothing of the Service's reaches the config. A pool is named by its Service (a digest of the UID) and its node
-// port, not by their places in the state (it was s<i>-<j>): HAProxy keeps a member's state over a reload by the
-// pool's name, and a port or a Service that comes or goes must not rename the pools after it (drill N3-8).
+// lbClusterServiceSpec adds Service w to spec: a listener on its address per port to a pool of the workers' node
+// port, TCP ports in HAProxy and UDP ports in LVS (pve.RenderLVS). Policy Local is checked over HTTP on
+// healthCheckNodePort, which kube-proxy answers 200 only with a local endpoint, for TCP and UDP ports alike; a check
+// on its own port is sent without the PROXY header (C14). What the Service's annotations and affinity ask
+// (lbgw.ServiceOptions) goes on every port it applies to: a UDP port takes no PROXY header, no timeouts and no
+// forwarded-for header. Names are generated: nothing of the Service's reaches the config. A pool is named by its
+// Service (a digest of the UID) and its node port, not by their places in the state (it was s<i>-<j>): HAProxy keeps
+// a member's state over a reload by the pool's name, and a port or a Service that comes or goes must not rename the
+// pools after it (drill N3-8). A UDP pool's name ends in -udp: Kubernetes gives a TCP and a UDP port of one number
+// the same node port.
+//
+// A Service without annotations or affinity, which is every Service of a protocol 1 controller, makes the spec it
+// made before protocol 2, field for field: its listener names no protocol (it reads its pool's) and its pool has no
+// option set.
 func lbClusterServiceSpec(spec pve.LBSpec, w lbgw.Service, vip string, nodes []string) pve.LBSpec {
 	out := pve.LBSpec{Listeners: slices.Clone(spec.Listeners), Pools: slices.Clone(spec.Pools)}
+	o, _, _ := lbgw.ServiceOptions(&w) // the gateway refused what this refuses before the state was stored
+	if w.Nodes != nil {                // the Service's node selector; only the cluster's own workers count (C11)
+		nodes = slices.DeleteFunc(slices.Clone(nodes), func(n string) bool { return !slices.Contains(*w.Nodes, n) })
+	}
 	uid := sha256.Sum256([]byte(w.UID))
 	for _, p := range w.Ports {
-		pool := pve.LBPool{Name: "s" + hex.EncodeToString(uid[:4]) + "-" + strconv.Itoa(p.NodePort), Protocol: "tcp", Algorithm: "roundrobin", ProxyProtocol: w.ProxyProtocol}
-		if w.ExternalTrafficPolicy == "Local" {
-			pool.HealthCheck = &pve.LBHealthCheck{Type: "http", Port: w.HealthCheckNodePort, Path: "/"}
+		udp := p.Protocol == "UDP"
+		pool := pve.LBPool{Name: "s" + hex.EncodeToString(uid[:4]) + "-" + strconv.Itoa(p.NodePort), Protocol: "tcp", Algorithm: cmp.Or(o.Method, "roundrobin")}
+		l := pve.LBListener{Port: p.Port, SourceRanges: w.SourceRanges, VIP: vip, ConnectionLimit: o.ConnectionLimit}
+		switch {
+		case udp:
+			pool.Name += "-udp"
+			pool.Protocol, l.Protocol = "udp", "udp"
+		default:
+			if o.XForwardedFor {
+				pool.Protocol, l.Protocol = "http", "http"
+			}
+			pool.ProxyProtocol = o.ProxyVersion != 0
+			if o.ProxyVersion == 1 { // 2 is the renderer's own, and what a row from before the annotation holds
+				pool.ProxyVersion = 1
+			}
+			pool.TimeoutMemberConnect, pool.TimeoutMemberData, l.TimeoutClientData = o.TimeoutMemberConnect, o.TimeoutMemberData, o.TimeoutClientData
+		}
+		if o.AffinityTimeout > 0 {
+			pool.SessionPersistence = &pve.LBPersistence{Type: "source_ip", Timeout: o.AffinityTimeout}
+		}
+		hc := pve.LBHealthCheck{Interval: o.HealthDelay, Timeout: o.HealthTimeout, Rise: o.HealthRise, Fall: o.HealthFall}
+		if udp {
+			// keepalived's check: a member is up again at its first good check and down after two failed ones at
+			// least (pve.LBSpec.Validate), so "max-retries" has nothing to set and "max-retries-down: 1" is 2.
+			hc.Rise = 0
+			if hc.Fall == 1 {
+				hc.Fall = 2
+			}
+		}
+		switch {
+		case w.ExternalTrafficPolicy == "Local":
+			hc.Type, hc.Port, hc.Path = "http", w.HealthCheckNodePort, "/"
+		case o.NoMonitor:
+			hc = pve.LBHealthCheck{Type: "none"}
+		case udp:
+			hc.Type = "udp-connect"
+		default:
+			hc.Type = "tcp"
+		}
+		// No figure and no type of its own: the pool's check is the balancer's default, as before the annotations.
+		if hc != (pve.LBHealthCheck{Type: "tcp"}) && hc != (pve.LBHealthCheck{Type: "udp-connect"}) {
+			pool.HealthCheck = &hc
 		}
 		for _, n := range nodes {
 			pool.Members = append(pool.Members, pve.LBMember{Node: true, Address: n, Port: p.NodePort, Weight: 1})
 		}
+		l.Pool = pool.Name
 		out.Pools = append(out.Pools, pool)
-		out.Listeners = append(out.Listeners, pve.LBListener{Port: p.Port, Pool: pool.Name, SourceRanges: w.SourceRanges, VIP: vip})
+		out.Listeners = append(out.Listeners, l)
 	}
 	return out
 }

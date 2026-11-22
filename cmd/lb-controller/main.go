@@ -5,6 +5,10 @@
 // LoadBalancer of class proxcloud.io/lb, and those without a class when started with -default; it holds them with the
 // finalizer proxcloud.io/load-balancer, writes their status.loadBalancer and turns the portal's answers into Events.
 // A poll, not a watch: a full list each turn means a PUT never comes from a half-filled cache. See docs/managed-k8s.md.
+//
+// What a Service's annotations mean is the portal's to say (internal/cloud/lbgw/annotations.go): the controller sends
+// them as they are and says the Events the answer carries. The one it reads itself is the node selector, which needs
+// the nodes' labels.
 package main
 
 import (
@@ -39,9 +43,11 @@ const (
 	// Class is the loadBalancerClass of the product balancer. MetalLB serves proxcloud.io/internal (default mode) or the
 	// Services without a class (class-only mode).
 	Class           = "proxcloud.io/lb"
-	proxyAnnotation = "proxcloud.io/lb-proxy-protocol"
+	proxyAnnotation = lbgw.OwnPrefix + lbgw.KnobProxyProtocol
 	excludeLabel    = "node.kubernetes.io/exclude-from-external-load-balancers"
-	component       = "proxcloud-lb-controller"
+	// toBeDeletedTaint is the cluster autoscaler's mark on a node it is about to remove.
+	toBeDeletedTaint = "ToBeDeletedByClusterAutoscaler"
+	component        = "proxcloud-lb-controller"
 )
 
 func main() {
@@ -85,7 +91,23 @@ func main() {
 
 // gateway is the portal's side. The token and the CA are read again for each call, so a rotation (the operator's
 // "Enable load balancer controller" again) reaches a running controller when the kubelet updates the Secret volume.
-type gateway struct{ url, dir string }
+//
+// peer is the protocol the portal last answered with (0: not heard yet). A portal older than this controller, which
+// is a portal rolled back, refuses a field it does not know, so it is sent the request protocol 1 had.
+type gateway struct {
+	url, dir string
+	peer     int
+}
+
+// protocol1 is req without what protocol 2 added.
+func protocol1(req *lbgw.Request) *lbgw.Request {
+	out := &lbgw.Request{Services: slices.Clone(req.Services), Nodes: req.Nodes}
+	for i := range out.Services {
+		s := &out.Services[i]
+		s.Annotations, s.SessionAffinity, s.SessionAffinityTimeout, s.Nodes = nil, "", 0, nil
+	}
+	return out
+}
 
 func (g *gateway) put(ctx context.Context, req *lbgw.Request) (*lbgw.Answer, error) {
 	token, err := os.ReadFile(filepath.Join(g.dir, "token"))
@@ -106,6 +128,9 @@ func (g *gateway) put(ctx context.Context, req *lbgw.Request) (*lbgw.Answer, err
 		Transport:     &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}, DisableKeepAlives: true},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
+	if g.peer == 1 {
+		req = protocol1(req)
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -122,6 +147,9 @@ func (g *gateway) put(ctx context.Context, req *lbgw.Request) (*lbgw.Answer, err
 		return nil, err
 	}
 	defer res.Body.Close()
+	if v, err := strconv.Atoi(res.Header.Get(lbgw.ProtocolHeader)); err == nil {
+		g.peer = v
+	}
 	raw, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if err != nil {
 		return nil, err
@@ -163,6 +191,8 @@ type controller struct {
 	// ponytail: per process; a controller that starts takes every node it finds for a member, so a node that joins
 	// in that very turn is sent before it is Ready. Keep it in the portal's state if that ever matters.
 	members map[string]bool
+	// hosts are the nodes last sent behind each Service (by UID), for the Event that says they changed.
+	hosts map[string]string
 }
 
 // service is what a turn reads of one Service.
@@ -171,6 +201,7 @@ type service struct {
 	finalizers                 []string
 	owned, deleting, proxy     bool
 	loadBalancerIP             string
+	nodeSelector               string
 	ingress                    []any
 	wire                       lbgw.Service
 }
@@ -181,7 +212,7 @@ func (s *service) held() bool { return slices.Contains(s.finalizers, Finalizer) 
 // lets go of the Services the state no longer has (deleted, no longer of type LoadBalancer, or of another class).
 func (c *controller) turn(ctx context.Context) error {
 	if c.events == nil {
-		c.events = map[string]string{}
+		c.events, c.hosts = map[string]string{}, map[string]string{}
 	}
 	items, err := c.api.ListServicesAllNamespaces(ctx)
 	if err != nil {
@@ -199,9 +230,10 @@ func (c *controller) turn(ctx context.Context) error {
 	slices.SortFunc(services, func(a, b *service) int {
 		return strings.Compare(a.created+a.uid, b.created+b.uid)
 	})
-	nodes, members := readNodes(nodeItems, c.members)
+	nodes, labels, members := readNodes(nodeItems, c.members)
 	c.members = members
 	req := &lbgw.Request{Services: []lbgw.Service{}, Nodes: nodes}
+	hosts := map[string]string{} // by UID: the addresses behind the Service this turn
 	var owned []*service
 	for _, s := range services {
 		if !s.owned || s.deleting {
@@ -214,6 +246,12 @@ func (c *controller) turn(ctx context.Context) error {
 				continue
 			}
 		}
+		behind := addressesOf(nodes)
+		if sel := parseSelector(s.nodeSelector); len(sel) > 0 {
+			behind = slices.DeleteFunc(behind, func(a string) bool { return !selects(sel, labels[a]) })
+			s.wire.Nodes = &behind
+		}
+		hosts[s.uid] = strings.Join(behind, ",")
 		req.Services = append(req.Services, s.wire)
 		owned = append(owned, s)
 	}
@@ -227,6 +265,12 @@ func (c *controller) turn(ctx context.Context) error {
 			}
 			for _, s := range owned {
 				c.report(ctx, s, "state", "Warning", reason, rf.Message)
+			}
+		} else {
+			// The portal did not answer: upstream's word for a sync that failed (k8s.io/cloud-provider
+			// controllers/service/controller.go, processServiceCreateOrUpdate).
+			for _, s := range owned {
+				c.report(ctx, s, "state", "Warning", "SyncLoadBalancerFailed", "Error syncing load balancer: the portal's gateway cannot be reached")
 			}
 		}
 		return fmt.Errorf("gateway: %w", err)
@@ -247,6 +291,9 @@ func (c *controller) turn(ctx context.Context) error {
 		// a provider returns a status once its balancer is provisioned, an error before (k8s.io/cloud-provider
 		// controllers/service/controller.go, syncLoadBalancerIfNeeded, v0.34.0). An address already written stays
 		// while a later change is building, and goes when the portal names none (refused, or given back).
+		if st.IPMode != "" { // protocol 2: the portal read the annotations, the alias too
+			s.proxy = st.IPMode == "Proxy"
+		}
 		if st.State == lbgw.StateReady || st.Address == "" || hasIngress(s.ingress, st.Address) {
 			c.setStatus(ctx, s, st.Address)
 		}
@@ -266,6 +313,36 @@ func (c *controller) turn(ctx context.Context) error {
 			c.report(ctx, s, "ip", "Warning", "LoadBalancerIPIgnored",
 				"spec.loadBalancerIP is ignored: the portal gives each Service an address of its own")
 		}
+		// What the Service's annotations raised, one Event per reason while it stands; a reason that is gone may
+		// come again.
+		said := map[string]bool{}
+		for _, ev := range st.Events {
+			said[s.uid+"/ev/"+ev.Reason] = true
+			c.report(ctx, s, "ev/"+ev.Reason, ev.Type, ev.Reason, ev.Message)
+		}
+		for k := range c.events {
+			if strings.HasPrefix(k, s.uid+"/ev/") && !said[k] {
+				delete(c.events, k)
+			}
+		}
+		if st.State == lbgw.StateRefused {
+			delete(c.hosts, s.uid)
+			continue
+		}
+		// The two Events of upstream's node sync (controller.go, lockedUpdateLoadBalancerHosts): no node at all is
+		// a warning, a changed set is said once per change. The first set a controller sees is not a change.
+		was, known := c.hosts[s.uid]
+		c.hosts[s.uid] = hosts[s.uid]
+		switch {
+		case hosts[s.uid] == "":
+			c.report(ctx, s, "nodes", "Warning", "UnAvailableLoadBalancer", "There are no available nodes for LoadBalancer")
+		case known && was != hosts[s.uid]:
+			delete(c.events, s.uid+"/nodes")
+			c.report(ctx, s, "nodes", "Normal", "UpdatedLoadBalancer", "Updated load balancer with new hosts")
+			delete(c.events, s.uid+"/nodes") // each change is said
+		default:
+			delete(c.events, s.uid+"/nodes")
+		}
 	}
 	for _, n := range ans.Nodes {
 		c.log.Warn("lb-controller: node refused", "node", n.Name, "address", n.Address, "reason", n.Reason)
@@ -278,10 +355,15 @@ func (c *controller) turn(ctx context.Context) error {
 		if !s.deleting && len(s.ingress) > 0 {
 			c.setStatus(ctx, s, "")
 		}
+		// Upstream's two Events around the finalizer (controller.go, processLoadBalancerDelete). "Deleted" is said
+		// when the portal holds a state without the Service: its address leaves the appliances in the pass after.
+		c.report(ctx, s, "delete", "Normal", "DeletingLoadBalancer", "Deleting load balancer")
 		if err := c.setFinalizers(ctx, s, slices.DeleteFunc(slices.Clone(s.finalizers), func(f string) bool { return f == Finalizer })); err != nil {
 			c.log.Warn("lb-controller: remove finalizer", "service", s.ns+"/"+s.name, "err", err)
 			continue
 		}
+		c.report(ctx, s, "deleted", "Normal", "DeletedLoadBalancer", "Deleted load balancer")
+		delete(c.hosts, s.uid)
 		for k := range c.events {
 			if strings.HasPrefix(k, s.uid+"/") {
 				delete(c.events, k)
@@ -312,7 +394,25 @@ func readService(obj map[string]any, defaultClass bool) *service {
 		s.finalizers = append(s.finalizers, str(f))
 	}
 	w := lbgw.Service{UID: s.uid, Namespace: s.ns, Name: s.name, ProxyProtocol: s.proxy,
-		ExternalTrafficPolicy: str(spec["externalTrafficPolicy"]), HealthCheckNodePort: num(spec["healthCheckNodePort"])}
+		ExternalTrafficPolicy: str(spec["externalTrafficPolicy"]), HealthCheckNodePort: num(spec["healthCheckNodePort"]),
+		SessionAffinity: str(spec["sessionAffinity"])}
+	if w.SessionAffinity == "None" {
+		w.SessionAffinity = "" // the API server's default: nothing to say
+	}
+	if w.SessionAffinity == "ClientIP" {
+		cfg, _ := spec["sessionAffinityConfig"].(map[string]any)
+		clientIP, _ := cfg["clientIP"].(map[string]any)
+		w.SessionAffinityTimeout = num(clientIP["timeoutSeconds"])
+	}
+	for k, v := range ann {
+		if lbgw.SentAnnotation(k) {
+			if w.Annotations == nil {
+				w.Annotations = map[string]string{}
+			}
+			w.Annotations[k] = str(v)
+		}
+	}
+	s.nodeSelector, _, _ = lbgw.Annotation(w.Annotations, lbgw.KnobNodeSelector)
 	for _, p := range list(spec["ports"]) {
 		m, _ := p.(map[string]any)
 		w.Ports = append(w.Ports, lbgw.Port{Name: str(m["name"]), Protocol: str(m["protocol"]), Port: num(m["port"]), NodePort: num(m["nodePort"])})
@@ -327,34 +427,45 @@ func readService(obj map[string]any, defaultClass bool) *service {
 	return s
 }
 
-// readNodes lists the nodes' IPv4 InternalIP, without the nodes labelled to stay out of external load balancers and
-// those being deleted. members is the controller's memory of the nodes it sent, which readNodes keeps.
+// readNodes lists the nodes' IPv4 InternalIP, and their labels by that address for a Service's node selector.
+// members is the controller's memory of the nodes it sent, which readNodes keeps.
 //
-// A node is sent from its first turn Ready on, and then for as long as it exists. Kubernetes' own service controller
-// hands a balancer every node that is not deleted, not excluded and not tainted for removal, Ready or not, and leaves
-// the rest to the balancer's health check (k8s.io/cloud-provider controllers/service/controller.go,
-// stableNodeSetPredicates, v0.34.0; KEP-3458): a Ready condition that flaps must not reconfigure every balancer, and
-// a node whose kubelet is silent may still forward. The second half is kept: a member that goes NotReady stays, and
-// its health check decides. The first half is not: HAProxy starts a member new to its config as UP ("init-state
-// down" needs 3.1, Debian 13 ships 3.0), so a node sent before it is Ready took its share of the requests until its
-// first check had failed (drill N3-8 of v0.11.0: 4.4 s, 22 of 44 requests, at each worker added or replaced).
+// Two rules decide, and both must hold.
 //
-// members nil is a controller that just started: it does not know what the balancer has, so every node it finds
-// counts as a member, as that controller would have it. Waiting for Ready there would take a member that is NotReady
-// at that moment out of a balancer it may still serve through, and all of them when no kubelet reaches the control
-// plane while the controller is restarted.
-func readNodes(items []map[string]any, members map[string]bool) ([]lbgw.Node, map[string]bool) {
+// Upstream's (k8s.io/cloud-provider controllers/service/controller.go, stableNodeSetPredicates with
+// nodeNotDeletedPredicate, nodeIncludedPredicate and nodeUnTaintedPredicate; KEP-3458): a node is out while it is
+// being deleted, while it carries the label node.kubernetes.io/exclude-from-external-load-balancers with a value
+// that is not a false boolean (strconv.ParseBool: "false", "0", "f" keep the node in; "true", the empty value and
+// anything that does not parse take it out), and while it carries the cluster autoscaler's taint
+// ToBeDeletedByClusterAutoscaler. Ready is not part of it: a node that is NotReady or cordoned stays, and the
+// balancer's health check decides, because a Ready condition that flaps must not reconfigure every balancer and a
+// node whose kubelet is silent may still forward.
+//
+// Ours, on top, for a node the balancer does not have yet: it is sent from its first turn Ready on. HAProxy starts a
+// member new to its config as UP ("init-state down" needs 3.1, Debian 13 ships 3.0), so a node sent before it is
+// Ready took its share of the requests until its first check had failed (drill N3-8 of v0.11.0: 4.4 s, 22 of 44
+// requests, at each worker added or replaced). So the two combine as: upstream's rule says who may be a member, and
+// a node that may be one becomes one at its first Ready and then stays one, Ready or not, until upstream's rule
+// takes it out. A node taken out starts over, and waits for Ready again.
+//
+// members nil is a controller that just started: it does not know what the balancer has, so every node upstream's
+// rule lets in counts as a member, as that controller would have it. Waiting for Ready there would take a member
+// that is NotReady at that moment out of a balancer it may still serve through, and all of them when no kubelet
+// reaches the control plane while the controller is restarted.
+func readNodes(items []map[string]any, members map[string]bool) ([]lbgw.Node, map[string]map[string]any, map[string]bool) {
 	started := members == nil
 	if started {
 		members = map[string]bool{}
 	}
 	out := []lbgw.Node{}
+	labelsOf := map[string]map[string]any{}
 	seen := map[string]bool{}
 	for _, n := range items {
 		meta, _ := n["metadata"].(map[string]any)
+		spec, _ := n["spec"].(map[string]any)
 		labels, _ := meta["labels"].(map[string]any)
 		name := str(meta["name"])
-		if _, excluded := labels[excludeLabel]; excluded || meta["deletionTimestamp"] != nil {
+		if meta["deletionTimestamp"] != nil || excluded(labels) || tainted(spec) {
 			continue
 		}
 		status, _ := n["status"].(map[string]any)
@@ -366,16 +477,68 @@ func readNodes(items []map[string]any, members map[string]bool) ([]lbgw.Node, ma
 			m, _ := a.(map[string]any)
 			if ip, err := netip.ParseAddr(str(m["address"])); err == nil && ip.Is4() && str(m["type"]) == "InternalIP" {
 				out = append(out, lbgw.Node{Name: name, Address: ip.String()})
+				labelsOf[ip.String()] = labels
 				break
 			}
 		}
 	}
-	for name := range members { // gone, deleting or excluded: a node of that name starts over
+	for name := range members { // gone, deleting, excluded or tainted: a node of that name starts over
 		if !seen[name] {
 			delete(members, name)
 		}
 	}
-	return out, members
+	return out, labelsOf, members
+}
+
+// excluded is upstream's nodeIncludedPredicate, turned round: the exclusion label is there and its value is not a
+// false boolean.
+func excluded(labels map[string]any) bool {
+	v, has := labels[excludeLabel]
+	if !has {
+		return false
+	}
+	off, err := strconv.ParseBool(str(v))
+	return err != nil || off
+}
+
+// tainted is upstream's nodeUnTaintedPredicate, turned round.
+func tainted(spec map[string]any) bool {
+	return slices.ContainsFunc(list(spec["taints"]), func(t any) bool {
+		m, _ := t.(map[string]any)
+		return str(m["key"]) == toBeDeletedTaint
+	})
+}
+
+func addressesOf(nodes []lbgw.Node) []string {
+	out := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, n.Address)
+	}
+	return out
+}
+
+// parseSelector reads a node selector annotation as the OpenStack cloud controller manager does ("key=value, key":
+// cloud-provider-openstack v1.37.1 pkg/openstack/loadbalancer.go:467-470 and matchNodeLabels, :2360-2373): terms
+// between commas, each a label that must have that value, or without "=" a label that must be there.
+func parseSelector(v string) map[string]string {
+	out := map[string]string{}
+	for _, term := range strings.Split(v, ",") {
+		if k, val, _ := strings.Cut(strings.TrimSpace(term), "="); k != "" {
+			out[k] = val
+		}
+	}
+	return out
+}
+
+// selects: the node's labels hold every term of the selector.
+func selects(sel map[string]string, labels map[string]any) bool {
+	for k, want := range sel {
+		got, has := labels[k]
+		if !has || (want != "" && str(got) != want) {
+			return false
+		}
+	}
+	return true
 }
 
 // nodeReady: the node's Ready condition is True.
