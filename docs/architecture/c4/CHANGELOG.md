@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-21: the sandbox chart and the cluster chart's per-group pool, range and DNS
+## 2026-11-22: the sandbox chart and the cluster chart's per-group pool, range and DNS
 
 **What changed:** a new chart, `proxcloud-sandbox` 0.1.0 (`deploy/charts/proxcloud-sandbox`, tag `proxcloud-sandbox-v*`
 in `helm.yml`), the sandbox runtime of the managed platform in mode `shared` (a node group of the platform cluster) or
@@ -23,6 +23,7 @@ Proxmox pool, address range (`InClusterIPPool`, `net0` with `defaultIPv4: false`
 5, 6, 7): sandboxes on the managed platform, shared or separate, on the platform network with a range of their own.
 
 **Diagrams:** C2 (the chart node and its table row; the cluster chart row).
+
 ## 2026-11-22: sandbox-netguard reads per-node Cilium config (#422)
 
 **What changed:** no new component or container. `sandbox-netguard -install` (node-setup on every sandbox node) now
