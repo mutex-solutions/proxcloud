@@ -261,10 +261,6 @@ func (h *Handler) lbCertCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if h.lbCertKeys == nil {
-		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, lbCertNoKeyMsg)
-		return
-	}
 	var req struct {
 		Name        string `json:"name"`
 		Certificate string `json:"certificate"`
@@ -275,55 +271,57 @@ func (h *Handler) lbCertCreate(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, httpx.BadRequest("Send a name, the certificate chain and the private key as JSON text fields"))
 		return
 	}
-	if req.Name = strings.TrimSpace(req.Name); !pve.LBNameOK(req.Name) {
-		h.fail(w, httpx.BadRequest("Certificate names "+pve.LBNameRule))
+	c, warnings, err := h.lbCertStore(r.Context(), p.ID, u.Sub, req.Name, req.Certificate, req.PrivateKey)
+	if err != nil {
+		h.fail(w, err)
 		return
 	}
-	info, bundle, warnings, refused := pve.CheckLBCertificate(req.Certificate, req.PrivateKey, time.Now())
+	h.lbCertAudit(u, p, audit.ActionCreate, c)
+	view := lbCertViewOf(c, nil)
+	view.Warnings = warnings
+	httpx.OK(w, view)
+}
+
+// lbCertStore checks an upload and stores it sealed. Its errors are for the customer and hold nothing of the key.
+func (h *Handler) lbCertStore(ctx context.Context, projectID, sub, name, chainPEM, keyPEM string) (*lbCertificate, []string, error) {
+	noKey := httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, lbCertNoKeyMsg)
+	if h.lbCerts == nil || h.lbCertKeys == nil {
+		return nil, nil, noKey
+	}
+	if name = strings.TrimSpace(name); !pve.LBNameOK(name) {
+		return nil, nil, httpx.BadRequest("Certificate names " + pve.LBNameRule)
+	}
+	info, bundle, warnings, refused := pve.CheckLBCertificate(chainPEM, keyPEM, time.Now())
 	if refused != "" {
-		h.fail(w, httpx.BadRequest(refused))
-		return
+		return nil, nil, httpx.BadRequest(refused)
 	}
-	ctx := r.Context()
-	if n, err := h.lbCerts.Count(ctx, pgdoc.M{"projectId": p.ID}); err != nil {
-		h.fail(w, err)
-		return
+	if n, err := h.lbCerts.Count(ctx, pgdoc.M{"projectId": projectID}); err != nil {
+		return nil, nil, err
 	} else if n >= lbMaxProjectCerts {
-		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("A project holds at most %d certificates. Delete one that no listener uses", lbMaxProjectCerts)))
-		return
+		return nil, nil, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("A project holds at most %d certificates. Delete one that no listener uses", lbMaxProjectCerts))
 	}
-	if taken, err := h.lbCerts.Exists(ctx, pgdoc.M{"projectId": p.ID, "name": req.Name}); err != nil {
-		h.fail(w, err)
-		return
+	if taken, err := h.lbCerts.Exists(ctx, pgdoc.M{"projectId": projectID, "name": name}); err != nil {
+		return nil, nil, err
 	} else if taken {
-		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "This project already has a certificate named "+req.Name))
-		return
+		return nil, nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "This project already has a certificate named "+name)
 	}
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
-		h.fail(w, err)
-		return
+		return nil, nil, err
 	}
 	now := time.Now().UTC()
-	c := lbCertificate{ID: hex.EncodeToString(raw), ProjectID: p.ID, Name: req.Name, CreatedAt: &now, CreatedBy: u.Sub, LBCertificate: info}
-	keyID, blob, err := h.lbCertKeys.Seal([]byte(bundle), lbCertAAD(p.ID, c.ID))
-	if err != nil {
-		if errors.Is(err, textcrypt.ErrBlobKey) {
-			httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, lbCertNoKeyMsg)
-			return
-		}
-		h.fail(w, errors.New("the certificate could not be sealed"))
-		return
+	c := &lbCertificate{ID: hex.EncodeToString(raw), ProjectID: projectID, Name: name, CreatedAt: &now, CreatedBy: sub, LBCertificate: info}
+	keyID, blob, err := h.lbCertKeys.Seal([]byte(bundle), lbCertAAD(projectID, c.ID))
+	if errors.Is(err, textcrypt.ErrBlobKey) {
+		return nil, nil, noKey
+	} else if err != nil {
+		return nil, nil, errors.New("the certificate could not be sealed")
 	}
 	c.KeyID, c.Sealed = keyID, base64.StdEncoding.EncodeToString(blob)
 	if _, err := h.lbCerts.InsertOne(ctx, c); err != nil {
-		h.fail(w, err)
-		return
+		return nil, nil, err
 	}
-	h.lbCertAudit(u, p, audit.ActionCreate, &c)
-	view := lbCertViewOf(&c, nil)
-	view.Warnings = warnings
-	httpx.OK(w, view)
+	return c, warnings, nil
 }
 
 func (h *Handler) lbCertDelete(w http.ResponseWriter, r *http.Request) {
