@@ -302,7 +302,8 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 	}
 	mark = len(wire)
 	status, err := h.pveLBApply(ctx, es, proj, "lb-abc")
-	if got := saved(); err != nil || len(events(mark)) != 0 || !strings.Contains(got.StatusMessage, "names a certificate that is not a certificate of this project") {
+	if got := saved(); err != nil || len(events(mark)) != 0 || !strings.Contains(got.StatusMessage, "names a certificate that is not a certificate of this project") ||
+		!slices.Equal(got.Listeners[0].CertFiles, []string{c2.File}) { // the row still renders the config the appliances serve
 		t.Errorf("apply with a certificate gone: %s %v %q, wrote %v", status, err, got.StatusMessage, events(mark))
 	}
 

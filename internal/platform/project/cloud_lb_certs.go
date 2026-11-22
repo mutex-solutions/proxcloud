@@ -123,10 +123,10 @@ func (h *Handler) lbResolveCerts(ctx context.Context, projectID string, spec *pv
 	if h.lbCerts == nil || h.lbCertKeys == nil {
 		return nil, lbCertNoKeyMsg, nil
 	}
+	// The spec changes only when every certificate was found: a pass that fails leaves the row as it was.
 	seen := map[string]*lbCertificate{}
-	for i := range spec.Listeners {
-		l := &spec.Listeners[i]
-		l.CertFiles = nil
+	names := make([][]string, len(spec.Listeners))
+	for i, l := range spec.Listeners {
 		for _, id := range l.Certificates {
 			c := seen[id]
 			if c == nil {
@@ -149,8 +149,11 @@ func (h *Handler) lbResolveCerts(ctx context.Context, projectID string, spec *pv
 					}
 				}
 			}
-			l.CertFiles = append(l.CertFiles, c.File)
+			names[i] = append(names[i], c.File)
 		}
+	}
+	for i := range spec.Listeners {
+		spec.Listeners[i].CertFiles = names[i]
 	}
 	return files, "", nil
 }
