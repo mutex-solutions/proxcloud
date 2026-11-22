@@ -55,7 +55,7 @@ test("a listener's protocol and limits and a pool's layer 4 options are saved as
   await expect(protocol).toContainText("HTTP")
   await expect(page.getByTestId("pool-protocol-0")).toContainText("spoken to in HTTP")
   await protocol.click()
-  await expect(page.getByRole("option")).toHaveText(["TCP", "HTTP"]) // what a load balancer serves today
+  await expect(page.getByRole("option")).toHaveText(["TCP", "HTTP", "UDP"]) // what a load balancer on two appliances serves today
   await page.getByRole("option", { name: "TCP", exact: true }).click()
   await expect(page.getByTestId("pool-protocol-0")).toContainText("spoken to in TCP")
 
@@ -111,4 +111,58 @@ test("a listener's protocol and limits and a pool's layer 4 options are saved as
   expect(cleared?.pools[0].sessionPersistence).toBeNull()
   expect(cleared?.pools[0].proxyProtocol).toBe(false)
   expect(cleared?.pools[0].proxyVersion).toBeUndefined()
+})
+
+// UDP listeners (v0.11.1), on a load balancer with high availability: the pool follows the listener to UDP, loses what
+// UDP does not take (PROXY, the timeouts, a check of the TCP family), offers keepalived's checks with a payload and a
+// required reply, and says what the plain check does not see. The limit of a UDP listener is per server.
+test("a UDP listener takes a UDP pool with its own checks, and the page says what the check does not see", async ({ page }) => {
+  await page.goto(`${SITE}/load-balancers`)
+  await page.getByRole("link", { name: "web-lb" }).click()
+  const pick = async (box: string, option: string) => {
+    await page.getByRole("combobox", { name: box }).click()
+    await page.getByRole("option", { name: option, exact: true }).click()
+  }
+  await page.getByLabel("Server idle timeout (s)").fill("30")
+  await page.getByRole("spinbutton", { name: "Client idle timeout in seconds" }).fill("30")
+  await pick("Listener protocol", "UDP")
+  await expect(page.getByTestId("pool-protocol-0")).toContainText("spoken to in UDP")
+  await expect(page.getByTestId("pool-udp-0")).toContainText("see the load balancer's address, not the client's")
+  await expect(page.getByTestId("pool-udp-0")).toContainText("sends random bytes to the port unless a payload is given")
+  await expect(page.getByTestId("pool-udp-0")).toContainText("a closed port on a running server is not seen while the port has traffic")
+  await expect(page.getByText("connections per server")).toBeVisible()
+  // What UDP does not take is gone from the page.
+  for (const gone of ["Connect timeout (s)", "Server idle timeout (s)", "Up after"]) await expect(page.getByLabel(gone)).toHaveCount(0)
+  await expect(page.getByRole("combobox", { name: "PROXY protocol" })).toHaveCount(0)
+  await expect(page.getByRole("spinbutton", { name: "Client idle timeout in seconds" })).toHaveCount(0)
+  // The pool's own check is a datagram; keepalived's other checks are offered, HAProxy's are not.
+  const check = page.getByRole("combobox", { name: "Health check" })
+  await expect(check).toContainText("UDP datagram")
+  await check.click()
+  await expect(page.getByRole("option")).toHaveText(["UDP datagram", "TCP connection", "HTTP GET", "None"])
+  await page.getByRole("option", { name: "UDP datagram", exact: true }).click()
+  await page.getByRole("spinbutton", { name: "Listener port" }).fill("53")
+  await page.getByRole("spinbutton", { name: "Connection limit" }).fill("1000")
+  await page.getByRole("button", { name: "Save configuration" }).click()
+  await expect(page.getByText("Configuration saved")).toBeVisible()
+  type Sent = { listeners: Array<Record<string, unknown>>; pools: Array<Record<string, unknown>> }
+  const sent = await page.evaluate(() => (globalThis as { __lbConfig?: Sent }).__lbConfig)
+  expect(sent?.listeners[0]).toEqual({ port: 53, protocol: "udp", pool: "web", sourceRanges: ["198.51.100.0/24"], connectionLimit: 1000 })
+  expect(sent?.pools[0]).toMatchObject({ name: "web", protocol: "udp", healthCheck: null, proxyProtocol: false })
+  for (const key of ["timeoutMemberConnect", "timeoutMemberData", "proxyVersion"]) expect(sent?.pools[0][key]).toBeUndefined()
+
+  // A real check: a payload the service answers, and the reply required.
+  await page.getByLabel("Payload (hex)").fill("70 69 6e 67")
+  await page.getByLabel("Require a reply").click()
+  await page.getByLabel("Down after").fill("2")
+  await page.getByRole("button", { name: "Save configuration" }).click()
+  // (The note of the first save may still be on the page: wait for what was sent, not for the note.)
+  await expect.poll(async () => (await page.evaluate(() => (globalThis as { __lbConfig?: Sent }).__lbConfig))?.pools[0].healthCheck)
+    .toEqual({ type: "udp-connect", payload: "70696e67", requireReply: true, fall: 2 })
+
+  // Back to TCP: the UDP check goes with it.
+  await pick("Listener protocol", "TCP")
+  await expect(page.getByTestId("pool-udp-0")).toHaveCount(0)
+  await expect(page.getByRole("combobox", { name: "Health check" })).toContainText("TCP connection")
+  await expect(page.getByLabel("Payload (hex)")).toHaveCount(0)
 })

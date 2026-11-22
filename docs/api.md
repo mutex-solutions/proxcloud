@@ -191,7 +191,7 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
     for any address; `connectionLimit`, 1 to 20000 connections open at a time (absent: no limit of its own; 20000
     is what the load balancer holds in all); `timeoutClientData`, milliseconds a client's connection may stay idle,
     1000 to 86400000 (absent: 60 s). One port holds one listener.
-  - A **pool**: `name`; `protocol`, what its servers are spoken to in, `tcp` or `http` (absent: what its first
+  - A **pool**: `name`; `protocol`, what its servers are spoken to in, `tcp`, `http` or `udp` (absent: what its first
     listener needs, `http` when none says); `algorithm` `roundrobin`, `leastconn` or `source`; `members`
     (`serverId`, `port`, `weight` 1 to 256); `healthCheck`; `proxyProtocol` (boolean) with `proxyVersion` `1` or
     `2` (absent: 2), the PROXY header sent to the servers; `sessionPersistence` `{type: "source_ip", timeout}`,
@@ -210,14 +210,27 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
     or the interval, whichever is shorter, so on a `tcp` check, which waits for no answer, it only shortens that
     wait.
   - **The protocol of a listener decides the protocol of its pool**: a `tcp` listener needs a `tcp` pool, an `http`
-    listener an `http` pool (`400` otherwise, naming both), so a pool serves listeners of one protocol. The model
-    also knows `udp`, `tls` and `https` listeners (with `certificates` on the last two) and `udp` pools: until a
-    load balancer serves them they answer `400` "UDP is not available on a load balancer yet" and "TLS termination
-    is not available on a load balancer yet". `sctp` and any other value are a `400` too.
+    listener an `http` pool, a `udp` listener a `udp` pool (`400` otherwise, naming both), so a pool serves
+    listeners of one protocol. One port holds one listener of each transport: a `tcp` (or `http`) listener and a
+    `udp` listener may share a port number. The model also knows `tls` and `https` listeners (with
+    `certificates`): until a load balancer serves them they answer `400` "TLS termination is not available on a
+    load balancer yet". `sctp` and any other value are a `400` too.
+  - **UDP** (`protocol: "udp"` on a listener and its pool) is served by a load balancer on two appliances only:
+    on one VM it answers `400` "UDP needs a high-availability load balancer". The servers see the address of the
+    appliance, not the client's; a UDP pool takes no `proxyProtocol` and no member timeouts, a UDP listener no
+    `timeoutClientData`, and its `connectionLimit` counts **per server**. `algorithm` and `sessionPersistence`
+    work as for TCP. Its `healthCheck` is `udp-connect` (also what an absent one means), `tcp`, `http` or `none`,
+    with `port`, `path` (http), `interval`, `timeout` and `fall` (absent: every 5 s, 5 s, 3 checks; `fall` is 2 to 10, and `rise`
+    is refused: a server is back at its first good check). `udp-connect` sends a datagram to the port and pings the
+    server: a server that is down leaves in about 10 s, one that runs with the port closed is seen only by the
+    ICMP error it sends, which a server under traffic rate-limits. It takes `payload` (the datagram as 2 to 256
+    hexadecimal digits; random bytes when absent) and `requireReply` (boolean: up only while the server answers
+    the datagram). A UDP listener whose pool has no server to send to answers ICMP port unreachable.
 - **`REPLACE_APPLIANCES`** (a pair only; `409` on a single VM, while it is still being created, or while a replace
   runs): answers the row with `replacing` set and rebuilds the appliances one at a time, the standby first. A
   delete answers `409` while it runs. Refused while the project is suspended, like any change.
-- **`GET_HEALTH`** answers `result` (each member's state as HAProxy sees it; for a pair, the appliance holding the
+- **`GET_HEALTH`** answers `result` (each member's state as HAProxy sees it, and for a UDP pool as the kernel's
+  IPVS table holds it: `UP` in the table, `DOWN` taken out by its check; for a pair, the appliance holding the
   address) and, for a pair, `appliances` as just read. A member the stored configuration holds and the running
   HAProxy does not has `status` `NOT LOADED`; the answer then also has `notLoaded` (the listeners HAProxy does not
   run, each as `port` or `address:port`) and `message`. A member whose server left has `status` `""`.

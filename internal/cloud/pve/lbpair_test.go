@@ -171,6 +171,10 @@ func TestParseVRRPState(t *testing.T) {
 		"MASTER 1 1 1 x":  {State: "UNKNOWN"},
 		"MASTER\n1\n1\n1": {State: "MASTER", HAProxy: true, HoldsVIP: true, Serving: true},
 		"BACKUP 0 1 0\n ": {State: "BACKUP", HoldsVIP: true},
+		// With what the files hash to and the UDP service's word, as the appliance answers since v0.11.1.
+		"MASTER 1 1 1 aa bb cc 1": {State: "MASTER", HAProxy: true, HoldsVIP: true, Serving: true, HAProxySum: "aa", KeepalivedSum: "bb", LVSSum: "cc", LVS: true},
+		"BACKUP 1 0 1 aa bb - 0":  {State: "BACKUP", HAProxy: true, Serving: true, HAProxySum: "aa", KeepalivedSum: "bb", LVSSum: "-"},
+		"MASTER 1 1 1 aa bb cc":   {State: "UNKNOWN"},
 	} {
 		if got := ParseVRRPState(out); got != want {
 			t.Errorf("%q = %+v, want %+v", out, got, want)

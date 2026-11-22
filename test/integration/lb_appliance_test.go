@@ -450,11 +450,17 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 				t.Fatalf("single appliance: %v", err)
 			}
 			listens("single appliance", "0.0.0.0:80")
-			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100); err != nil || !ok {
+			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, lbSum(pve.RenderHAProxy(spec(80)))); err != nil || !ok {
 				t.Fatalf("single appliance serving: %v %q %v", ok, why, err)
 			}
+			// A file changed by hand is served, and is not the one that was applied (spike of v0.11.1, SP-2): the
+			// state read says so, which makes the next pass push it again.
+			g.run(ctx, "echo '# by hand' >> /etc/haproxy/haproxy.cfg")
+			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, lbSum(pve.RenderHAProxy(spec(80)))); err != nil || ok || !strings.Contains(why, "not the one that was applied") {
+				t.Fatalf("single appliance, file changed by hand: %v %q %v", ok, why, err)
+			}
 			g.run(ctx, "systemctl stop haproxy")
-			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100); err != nil || ok || why != "HAProxy is not running" {
+			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, ""); err != nil || ok || why != "HAProxy is not running" {
 				t.Fatalf("single appliance stopped: %v %q %v", ok, why, err)
 			}
 			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {

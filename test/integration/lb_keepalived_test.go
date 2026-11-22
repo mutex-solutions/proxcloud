@@ -135,6 +135,40 @@ func TestLBPairConfigsPassTheirChecks(t *testing.T) {
 					t.Logf("%d VIPs: %s", n, s)
 				}
 			}
+			// The config of the second keepalived, the one that fills the kernel's IPVS table for UDP listeners
+			// (pve.RenderLVS): every golden of the unit tests is read by this image's keepalived without an error and
+			// without a keyword it does not know. The control: the same file with a server that names no port.
+			lvsGoldens, err := filepath.Glob("../../internal/cloud/pve/testdata/lvs-*.conf")
+			if err != nil || len(lvsGoldens) < 3 {
+				t.Fatalf("LVS goldens: %q %v", lvsGoldens, err)
+			}
+			check := func(conf []byte) (int, string) {
+				t.Helper()
+				if err := c.CopyToContainer(ctx, conf, "/tmp/lvs.conf", 0o644); err != nil {
+					t.Fatal(err)
+				}
+				code, r, err := c.Exec(ctx, []string{"keepalived", "-t", "-f", "/tmp/lvs.conf"}, tcexec.Multiplexed())
+				if err != nil {
+					t.Fatal(err)
+				}
+				var out bytes.Buffer
+				if r != nil {
+					_, _ = io.Copy(&out, r)
+				}
+				return code, out.String()
+			}
+			for _, g := range lvsGoldens {
+				conf, err := os.ReadFile(g)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if code, out := check(conf); code != 0 || strings.Contains(out, "Unknown keyword") || strings.Contains(out, "nknown") {
+					t.Errorf("%s: keepalived -t exit %d\n%s", filepath.Base(g), code, out)
+				}
+				if code, out := check(append(conf, "virtual_server 203.0.113.10 {\n"...)); code == 0 {
+					t.Errorf("%s with a server that names no port: keepalived -t took it\n%s", filepath.Base(g), out)
+				}
+			}
 		})
 	}
 }

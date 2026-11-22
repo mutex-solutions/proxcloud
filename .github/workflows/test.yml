@@ -70,9 +70,19 @@ jobs:
           python3 -m venv /tmp/iv && /tmp/iv/bin/pip install -q -r installer/requirements.txt
           /tmp/iv/bin/python installer/tests/render_prepull_policy.py /tmp/prepull-policy.yaml
           cd test/policy && POLICY_YAML=/tmp/prepull-policy.yaml go test ./...
+      # The UDP load balancer test (TestLBApplianceUDP) needs the kernel's IPVS. With the module loaded here the test
+      # must run: it fails instead of skipping. On a runner without the module the run carries a warning, and the lab
+      # drill is the gate for UDP listeners.
+      - name: Kernel IPVS for the UDP load balancer test
+        run: |
+          if sudo modprobe ip_vs; then
+            echo "LB_UDP_REQUIRE_IPVS=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning title=UDP load balancer test skipped::this runner's kernel has no IPVS (ip_vs): TestLBApplianceUDP does not run, the lab drill is the gate for UDP listeners"
+          fi
       - name: Integration tests (testcontainers PostgreSQL)
         run: |
-          go test -tags=integration ./test/integration/... ./cmd/api/...
+          go test -tags=integration -timeout 40m ./test/integration/... ./cmd/api/...
           go test -tags=integration ./internal/platform/project -run '^(TestBuildArchiveSurvivesCleanupAndRestart|TestPVESubnetRefreshFollowsTheLiveZone|TestPVEServerRefreshKeepsTheRowIdentity|TestLBPairApplyOrderAndStatus|TestLBClusterStateConverges|TestLBControllerEnable)$'
 
   # tsc and vite build stay green on a bundle that renders a white page, so open the real build.

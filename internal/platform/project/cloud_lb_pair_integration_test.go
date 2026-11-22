@@ -133,4 +133,34 @@ func TestLBPairApplyOrderAndStatus(t *testing.T) {
 	if herr := h.pveLBReplace(ctx, nil, es, proj, single); herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "one VM") {
 		t.Fatalf("replace on a single appliance: %v", herr)
 	}
+	// UDP through UPDATE_CONFIG. A balancer on one VM refuses it by name and its row stays as it was (it has no
+	// keepalived to fill the kernel's table); a pair takes the listener into its row.
+	udp := map[string]any{
+		"listeners": []any{map[string]any{"port": float64(53), "protocol": "udp", "pool": "dns"}},
+		"pools":     []any{map[string]any{"name": "dns", "members": []any{}}}}
+	oneVM := &cloud.CloudResource{ExternalID: "lb-one", ServiceID: "svc", ProjectID: "p1", Type: cloud.TypeLoadBalancer}
+	if err := setLBRow(oneVM, &loadBalancer{ID: "one", Name: "one", Status: lbStatusActive, NetworkID: "v1", PublicNetworkID: "vmbr1", ServerID: "401",
+		PrivateIP: "10.0.0.41", PrivatePrefix: 24, PublicIP: "203.0.113.11", VIPs: []string{"203.0.113.11"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.cloud.Insert(ctx, oneVM); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.pveLBUpdateConfig(ctx, es, proj, oneVM, udp); err == nil || !strings.Contains(err.Error(), "UDP needs a high-availability load balancer") {
+		t.Fatalf("a UDP listener on a load balancer on one VM: %v", err)
+	}
+	for id, want := range map[string]bool{"lb-one": false, "lb-abc": true} {
+		if want {
+			if err := h.pveLBUpdateConfig(ctx, es, proj, &cloud.CloudResource{ExternalID: id}, udp); err != nil {
+				t.Fatalf("a UDP listener on a pair: %v", err)
+			}
+		}
+		kept, err := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", id)
+		if err != nil || kept == nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if got, err := lbOfRow(kept); err != nil || got.HasUDP() != want {
+			t.Fatalf("%s holds a UDP listener: %v, want %v (%v)", id, got.HasUDP(), want, err)
+		}
+	}
 }

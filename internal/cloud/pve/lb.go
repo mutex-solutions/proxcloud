@@ -87,15 +87,20 @@ type LBPersistence struct {
 
 // LBHealthCheck is how a pool's members are checked.
 type LBHealthCheck struct {
-	Type string `json:"type"`           // tcp | http | https | tls-hello | none
+	Type string `json:"type"`           // tcp | http | https | tls-hello | udp-connect (a UDP pool's own) | none
 	Port int    `json:"port,omitempty"` // 0 = the member's own port
 	Path string `json:"path,omitempty"` // http, https: the path of the GET, "/" when empty
 	// Interval and Timeout in seconds, Rise and Fall in checks; 0 = the balancer's own (every 3 s, the answer within
-	// the interval, 2 good checks up, 2 bad ones down).
+	// the interval, 2 good checks up, 2 bad ones down; a UDP pool's are in lblvs.go).
 	Interval int `json:"interval,omitempty"`
 	Timeout  int `json:"timeout,omitempty"`
 	Rise     int `json:"rise,omitempty"`
 	Fall     int `json:"fall,omitempty"`
+	// Payload and RequireReply belong to udp-connect. Payload is the datagram the check sends, as hexadecimal digits
+	// (empty: random bytes). RequireReply makes a member up only when it answers the datagram: without it a member
+	// is down only when an ICMP error comes back, and one whose port is closed is not seen under traffic (lblvs.go).
+	Payload      string `json:"payload,omitempty"`
+	RequireReply bool   `json:"requireReply,omitempty"`
 }
 
 // LBListener is a port on the load balancer's addresses.
@@ -141,6 +146,10 @@ var (
 	lbServerIDRe = regexp.MustCompile(`^[0-9]{1,9}$`)
 	lbAlgorithms = []string{"roundrobin", "leastconn", "source"}
 	lbChecks     = []string{"tcp", "http", "https", "tls-hello", "none"}
+	// lbUDPChecks are the checks of a UDP pool: keepalived runs them, not HAProxy (lblvs.go).
+	lbUDPChecks = []string{"udp-connect", "tcp", "http", "none"}
+	// lbPayloadRe: a check's datagram, 1 to 128 bytes as hexadecimal digits.
+	lbPayloadRe = regexp.MustCompile(`^([0-9a-fA-F]{2}){1,128}$`)
 	// lbCheckPathRe: what a health check's path may hold, so it can only be a path in the config.
 	lbCheckPathRe = regexp.MustCompile(`^/[A-Za-z0-9._~/%=&?:@+-]{0,199}$`)
 
@@ -153,11 +162,10 @@ var (
 	// lbNotServed is the switch of the protocols the model knows and no appliance serves yet: a listener or a pool
 	// of one is refused with the text here. It is the only thing that keeps them out. The matrix, the listener key
 	// (lbFamily), the firewall rule's protocol (LBListenerRules) and the renderer, which gives no HAProxy frontend
-	// to a protocol it does not serve (lbFrontendMode), already know them. So the change that serves UDP deletes
-	// "udp" here and adds its own renderer, and the one that ends TLS deletes "tls" and "https" and renders their
-	// binds in lbFrontendMode's place.
+	// to a protocol it does not serve (lbFrontendMode), already know them. So the change that ends TLS deletes
+	// "tls" and "https" and renders their binds in lbFrontendMode's place. UDP is served by keepalived and LVS on an
+	// appliance pair (lblvs.go), and refused on a single appliance where the request is taken (LBSpec.HasUDP).
 	lbNotServed = map[string]string{
-		"udp":   "UDP is not available on a load balancer yet",
 		"tls":   "TLS termination is not available on a load balancer yet: use a tcp listener and end TLS on the servers",
 		"https": "TLS termination is not available on a load balancer yet: use a tcp listener and end TLS on the servers",
 	}
@@ -217,7 +225,7 @@ func (s *LBSpec) Validate() string {
 			p.Protocol = cmp.Or(asked[p.Name], "http")
 		}
 		if !slices.Contains([]string{"http", "tcp", "udp"}, p.Protocol) {
-			return "Pool " + p.Name + ": protocol must be http or tcp"
+			return "Pool " + p.Name + ": protocol must be http, tcp or udp"
 		}
 		if why := lbNotServed[p.Protocol]; why != "" {
 			return "Pool " + p.Name + ": " + why
@@ -231,14 +239,29 @@ func (s *LBSpec) Validate() string {
 		if len(p.Members) > lbMaxMembers {
 			return fmt.Sprintf("Pool %s holds more than %d members", p.Name, lbMaxMembers)
 		}
+		udp := p.Protocol == "udp"
 		if hc := p.HealthCheck; hc != nil {
 			if hc.Type == "" {
 				hc.Type = "tcp"
+				if udp {
+					hc.Type = "udp-connect"
+				}
 			}
 			hasPath := hc.Type == "http" || hc.Type == "https"
 			switch {
-			case !slices.Contains(lbChecks, hc.Type):
+			case udp && !slices.Contains(lbUDPChecks, hc.Type):
+				return "Pool " + p.Name + ": the health check of a UDP pool must be udp-connect, tcp, http or none"
+			case !udp && !slices.Contains(lbChecks, hc.Type):
 				return "Pool " + p.Name + ": health check type must be tcp, http, https, tls-hello or none"
+			case hc.Type != "udp-connect" && (hc.Payload != "" || hc.RequireReply):
+				return "Pool " + p.Name + ": only a udp-connect health check takes a payload and a required reply"
+			case hc.Payload != "" && !lbPayloadRe.MatchString(hc.Payload):
+				return "Pool " + p.Name + ": health check payload must be 1 to 128 bytes written as hexadecimal digits, such as 70696e67"
+			case udp && hc.Rise != 0:
+				return "Pool " + p.Name + ": a UDP pool's member is up again at its first good check, so its health check takes no rise"
+			case udp && hc.Fall == 1:
+				// keepalived tries a failed check again at least once ("retry" is 1 or more, 2.3.3 and 2.3.4).
+				return "Pool " + p.Name + ": a UDP pool's member is down after 2 to 10 failed checks, so its health check's fall cannot be 1"
 			case hc.Type == "none" && *hc != (LBHealthCheck{Type: "none"}):
 				return "Pool " + p.Name + ": a pool without a health check takes no port, path or figures of one"
 			case hc.Port < 0 || hc.Port > 65535:
@@ -254,6 +277,10 @@ func (s *LBSpec) Validate() string {
 			}
 		}
 		switch {
+		case udp && p.ProxyProtocol:
+			return "Pool " + p.Name + ": UDP has no PROXY protocol; the members see the load balancer's address, not the client's"
+		case udp && (p.TimeoutMemberConnect != 0 || p.TimeoutMemberData != 0):
+			return "Pool " + p.Name + ": a UDP pool takes no member timeouts"
 		case p.ProxyVersion < 0 || p.ProxyVersion > 2:
 			return "Pool " + p.Name + ": PROXY protocol version must be 1 or 2"
 		case p.ProxyVersion != 0 && !p.ProxyProtocol:
@@ -308,7 +335,7 @@ func (s *LBSpec) Validate() string {
 		}
 		needs, known := lbPoolProtocolOf[l.Protocol]
 		if !known {
-			return on + ": protocol must be tcp or http"
+			return on + ": protocol must be tcp, udp or http"
 		}
 		if why := lbNotServed[l.Protocol]; why != "" {
 			return on + ": " + why
@@ -326,6 +353,8 @@ func (s *LBSpec) Validate() string {
 			return on + ": only a tls or https listener takes certificates"
 		case l.ConnectionLimit < 0 || l.ConnectionLimit > lbMaxConnections:
 			return fmt.Sprintf("%s: connection limit must be 1 to %d, or empty for none (%d is what the load balancer holds in all)", on, lbMaxConnections, lbMaxConnections)
+		case l.Protocol == "udp" && l.TimeoutClientData != 0:
+			return on + ": a UDP listener takes no client timeout"
 		case !lbTimeoutOK(l.TimeoutClientData):
 			return on + ": client timeout must be 1000 to 86400000 milliseconds (a second to a day), or empty"
 		}
@@ -337,6 +366,12 @@ func (s *LBSpec) Validate() string {
 		l.SourceRanges = ranges
 	}
 	return ""
+}
+
+// HasUDP: the spec holds a UDP listener or pool, which only an appliance pair serves.
+func (s *LBSpec) HasUDP() bool {
+	return slices.ContainsFunc(s.Listeners, func(l LBListener) bool { return l.Protocol == "udp" }) ||
+		slices.ContainsFunc(s.Pools, func(p LBPool) bool { return p.Protocol == "udp" })
 }
 
 func lbTimeoutOK(ms int) bool { return ms == 0 || (ms >= lbMinTimeout && ms <= lbMaxTimeout) }
@@ -542,6 +577,9 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		b.WriteString("\nlisten idle\n  mode tcp\n  bind unix@/run/haproxy/idle.sock\n")
 	}
 	for i, p := range s.Pools {
+		if p.Protocol == "udp" { // keepalived's, not HAProxy's (RenderLVS)
+			continue
+		}
 		algo := "roundrobin"
 		if slices.Contains(lbAlgorithms, p.Algorithm) {
 			algo = p.Algorithm
@@ -779,15 +817,19 @@ func (s *Service) swapHAProxy(ctx context.Context, node string, vmid int, config
 }
 
 // HAProxyServing asks a single appliance whether HAProxy runs and listens on every bind of its config, and what is
-// missing when it does not.
-func (s *Service) HAProxyServing(ctx context.Context, node string, vmid int) (serving bool, why string, err error) {
-	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbServingFn+"serving && echo ok")
+// missing when it does not. With hash, the sha256 of the config that was applied, the file on the appliance must be
+// that one too: listeners alone say nothing of a file edited by hand (spike of v0.11.1, SP-2).
+func (s *Service) HAProxyServing(ctx context.Context, node string, vmid int, hash string) (serving bool, why string, err error) {
+	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbServingFn+"serving && echo ok $(sha256sum < "+haproxyConfig+" | cut -c1-64)")
 	if err != nil {
 		return false, "", err
 	}
 	out = strings.TrimSpace(out)
-	switch {
-	case exit == 0 && out == "ok":
+	sum, ok := strings.CutPrefix(out, "ok")
+	switch sum = strings.TrimSpace(sum); {
+	case exit == 0 && ok && sum != "" && hash != "" && sum != hash:
+		return false, "HAProxy's configuration file is not the one that was applied", nil
+	case exit == 0 && ok:
 		return true, "", nil
 	case out == "":
 		return false, "", fmt.Errorf("haproxy state: exit %d %s", exit, strings.TrimSpace(stderr))
@@ -1025,6 +1067,9 @@ func ParseHAProxyStat(out string, spec LBSpec) ([]LBMemberHealth, []string, erro
 	backends := lbBackends(spec.Pools)
 	for i, p := range spec.Pools {
 		pools[p.Name] = p
+		if p.Protocol == "udp" { // HAProxy holds no member of it: ParseLVSTable reads them
+			continue
+		}
 		for _, m := range p.Members {
 			addr := ""
 			if m.Node {

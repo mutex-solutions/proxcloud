@@ -40,25 +40,46 @@ A load balancer named `k8s-…` whose row names a Kubernetes cluster belongs to 
 
 - A **pool** is a set of your servers. Choose how to spread traffic: round robin, least connections, or by source address.
 - Each server in a pool has a **port** and a **weight**. A server with twice the weight gets twice the traffic.
-- A **listener** opens a port on the public address and forwards it to a pool. Its **protocol** is TCP or HTTP, and the pool speaks the same to your servers: a pool serves listeners of one protocol, so changing a listener's protocol changes its pool and the pool's other listeners with it. Under **Allowed sources** you can list the networks that may connect, such as `203.0.113.0/24`; empty means any address. Other clients are dropped before they reach the load balancer.
+- A **listener** opens a port on the public address and forwards it to a pool. Its **protocol** is TCP, HTTP or, on a load balancer with high availability, UDP, and the pool speaks the same to your servers: a pool serves listeners of one protocol, so changing a listener's protocol changes its pool and the pool's other listeners with it. Under **Allowed sources** you can list the networks that may connect, such as `203.0.113.0/24`; empty means any address. Other clients are dropped before they reach the load balancer.
 - A listener's **connection limit** is the most connections it holds open at a time; further clients wait until one closes. Empty means no limit of its own. The load balancer as a whole holds 20000. Its **idle timeout** closes a client's connection after that many seconds without data (60 when empty).
 - **Session persistence** by source address keeps each client address on the server it first reached, until that address has made no new connection for the time you set (three hours when empty). The load balancer forgets these choices when you save a change and when the other appliance takes over, and clients are then spread afresh.
 - **PROXY protocol** on a pool passes the client's address to your servers in a PROXY header, version 1 (a text line) or 2 (binary). Turn it on only when your servers expect that header, in that version.
 - A pool's **connect timeout** is how long a server may take to accept a connection before the next server is tried (2 seconds when empty), and its **server idle timeout** closes a connection after that many seconds without data from the server (60 when empty). For long-lived connections such as a database or a websocket, raise both idle timeouts.
 
-UDP listeners and TLS termination on the load balancer are not available yet.
+TLS termination on the load balancer is not available yet. UDP has a section of its own below.
 
 Press **Save configuration**. The change reaches the load balancer within seconds. If HAProxy refuses it, the page shows why and the load balancer keeps running the last configuration that worked.
 
 Only servers of this project, on the load balancer's own network and subnet, can be added. HTTP pools add an `X-Forwarded-For` header with the client's address. To serve HTTPS, use a TCP pool on port 443 and terminate TLS on your servers.
 
+## UDP
+
+A load balancer with high availability also takes **UDP** listeners; one that runs on a single VM does not, and says so when you try. A UDP listener forwards to a UDP pool, and the same port number can hold a TCP listener and a UDP listener side by side (DNS on 53, for example).
+
+- **Your servers see the load balancer's address, not the client's.** Each datagram reaches a server from the private address of the appliance that carries the traffic. There is no PROXY protocol for UDP, so nothing passes the client's address on.
+- **Spreading traffic** works as for TCP: round robin, least connections or by source address, with the servers' weights. **Session persistence** by source address keeps a client address on one server until it has been silent for the time you set (three hours when empty).
+- A UDP listener's **connection limit** counts per server, not for the listener as a whole: with a limit of 1000 and three servers, up to 3000 clients are served at a time. It has no idle timeout, and a UDP pool has no connect or server timeout.
+- **After a failover** of the load balancer the other appliance spreads the clients afresh, so a client may reach another server than before. With traffic spread by source address it is the same server as long as both appliances see the same servers up.
+- A UDP listener whose pool has no server that can take traffic answers "port unreachable".
+
+### Checking UDP servers
+
+UDP has no connection to open, so the checks are different, and it matters which one you choose:
+
+- **UDP datagram** (the default) sends a datagram to the server's port every 5 seconds and pings the server. A server that is stopped or unreachable leaves the pool in about 10 seconds. **A server that runs with nothing listening on the port is often not taken out**: the only sign is the "port unreachable" message the server sends back, and a server under traffic sends only a few of those per second. A server whose firewall drops packets in silence is never taken out.
+- The datagram holds **random bytes** unless you give a **payload**, so your service receives junk every few seconds and should ignore it. Give a payload (as hexadecimal digits, `70696e67` for `ping`) that your service understands.
+- **Require a reply** is the real check: a server is up only while it answers the payload, and a closed port is seen within about 12 seconds. Use it whenever your service answers something.
+- **TCP connection** or **HTTP GET** check another side of the same service, on the **check port** you name: the TCP port of a DNS server, a health endpoint next to a game server.
+- **None**: no check, every server always gets traffic.
+- **Every**, **Timeout** and **Down after** work as for TCP (5 seconds, 5 seconds and 3 checks when empty; **Down after** is 2 at least). There is no **Up after**: a server is back at its first good check. A server you add gets no traffic until its first good check.
+
 ## Let the traffic in
 
-The load balancer reaches your servers from its private addresses (one per VM; a replace gives new ones). The `default` security group already allows that. If a server uses other groups, open its port to the load balancer's network.
+The load balancer reaches your servers from its private addresses (one per VM; a replace gives new ones). The `default` security group already allows that. If a server uses other groups, open its port to the load balancer's network, for UDP when the pool is a UDP pool. The default check of a UDP pool also pings the server: let ICMP echo in from the load balancer's network as well, or the server never enters the pool (a check with a required reply, a TCP check or an HTTP check sends no ping).
 
 ## Health
 
-Every server is checked every 3 seconds, by default with a TCP connection to its port. Two failures take a server out, two successes bring it back. The page shows each server's state as `up` or `down`. A pool can check differently:
+Every server of a TCP or HTTP pool is checked every 3 seconds, by default with a TCP connection to its port (a UDP pool's checks are described under UDP above). Two failures take a server out, two successes bring it back. The page shows each server's state as `up` or `down`. A pool can check differently:
 
 - **HTTP GET** or **HTTPS GET** on a path you choose: any 2xx or 3xx answer is healthy. The HTTPS check speaks TLS to the server and does not verify its certificate.
 - **TLS hello**: the server is healthy when it answers a TLS hello with TLS. Use it for a TCP pool whose servers end TLS themselves. It does not look at the certificate.

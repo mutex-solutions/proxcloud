@@ -40,6 +40,60 @@ type lbGuest struct {
 	dead       []string          // members no check can reach, by address:port
 	members    map[string]string // what the running HAProxy holds of each member, "backend/server" -> UP or DOWN
 	saved      map[string]string // the state file: what the last apply saved, nil when there is none
+	// The UDP service (v0.11.1). disk holds every file the agent wrote, by path: the state read sums them as the
+	// guest does, so a file changed behind the product shows. noNft: the image lacks the nftables package (the
+	// install line of a pair with a UDP listener brings it). lvs: proxcloud-lvs.service runs and the IPVS table
+	// holds the servers of its config. lvsFails: what keepalived says of a config it refuses.
+	disk     map[string]string
+	noNft    bool
+	lvs      bool
+	lvsFails string
+}
+
+// The UDP service's files, in the order the guest sums them (pve's lvssum).
+var lbGuestLVSFiles = []string{"/etc/keepalived/lvs.conf", "/etc/proxcloud-lb/lvs.nft", "/etc/proxcloud-lb/lvs.sysctl", "/usr/local/sbin/proxcloud-lvs-net",
+	"/etc/systemd/system/proxcloud-lvs.service"}
+
+// sum is what sha256sum says of a file of the guest, "-" for one that is not there.
+func (g *lbGuest) sum(path string) string {
+	if content, ok := g.disk[path]; ok {
+		return lbHash(content)
+	}
+	return "-"
+}
+
+// lvsSum is the guest's digest of the UDP service's files, "-" without a config.
+func (g *lbGuest) lvsSum() string {
+	if _, ok := g.disk[lbGuestLVSFiles[0]]; !ok {
+		return "-"
+	}
+	all := ""
+	for _, path := range lbGuestLVSFiles {
+		all += g.disk[path]
+	}
+	return lbHash(all)
+}
+
+// ipvs is /proc/net/ip_vs: the servers of the config the UDP service runs, without the members no check reaches.
+func (g *lbGuest) ipvs() string {
+	out := "IP Virtual Server version 1.2.1 (size=4096)\nProt LocalAddress:Port Scheduler Flags\n  -> RemoteAddress:Port Forward Weight ActiveConn InActConn\n"
+	if !g.lvs {
+		return out
+	}
+	key := func(addr, port string) string {
+		var a, b, c, d, p int
+		_, _ = fmt.Sscanf(addr+" "+port, "%d.%d.%d.%d %d", &a, &b, &c, &d, &p)
+		return fmt.Sprintf("%02X%02X%02X%02X:%04X", a, b, c, d, p)
+	}
+	for _, line := range strings.Split(g.disk[lbGuestLVSFiles[0]], "\n") {
+		switch w := strings.Fields(line); {
+		case len(w) >= 3 && w[0] == "virtual_server":
+			out += "UDP  " + key(w[1], w[2]) + " wrr \n"
+		case len(w) >= 3 && w[0] == "real_server" && !slices.Contains(g.dead, w[1]+":"+w[2]):
+			out += "  -> " + key(w[1], w[2]) + "      Masq    1      0          0\n"
+		}
+	}
+	return out
 }
 
 // lbConfigMembers lists a config's members as "backend/server" -> "address:port".
@@ -124,15 +178,39 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 	switch {
 	case strings.Contains(cmd, "apt-get install"): // the install line, left running
 		f.log = append(f.log, vm+" install")
+		if strings.Contains(cmd, "nftables") { // the install line of a pair with a UDP listener
+			g.noNft = false
+		}
 		return lbRun{}
 	case strings.Contains(cmd, "dpkg-query"): // the ready check
 		switch {
 		case g.aptRunning:
 			return lbRun{exit: 3}
-		case g.packages != "installed":
+		case g.packages != "installed", g.noNft && strings.Contains(cmd, "nftables"):
 			return lbRun{exit: 1}
 		}
 		return lbRun{}
+	case strings.Contains(cmd, "systemctl enable -q proxcloud-lvs"): // the UDP service's apply: check, swap, (re)load, prove
+		f.log = append(f.log, vm+" lvs reload")
+		if g.lvsFails != "" {
+			delete(g.disk, lbGuestLVSFiles[0]+".new")
+			return lbRun{exit: 1, err: g.lvsFails}
+		}
+		for _, path := range []string{lbGuestLVSFiles[0], lbGuestLVSFiles[4]} {
+			g.disk[path] = g.disk[path+".new"]
+			delete(g.disk, path+".new")
+		}
+		g.lvs = true
+		return lbRun{}
+	case strings.Contains(cmd, "systemctl disable -q --now proxcloud-lvs"): // the last UDP listener went
+		f.log = append(f.log, vm+" lvs remove")
+		for _, path := range lbGuestLVSFiles {
+			delete(g.disk, path)
+		}
+		g.lvs = false
+		return lbRun{}
+	case strings.Contains(cmd, "cat /proc/net/ip_vs"):
+		return lbRun{out: g.ipvs()}
 	case strings.Contains(cmd, "command -v haproxy"): // a ready check that only asks for the binaries (v0.11.0-rc.1)
 		if g.packages == "" {
 			return lbRun{exit: 1}
@@ -141,6 +219,8 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 	case strings.Contains(cmd, "keepalived -t"):
 		f.log = append(f.log, vm+" keepalived reload")
 		g.keepalived = true
+		g.disk["/etc/keepalived/keepalived.conf"] = g.disk["/etc/keepalived/keepalived.conf.new"]
+		delete(g.disk, "/etc/keepalived/keepalived.conf.new")
 		if g.role == "" {
 			g.role = "BACKUP"
 		}
@@ -177,7 +257,12 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		if g.serving() {
 			c = 1
 		}
-		return lbRun{out: fmt.Sprintf("%s %d %d %d", role, h, v, c)}
+		l := 0
+		if g.lvs && g.disk[lbGuestLVSFiles[0]] != "" {
+			l = 1
+		}
+		// The files as they are on the guest, which is not always what the product wrote last.
+		return lbRun{out: fmt.Sprintf("%s %d %d %d %s %s %s %d", role, h, v, c, lbHash(g.file), g.sum("/etc/keepalived/keepalived.conf"), g.lvsSum(), l)}
 	case strings.Contains(cmd, "show stat"): // what the running HAProxy holds, not what the file says
 		if !g.haproxy {
 			return lbRun{exit: 1, err: "socat: /run/haproxy/admin.sock: Connection refused"}
@@ -204,7 +289,7 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		case !g.serving():
 			return lbRun{exit: 1, out: "HAProxy does not listen on 0.0.0.0:80"}
 		}
-		return lbRun{out: "ok"}
+		return lbRun{out: "ok " + lbHash(g.file)}
 	}
 	return lbRun{}
 }
@@ -321,6 +406,10 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.files = append(f.files, r.Form.Get("content"))
 			g.pending = r.Form.Get("content")
 		}
+		if g.disk == nil {
+			g.disk = map[string]string{}
+		}
+		g.disk[r.Form.Get("file")] = r.Form.Get("content")
 		f.log = append(f.log, vm+" write "+r.Form.Get("file"))
 		write(nil)
 	case "POST agent/exec":

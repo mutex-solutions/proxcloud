@@ -571,7 +571,7 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 		// The recorded hash is the product's word that the appliance serves this config, so ask it. One that does
 		// not (HAProxy stopped, or running the package's own config) is pushed again below, which starts HAProxy
 		// with the config: it is the product's own service. No answer says nothing new.
-		serving, why, err := ps.HAProxyServing(ctx, vm.Node, vm.VMID)
+		serving, why, err := ps.HAProxyServing(ctx, vm.Node, vm.VMID, hash)
 		switch {
 		case err != nil:
 			slog.Warn("load balancer: state", "project", proj.ID, "lb", lb.ID, "err", err)
@@ -687,6 +687,15 @@ func (h *Handler) pveLoadBalancerAction(w http.ResponseWriter, r *http.Request, 
 	return false
 }
 
+// lbUDPNeedsPair is why a balancer cannot take spec: UDP listeners are served by keepalived and LVS, which only an
+// appliance pair runs. "" when it can.
+func lbUDPNeedsPair(spec pve.LBSpec, ha bool) string {
+	if spec.HasUDP() && !ha {
+		return "UDP needs a high-availability load balancer, on two appliances: this one runs on one VM. Create a load balancer with high availability for UDP listeners"
+	}
+	return ""
+}
+
 // lbSpecOfRequest reads the body of UPDATE_CONFIG: listeners and pools with every option of pve.LBSpec. A body from
 // before v0.11.1, with the protocol on the pool alone, reads as it did. What the balancer cannot do is a 400 with
 // the reason, a protocol the model knows and no appliance serves yet among them.
@@ -756,7 +765,10 @@ func (h *Handler) pveLBUpdateConfig(ctx context.Context, es *externalservice.Ext
 			m.Address, m.Stamp = addr, stamp
 		}
 	}
-	if len(pve.RenderHAProxyOn(spec, lb.VIPs)) > pve.LBMaxConfig {
+	if why := lbUDPNeedsPair(spec, lb.HA); why != "" {
+		return httpx.BadRequest(why)
+	}
+	if len(pve.RenderHAProxyOn(spec, lb.VIPs)) > pve.LBMaxConfig || len(pve.RenderLVS(spec, lb.VIPs)) > pve.LBMaxConfig {
 		return httpx.BadRequest("This configuration is too large for a load balancer. Use fewer members")
 	}
 	lb.LBSpec = spec

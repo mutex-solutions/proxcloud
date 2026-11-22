@@ -4,6 +4,45 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-22: UDP listeners on an appliance pair
+
+**What changed:** no new container or relation: the load balancer appliance of a pair gains a second service, and
+`internal/cloud/pve` a file. `lblvs.go`: `RenderLVS` (the config of a second keepalived that runs only health checks
+and fills the kernel's IPVS table: one `virtual_server` per UDP listener and address, NAT, `alpha`, `UDP_CHECK` with
+`PING_CHECK` or with a payload and a required reply, `TCP_CHECK`, `HTTP_GET`, `persistence_timeout`, `uthreshold`),
+`lvsFiles` (the nftables table with the UDP masquerade on the tenant NIC, the forward chain with policy drop and the
+two `notrack` chains for TCP; the `vs.*` and `send_redirects` sysctls; the script that loads the table before it
+switches forwarding on and switches it off when the unit stops or fails; the unit `proxcloud-lvs.service`),
+`LVSHash`, `Service.PushLVS` (write, `keepalived -t`, reload, and a proof that the IPVS table holds every virtual
+server before a hash may be recorded), `RemoveLVS`, `LVSHealth` and `ParseLVSTable`. `lb.go`: `udp` leaves
+`lbNotServed`; `LBHealthCheck` gains `payload` and `requireReply`, a UDP pool its own check list; `renderHAProxy` and
+`ParseHAProxyStat` skip UDP pools; `HAProxyServing` takes the applied hash. `lbpair.go`: `ReadVRRPState` also answers
+what the appliance's config files hash to and whether the UDP service serves (`VRRPState.HAProxySum`,
+`KeepalivedSum`, `LVSSum`, `LVS`). `internal/platform/project`: `lbApplyPair` pushes the LVS files after HAProxy on
+each appliance (standby first), records `lbAppliance.LVSHash`, removes the service with the last UDP listener and
+pushes an appliance whose files are not the ones recorded; `lbAppliedHash`; `lbUDPNeedsPair` refuses UDP on a single
+appliance; `lbPairHealth` merges the IPVS table's members. `web/client`: UDP in the listener protocols of a pair,
+the UDP pool's options and the text on what its check does not see. Diagrams: none redrawn; the load balancer row of
+`c2-containers.md` and the rows of `c4-code.md` name the UDP path.
+
+**Why:** v0.11.1 is to be a complete layer 4 balancer, and HAProxy balances no generic UDP. LVS NAT with connection
+tracking and a UDP masquerade on the tenant NIC is the one method that needs nothing on a member (its default route
+is the tenant gateway, not the appliance) and is what Octavia's amphora does (`octavia/common/jinja/lvs/templates/macros.j2`:84-141
+for `lb_kind NAT`, `persistence_timeout` and `uthreshold` per member, `lvs/jinja_cfg.py`:33-37 for `wrr`, `lc`, `sh`,
+`amphorae/backends/utils/lvs-masquerade.sh`:36-46 for the UDP masquerade and the two `notrack` chains,
+`amphora-netns.systemd.j2`:14-28 for `ip_forward`, `vs.conntrack`, `expire_nodest_conn`, `expire_quiescent_template`
+and the sized connection table, `constants.py`:733-735 for a keepalived unit of its own, all at `9718c66`; it runs no
+connection sync either). keepalived's keywords are those of keepalived.conf(5) at v2.3.3 (`instance`, `lvs_flush_on_stop`,
+`alpha`, `lvs_sched`, `lvs_method`, `persistence_timeout`, `retry`, `delay_before_retry`, `delay_loop`, `uthreshold`,
+`UDP_CHECK` with `payload` and `require_reply`, `PING_CHECK`) and `--check` of keepalived(8); `vs.snat_reroute` is
+the kernel's `Documentation/networking/ipvs-sysctl.rst`. A second keepalived keeps VRRP out of every member change. The choices the lab spike of 2026-11-22 forced are in the code and in
+`docs/cloud-integration.md` ("UDP listeners"): `alpha`, the ping beside the UDP check, chain names that are no nft
+keywords, interface names read from the guest, the table before forwarding and `ip_forward` in no boot-time file,
+and the comparison of the appliance's files with the recorded hashes. The service exists only on a pair with a UDP
+listener, so no other balancer changes. Two rules came out of the review: the install line of the first UDP listener
+names `nftables` alone and upgrades nothing (apt would upgrade, and so restart, HAProxy and keepalived on an appliance
+in use), and an appliance that holds an LVS config its row records nothing of has the service taken off again, so
+forwarding is never on without a record that some pass looks after.
 ## 2026-11-22: the managed platform builds a sandbox node group or cluster from its settings (dark)
 
 **What changed:** no new container. Component "Platform installations" gains `internal/platformlife/sandbox.go` and
