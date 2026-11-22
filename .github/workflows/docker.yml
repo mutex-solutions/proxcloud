@@ -75,7 +75,7 @@ jobs:
             echo "build=true" >> "$GITHUB_OUTPUT"   # new branch / force-push / unknown base → build to be safe
             exit 0
           fi
-          if git diff --name-only "$base" "$GITHUB_SHA" | grep -qE '^(cmd/|internal/|pkg/|web/|deploy/seed/|deploy/platform/|deploy/embed\.go$|deploy/(mgmt|dbaas)-cluster/argocd-health\.yaml$|deploy/Dockerfile$|deploy/sandbox-proxy\.Dockerfile$|deploy/sandbox-runtime\.Dockerfile$|go\.mod$|go\.sum$|\.github/workflows/docker\.yml$)'; then
+          if git diff --name-only "$base" "$GITHUB_SHA" | grep -qE '^(cmd/|internal/|pkg/|web/|deploy/seed/|deploy/platform/|deploy/embed\.go$|deploy/(mgmt|dbaas)-cluster/argocd-health\.yaml$|deploy/templates/images\.yaml$|deploy/Dockerfile$|deploy/sandbox-proxy\.Dockerfile$|deploy/sandbox-runtime\.Dockerfile$|go\.mod$|go\.sum$|\.github/workflows/docker\.yml$)'; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
             echo "build=false" >> "$GITHUB_OUTPUT"

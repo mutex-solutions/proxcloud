@@ -114,7 +114,7 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual((got["jobs"], got["scan"], got["images"], got["spa"]),
                          ({"go_test", "installer"}, ["filesystem"], [], []))
         for path in ("deploy/embed.go", "deploy/platform/platform-bom.yaml", "deploy/seed/flavors.json",
-                     "deploy/mgmt-cluster/argocd-health.yaml", "deploy/Dockerfile"):
+                     "deploy/mgmt-cluster/argocd-health.yaml", "deploy/templates/images.yaml", "deploy/Dockerfile"):
             self.assertEqual(run(path)["images"], ["proxcloud-api"], path)
         self.assertEqual(run("deploy/sandbox-runtime.Dockerfile")["scan"], ["filesystem", "sandbox-runtime"])
         # A <Dockerfile>.dockerignore replaces the root .dockerignore for that image only.
