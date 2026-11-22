@@ -27,8 +27,15 @@ the UDP pool's options and the text on what its check does not see. Diagrams: no
 
 **Why:** v0.11.1 is to be a complete layer 4 balancer, and HAProxy balances no generic UDP. LVS NAT with connection
 tracking and a UDP masquerade on the tenant NIC is the one method that needs nothing on a member (its default route
-is the tenant gateway, not the appliance) and is what Octavia's amphora does; a second keepalived keeps VRRP out of
-every member change. The choices the lab spike of 2026-11-22 forced are in the code and in
+is the tenant gateway, not the appliance) and is what Octavia's amphora does (`octavia/common/jinja/lvs/templates/macros.j2`:84-141
+for `lb_kind NAT`, `persistence_timeout` and `uthreshold` per member, `lvs/jinja_cfg.py`:33-37 for `wrr`, `lc`, `sh`,
+`amphorae/backends/utils/lvs-masquerade.sh`:36-46 for the UDP masquerade and the two `notrack` chains,
+`amphora-netns.systemd.j2`:14-28 for `ip_forward`, `vs.conntrack`, `expire_nodest_conn`, `expire_quiescent_template`
+and the sized connection table, `constants.py`:733-735 for a keepalived unit of its own, all at `9718c66`; it runs no
+connection sync either). keepalived's keywords are those of keepalived.conf(5) at v2.3.3 (`instance`, `lvs_flush_on_stop`,
+`alpha`, `lvs_sched`, `lvs_method`, `persistence_timeout`, `retry`, `delay_before_retry`, `delay_loop`, `uthreshold`,
+`UDP_CHECK` with `payload` and `require_reply`, `PING_CHECK`) and `--check` of keepalived(8); `vs.snat_reroute` is
+the kernel's `Documentation/networking/ipvs-sysctl.rst`. A second keepalived keeps VRRP out of every member change. The choices the lab spike of 2026-11-22 forced are in the code and in
 `docs/cloud-integration.md` ("UDP listeners"): `alpha`, the ping beside the UDP check, chain names that are no nft
 keywords, interface names read from the guest, the table before forwarding and `ip_forward` in no boot-time file,
 and the comparison of the appliance's files with the recorded hashes. The service exists only on a pair with a UDP

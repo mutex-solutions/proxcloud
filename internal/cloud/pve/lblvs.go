@@ -11,8 +11,8 @@ package pve
 // the tenant gateway, not the appliance). Connection tracking undoes the masquerade, the packet is forwarded, IPVS
 // puts the VIP back as its source, and with vs.snat_reroute the route is looked up again with that source, so the
 // pair's rule "from <vip> table 100" sends it out of the public NIC. Both vs.conntrack=1 and vs.snat_reroute=1 are
-// needed (spike: without the first no answer, without the second the answer left by the tenant NIC). It is the
-// method of Octavia's amphora (octavia/common/jinja/lvs/templates/macros.j2, lvs-masquerade.sh).
+// needed (spike: without the first no answer, without the second the answer left by the tenant NIC). The upstream
+// balancer the method is taken from is named in the C4 change log (2026-11-22, UDP listeners).
 //
 // Forwarding makes a two-NIC appliance a router between the public and the tenant network, so the same nftables
 // table holds a forward chain with policy drop that lets only the answers of flows IPVS opened through, and TCP is
@@ -47,8 +47,8 @@ const (
 	// (spike, nft 1.1.6: "unexpected fwd, expecting string").
 	lvsTable   = "ip proxcloud-lb"
 	lvsForward = "lb-forward"
-	// lvsConntrackMax is the least the connection table holds once UDP flows are tracked (Octavia sizes it too,
-	// amphora-netns.systemd.j2). A larger value of the image's stays.
+	// lvsConntrackMax is the least the connection table holds once UDP flows are tracked (the upstream reference
+	// sizes it too). A larger value of the image's stays.
 	lvsConntrackMax = 262144
 
 	// What a UDP pool's health check is when the pool names no figure, as measured in the spike: a check every 5 s,

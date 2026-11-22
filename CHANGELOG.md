@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Not on one VM.** A load balancer without high availability answers `400` "UDP needs a high-availability load
     balancer". A Kubernetes Service with a UDP port is still refused (`UDPNotSupported`) until the cluster
     gateway maps it.
-  - **After a failover** the other appliance spreads clients afresh (no connection sync, as in Octavia).
+  - **After a failover** the other appliance spreads clients afresh (the appliances do not sync their connections).
   - Tested in real guests of both appliance images (Debian 13 and Ubuntu 26.04 containers with systemd, keepalived,
     nftables and HAProxy, on the CI runner's kernel) with network namespaces for client, servers and gateway: the
     reply path, the dead server, the dropped forwarding, the untracked TCP, the refused config. Run on the lab on
