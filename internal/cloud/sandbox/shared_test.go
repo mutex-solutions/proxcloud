@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"reflect"
 	"slices"
@@ -20,6 +21,9 @@ import (
 type sharedRBAC struct {
 	*sampleAPI
 	refused []string
+	// lag: the next calls that rest on a RoleBinding are refused although it exists, as an API server answers until
+	// its authorizer's cache has seen the binding.
+	lag int
 }
 
 func (a *sharedRBAC) deny(what string) error {
@@ -70,7 +74,12 @@ func (a *sharedRBAC) ListPods(ctx context.Context, ns, sel string) ([]map[string
 }
 
 func (a *sharedRBAC) ApplyResourceQuota(ctx context.Context, rq map[string]any) error {
-	if ns := digStr(rq, "metadata", "namespace"); !a.bound(ns) {
+	ns := digStr(rq, "metadata", "namespace")
+	if a.lag > 0 && a.bound(ns) {
+		a.lag--
+		return &kamajik8s.APIError{Status: 403, Message: "resourcequotas is forbidden (the binding is not cached yet)"}
+	}
+	if !a.bound(ns) {
 		return a.deny("patch resourcequotas in " + ns)
 	}
 	return a.fakeAPI.ApplyResourceQuota(ctx, rq)
@@ -179,6 +188,30 @@ func TestSharedClusterBindsEachNamespaceAndListsThroughThem(t *testing.T) {
 	}
 	if err := plain.EnsureProjectNamespace(ctx, "p3", nil); err == nil {
 		t.Fatal("a quota was written in a namespace without the RoleBinding")
+	}
+}
+
+// The API server authorizes from a cache that follows its own writes: the call right after the RoleBinding may be
+// refused once or twice. It is tried again; a refusal that stays is still a refusal.
+func TestSharedClusterWaitsForItsNewBinding(t *testing.T) {
+	saved := sharedBindingWait
+	t.Cleanup(func() { sharedBindingWait = saved })
+	ctx := context.Background()
+	cfg := testConfig()
+	cfg.Shared = true
+	api := newSharedAPI()
+	api.lag = 2
+	if err := NewWithAPI(api, cfg, "svc").EnsureProjectNamespace(ctx, "p1", nil); err != nil || api.quotas["sb-p1"] == nil || api.lag != 0 {
+		t.Fatalf("a binding that counts after two refusals: %v", err)
+	}
+	sharedBindingWait = 300 * time.Millisecond
+	api = newSharedAPI()
+	api.lag = 1000
+	start := time.Now()
+	err := NewWithAPI(api, cfg, "svc").EnsureProjectNamespace(ctx, "p1", nil)
+	var ae *kamajik8s.APIError
+	if !errors.As(err, &ae) || ae.Status != 403 || time.Since(start) > 3*time.Second || api.quotas["sb-p1"] != nil {
+		t.Fatalf("a refusal that stays: %v after %s", err, time.Since(start))
 	}
 }
 

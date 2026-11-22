@@ -192,6 +192,36 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string, 
 	if q != nil {
 		pods, cpu, memMb, gpus = min(pods, q.Sandboxes), min(cpu, q.VCPUs), min(memMb, q.RAMMb), min(gpus, q.GPUs)
 	}
+	return s.afterBinding(ctx, func() error { return s.applyQuota(ctx, projectID, ns, pods, cpu, memMb, gpus) })
+}
+
+// sharedBindingWait is how long the first call into a namespace waits for its RoleBinding to count.
+var sharedBindingWait = 3 * time.Second
+
+// afterBinding runs the first namespaced call after ensureTenantNamespace. On a shared cluster that call rests on a
+// RoleBinding written a moment ago, and the API server authorizes from a cache that follows its writes: a 403 right
+// after the write is the cache, so the call is tried again for a few seconds. A 403 that stays is returned.
+// ponytail: a fixed wait; watch the RoleBinding's resourceVersion in a SubjectAccessReview if a busy API server needs longer.
+func (s *Service) afterBinding(ctx context.Context, call func() error) error {
+	err := call()
+	if !s.cfg.Shared {
+		return err
+	}
+	for deadline := time.Now().Add(sharedBindingWait); err != nil && time.Now().Before(deadline); err = call() {
+		var ae *kamajik8s.APIError
+		if !errors.As(err, &ae) || ae.Status != 403 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return err
+}
+
+func (s *Service) applyQuota(ctx context.Context, projectID, ns string, pods, cpu, memMb, gpus int) error {
 	return s.api.ApplyResourceQuota(ctx, map[string]any{
 		"apiVersion": "v1",
 		"kind":       "ResourceQuota",
