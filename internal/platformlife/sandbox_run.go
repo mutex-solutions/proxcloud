@@ -238,14 +238,14 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 // before the wave of the sandbox chart: the chart mounts it, and its Deployment never becomes available without. The
 // run makes a self-signed one (and a new one for another domain or 30 days before it ends); its key is sealed, the
 // certificate is in the status for clients to trust. An operator's certificate (tls.mode secret) has no route that
-// stores it yet: refused, with nothing changed.
+// stores it yet: the save refuses it (SandboxProblems), and a record that names it all the same stops here.
 func (x *acq) sandboxCertificate(ctx context.Context, wl *kamajik8s.Client) error {
 	sb := x.in.Spec.Sandbox
 	if x.in.Spec.sandboxMode() != SandboxShared {
 		return nil
 	}
 	if sb.TLS != nil && sb.TLS.Mode == TLSSecret {
-		return permanent(CodeSandboxRefused, "spec.sandbox.tls.mode is secret and no certificate of the operator's is stored: this release has no route that stores one. Set tls.mode selfsigned, then Retry.")
+		return permanent(CodeSandboxRefused, "spec.sandbox.tls.mode is secret and no certificate of the operator's is stored: this release has no route that stores one. Set tls.mode selfsigned, then apply again.")
 	}
 	cert, key := x.sec.SandboxTLSCert, x.sec.SandboxTLSKey
 	if !certificateFor(cert, sb.Domain, time.Now().AddDate(0, 0, 30)) || key == "" {

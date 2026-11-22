@@ -312,7 +312,7 @@ func (in *Installation) sandboxSiteProblems(site Site) []string {
 	return out
 }
 
-// SandboxProblems is why the installation's BOM cannot build spec.sandbox, or nil. The record alone cannot say it, so
+// SandboxProblems is why the installation's BOM, or this release, cannot build spec.sandbox, or nil. The record alone cannot say it, so
 // Validate does not: the save and the Check's spec row both ask here, as for ControlPlaneCountProblems.
 func (in *Installation) SandboxProblems() []string {
 	if in.Spec.sandboxMode() == "" {
@@ -341,6 +341,10 @@ func (in *Installation) SandboxProblems() []string {
 	if !kamaji.ChartHasGroupPool(chart) {
 		return []string{fmt.Sprintf("spec.sandbox: the platform's BOM (release %s) names cluster chart %s, which cannot give a node group a pool and an address range of its own: sandboxes need chart %s or newer",
 			bom.Release, chart, kamaji.GroupPoolChartVersion)}
+	}
+	// Refused here and not by the run: a run would have built the machines before it met the missing certificate.
+	if t := in.Spec.Sandbox.TLS; t != nil && t.Mode == TLSSecret {
+		return []string{"spec.sandbox.tls.mode secret: this release has no route that stores an operator's certificate. Set tls.mode selfsigned: the run makes a certificate for *." + in.Spec.Sandbox.Domain}
 	}
 	return nil
 }

@@ -107,6 +107,15 @@ func TestSandboxIsDark(t *testing.T) {
 	if p := in.SandboxProblems(); p != nil {
 		t.Errorf("a BOM with the sandbox chart: %v", p)
 	}
+	// An operator's certificate has no route that stores it: refused at the save, before a run builds a machine.
+	for _, sb := range []*SandboxSpec{sharedSandbox(), separateSandbox()} {
+		sb.TLS = &SandboxTLS{Mode: TLSSecret}
+		in.Spec.Sandbox = sb
+		if p := in.SandboxProblems(); len(p) != 1 || !strings.Contains(p[0], "tls.mode secret") {
+			t.Errorf("tls.mode secret, placement %s: %v", sb.Placement, p)
+		}
+	}
+	in.Spec.Sandbox = sharedSandbox()
 	comp(t, b.BOM, ClusterSeed, ClusterName).Chart.Version = "0.1.17"
 	if p := in.SandboxProblems(); len(p) != 1 || !strings.Contains(p[0], "cluster chart 0.1.17") {
 		t.Errorf("an older cluster chart: %v", p)
