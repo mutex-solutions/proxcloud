@@ -7,6 +7,143 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-22
+
+The release after `v0.10.2`. It brings highly available load balancers: a load balancer runs on a pair of appliance
+VMs that share one public address, and a managed Kubernetes cluster can give its Services of type LoadBalancer a
+public address on such a pair. It was prepared by the release candidates `v0.11.0-rc.1` and `v0.11.0-rc.2`, whose
+sections below are kept; everything they held is in this section, and the code is that of `v0.11.0-rc.2`. The entries
+under Added, Fixed and Changed were written when each change merged, before or between the two lab drills: where one
+says "Not run on a lab", the two lists below are the current state.
+
+- **A load balancer is a pair** (Added). Two appliance VMs, one public address moved by keepalived, the same HAProxy
+  config on both. On the lab a dead appliance cost 2.8 to 3.5 seconds, a planned switch 0.7 to 0.8.
+- **What HA means on one node.** The pair survives the failure of an appliance, not the loss of the node both run on.
+  Both land on one node on a one-node site, on a tenant network in a `simple` zone, and where the appliance image is
+  on one node only. Two nodes were not run on a lab.
+- **What a pair costs.** Two servers, their disks and one public address, as ordinary rows of the project. A tenant
+  can ask for one VM (`ha: false`); a balancer made before this release stays one VM.
+- **A load balancer controller for managed Kubernetes** (Added). A Service of type LoadBalancer gets its own public
+  address on the cluster's pair; listeners and members follow the Services' ports and the nodes by themselves. On the
+  lab a port added to a live Service answered after 16.8 seconds, a changed node port was followed in 12.7, a removed
+  port lost its firewall rule after 9.5 and left the config after 14.4, a second Service had its own address after 32
+  and gave it back 33.6 after its delete, and a new worker was a member 14 seconds after its Node appeared. Through
+  the listener and Service changes the first port lost 0 requests and a long-lived connection survived six reloads
+  (`externalTrafficPolicy: Cluster`, healthy nodes). Node changes lose requests for seconds (Known issues).
+- **Existing clusters keep MetalLB** until the operator enables the controller for them, in class-only mode: no
+  MetalLB address moves.
+- **Docker Compose can serve the gateway listener** the controllers call (`--cluster-gateway <address>`, off by
+  default; Added).
+- **Sandbox nodes install gVisor again**: the node setup installs runsc `20261116.0` from the release's own package,
+  pinned by SHA256, where it asked apt for a version the suite no longer lists (Fixed).
+- **The first candidate's two faults are fixed and shown** (Fixed). Replace appliances took an address down for 458
+  seconds on `v0.11.0-rc.1`, and a stopped master appliance was started again in 1 of 6 tries. On `v0.11.0-rc.2` three
+  replaces under load cost one switch of 0.7 to 0.8 seconds each, and a stopped appliance was started by the next sync
+  three times of three.
+- **Not in this release:** UDP listeners and TLS termination. Both are planned for the next release, "complete layer
+  4" (Known issues).
+
+The platform BOM of this release is `0.11.0`. It pins what the candidates `0.11.0-rc.1` and `0.11.0-rc.2` pin, and the
+three BOMs differ in the `release` line alone: the pins of `0.10.2` but `tenantCharts.kubernetes`, cluster chart
+`proxmox-kamaji-cluster` 0.1.17 (`sha256:dfdccf67de36238f4ae7e7914035f99f394fb6f45ed80540d6e1a2bf5076e914`) for new
+tenant clusters. No k3s, Kubernetes version, node image, third-party chart, Cluster API provider or clusterctl image
+moves, and the platform cluster stays on chart 0.1.16. The release carries the BOMs of `0.8.0`, `0.8.1`, `0.8.2`,
+`0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.1`,
+`0.10.2-rc.1`, `0.10.2`, `0.11.0-rc.1` and `0.11.0-rc.2` for the platforms those builds installed.
+
+Upgrading from `v0.10.2`. From an older release, read the sections of `v0.10.2` and `v0.10.1` as well: their steps
+still apply.
+
+- **A platform on a BOM before `0.10.1`** (0.8.0 to 0.10.0 and their candidates, all on Kubernetes 1.35.10) is refused
+  by this build, by the pair gate on both cert-manager rows. Move it to `0.10.1` with the `v0.10.1` build first, both
+  parts.
+- **Portal first.** On the Docker Compose host check out the tag and run `./proxcloud-up.sh upgrade v0.11.0`
+  (`deploy/compose/README.md`, "Upgrade"). The script takes its backup first. `compose.yaml` did not change since
+  `v0.10.2`: on the lab the upgrade between the two candidates took 27.6 seconds and PostgreSQL, Keycloak and Traefik
+  kept their containers. From now on a new load balancer is a pair (two servers, their disks, one address). Existing
+  balancers keep their one VM, config and firewall rules, and are not pushed at the upgrade: each pass asks every
+  appliance whether HAProxy serves its config and pushes only where it does not (shown for balancers made on a
+  candidate; for one made on `v0.10.2` it rests on tests).
+- **The platform run is record only**, phrase `upgrade <name> to 0.11.0`, one action with no parts. From `0.10.2` or
+  `0.10.2-rc.1` the plan has two rows, the release and `tenantCharts.kubernetes` 0.1.16 to 0.1.17: it records the
+  release and writes the chart on the Kubernetes provider, so clusters created after it get the new chart. It replaces
+  no machine, syncs nothing and writes nothing on Proxmox; no tenant cluster changes chart and none loses MetalLB. On
+  the lab the same two rows took 39.6 seconds (to the first candidate), and the one-row run between the candidates 8.5
+  seconds with no VM restarted. The run to `0.11.0` itself was read as a plan, not run.
+- **From other BOMs** (`Classify`): from `0.11.0-rc.1` and `0.11.0-rc.2` one change, the release, record only; from
+  `0.10.1` and `0.10.1-rc.2` four, the two above and `cert-manager` `v1.20.2` to `v1.21.3` on the seed and on the
+  platform cluster (back up the cert-manager resources first, as the section of 0.10.2 says); from `0.10.1-rc.1` five,
+  also `pc-platform` 0.1.15 to 0.1.16, no machine replaced; from the nine BOMs on 1.35.10 refused. A platform that
+  stands in the replacement of its machines toward `0.10.1` or one of its candidates goes on to that BOM with a Retry
+  first.
+- **What a site needs for load balancers.** An untagged public bridge on every node: a public network is a bridge name
+  and nothing more, the appliance's NIC is plugged on it with no VLAN tag, and the bridge must exist under that name
+  on every node an appliance can land on (a VLAN on a trunk gets a bridge of its own on every node; an SDN vnet is
+  refused for a pair). The appliance image (`config.lbImage`, default `debian-13`) on every node, with `haproxy`,
+  `socat`, `keepalived` and `iproute2` from apt or baked in. For cluster balancers a route from the platform network
+  to the portal host on port 8444, where the controllers call the gateway listener (Compose: `./proxcloud-up.sh
+  install --cluster-gateway <address>`, 14 to 19 seconds on the lab, only the API container recreated; keep the volume
+  `gateway`), and the provider settings: a public network with a gateway on the compute provider
+  (`config.network.publicNetworks`) and `config.cluster.loadBalancer` on the Kubernetes provider (that public network
+  and the flavor of the appliances). Without them every cluster keeps MetalLB alone.
+- **New clusters get the controller in default mode** when every gate holds (a gateway URL and the controller image,
+  chart 0.1.17 on the provider, the project's own workers, a public network the project may use): a Service without a
+  class gets a public address, MetalLB serves only class `proxcloud.io/internal`, and NGINX Gateway Fabric takes one
+  public address per Gateway. **An existing cluster** keeps MetalLB as its default until the operator runs **Enable
+  load balancer controller** for it (class-only: only Services of class `proxcloud.io/lb`).
+- **A load balancer pair made on `v0.11.0-rc.1`**: run a services sync right after the portal upgrade. On the lab such
+  a pair refused every connection for about 8 minutes while its row read `ACTIVE`, and the first sync on the corrected
+  code repaired it in 5 seconds.
+- The app chart is `0.11.0` with appVersion `v0.11.0`, and `pc_versions.proxcloud` and `DEFAULT_VERSION` of
+  `proxcloud-up.sh` name `v0.11.0`. The installer's k3s and Kubernetes pins stay at 1.35.10.
+
+Verified on a lab. One lab, every appliance on one node, Ubuntu 26.04 appliances; the first drill on `v0.11.0-rc.1`
+(2026-11-21), the second on `v0.11.0-rc.2` (2026-11-22), each checked afterwards by a read-only audit:
+
+- On rc.1, not run again: pair create and its firewall rules; 15 failovers 0.7 to 3.5 s; a deleted vrrp rule restored
+  by the sync; stop / hard reboot of an appliance refused; five Services on five addresses of one pair; refusals as
+  Events (UDP, no node port, loadBalancerIP, quota); class internal on MetalLB; PROXY protocol v2; an allowed source
+  range; policy Local health checks; idle TCP 330 s; foreign Nodes refused and audited; suspended project; gateway
+  down during a delete; enable on an existing cluster; one floating IP row per address, traffic counted once.
+- Upgrade rc.1 to rc.2: portal 27.6 s; platform run record only, 8.5 s, no VM restarted; serving balancers not pushed
+  by the upgrade or by two syncs; an appliance rc.1 left not serving repaired by the first sync.
+- Replace appliances under 10 requests a second, three times: one switch of 0.7 to 0.8 s each (rc.1: 458 s), 12.5 to
+  13.5 min, never ACTIVE with one appliance.
+- A new pair and a new single balancer answer before their first ACTIVE; config files 644, scripts 755.
+- Stopped keepalived or HAProxy started by the next sync; HAProxy on another config reported and loaded again by the
+  next sync; a config change held while apt runs on the master, applied after, 0 requests lost.
+- A stopped master, three times: failover 2.9 to 3.4 s, started by the next sync, ACTIVE one sync later, the sync's
+  other passes ran. A paused master: failover 3.0 s, ACTIVE one sync after the resume.
+- A cluster's controller: port added (answers after 16.8 s), targetPort changed (0.5 s), nodePort changed (12.7 s),
+  port removed (rule gone 9.5 s, out of the config 14.4 s), second Service on its own address (32 s) and given back
+  (33.6 s); 0 requests lost on the first port and its long-lived connection kept through six reloads.
+- Workers 1 to 2 and 2 to 1: the member follows 14 s after the Node (with the loss under Known issues).
+- Converge lock about 58 s; a change cut by an API stop is live after 190 to 209 s (rc.1: 24.7 min). Controller idle:
+  18.6 Proxmox calls a minute (rc.1: 132). A dead master of a cluster's pair: 3.5 s, started by the product 31 s
+  later.
+- A refused credential: one log line with cluster and reason, one audit row. Clean-up: no object, no quota, the
+  Proxmox cluster as before.
+
+Not verified on a lab:
+
+- UDP listeners and TLS termination: not in v0.11.0, planned next.
+- Two nodes: VRRP across nodes, placement on two nodes, loss of a node.
+- The consoles: no page was opened; every step went through the API.
+- A production site with a public network: one lab, a test range on a plain bridge.
+- The default Debian 13 appliance image (container test only).
+- A balancer made before v0.11.0 across the upgrade (tests only; the lab's were made on rc.1).
+- The scheduler: the lab runs none, every sync was started by hand.
+- Request loss at node changes was measured once per direction, policy Local twice; a dead node across a reload not
+  run.
+- A real unattended-upgrades run of minutes; a VM stopped from inside the guest; an appliance out of the token's
+  sight; a worker firewall write during a faulted sync.
+- The refusal of a foreign source address, NGINX Gateway Fabric in default mode, a cluster made on chart 0.1.16 then
+  enabled, a project delete with a balancer, the installer path, the sandbox fix (#420), the sandbox entry appliance.
+- The upgrade to the final BOM 0.11.0 (the lab moved to 0.11.0-rc.2).
+
+Where an entry below says the BOM on `main` is `0.11.0-dev`, that was the state at that merge: this release's BOM is
+`0.11.0`, and the change after its tag sets `main` back to a `-dev` one.
+
 ### Added
 
 - **A load balancer may run on two appliance VMs, and a new one does by default** (`data.ha`, default `true`;
@@ -121,7 +258,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A load balancer's config is recorded only when its appliance serves it** (`internal/cloud/pve/lb.go`,
   `lbpair.go`, `internal/platform/project/cloud_lb_pve.go`, `cloud_lb_pair_pve.go`). The drill of `0.11.0-rc.1`
   replaced a pair's appliances and the address refused every connection for 458 seconds while the row read
-  `ACTIVE`: the first config push met the haproxy package's own first start. The readiness check passed as soon as
+  `ACTIVE`, or `DEGRADED` with "One appliance carries the traffic" while the second appliance was built: the
+  first config push met the haproxy package's own first start. The readiness check passed as soon as
   the binaries existed, the apply found HAProxy "activating", joined that start and answered success, and HAProxy
   kept the package's config; the hash was stored, so nothing was pushed again. A single appliance had the same
   check and the same apply. Now:
@@ -202,12 +340,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record only. `TestPreviousBOMsMoveCertManager` states that answer, and `TestUpgradeRollsNoMachine` compares seven
   of the sixteen previous BOMs with the BOM on `main`, none of them rolling. No apply on such a platform was run on a
   lab by this change.
+- **The platform BOM's release is `0.11.0`** (`deploy/platform/platform-bom.yaml`), with the pins of `0.11.0-rc.2`:
+  the two files differ in the `release` line alone. No chart of the product changed since its tag (`git diff
+  proxmox-kamaji-cluster-v0.1.17 -- deploy/charts/proxmox-kamaji-cluster`, `git diff database-cluster-v0.5.2 --
+  deploy/charts/database-cluster` and `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` print
+  nothing), so no chart tag is needed. The release gate passes on it and on the sixteen previous BOMs. The app chart
+  is `0.11.0`, appVersion `v0.11.0`, and the installer's ProxCloud pin and `DEFAULT_VERSION` of `proxcloud-up.sh` name
+  `v0.11.0`. This BOM carries no unfinished replacement (`TestRollTowardAKeptCandidateGoesOn` passes under it
+  unchanged).
+- **The guides give what the two lab drills showed** (docs/cloud-integration.md, docs/managed-k8s.md,
+  docs/managed-services.md, deploy/compose/README.md): the figures of `v0.11.0-rc.2` next to those of `v0.11.0-rc.1`,
+  what the corrections of #424 and #425 did on a lab, and what neither drill ran.
+
+### Known issues
+
+- **No UDP listeners and no TLS termination.** A UDP port of a Service is refused with the Event `UDPNotSupported`, a
+  listener is plain TCP or HTTP, and TLS passes through to the members. Both are planned for the next release,
+  "complete layer 4".
+- **Layer 4 and plain HTTP only**: no routing by host or path. **IPv4 only**: an IPv6 Service is refused, with an
+  Event.
+- **One appliance pair per cluster**, shared by all its Services, each with its own address.
+- **A worker added or removed loses requests for seconds.** A new worker is a member as soon as its Node exists,
+  before it is Ready, and HAProxy takes a new member for healthy until two checks fail: on the lab a scale-up lost 22
+  of 44 requests in 4.4 seconds and a scale-down 52 in 10.3 seconds. The same happens at every worker replacement (a
+  machine roll, a Kubernetes upgrade of the workers). Measured once per direction.
+- **A member that is down gets traffic again after every reload**, until its checks fail: a Service with
+  `externalTrafficPolicy: Local` on a cluster where a node has no local endpoint (NGINX Gateway Fabric's chart
+  default), and any Service while a node is dead. On the lab such a Service lost 11 to 12 requests in 2.2 to 2.4
+  seconds at each change of another Service of the same cluster.
+- **In-cluster clients do not pass the pair.** A pod that calls a Service's public address is answered inside the
+  cluster (`ipMode: VIP`): it sees neither a pair outage nor the source ranges. Only a PROXY protocol Service
+  (`ipMode: Proxy`) goes out through the pair.
+- **Five public addresses by default** (`floatingIps: 5`): in default mode every Service of type LoadBalancer and
+  every Gateway takes one, and the sixth waits with `QuotaExceeded` until the project's quota or the provider's
+  default quota is raised.
+- **What backups hold.** A Proxmox backup or snapshot of an appliance holds its disk: the HAProxy config with the
+  listeners and the members' addresses, and the keepalived config; no key and no password in this release. Do not
+  restore an appliance from one: its config comes from the portal, and Replace appliances builds a fresh one. The
+  portal's `backup` writes the database dump and a copy of `.env` side by side: the dump holds every balancer's row
+  and a hash of each cluster's gateway secret, and `.env` holds the key that opens the provider credentials in the
+  dump. Whoever has both files has the portal's secrets. Neither holds the volume `gateway`.
+- **A cluster's first Service shows its address before it answers**: 3 minutes 12 seconds earlier on the lab. Tools
+  that wait for the address (`helm --wait`, Argo CD health, external-dns) take the Service for ready too early; the
+  Event stays `EnsuringLoadBalancer` until it serves. The first Service waits for the pair (6 minutes 37 seconds on
+  the lab until it answered, with packages from apt); later ones took about half a minute.
+- **Builds and replaces take minutes** (7 to 13.5 on the lab): a stock image runs its own first-boot upgrade and the
+  platform waits for the package manager. A config change also waits while the package manager runs on an appliance;
+  the other appliance takes it first and the row reads `DEGRADED` until both have it.
+- **A tenant's pair is repaired by the services sync**, not at once: a stopped appliance or service is started at the
+  next sync, and the other appliance carries the traffic meanwhile. A single appliance has no other one. A stopped
+  appliance of a cluster's pair is started within about 70 seconds (31 in the lab's one run).
+- **A paused VM makes its project's inventory unproved** for as long as it is paused, which includes every project the
+  operator suspends: the project's own rows are frozen and the provider's seed sweep and sandbox sweep are held back
+  (the load balancer pass and the provider's other passes run). Not new in this release. A paused appliance is not
+  resumed by the platform, and the row of a pair whose former master is paused says "Both appliances hold the address"
+  instead of the cause.
+- **A change cut by an API stop waits about 3 minutes** (190 to 209 seconds on the lab; traffic was not touched). A
+  Replace's mark can outlive a dead API for up to 60 minutes.
+- **One node is not node HA**, and a switch cuts open connections (no connection state sync between the appliances).
+- An address released before a sync saw it is not billed. A new cluster's first MetalLB address can take about 10
+  minutes (not new). A cluster's state over 64 KiB is refused whole (around 45 Services with several ports or long
+  source ranges). A gateway URL that is a host name leaves the controller's egress port open to any address. Enable
+  during a cluster's delete can mint its credential again. A Service deleted and created again gets a new address.
+  Cluster appliances are not checked against the server quota.
+- The known issues of 0.10.2 still hold: a platform on a BOM before `0.10.1` cannot take this move, from the BOM
+  `0.10.1` there is no way back (cert-manager), the installer path is not drilled, a seed backup on an NFS store can
+  be readable by everyone, Cilium is outside its own support matrix on 1.36, and the tenant cluster chart's
+  cert-manager addon stays at `v1.20.2`.
 
 ## [0.11.0-rc.2] - 2026-11-22
 
 The second release candidate of 0.11.0, published as a prerelease and never as `latest`. It is not the release:
 `v0.10.2` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
-still name it. It holds what is under Unreleased above: the corrections of the full lab drill of `v0.11.0-rc.1`
+still name it. It holds what is under 0.11.0 above: the corrections of the full lab drill of `v0.11.0-rc.1`
 (#424, #425) and the sandbox node fix (#420) next to what that candidate held (#415 to #418). It exists so that the
 lab can run the drill again on the corrected code: none of the corrections had run on a lab when it was tagged. The
 entries above are not repeated here. Not for a production site.
@@ -248,7 +453,7 @@ entries above are not repeated here. Not for a production site.
   tenant while the VM was down. It also found the 20-minute cluster lock (24.7 minutes without a converge after an
   API restart), a full pass on every controller call (96 Proxmox calls a minute per cluster), stopped services
   never started, files of mode 0666, and refused credentials without a trace.
-- **What rc.2 changes** (in detail under Unreleased, Fixed): a config is recorded only when the appliance serves
+- **What rc.2 changes** (in detail under 0.11.0, Fixed): a config is recorded only when the appliance serves
   it, a recorded hash is checked on every pass, stopped services are started, file modes are set, the row is
   stated during a Replace (#424); the services sync keeps running when an appliance is down, the cluster lock is
   a one-minute lease, an unchanged controller call starts no pass, a refused credential is logged and audited
@@ -287,7 +492,7 @@ candidate. Also on rc.1: the portal upgrade from `v0.10.2-rc.1` (28 s), the plat
 
 The first release candidate of 0.11.0, published as a prerelease and never as `latest`. It is not the release:
 `v0.10.2` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
-still name it. It holds what is under Unreleased above (#415, #416, #417, #418): a load balancer on a pair of
+still name it. It holds what is under 0.11.0 above (#415, #416, #417, #418): a load balancer on a pair of
 appliances, the load balancer controller for managed Kubernetes clusters, the Compose gateway listener and the two
 billing fixes. It exists so that a lab can run the drill of those: none of them has run on a lab on this code. The
 entries above are not repeated here. Not for a production site.
