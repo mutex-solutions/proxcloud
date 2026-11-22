@@ -437,10 +437,18 @@ func readService(obj map[string]any, defaultClass bool) *service {
 			if w.Annotations == nil {
 				w.Annotations = map[string]string{}
 			}
-			w.Annotations[k] = str(v)
+			// A value the portal does not read (lbgw.Read) is sent cut, one character over the limit: the portal
+			// still names it in the Service's Event, and one long annotation cannot take the cluster's whole state
+			// over the gateway's body limit.
+			val := str(v)
+			if len(val) > lbgw.MaxAnnotationValue {
+				val = val[:lbgw.MaxAnnotationValue+1]
+			}
+			w.Annotations[k] = val
 		}
 	}
-	s.nodeSelector, _, _ = lbgw.Annotation(w.Annotations, lbgw.KnobNodeSelector)
+	read, _ := lbgw.Read(w.Annotations) // a selector the portal says it does not obey is not obeyed here either
+	s.nodeSelector, _, _ = lbgw.Annotation(read, lbgw.KnobNodeSelector)
 	for _, p := range list(spec["ports"]) {
 		m, _ := p.(map[string]any)
 		w.Ports = append(w.Ports, lbgw.Port{Name: str(m["name"]), Protocol: str(m["protocol"]), Port: num(m["port"]), NodePort: num(m["nodePort"])})

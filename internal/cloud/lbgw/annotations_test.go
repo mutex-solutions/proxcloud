@@ -160,10 +160,6 @@ func TestAnnotationsThatAreNotObeyed(t *testing.T) {
 }
 
 func TestAnnotationsThatRefuseTheService(t *testing.T) {
-	many := annotated()
-	for i := range MaxAnnotations + 1 {
-		many.Annotations[OwnPrefix+"x"+strconv.Itoa(i)] = "1"
-	}
 	affinity := web("u")
 	affinity.SessionAffinity = "ClientIP"
 	affinity.SessionAffinityTimeout = 86401
@@ -173,15 +169,12 @@ func TestAnnotationsThatRefuseTheService(t *testing.T) {
 		s    *Service
 		want string
 	}{
-		"internal":                                      {annotated(InternalAnnotation, "true"), ReasonInternalNotSupported},
-		"internal, as a bool":                           {annotated(InternalAnnotation, "True"), ReasonInternalNotSupported},
-		"forwarded-for and PROXY, own names":            {annotated(OwnPrefix+"x-forwarded-for", "true", OwnPrefix+"proxy-protocol", "true"), ReasonInvalidAnnotation},
-		"forwarded-for and PROXY, OCCM's names":         {annotated(AliasPrefix+"x-forwarded-for", "true", AliasPrefix+"proxy-protocol", "v2"), ReasonInvalidAnnotation},
-		"too many":                                      {many, ReasonInvalidAnnotation},
-		"a value too long":                              {annotated(OwnPrefix+"method", strings.Repeat("x", MaxAnnotationValue+1)), ReasonInvalidAnnotation},
-		"a name that is not a load balancer annotation": {annotated("example.com/owner", "me"), ReasonInvalidAnnotation},
-		"affinity timeout":                              {&affinity, ReasonInvalid},
-		"affinity type":                                 {&odd, ReasonInvalid},
+		"internal":                              {annotated(InternalAnnotation, "true"), ReasonInternalNotSupported},
+		"internal, as a bool":                   {annotated(InternalAnnotation, "True"), ReasonInternalNotSupported},
+		"forwarded-for and PROXY, own names":    {annotated(OwnPrefix+"x-forwarded-for", "true", OwnPrefix+"proxy-protocol", "true"), ReasonInvalidAnnotation},
+		"forwarded-for and PROXY, OCCM's names": {annotated(AliasPrefix+"x-forwarded-for", "true", AliasPrefix+"proxy-protocol", "v2"), ReasonInvalidAnnotation},
+		"affinity timeout":                      {&affinity, ReasonInvalid},
+		"affinity type":                         {&odd, ReasonInvalid},
 	} {
 		if _, reason, msg := ServiceOptions(c.s); reason != c.want || msg == "" {
 			t.Errorf("%s: %q %q, want %s", name, reason, msg, c.want)
@@ -294,5 +287,68 @@ func TestProtocol1RequestIsServedAsBefore(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "ipMode") || strings.Contains(w.Body.String(), "events") {
 		t.Fatalf("the answer to protocol 1 holds a protocol 2 field: %s", w.Body)
+	}
+}
+
+// An annotation that cannot be read never refuses a Service, so a Service that v0.11.0 served with such an annotation
+// left on it keeps its address: a value that is too long is as if it were not set, any number of names the table
+// does not know is named and counted, and a name that is not the load balancer's counts for nothing. Each kind is
+// one Event with the same text every turn. The internal annotation still refuses.
+func TestAnnotationsThatCannotBeReadAreNotObeyed(t *testing.T) {
+	long := strings.Repeat("x", MaxAnnotationValue+1)
+	leftover := func() *Service {
+		s := annotated(OwnPrefix+KnobMethod, long, AliasPrefix+"lb-method", "SOURCE_IP", OwnPrefix+KnobConnectionLimit, "500",
+			OwnPrefix+"zz", long, "example.com/owner", long)
+		for i := range 40 {
+			s.Annotations[OwnPrefix+"x"+strconv.Itoa(10+i)] = "1"
+		}
+		return s
+	}
+	o, reason, msg := ServiceOptions(leftover())
+	if reason != "" {
+		t.Fatalf("refused: %s %s", reason, msg)
+	}
+	// The own name's value cannot be read, so the alias is the one that is set.
+	if o.Method != "source" || o.ConnectionLimit != 500 {
+		t.Errorf("the annotations that can be read: %+v", o)
+	}
+	if len(o.Events) != 2 || o.Events[0].Reason != ReasonInvalidAnnotation || o.Events[1].Reason != ReasonAnnotationNotSupported {
+		t.Fatalf("events: %+v", o.Events)
+	}
+	if got, want := o.Events[0].Message, "Not obeyed, the default holds: "+OwnPrefix+"method, "+OwnPrefix+"zz: longer than 256 characters"; got != want {
+		t.Errorf("too long:\n got %s\nwant %s", got, want)
+	}
+	unknown := o.Events[1].Message
+	if !strings.Contains(unknown, OwnPrefix+"x10, ") || !strings.Contains(unknown, OwnPrefix+"x41 and 8 more.") ||
+		strings.Contains(unknown, OwnPrefix+"x42") || strings.Contains(unknown, "example.com") || strings.Contains(unknown, OwnPrefix+"zz") {
+		t.Errorf("not known: %s", unknown)
+	}
+	for range 20 { // a map's order must not reach the text: the controller says an Event again when it changes
+		if again, _, _ := ServiceOptions(leftover()); !reflect.DeepEqual(again.Events, o.Events) {
+			t.Fatalf("the Events differ between two readings:\n%+v\n%+v", again.Events, o.Events)
+		}
+	}
+	internal := leftover()
+	internal.Annotations[InternalAnnotation] = "true"
+	if _, reason, _ := ServiceOptions(internal); reason != ReasonInternalNotSupported {
+		t.Errorf("internal among annotations that cannot be read: %q", reason)
+	}
+
+	// Through the gateway: the Service reaches the portal, and its answer carries the two Events.
+	r := newRig()
+	r.protocol = "2"
+	w, ans := r.put(t, v2, Request{Services: []Service{*leftover()}})
+	if w.Code != http.StatusOK || len(r.portal.got) != 1 || ans.Services[0].State != StateBuilding || len(ans.Services[0].Events) != 2 {
+		t.Fatalf("gateway: %d %+v, the portal got %d", w.Code, ans, len(r.portal.got))
+	}
+	// A state over the body's limit is not taken at all, and the answer says what stays and what to do.
+	big := leftover()
+	for i := range 300 {
+		big.Annotations[OwnPrefix+"y"+strconv.Itoa(i)] = long[:MaxAnnotationValue]
+	}
+	w, _ = r.put(t, v2, Request{Services: []Service{*big}})
+	if w.Code != http.StatusRequestEntityTooLarge || r.portal.calls != 1 || !strings.Contains(w.Body.String(), ReasonTooLarge) ||
+		!strings.Contains(w.Body.String(), "the balancer stays as it is") {
+		t.Fatalf("over the body limit: %d %s, portal calls %d", w.Code, w.Body, r.portal.calls)
 	}
 }

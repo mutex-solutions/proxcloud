@@ -1,8 +1,8 @@
 package lbgw
 
 // annotations.go: what a Service's annotations and session affinity ask of its listeners and pools. The table is read
-// here, in the portal, and not in the controller: the controller sends the annotations of the two prefixes as they
-// are (protocol 2), so a new knob ships with the portal and needs no new controller in every cluster (C12). The one
+// here, in the portal, and not in the controller: the controller sends the annotations of the two prefixes, and no
+// other, as they are (protocol 2), so a new knob ships with the portal and needs no new controller in every cluster (C12). The one
 // the controller reads itself is the node selector, which needs the nodes' labels (Annotation).
 //
 // The own name is proxcloud.io/lb-<knob>. A loadbalancer.openstack.org/<alias> annotation is obeyed where it means the
@@ -26,9 +26,14 @@ const (
 	// Service that sets it to true is refused and never gets one (ReasonInternalNotSupported).
 	InternalAnnotation = "service.beta.kubernetes.io/openstack-internal-load-balancer"
 
-	// What one Service may send.
-	MaxAnnotations     = 32
+	// MaxAnnotationValue: an annotation with a longer value is not read (Read). How many annotations a Service has
+	// is no limit of its own: the table looks up the names it knows and names the others, and the size of the whole
+	// request is the gateway's limit (maxBody).
 	MaxAnnotationValue = 256
+	// maxAnnotationName: the longest name Kubernetes takes (253 for the prefix, "/", 63 for the name).
+	maxAnnotationName = 317
+	// maxNamed: an Event names this many annotations and counts the rest.
+	maxNamed = 32
 
 	// Kubernetes' own default for sessionAffinityConfig.clientIP.timeoutSeconds, and its largest value.
 	affinityDefault, affinityMax = 10800, 86400
@@ -93,6 +98,33 @@ func Internal(ann map[string]string) bool {
 	return err == nil && on
 }
 
+// Read returns the annotations that are read at all: the load balancer's names (SentAnnotation) whose value has at
+// most MaxAnnotationValue characters. long are the names left out for their value, in order. Anything else in ann is
+// not the load balancer's business and counts for nothing. The controller reads its node selector through Read too,
+// so both sides leave the same annotation out.
+func Read(ann map[string]string) (read map[string]string, long []string) {
+	read = map[string]string{}
+	for k, v := range ann {
+		switch {
+		case !SentAnnotation(k) || len(k) > maxAnnotationName:
+		case len(v) > MaxAnnotationValue:
+			long = append(long, k)
+		default:
+			read[k] = v
+		}
+	}
+	slices.Sort(long)
+	return read, long
+}
+
+// named lists names, which the caller sorted: at most maxNamed of them, and how many more there are.
+func named(names []string) string {
+	if more := len(names) - maxNamed; more > 0 {
+		return strings.Join(names[:maxNamed], ", ") + fmt.Sprintf(" and %d more", more)
+	}
+	return strings.Join(names, ", ")
+}
+
 // Annotation reads one knob: the own name, then OCCM's alias. name is the annotation that was read.
 func Annotation(ann map[string]string, knob string) (value, name string, ok bool) {
 	if v, ok := ann[OwnPrefix+knob]; ok {
@@ -148,23 +180,21 @@ func (o Options) IPMode(s *Service) string {
 }
 
 // ServiceOptions reads a Service's annotations and affinity. A reason refuses the Service: the internal annotation,
-// too many or too long annotations, the forwarded-for header together with PROXY (as OCCM refuses it,
-// loadbalancer.go:1627-1631). A value that is not understood is not obeyed and named in an Event; the Service is
-// served with the default, since refusing it would give its address back over a typing mistake.
+// and the forwarded-for header together with PROXY (as OCCM refuses it, loadbalancer.go:1627-1631). An annotation
+// that cannot be read never does: a value that is too long (Read) or not understood is not obeyed and named in one
+// Event (InvalidAnnotation), and the Service is served with the default, since refusing it would give its address
+// back over a typing mistake, or over an annotation left on a Service that v0.11.0 served without reading it. The
+// number of annotations refuses nothing either: the ones the table does not know are named (AnnotationNotSupported).
 func ServiceOptions(s *Service) (o Options, reason, message string) {
-	ann := s.Annotations
-	if len(ann) > MaxAnnotations {
-		return o, ReasonInvalidAnnotation, fmt.Sprintf("A Service takes at most %d load balancer annotations", MaxAnnotations)
-	}
-	for k, v := range ann {
-		if !SentAnnotation(k) || len(k) > 317 || len(v) > MaxAnnotationValue { // 253 for the prefix, "/", 63 for the name
-			return o, ReasonInvalidAnnotation, fmt.Sprintf("%.80s is not a load balancer annotation of at most %d characters", k, MaxAnnotationValue)
-		}
-	}
-	if Internal(ann) {
+	// Read before anything is left out: a Service that asks for an internal balancer never gets a public address.
+	if Internal(s.Annotations) {
 		return o, ReasonInternalNotSupported, "The load balancer's addresses are public: for an address inside the cluster's network set loadBalancerClass proxcloud.io/internal and remove " + InternalAnnotation
 	}
+	ann, long := Read(s.Annotations)
 	var invalid []string
+	if len(long) > 0 {
+		invalid = append(invalid, fmt.Sprintf("%s: longer than %d characters", named(long), MaxAnnotationValue))
+	}
 	bad := func(name, value, want string) {
 		invalid = append(invalid, fmt.Sprintf("%s: %q is not %s", name, value, want))
 	}
@@ -287,7 +317,7 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 	if len(unknown) > 0 {
 		slices.Sort(unknown)
 		o.Events = append(o.Events, Event{Type: "Warning", Reason: ReasonAnnotationNotSupported,
-			Message: "The load balancer does not obey these annotations: " + strings.Join(unknown, ", ") +
+			Message: "The load balancer does not obey these annotations: " + named(unknown) +
 				". The Kubernetes guide lists the ones it obeys"})
 	}
 	return o, "", ""

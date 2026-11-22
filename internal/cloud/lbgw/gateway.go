@@ -4,7 +4,7 @@
 // The controller presents a per-cluster credential (lb@proxcloud!<clusterId>) and sends the cluster's whole desired
 // state: its Services of type LoadBalancer and its nodes' addresses. Nothing in the request names a project, a network
 // or a VM: those come from the credential row. The gateway checks each Service on its own (TCP, UDP and IPv4 only, a
-// node port in range, source ranges that fit a firewall rule, annotations it can read: annotations.go) and hands the
+// node port in range, source ranges that fit a firewall rule, annotations it can honour: annotations.go) and hands the
 // rest to the portal (Portal), which stores the
 // state and converges the cluster's balancer in the background: the answer is the state as it is, never a build
 // inside the request. See docs/managed-k8s.md and the v0.11.0 load balancer plan.
@@ -109,7 +109,8 @@ type Service struct {
 
 	// Protocol 2, each optional.
 	//
-	// Annotations are the Service's annotations of the names SentAnnotation takes, as the tenant wrote them.
+	// Annotations are the Service's annotations of the names SentAnnotation takes, as the tenant wrote them (a value
+	// over MaxAnnotationValue may come cut: it is not read either way). Any other name is not read and not counted.
 	Annotations map[string]string `json:"annotations,omitempty"`
 	// SessionAffinity ClientIP keeps a client on one node for SessionAffinityTimeout seconds (0 = Kubernetes' three
 	// hours).
@@ -360,7 +361,8 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if err := dec.Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return nil, &Refusal{http.StatusRequestEntityTooLarge, ReasonTooLarge, fmt.Sprintf("lb gateway: the state takes at most %d KiB", maxBody>>10)}
+			// Nothing was stored: the cluster's balancer stays as the last state that fitted made it.
+			return nil, &Refusal{http.StatusRequestEntityTooLarge, ReasonTooLarge, fmt.Sprintf("The cluster's load balancer state is over %d KiB and was not taken: the balancer stays as it is, and no change to a Service or a node reaches it until the state fits. Shorten the Services' load balancer annotations and source ranges", maxBody>>10)}
 		}
 		return nil, &Refusal{http.StatusBadRequest, ReasonInvalid, "lb gateway: the body is not a state: " + err.Error()}
 	}

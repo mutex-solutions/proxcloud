@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
 )
@@ -409,6 +412,101 @@ func TestGatewayPutStepsDownForOneRequestOnly(t *testing.T) {
 	refuse = true
 	if _, err := put(); !errors.As(err, &rf) || rf.Status != http.StatusBadRequest || requests != 1 {
 		t.Fatalf("a refusal of this release's portal: %v after %d requests", err, requests)
+	}
+}
+
+// oneCluster is the gateway's credential side for the test's cluster, readyPortal its project side: every Service
+// the gateway lets through is served at one address.
+type oneCluster struct{}
+
+func (oneCluster) Credential(_ context.Context, id string) (*lbgw.Credential, error) {
+	sum, now := sha256.Sum256([]byte("s3cr3t")), time.Now()
+	return &lbgw.Credential{ID: id, ProjectID: "p1", SecretSHA256: hex.EncodeToString(sum[:]), LastSeenAt: &now}, nil
+}
+
+func (oneCluster) Seen(context.Context, string, time.Time) error { return nil }
+
+type readyPortal struct {
+	calls int
+	got   []lbgw.Service
+}
+
+func (p *readyPortal) LBClusterState(_ context.Context, _ *lbgw.Credential, services []lbgw.Service, _ []lbgw.Node) (*lbgw.Answer, error) {
+	p.calls, p.got = p.calls+1, services
+	ans := &lbgw.Answer{}
+	for _, s := range services {
+		ans.Services = append(ans.Services, lbgw.ServiceStatus{UID: s.UID, State: lbgw.StateReady, Address: "203.0.113.5"})
+	}
+	return ans, nil
+}
+
+// The controller against the gateway itself (lbgw.Handler over TLS). A Service that v0.11.0 served with annotations
+// this release cannot read keeps its address: a value that is too long, forty names the table does not know, a node
+// selector that is too long (obeyed by neither side), and next to them an annotation that is not the load
+// balancer's, which is not sent. The Events come once. A state over the body's limit changes nothing and says so;
+// the internal annotation is the one that gives the address back.
+func TestAnnotationsThatCannotBeReadKeepTheAddress(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTenant{services: map[string]map[string]any{}}
+	f.add("web", "shop", "u-1", "2026-11-23T10:00:00Z", lbSpec(Class, tcp(80, 30080)))
+	f.nodes = []map[string]any{node("w1", "10.0.0.11", map[string]any{"pool": "edge"}), node("w2", "10.0.0.12", map[string]any{"pool": "core"})}
+	portal := &readyPortal{}
+	ts := httptest.NewTLSServer(&lbgw.Handler{Reg: oneCluster{}, Portal: portal, Log: quiet()})
+	defer ts.Close()
+	g := &gateway{url: ts.URL, dir: gatewayDir(t, ts)}
+	c := &controller{api: f, put: g.put, log: quiet()}
+	turn := func() ([]string, error) {
+		f.events = nil
+		err := c.turn(ctx)
+		return reasons(f.events), err
+	}
+	served := func() bool { return hasIngress(ingress(f.svc("web", "shop")), "203.0.113.5") }
+	if got, err := turn(); err != nil || !slices.Equal(got, []string{"shop:EnsuredLoadBalancer"}) || !served() {
+		t.Fatalf("a plain Service: %v %v", got, err)
+	}
+
+	leftover := []string{
+		lbgw.OwnPrefix + lbgw.KnobMethod, strings.Repeat("x", 100<<10),
+		lbgw.OwnPrefix + lbgw.KnobNodeSelector, strings.Repeat("pool=edge,", 30),
+		lbgw.OwnPrefix + lbgw.KnobConnectionLimit, "500",
+		"example.com/blob", strings.Repeat("x", 200<<10),
+	}
+	for i := range 40 {
+		leftover = append(leftover, lbgw.OwnPrefix+"x"+strconv.Itoa(i), "1")
+	}
+	annotate(f.svc("web", "shop"), leftover...)
+	if got, err := turn(); err != nil || !slices.Equal(got, []string{"shop:InvalidAnnotation", "shop:AnnotationNotSupported"}) || !served() {
+		t.Fatalf("annotations that cannot be read: %v %v, served %v", got, err, served())
+	}
+	sent := portal.got[0]
+	if len(sent.Annotations) != 43 || len(sent.Annotations[lbgw.OwnPrefix+lbgw.KnobMethod]) != lbgw.MaxAnnotationValue+1 || sent.Nodes != nil {
+		t.Errorf("sent %d annotations, the long one with %d characters, nodes %v", len(sent.Annotations), len(sent.Annotations[lbgw.OwnPrefix+lbgw.KnobMethod]), sent.Nodes)
+	}
+	// As the portal reads what it stored (lbClusterServiceSpec): the annotation that can be read is obeyed.
+	if o, reason, _ := lbgw.ServiceOptions(&sent); reason != "" || o.ConnectionLimit != 500 || o.Method != "" {
+		t.Errorf("the portal reads %+v %s", o, reason)
+	}
+	if got, err := turn(); err != nil || len(got) != 0 || !served() {
+		t.Fatalf("a turn later: %v %v", got, err)
+	}
+
+	// Over the body's limit: the gateway takes nothing, the portal is not called, the address stays.
+	calls, big := portal.calls, slices.Clone(leftover)
+	for i := range 300 {
+		big = append(big, lbgw.OwnPrefix+"y"+strconv.Itoa(i), strings.Repeat("y", lbgw.MaxAnnotationValue))
+	}
+	annotate(f.svc("web", "shop"), big...)
+	if got, err := turn(); err == nil || !slices.Equal(got, []string{"shop:TooLarge"}) || !served() || portal.calls != calls {
+		t.Fatalf("over the body limit: %v %v, served %v, portal calls %d", got, err, served(), portal.calls-calls)
+	}
+	if msg := f.events[0]["message"].(string); !strings.Contains(msg, "the balancer stays as it is") {
+		t.Errorf("the Event does not say what happens: %s", msg)
+	}
+
+	// The internal annotation, even among the others: no public address.
+	annotate(f.svc("web", "shop"), append(slices.Clone(leftover), lbgw.InternalAnnotation, "true")...)
+	if got, err := turn(); err != nil || !slices.Equal(got, []string{"shop:InternalNotSupported"}) || served() {
+		t.Fatalf("internal: %v %v, served %v", got, err, served())
 	}
 }
 
