@@ -687,18 +687,29 @@ func (h *Handler) pveLoadBalancerAction(w http.ResponseWriter, r *http.Request, 
 	return false
 }
 
-// pveLBUpdateConfig replaces a balancer's listeners, pools and members after checking every member.
-func (h *Handler) pveLBUpdateConfig(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, data map[string]any) error {
+// lbSpecOfRequest reads the body of UPDATE_CONFIG: listeners and pools with every option of pve.LBSpec. A body from
+// before v0.11.1, with the protocol on the pool alone, reads as it did. What the balancer cannot do is a 400 with
+// the reason, a protocol the model knows and no appliance serves yet among them.
+func lbSpecOfRequest(data map[string]any) (pve.LBSpec, error) {
+	var spec pve.LBSpec
 	raw, err := json.Marshal(data)
 	if err != nil {
-		return err
+		return spec, err
 	}
-	var spec pve.LBSpec
 	if err := json.Unmarshal(raw, &spec); err != nil {
-		return httpx.BadRequest("Listeners and pools do not have the expected shape")
+		return spec, httpx.BadRequest("Listeners and pools do not have the expected shape")
 	}
 	if msg := spec.Validate(); msg != "" {
-		return httpx.BadRequest(msg)
+		return spec, httpx.BadRequest(msg)
+	}
+	return spec, nil
+}
+
+// pveLBUpdateConfig replaces a balancer's listeners, pools and members after checking every member.
+func (h *Handler) pveLBUpdateConfig(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, data map[string]any) error {
+	spec, err := lbSpecOfRequest(data)
+	if err != nil {
+		return err
 	}
 	ps, err := h.pveFor(es)
 	if err != nil {

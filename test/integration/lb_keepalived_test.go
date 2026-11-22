@@ -7,11 +7,15 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
@@ -35,7 +39,7 @@ func TestLBPairConfigsPassTheirChecks(t *testing.T) {
 			t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 			run := func(cmd string) string {
 				t.Helper()
-				code, r, err := c.Exec(ctx, []string{"sh", "-c", cmd})
+				code, r, err := c.Exec(ctx, []string{"sh", "-c", cmd}, tcexec.Multiplexed())
 				var out bytes.Buffer
 				if r != nil {
 					_, _ = io.Copy(&out, r)
@@ -84,6 +88,29 @@ func TestLBPairConfigsPassTheirChecks(t *testing.T) {
 				t.Fatal(err)
 			}
 			run("haproxy -c -f /tmp/c.cfg")
+			// Every config the unit tests hold a golden of, the layer 4 options among them: no error and, with -dW,
+			// no warning either, from the HAProxy this image ships.
+			goldens, err := filepath.Glob("../../internal/cloud/pve/testdata/lb*.cfg")
+			if err != nil || len(goldens) < 6 {
+				t.Fatalf("goldens: %q %v", goldens, err)
+			}
+			for _, g := range goldens {
+				cfg, err := os.ReadFile(g)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := c.CopyToContainer(ctx, cfg, "/tmp/golden.cfg", 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if code, r, err := c.Exec(ctx, []string{"haproxy", "-dW", "-c", "-f", "/tmp/golden.cfg"}); err != nil || code != 0 {
+					var out bytes.Buffer
+					if r != nil {
+						_, _ = io.Copy(&out, r)
+					}
+					t.Errorf("%s: haproxy -dW -c exit %d %v\n%s", filepath.Base(g), code, err, out.String())
+				}
+			}
+			lbLayer4Behaves(ctx, t, c, run)
 			for _, n := range []int{0, 1, 50} {
 				var vips []string
 				for i := range n {
@@ -110,4 +137,112 @@ func TestLBPairConfigsPassTheirChecks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// lbLayer4Behaves runs the image's HAProxy on a rendered config and asks it what the layer 4 options do, with members
+// in the same container: two plain ones that answer their name, one that keeps the first line it is sent, and two
+// that speak TLS (openssl s_server, one of them TLS 1.3 only). Shown: a PROXY v1 header reaches the member; source
+// persistence keeps a client on one member where round robin uses both; an HTTPS check and a TLS hello check take a
+// TLS member for up and a plain one for down; a pool without a check reads "no check"; a listener's connection limit
+// is the frontend's.
+func lbLayer4Behaves(ctx context.Context, t *testing.T, c testcontainers.Container, run func(string) string) {
+	t.Helper()
+	run("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssl socat >/dev/null")
+	run("openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/k.pem -out /tmp/c.pem -days 1 -subj /CN=member >/dev/null 2>&1")
+	run(`printf '#!/bin/sh\nhead -n1 >> /tmp/$1.in\necho $1\n' > /tmp/answer && chmod 0755 /tmp/answer`)
+	for name, port := range map[string]int{"a": 9081, "b": 9082, "c": 9083} {
+		run(fmt.Sprintf(`setsid socat TCP-LISTEN:%d,fork,reuseaddr SYSTEM:"/tmp/answer %s" >/dev/null 2>&1 &`, port, name))
+	}
+	run("setsid openssl s_server -accept 9443 -cert /tmp/c.pem -key /tmp/k.pem -www >/dev/null 2>&1 &")
+	run("setsid openssl s_server -accept 9444 -cert /tmp/c.pem -key /tmp/k.pem -tls1_3 -www >/dev/null 2>&1 &")
+	at := func(id string, port int) pve.LBMember {
+		return pve.LBMember{ServerID: id, Port: port, Weight: 1, Address: "127.0.0.1"}
+	}
+	fast := func(kind string) *pve.LBHealthCheck {
+		return &pve.LBHealthCheck{Type: kind, Interval: 1, Timeout: 1, Rise: 1, Fall: 1}
+	}
+	spec := pve.LBSpec{
+		Listeners: []pve.LBListener{
+			{Port: 8001, Protocol: "tcp", Pool: "proxy", ConnectionLimit: 7},
+			{Port: 8002, Protocol: "tcp", Pool: "stick"},
+			{Port: 8003, Protocol: "tcp", Pool: "spread"},
+		},
+		Pools: []pve.LBPool{
+			{Name: "proxy", Protocol: "tcp", Algorithm: "roundrobin", Members: []pve.LBMember{at("103", 9083)},
+				ProxyProtocol: true, ProxyVersion: 1, HealthCheck: &pve.LBHealthCheck{Type: "none"}},
+			{Name: "stick", Protocol: "tcp", Algorithm: "roundrobin", Members: []pve.LBMember{at("101", 9081), at("102", 9082)},
+				SessionPersistence: &pve.LBPersistence{Type: "source_ip", Timeout: 60}},
+			{Name: "spread", Protocol: "tcp", Algorithm: "roundrobin", Members: []pve.LBMember{at("101", 9081), at("102", 9082)}},
+			{Name: "https", Protocol: "tcp", Algorithm: "roundrobin", Members: []pve.LBMember{at("201", 9443), at("101", 9081)}, HealthCheck: fast("https")},
+			{Name: "hello", Protocol: "tcp", Algorithm: "roundrobin", Members: []pve.LBMember{at("201", 9443), at("202", 9444), at("101", 9081)}, HealthCheck: fast("tls-hello")},
+		},
+	}
+	if asked := l4Copy(spec); asked.Validate() != "" { // a copy: Validate clears the addresses
+		t.Fatal(asked.Validate())
+	}
+	if err := c.CopyToContainer(ctx, []byte(pve.RenderHAProxy(spec)), "/tmp/l4.cfg", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("mkdir -p /run/haproxy && haproxy -D -f /tmp/l4.cfg")
+	ask := func(port int) string {
+		return strings.TrimSpace(run(fmt.Sprintf("echo hello | socat -t3 - TCP:127.0.0.1:%d", port)))
+	}
+	var stick, spread string
+	for range 6 {
+		stick += ask(8002)
+		spread += ask(8003)
+	}
+	if stick != "aaaaaa" && stick != "bbbbbb" {
+		t.Errorf("source persistence: one client reached %q", stick)
+	}
+	if !strings.Contains(spread, "a") || !strings.Contains(spread, "b") {
+		t.Errorf("round robin without persistence: %q", spread)
+	}
+	if got := ask(8001); got != "c" {
+		t.Errorf("the PROXY pool answered %q", got)
+	}
+	if line := run("cat /tmp/c.in"); !strings.HasPrefix(line, "PROXY TCP4 127.0.0.1 127.0.0.1 ") {
+		t.Errorf("the member's first line is %q, not a PROXY v1 header", line)
+	}
+	state := map[string]string{}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		stat := run(`echo "show stat" | socat - /run/haproxy/admin.sock`)
+		health, notLoaded, err := pve.ParseHAProxyStat(stat, spec)
+		if err != nil || len(notLoaded) != 0 {
+			t.Fatalf("health: %v, not loaded %q", err, notLoaded)
+		}
+		for _, h := range health {
+			state[h.Pool+"/"+h.ServerID] = h.Status
+		}
+		up := func(k string) bool { return strings.HasPrefix(state[k], "UP") }
+		down := func(k string) bool { return strings.HasPrefix(state[k], "DOWN") }
+		if up("https/201") && down("https/101") && up("hello/201") && up("hello/202") && down("hello/101") && state["proxy/103"] == "no check" {
+			if !strings.Contains(stat, "\nl8001,FRONTEND,") {
+				t.Fatalf("no frontend l8001:\n%s", stat)
+			}
+			rows := strings.Split(stat, "\n")
+			slim := slices.Index(strings.Split(strings.TrimPrefix(rows[0], "# "), ","), "slim")
+			for _, row := range rows {
+				if f := strings.Split(row, ","); f[0] == "l8001" && f[1] == "FRONTEND" && f[slim] != "7" {
+					t.Errorf("listener 8001 holds %s connections, want its limit of 7", f[slim])
+				}
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("members read %v", state)
+		}
+		time.Sleep(time.Second)
+	}
+	run("pkill haproxy; pkill socat; pkill openssl; true")
+}
+
+// l4Copy is a spec whose pools and members are its own.
+func l4Copy(s pve.LBSpec) pve.LBSpec {
+	out := pve.LBSpec{Listeners: slices.Clone(s.Listeners), Pools: slices.Clone(s.Pools)}
+	for i := range out.Pools {
+		out.Pools[i].Members = slices.Clone(out.Pools[i].Members)
+	}
+	return out
 }
