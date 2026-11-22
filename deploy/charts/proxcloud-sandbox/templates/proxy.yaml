@@ -1,0 +1,98 @@
+{{- /*
+sandbox-proxy (deploy/sandbox-cluster/sandbox-proxy.yaml): https://<port>-<sandboxID>.<domain> reaches proxy.address
+(MetalLB), TLS ends here, and the proxy forwards plain HTTP to that sandbox's pod. System side only: it holds the
+wildcard key and the wake token. The run writes Secret sandbox-proxy-tls (tls.crt, tls.key) and, with a wake URL,
+sandbox-proxy-wake (PROXCLOUD_WAKE_TOKEN) into this namespace; never through values. No cert-sync identity: the
+certificate does not come from another cluster here.
+*/ -}}
+{{- $ns := .Release.Namespace }}
+{{- $sys := (include "sbx.placement" . | fromJson).system }}
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: sandbox-proxy-config, namespace: {{ $ns }}}
+data:
+  SANDBOX_DOMAIN: {{ required "proxy.domain is required" .Values.proxy.domain | quote }}
+  {{- with .Values.proxy.wakeURL }}
+  PROXCLOUD_WAKE_URL: {{ . | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: sandbox-proxy, namespace: {{ $ns }}}
+---
+# Pod lookup by the proxcloud.io/sandbox-id label across the sb-<project> namespaces. Nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: sandbox-proxy}
+rules:
+  - {apiGroups: [""], resources: [pods], verbs: [list]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: sandbox-proxy}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sandbox-proxy}
+subjects: [{kind: ServiceAccount, name: sandbox-proxy, namespace: {{ $ns }}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: sandbox-proxy, namespace: {{ $ns }}}
+spec:
+  replicas: {{ int .Values.proxy.replicas }}
+  selector:
+    matchLabels: {app: sandbox-proxy}
+  template:
+    metadata:
+      labels: {app: sandbox-proxy}
+    spec:
+      serviceAccountName: sandbox-proxy
+      nodeSelector: {{ toJson (required "system.nodeSelector must not be empty: the proxy must never land on a sandbox node" $sys.nodeSelector) }}
+      {{- with $sys.tolerations }}
+      tolerations: {{ toJson . }}
+      {{- end }}
+      topologySpreadConstraints:
+        - {maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: ScheduleAnyway, labelSelector: {matchLabels: {app: sandbox-proxy}}}
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: proxy
+          image: {{ .Values.images.proxy }}
+          env:
+            - {name: SANDBOX_TLS_DIR, value: /etc/sandbox-proxy/tls}
+          envFrom:
+            - configMapRef: {name: sandbox-proxy-config}
+            - secretRef: {name: sandbox-proxy-wake, optional: true}
+          ports:
+            - {name: https, containerPort: 8443}
+            - {name: health, containerPort: 8081}
+          readinessProbe: {httpGet: {path: /readyz, port: health}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: health}, periodSeconds: 10}
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: tls, mountPath: /etc/sandbox-proxy/tls, readOnly: true}
+      volumes:
+        - name: tls
+          secret: {secretName: sandbox-proxy-tls}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: sandbox-proxy, namespace: {{ $ns }}}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: sandbox-proxy}
+---
+# Local keeps the caller's address as the source, and MetalLB answers for the address only from a node with a ready proxy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-proxy
+  namespace: {{ $ns }}
+  annotations: {metallb.io/loadBalancerIPs: {{ required "proxy.address is required" .Values.proxy.address | quote }}}
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector: {app: sandbox-proxy}
+  ports:
+    - {name: https, port: 443, targetPort: https}

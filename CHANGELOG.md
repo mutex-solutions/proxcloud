@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Chart `proxcloud-sandbox` 0.1.0: the sandbox runtime of the managed platform** (`deploy/charts/proxcloud-sandbox`,
+  published on a `proxcloud-sandbox-v*` tag; not pinned by the BOM yet, so nothing installs it). Mode `shared` runs it
+  on a node group `sandbox` of the platform cluster, mode `separate` on the platform-owned sandbox cluster. node-setup
+  (runsc 20261116.0 from the pinned package file, the network guard), telemetry and the template prepull run on the
+  sandbox nodes only (shared), so no platform node gets runsc or a containerd restart. RuntimeClass `gvisor` carries
+  `scheduling`: every gVisor pod lands on a sandbox node, tolerating `proxcloud.io/sandbox` only (never
+  `proxcloud.io/unsecured`). A CiliumNodeConfig gives the sandbox nodes alone the network guard's CNI chain
+  (`custom-cni-conf`, `write-cni-conf-when-ready` present and empty), the bandwidth manager and host-only socket LB.
+  agent-sandbox v1.0.9 and sandbox-proxy (its MetalLB address from `proxy.address`) run on the system side; the
+  release namespace gets no placement. In shared mode the portal's identity holds cluster-wide only namespaces,
+  RoleBindings and `bind` on one namespaced ClusterRole, which it binds in each `sb-*` namespace, and four
+  ValidatingAdmissionPolicies narrow it: namespaces `sb-*` with `proxcloud.io/tenant=true`, RoleBindings of that role
+  to itself only, the firewall identity's node writes on sandbox nodes only, and every pod of a tenant namespace
+  (both modes) on RuntimeClass `gvisor` with no privilege, added capability, host namespace, `nodeName` at create or
+  hostPath but `/opt/proxcloud-sandbox/bin` read-only, no hostPort, no volume type outside Pod Security restricted and
+  no toleration of `proxcloud.io/unsecured` or of every taint, ephemeral containers included. In shared mode the chart
+  refuses to render with an empty sandbox node selector or RuntimeClass scheduling. No Pod Security label: baseline
+  refuses the runtime hostPath of every sandbox. The firewall identity may get RuntimeClass `gvisor` (the fence gate),
+  the network guard and the portal may read CiliumNodeConfigs. Images by digest (the runtime built from `main` at
+  `d26edd2e`, the first with the network guard's per-node Cilium read, below; the proxy of `v0.11.0-rc.1`; busybox,
+  pause). Tests: goldens of both modes, the node-setup script, guardrail, telemetry, the network guard's RBAC and
+  agent-sandbox equal to `deploy/sandbox-cluster`, and the policies run through the API server's CEL against the pods
+  the portal's `BuildCR` makes.
+- **Cluster chart `proxmox-kamaji-cluster` 0.1.18: a node group's own pool, address range and DNS servers, and the
+  sandbox chart as an add-on.** A node group may set `pool`, `addresses` (an `InClusterIPPool` `<release>-<group>`,
+  `net0` on it with `defaultIPv4: false`, so the machines take no address from the cluster's range) and `dnsServers`;
+  `addons.sandbox` installs chart `proxcloud-sandbox` in mode separate through CAAPH. A group without the keys renders
+  what 0.1.17 rendered: every values fixture of this and every previous release renders the same control plane,
+  machine and bootstrap templates as the pinned chart, and the tenant goldens are unchanged.
+
 ### Changed
 
 - **The platform BOM on `main` is `0.12.0-dev`, and the build carries the BOM of `0.11.0`**

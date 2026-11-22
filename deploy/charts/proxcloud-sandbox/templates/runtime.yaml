@@ -1,0 +1,105 @@
+{{- /*
+The RuntimeClass every sandbox pod names (the portal sets runtimeClassName itself), the per-node Cilium settings, and
+the cluster-wide guardrail of deploy/sandbox-cluster/network-policy.yaml (equal to it when guardrail.extraDeny is
+empty; comments on each rule are there).
+*/ -}}
+{{- $shared := include "sbx.shared" . }}
+{{- $p := include "sbx.placement" . | fromJson }}
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata: {name: {{ .Values.runtimeClass.name }}}
+handler: gvisor
+{{- with $p.scheduling }}
+scheduling: {{ toJson . }}
+{{- end }}
+---
+{{- if $shared }}
+{{- /* Shared: Cilium keeps writing its own CNI config on every platform node, and on the sandbox nodes alone hands the
+file to the network guard's chain (custom-cni-conf; write-cni-conf-when-ready present and EMPTY: absent, Cilium rewrites
+the file and drops the chain) with the bandwidth manager for the egress cap. Socket LB stays in the host namespace there
+(gVisor's own stack never sees a socket-level translation). Read when an agent starts: a node that joins after this
+object exists gets it; a running agent needs a restart. */}}
+apiVersion: cilium.io/v2
+kind: CiliumNodeConfig
+metadata:
+  name: sandbox-nodes
+  namespace: kube-system
+spec:
+  nodeSelector:
+    matchLabels: {{ toJson (required "cilium.nodeSelector must not be empty in mode shared" $p.cilium) }}
+  defaults:
+    custom-cni-conf: "true"
+    write-cni-conf-when-ready: ""
+    enable-bandwidth-manager: "true"
+    bpf-lb-sock-hostns-only: "true"
+{{- else }}
+{{- /* Separate: the chain and the bandwidth manager are cluster-wide (the cluster chart's sandboxBandwidth);
+deploy/sandbox-cluster/cilium-node-config.yaml. */}}
+apiVersion: cilium.io/v2
+kind: CiliumNodeConfig
+metadata:
+  name: sandbox-socket-lb
+  namespace: kube-system
+spec:
+  nodeSelector: {}
+  defaults:
+    bpf-lb-sock-hostns-only: "true"
+{{- end }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: sandbox-tenant-egress
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s:io.cilium.k8s.namespace.labels.proxcloud.io/tenant: "true"
+  egress:
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: kube-system
+        k8s:k8s-app: kube-dns
+    toPorts:
+    - ports:
+      - {port: "53", protocol: ANY}
+  egressDeny:
+  - toCIDRSet:
+    - cidr: 10.0.0.0/8
+    - cidr: 172.16.0.0/12
+    - cidr: 192.168.0.0/16
+    - cidr: 100.64.0.0/10
+    - cidr: 169.254.0.0/16
+    {{- range .Values.guardrail.extraDeny }}
+    - cidr: {{ . }}
+    {{- end }}
+  - toCIDRSet:
+    - cidr: 0.0.0.0/0
+    toPorts:
+    - ports:
+      - {port: "25", protocol: TCP}
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: sandbox-tenant-ingress
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s:io.cilium.k8s.namespace.labels.proxcloud.io/tenant: "true"
+  ingress:
+  - fromEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: {{ .Release.Namespace }}
+        k8s:app: sandbox-proxy
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sandbox-warming-deny-all
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      proxcloud.io/sandbox-warm: "true"
+  ingress: []
+  egress: []

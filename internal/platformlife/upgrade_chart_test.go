@@ -138,7 +138,8 @@ func TestUpgradeRollsNoMachine(t *testing.T) {
 
 // The cluster chart in this tree, when it is a version ahead of the one this build's BOM pins (bumped in a pull
 // request, tagged and pinned after it), renders the same machines as the pinned one from the same values: the pin
-// that follows starts no rollout on a platform, and the run's rollout check lets it through.
+// that follows starts no rollout on a platform, and the run's rollout check lets it through. Every values fixture: this
+// build's (one and three control plane machines) and those of every previous release.
 func TestChartInTreeRollsNoMachine(t *testing.T) {
 	helm, err := exec.LookPath("helm")
 	if err != nil {
@@ -147,13 +148,19 @@ func TestChartInTreeRollsNoMachine(t *testing.T) {
 		}
 		t.Skip("helm not installed")
 	}
-	const local, values = "../../deploy/charts/proxmox-kamaji-cluster", "testdata/render-cluster-values.golden.yaml"
+	const local = "../../deploy/charts/proxmox-kamaji-cluster"
 	pinned := clusterChart(t, helm, comp(t, embedded(t), ClusterSeed, ClusterName).Chart)
 	if pinned == local {
 		t.Skip("the BOM pins the chart in this tree")
 	}
-	if got, want := machineFacts(t, helm, local, values), machineFacts(t, helm, pinned, values); !reflect.DeepEqual(got, want) {
-		t.Errorf("the chart in this tree renders another control plane, machine template or bootstrap template than the pinned one.\nin tree: %v\npinned: %v", got, want)
+	previous, err := filepath.Glob("testdata/previous/*/render-cluster-values.golden.yaml")
+	if err != nil || len(previous) == 0 {
+		t.Fatalf("previous values fixtures: %v", err)
+	}
+	for _, values := range append([]string{"testdata/render-cluster-values.golden.yaml", "testdata/render-cluster-values-3cp.golden.yaml"}, previous...) {
+		if got, want := machineFacts(t, helm, local, values), machineFacts(t, helm, pinned, values); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: the chart in this tree renders another control plane, machine template or bootstrap template than the pinned one.\nin tree: %v\npinned: %v", values, got, want)
+		}
 	}
 }
 

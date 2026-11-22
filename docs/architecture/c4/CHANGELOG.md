@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-22: the sandbox chart and the cluster chart's per-group pool, range and DNS
+
+**What changed:** a new chart, `proxcloud-sandbox` 0.1.0 (`deploy/charts/proxcloud-sandbox`, tag `proxcloud-sandbox-v*`
+in `helm.yml`), the sandbox runtime of the managed platform in mode `shared` (a node group of the platform cluster) or
+`separate` (the platform-owned sandbox cluster). It carries what `deploy/sandbox-cluster` applies on the installer path
+(node-setup, telemetry, the guardrail, agent-sandbox v1.0.9, sandbox-proxy) and two new trust boundaries for shared
+mode: the portal's sandbox identity holds cluster-wide only namespaces, RoleBindings of ONE namespaced ClusterRole and
+nodes read, and ValidatingAdmissionPolicies keep its namespaces to `sb-*` with `proxcloud.io/tenant=true`, its
+RoleBindings to that role and itself, and the firewall identity's node writes to the sandbox group; a pod policy on
+every tenant namespace (both modes) allows only RuntimeClass `gvisor` and no host access but the read-only runtime
+directory. The RuntimeClass's `scheduling` (one toleration, `proxcloud.io/sandbox`) and a CiliumNodeConfig on the
+sandbox nodes keep gVisor pods and the network guard's CNI chain there. Cluster chart 0.1.18: a node group's own
+Proxmox pool, address range (`InClusterIPPool`, `net0` with `defaultIPv4: false`) and DNS servers, and
+`addons.sandbox` (the sandbox chart in mode separate). Neither chart is published or pinned yet: nothing renders them.
+
+**Why:** v0.12.0 plan, PR 1 (`run-1/v0120-sandbox-plan.md`, corrections C1, C5, C6, C11, C15 and spike changes 1, 3,
+5, 6, 7): sandboxes on the managed platform, shared or separate, on the platform network with a range of their own.
+
+**Diagrams:** C2 (the chart node and its table row; the cluster chart row).
+
 ## 2026-11-22: sandbox-netguard reads per-node Cilium config (#422)
 
 **What changed:** no new component or container. `sandbox-netguard -install` (node-setup on every sandbox node) now
