@@ -51,9 +51,7 @@ func TestValidateControlPlaneCount(t *testing.T) {
 			in.Spec.Clusters[0].ControlPlane.Replicas, in.Spec.Clusters[0].NodeRange = 3, "10.200.200.30-10.200.200.38"
 		}},
 		{"one in the same range", "", func(in *Installation) { in.Spec.Clusters[0].NodeRange = "10.200.200.30-10.200.200.38" }},
-		{"sandbox shared", "spec.sandbox: the sandbox service on the platform comes in a later release", func(in *Installation) { in.Spec.Sandbox = &SandboxSpec{Placement: SandboxShared} }},
-		{"sandbox separate", "spec.sandbox: the sandbox service on the platform comes in a later release", func(in *Installation) { in.Spec.Sandbox = &SandboxSpec{Placement: SandboxSeparate} }},
-		{"sandbox elsewhere", `spec.sandbox.placement "own" is neither shared nor separate`, func(in *Installation) { in.Spec.Sandbox = &SandboxSpec{Placement: "own"} }},
+		{"sandbox elsewhere", `spec.sandbox.placement "own" is not shared, separate or off`, func(in *Installation) { in.Spec.Sandbox = &SandboxSpec{Placement: "own"} }},
 	} {
 		in := validInstallation(t)
 		tc.mut(in)

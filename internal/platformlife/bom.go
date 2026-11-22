@@ -103,16 +103,20 @@ type Chart struct {
 
 // Component is one chart the platform installs on one of its clusters.
 type Component struct {
-	Name        string         `yaml:"name" json:"name"`
-	Cluster     string         `yaml:"cluster" json:"cluster"` // seed or workload
-	Wave        int            `yaml:"wave" json:"wave"`       // applied and health-gated in ascending order per cluster
-	Install     string         `yaml:"install" json:"install"` // application (the default) or helmchart
-	Namespace   string         `yaml:"namespace" json:"namespace"`
-	Chart       Chart          `yaml:"chart" json:"chart"`
-	Group       string         `yaml:"group" json:"group"`       // workload node group: "" (system), all, system, kamaji, dbaas
-	Stateful    bool           `yaml:"stateful" json:"stateful"` // prune off, never deleted by a run
-	UpgradeFrom []string       `yaml:"upgradeFrom,omitempty" json:"upgradeFrom,omitempty"`
-	Values      map[string]any `yaml:"values,omitempty" json:"values,omitempty"` // Helm values the component always gets
+	Name        string   `yaml:"name" json:"name"`
+	Cluster     string   `yaml:"cluster" json:"cluster"` // seed or workload
+	Wave        int      `yaml:"wave" json:"wave"`       // applied and health-gated in ascending order per cluster
+	Install     string   `yaml:"install" json:"install"` // application (the default) or helmchart
+	Namespace   string   `yaml:"namespace" json:"namespace"`
+	Chart       Chart    `yaml:"chart" json:"chart"`
+	Group       string   `yaml:"group" json:"group"`       // workload node group: "" (system), all, system, kamaji, dbaas
+	Stateful    bool     `yaml:"stateful" json:"stateful"` // prune off, never deleted by a run
+	UpgradeFrom []string `yaml:"upgradeFrom,omitempty" json:"upgradeFrom,omitempty"`
+	// Feature marks a component that is rendered only for an installation whose settings ask for it: FeatureSandbox,
+	// for spec.sandbox. "" is every component there was before the field: always rendered. A marked component of our
+	// own chart is also the one addition an upgrade makes to an installed platform (Classify).
+	Feature string         `yaml:"feature,omitempty" json:"feature,omitempty"`
+	Values  map[string]any `yaml:"values,omitempty" json:"values,omitempty"` // Helm values the component always gets
 }
 
 const (
@@ -124,7 +128,32 @@ const (
 	ownRepo            = "ghcr.io/mutex-solutions/"
 	mirrorRepo         = ownRepo + "charts-mirror" // third-party charts republished by CI (docs/ci-release.md, "Chart mirror")
 	schemaVersion      = 1
+	// FeatureSandbox is the feature of the sandbox chart's component (Component.Feature).
+	FeatureSandbox = "sandbox"
 )
+
+// Feature is b's component marked with feature name, nil when it has none.
+func (b *BOM) Feature(name string) *Component {
+	for i := range b.Components {
+		if b.Components[i].Feature == name {
+			return &b.Components[i]
+		}
+	}
+	return nil
+}
+
+// For is b as one installation renders it: without the components of a feature its settings do not ask for. The
+// sandbox component is an Application of the platform cluster only with spec.sandbox shared; with separate the sandbox
+// cluster's own chart installs that chart inside it (SandboxClusterValues), and without sandboxes nothing does. A BOM
+// with no marked component, which is every BOM before the field, is returned as it is.
+func (b *BOM) For(s Spec) *BOM {
+	if b.Feature(FeatureSandbox) == nil || s.sandboxMode() == SandboxShared {
+		return b
+	}
+	out := *b
+	out.Components = slices.DeleteFunc(slices.Clone(b.Components), func(c Component) bool { return c.Feature != "" })
+	return &out
+}
 
 // Parse decodes a BOM. Unknown keys are refused, so a misspelt key cannot drop a pin. It does not validate.
 func Parse(raw []byte) (*BOM, error) {
@@ -290,6 +319,11 @@ func (b *BOM) Validate() error {
 		if (c.Cluster == ClusterSeed && c.Group != "") || !slices.Contains(workloadGrps, c.Group) {
 			bad("%s: group %q", field, c.Group)
 		}
+		// A marked component is skipped for most installations: nothing may depend on it being there, so it is a
+		// stateless chart of our own on the workload cluster, placed by its own values (group "").
+		if c.Feature != "" && (c.Feature != FeatureSandbox || !ownPackage(c.Chart.Repo) || c.Cluster != ClusterWorkload || c.Group != "" || c.Stateful || c.Install != InstallApplication) {
+			bad("%s: feature %q: only %s, on an application of our own chart for the workload cluster, without a group and not stateful", field, c.Feature, FeatureSandbox)
+		}
 		chart(field, c.Chart)
 		for _, v := range c.UpgradeFrom {
 			version(field+".upgradeFrom", v)
@@ -361,11 +395,14 @@ func Lookup(sha string) (Embedded, bool) {
 func bomOf(in *Installation) (*BOM, error) {
 	if ref := in.Status.BOM; ref != nil {
 		if b, ok := Lookup(ref.SHA256); ok {
-			return b.BOM, nil
+			return b.BOM.For(in.Spec), nil
 		}
 	}
 	cur, err := Current()
-	return cur.BOM, err
+	if err != nil {
+		return cur.BOM, err
+	}
+	return cur.BOM.For(in.Spec), nil
 }
 
 // blockedAdvice ends the message about a BOM image on the template update blocklist. A newer release brings other

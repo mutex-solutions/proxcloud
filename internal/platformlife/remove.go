@@ -125,6 +125,13 @@ func (x *acq) removeCluster(ctx context.Context) error {
 			}
 		}
 	}
+	// Only while the platform cluster answers: a cluster that does not cannot delete the sandbox cluster's machines,
+	// and those are then deleted by their tag once the platform cluster is gone (clusterRemoved).
+	if wl != nil {
+		if err := x.removeSandboxCluster(ctx, seed); err != nil {
+			return err
+		}
+	}
 	if app != nil || live {
 		if err := x.check(ctx); err != nil {
 			return err
@@ -186,6 +193,16 @@ func (x *acq) clusterRemoved(ctx context.Context) error {
 	if err := x.deleteVolumes(ctx); err != nil {
 		return err
 	}
+	// The sandbox machines Cluster API did not delete (a separate cluster whose platform cluster no longer answered),
+	// then the ACL row or token and the pool. With the portal token: the pool is the one it holds its role on.
+	if x.in.Status.Sandbox != nil {
+		if err := x.deleteTaggedIn(ctx, x.portal, pve.SandboxPool); err != nil {
+			return err
+		}
+		if err := x.removeSandboxAccess(ctx); err != nil {
+			return err
+		}
+	}
 	return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Clusters, in.Status.Volumes = nil, nil })
 }
 
@@ -228,7 +245,13 @@ func (x *acq) disableProviders(ctx context.Context) error {
 // delete removes for a machine that never joined). CAPMOX tags a VM after its clone, so a machine that was still being
 // cloned when the seed was lost has no tag: it is not deleted, and the stage's items name it.
 func (x *acq) deleteTagged(ctx context.Context) error {
-	pool, err := x.capi.GetPool(ctx, pve.SystemPool)
+	return x.deleteTaggedIn(ctx, x.capi, pve.SystemPool)
+}
+
+// deleteTaggedIn is deleteTagged for one pool, with the token that holds a role there: Cluster API's on the platform
+// pool, the portal's on the sandbox pool. The bootstrap ISOs are read and deleted with Cluster API's token either way.
+func (x *acq) deleteTaggedIn(ctx context.Context, c *pve.Client, poolName string) error {
+	pool, err := c.GetPool(ctx, poolName)
 	if err != nil {
 		return classify(CodeMachineDeleteStuck, err)
 	}
@@ -238,23 +261,23 @@ func (x *acq) deleteTagged(ctx context.Context) error {
 		if m.Type != "qemu" {
 			continue
 		}
-		cfg, err := x.capi.GetVMConfig(ctx, m.Node, m.VMID)
+		cfg, err := c.GetVMConfig(ctx, m.Node, m.VMID)
 		if err != nil {
 			return classify(CodeMachineDeleteStuck, err)
 		}
 		if !slices.Contains(vmTags(cfg), "pc-platform-"+x.in.ID) {
 			if strings.HasPrefix(cfg.Str("name"), ClusterName+"-") && !slices.ContainsFunc(vmTags(cfg), func(t string) bool { return strings.HasPrefix(t, "pc-platform-") }) {
 				items = append(items, StageItem{ID: fmt.Sprintf("vm-%d", m.VMID), State: "left", Message: fmt.Sprintf("VM %d (%s) on %s is in pool %s and carries no "+
-					"installation's tag: not deleted. If it is a machine of this platform that was still being cloned, delete it in Proxmox.", m.VMID, cfg.Str("name"), m.Node, pve.SystemPool)})
+					"installation's tag: not deleted. If it is a machine of this platform that was still being cloned, delete it in Proxmox.", m.VMID, cfg.Str("name"), m.Node, poolName)})
 			}
 			continue
 		}
-		st, err := x.capi.GetVMStatus(ctx, m.Node, m.VMID)
+		st, err := c.GetVMStatus(ctx, m.Node, m.VMID)
 		if err != nil {
 			return classify(CodeMachineDeleteStuck, err)
 		}
 		if st.Status == "running" {
-			if err := x.pveTask(ctx, CodeMachineDeleteStuck, func() (pve.UPID, error) { return x.capi.StopVM(ctx, m.Node, m.VMID) }); err != nil {
+			if err := x.pveTask(ctx, CodeMachineDeleteStuck, func() (pve.UPID, error) { return c.StopVM(ctx, m.Node, m.VMID) }); err != nil {
 				return err
 			}
 		}
@@ -272,7 +295,7 @@ func (x *acq) deleteTagged(ctx context.Context) error {
 				return classify(CodeMachineDeleteStuck, err)
 			}
 		}
-		if err := x.pveTask(ctx, CodeMachineDeleteStuck, func() (pve.UPID, error) { return x.capi.DeleteVM(ctx, m.Node, m.VMID) }); err != nil {
+		if err := x.pveTask(ctx, CodeMachineDeleteStuck, func() (pve.UPID, error) { return c.DeleteVM(ctx, m.Node, m.VMID) }); err != nil {
 			return err
 		}
 		if err := x.note(ctx, StageItem{ID: fmt.Sprintf("vm-%d", m.VMID), State: "deleted", Message: fmt.Sprintf("VM %d (%s) on %s, after its bootstrap ISO.", m.VMID, cfg.Str("name"), m.Node)}); err != nil {

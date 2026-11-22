@@ -43,6 +43,8 @@ type RenderInput struct {
 	NodeImageLine string
 	// ArgoCD is spec.access.argocd: the address of the platform cluster's ArgoCD (nil = none).
 	ArgoCD *ArgoCDAccess
+	// Sandbox is spec.sandbox (nil = no sandboxes). With mode shared, Cluster.NodeGroups holds the group sandbox.
+	Sandbox *RenderSandbox
 }
 
 // RenderNetwork is the platform network the seed and the workload VMs share. VLAN tags every NIC on Bridge (0 = none).
@@ -256,7 +258,11 @@ func ClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 			"machineCores": g.Cores, "machineMemoryMiB": g.MemoryMiB, "machineRootVolume": map[string]any{"diskSize": g.DiskGiB},
 			"machineTags": machineTags(in.ID), "machineLabels": map[string]any{GroupLabel: g.Name},
 		}
-		if t := groupTaint(g.Name); t != nil {
+		if g.Name == SandboxGroup && in.Sandbox != nil {
+			if err := sandboxGroupValues(b, in, ng); err != nil {
+				return nil, err
+			}
+		} else if t := groupTaint(g.Name); t != nil {
 			ng["taints"] = t
 		}
 		// Written only when there is something to say, so a render without a roll is the one it always was.
@@ -544,13 +550,32 @@ func componentPart(b *BOM, c Component, in RenderInput) (part, error) {
 	case "workload/cnpg":
 		return part{pin: group}, nil
 	case "workload/proxmox-csi":
+		node := map[string]any{"tolerations": []any{map[string]any{"operator": "Exists"}}}
+		// The node plugin tolerates every taint. A sandbox machine takes no volume and its pods are tenant code's
+		// neighbours: the plugin keeps off the group, by the kubelet's own label (there when the node registers; the
+		// CAPI label arrives later, and NotIn matches a node without it). Written only with the group, so every
+		// installation without it renders as before.
+		if in.Sandbox != nil && in.Sandbox.Mode == SandboxShared {
+			node["affinity"] = map[string]any{"nodeAffinity": map[string]any{"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{"nodeSelectorTerms": []any{
+				map[string]any{"matchExpressions": []any{map[string]any{"key": GroupTaintKey, "operator": "NotIn", "values": []any{SandboxGroup}}}}}}}}
+		}
 		return part{values: map[string]any{
 			"existingConfigSecret": CSIConfigSecretName,
 			"storageClass": []any{map[string]any{"name": "std", "storage": in.BootStorage, "fstype": "ext4", "reclaimPolicy": "Delete",
 				"annotations": map[string]any{"storageclass.kubernetes.io/is-default-class": "true"}}},
-			"node":         map[string]any{"tolerations": []any{map[string]any{"operator": "Exists"}}},
+			"node":         node,
 			"nodeSelector": onGroup,
 		}}, nil
+	case "workload/sandbox":
+		// The sandbox chart in mode shared (BOM.For renders the component for that mode alone). No namespace placement:
+		// sandbox-system holds DaemonSets of the sandbox nodes next to Deployments of the system group, and a pin would
+		// make the API server refuse one of the two. The chart places each by its own values (its defaults for the mode).
+		if in.Sandbox == nil || in.Sandbox.Mode != SandboxShared {
+			return part{}, fmt.Errorf("platform: component %s/%s is rendered only with spec.sandbox shared", c.Cluster, c.Name)
+		}
+		v := sandboxChartValues(in)
+		v["mode"] = SandboxShared
+		return part{values: v}, nil
 	case "workload/capi-tenant":
 		return part{values: clusterctlValues(b, b.CAPI.Workload, onGroup)}, nil
 	case "workload/kamaji-crds":

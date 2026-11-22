@@ -249,9 +249,10 @@ type acq struct {
 	sec          *Secrets
 	es           *externalservice.ExternalService
 	hidden       []string // secrets this acquisition read from a cluster: no message may carry them
-	bom          *BOM
-	from         *BOM // on an upgrade run, the BOM the platform is moved from
-	rolls        bool // the move from from to bom replaces the platform cluster's machines (roll.go)
+	bom          *BOM     // the run's BOM as this installation renders it (BOM.For)
+	full         *BOM     // the run's BOM with every component: the sandbox chart also when no Application of it is rendered
+	from         *BOM     // on an upgrade run, the BOM the platform is moved from
+	rolls        bool     // the move from from to bom replaces the platform cluster's machines (roll.go)
 	portal, capi *pve.Client
 	si           int // the stage being run
 	// doneNote is what the stage being run leaves as its message when it ends done (a finished stage has none otherwise).
@@ -343,7 +344,7 @@ func (x *acq) execute(ctx context.Context) end {
 			return x.finish(ctx, RunFailed, CodePortalChanged, "ProxCloud was upgraded during the run and no longer embeds its BOM "+
 				run.BOM.Release+": Retry starts a new run.")
 		}
-		x.bom = b.BOM
+		x.bom, x.full = b.BOM.For(x.in.Spec), b.BOM
 		if run.FromBOM != nil {
 			f, ok := Lookup(run.FromBOM.SHA256)
 			if !ok {
@@ -351,7 +352,7 @@ func (x *acq) execute(ctx context.Context) end {
 					run.FromBOM.Release+" the platform is moved from: Retry starts a new run.")
 			}
 			x.from = f.BOM
-			x.rolls = hasMachines(Classify(x.from, x.bom))
+			x.rolls = hasMachines(Classify(x.from, b.BOM))
 		}
 	}
 	es, err := x.r.Provider(ctx, in.ServiceID)
@@ -629,7 +630,8 @@ func (x *acq) secrets() []string {
 	if sec.SeedKubeconfig != nil {
 		add(sec.SeedKubeconfig.Token)
 	}
-	for _, t := range []*TokenCredential{sec.CAPI, sec.CSI} {
+	add(sec.SandboxTLSKey)
+	for _, t := range []*TokenCredential{sec.CAPI, sec.CSI, sec.Sandbox} {
 		if t != nil {
 			add(t.Secret)
 		}

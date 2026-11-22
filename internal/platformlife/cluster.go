@@ -142,7 +142,7 @@ func (x *acq) hide(v string) {
 
 // renderInput is what the renderers read of the installation, its Proxmox provider and stage 2.
 func (x *acq) renderInput() RenderInput {
-	sp, c := x.in.Spec, x.in.Spec.Clusters[0]
+	sp, c := x.in.Spec, x.in.Spec.platformCluster()
 	prefix, _ := netip.ParsePrefix(sp.Network.Prefix)
 	region := x.es.PVERegion()
 	templates := sp.NodeImage.Templates
@@ -170,6 +170,21 @@ func (x *acq) renderInput() RenderInput {
 			ControlPlaneReplicas: c.ControlPlane.Count()}}
 	for _, g := range c.NodeGroups {
 		in.Cluster.NodeGroups = append(in.Cluster.NodeGroups, RenderNodeGroup{Name: g.Name, Nodes: g.Nodes, Count: g.Count, Cores: g.Cores, MemoryMiB: g.MemoryMiB, DiskGiB: g.DiskGiB})
+	}
+	if sb := sp.Sandbox; sp.sandboxMode() != "" {
+		rs := &RenderSandbox{Mode: sb.Placement, NodeRange: sb.NodeRange, PlatformPrefix: prefix.String(), DNS: sb.DNS, ProxyAddress: sb.ProxyAddress, Domain: sb.Domain}
+		if len(rs.DNS) == 0 {
+			rs.DNS = sp.Network.DNS
+		}
+		if st := x.in.Status.Sandbox; st != nil {
+			rs.ChartVersion = st.ChartVersion
+		}
+		if rs.Mode == SandboxSeparate {
+			for _, g := range sp.sandboxGroups() {
+				rs.Groups = append(rs.Groups, RenderNodeGroup{Name: g.Name, Nodes: g.Nodes, Count: g.Count, Cores: g.Cores, MemoryMiB: g.MemoryMiB, DiskGiB: g.DiskGiB})
+			}
+		}
+		in.Sandbox = rs
 	}
 	// A move that replaces machines renders from the recorded step, in every stage: 0 until stage 7 begins the roll
 	// (everything as it runs), and never lower than a step a run has reached.
@@ -549,6 +564,12 @@ func (x *acq) rolloutGate(ctx context.Context, seed *kamajik8s.Client, a appOf, 
 	if rc := x.receipt(); x.from == nil || x.r.SkipRolloutGate || (step == 0 && rc.RolloutChecked) || (step > 0 && rc.RollChecked >= step) {
 		return nil
 	}
+	var newSandboxOwners []string
+	if st := x.in.Status.Sandbox; x.in.Spec.sandboxMode() == SandboxShared && (st == nil || st.BuiltAt == nil) {
+		for _, n := range x.in.Spec.Sandbox.Nodes {
+			newSandboxOwners = append(newSandboxOwners, ClusterName+"-"+SandboxGroup+"-"+n)
+		}
+	}
 	own := func(kind, name string) bool { // what this step replaces
 		base := name[:max(strings.LastIndex(name, "-"), 0)] // a template's name ends in a hash of its spec
 		switch {
@@ -556,6 +577,11 @@ func (x *acq) rolloutGate(ctx context.Context, seed *kamajik8s.Client, a appOf, 
 			return kind == "KubeadmControlPlane" || (kind == "ProxmoxMachineTemplate" && base == ClusterName+"-cp-"+unit.Node)
 		case step > 1:
 			return kind != "KubeadmControlPlane" && base == unit.Owner
+		case step == 0 && kind != "KubeadmControlPlane":
+			// An upgrade that replaces no machine may still build the sandbox group the settings ask for and no run has
+			// built: its templates are new by design. Only templates of that group's MachineDeployments, and only until
+			// the group stood once (SandboxStatus.BuiltAt): after that a new template there is a machine replaced.
+			return slices.Contains(newSandboxOwners, base)
 		}
 		return false
 	}
@@ -919,7 +945,12 @@ func (x *acq) cluster(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	in, c := x.renderInput(), x.in.Spec.Clusters[0]
+	in, c := x.renderInput(), x.in.Spec.platformCluster()
+	// The sandbox pool and what opens it, before the cluster's Application names the pool; and, when the settings
+	// switched sandboxes off, their Applications deleted before the group leaves the render.
+	if err := x.sandboxAccess(ctx, seed); err != nil {
+		return err
+	}
 	apps, err := x.apps(ClusterSeed)
 	if err != nil {
 		return err
@@ -1147,6 +1178,9 @@ func (x *acq) cluster(ctx context.Context) error {
 		note += machineNote + appNote
 		return waiting(CodeControlPlaneTimeout, "%d of %d machines are Running (%d exist); control plane initialized: %t.%s", running, total, len(machines), initialized, clip(note))
 	}
+	if err := x.sandboxSettled(ctx); err != nil {
+		return err
+	}
 	if err := x.moved(ctx, apps[i].c); err != nil {
 		return err
 	}
@@ -1162,12 +1196,18 @@ type platformVM struct {
 	err             error
 }
 
-// platformVMs are the installation's VMs: the members of the seed's pool and of proxcloud-system that carry its tag
+// platformVMs are the installation's VMs: the members of the seed's pool, of proxcloud-system and (the sandbox group's
+// machines) of the sandbox pool that carry its tag
 // (stage 3 tags the seed, CAPMOX the machines: machineTags), in VMID order. A member that cannot be read is in the
 // answer with its err and does not hide the others.
-func platformVMs(ctx context.Context, capi *pve.Client, id string) ([]platformVM, error) {
+func platformVMs(ctx context.Context, capi *pve.Client, in *Installation) ([]platformVM, error) {
 	var out []platformVM
-	for _, name := range []string{pve.SeedPool, pve.SystemPool} {
+	pools := []string{pve.SeedPool, pve.SystemPool}
+	if st := in.Status.Sandbox; st != nil && st.Placement == SandboxShared {
+		pools = append(pools, pve.SandboxPool) // Cluster API's token holds a row there only with the shared group
+	}
+	id := in.ID
+	for _, name := range pools {
 		pool, err := capi.GetPool(ctx, name)
 		if err != nil {
 			return nil, err
@@ -1204,7 +1244,7 @@ func platformVMs(ctx context.Context, capi *pve.Client, id string) ([]platformVM
 // token does not hold (docs/managed-services.md has the command). A machine that cannot be set does not fail the
 // stage: the platform is built, and the Check's machines row names it.
 func (x *acq) startAtBoot(ctx context.Context) error {
-	vms, err := platformVMs(ctx, x.capi, x.in.ID)
+	vms, err := platformVMs(ctx, x.capi, x.in)
 	if err != nil {
 		x.r.Log.Warn("platform: start at boot not checked", "installation", x.in.ID, "err", err)
 		return nil
@@ -1423,6 +1463,9 @@ func (x *acq) workloadPlatform(ctx context.Context) error {
 	if err := x.tenantGate(ctx, wl, true); err != nil {
 		return err
 	}
+	if err := x.sandboxCertificate(ctx, wl); err != nil {
+		return err
+	}
 	err = x.waves(ctx, seed, wl, apps, waveStall, func(wave int) error {
 		if wave == first {
 			if err := x.nodes(ctx, seed, wl); err != nil {
@@ -1449,6 +1492,9 @@ func (x *acq) workloadPlatform(ctx context.Context) error {
 		}
 		return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Volumes = vols })
 	})
+	if err == nil {
+		err = x.sandboxCluster(ctx, seed, wl)
+	}
 	// ArgoCD calls a LoadBalancer Service without an address Progressing, so a wave that waits may wait for the
 	// address: then the stage says so, and fails with that code at its deadline.
 	var se *stageErr
@@ -1731,13 +1777,13 @@ func (x *acq) nodes(ctx context.Context, seed, wl *kamajik8s.Client) error {
 			ownerless = " No Machine names " + strings.Join(names, ", ") + " as its node yet."
 		}
 	}
-	ready, total := map[string]int{}, x.in.Spec.Clusters[0].ControlPlane.Count()
+	ready, total := map[string]int{}, x.in.Spec.platformCluster().ControlPlane.Count()
 	for _, n := range nodes {
 		if condition(n, "Ready") == "True" {
 			ready[str(n, "metadata", "labels", GroupLabel)]++
 		}
 	}
-	for _, g := range x.in.Spec.Clusters[0].NodeGroups {
+	for _, g := range x.in.Spec.platformCluster().NodeGroups {
 		total += g.Count
 		if ready[g.Name] != g.Count {
 			return waiting(CodeNodesTimeout, "%d of %d nodes of group %s are Ready with the label %s. Not Ready: %s.%s", ready[g.Name], g.Count, g.Name, GroupLabel,

@@ -324,6 +324,7 @@ func (h *Handler) checked(r *http.Request, in *platformlife.Installation, preset
 	}
 	problems = append(problems, in.ArgoSourceProblems(stored)...)
 	problems = append(problems, in.ControlPlaneCountProblems()...)
+	problems = append(problems, in.SandboxProblems()...)
 	problems = append(problems, in.SiteProblems(platformlife.SiteOf(es))...)
 	if len(problems) > 0 {
 		return &invalidInstallation{status: http.StatusBadRequest, code: "invalid_installation", msg: "The installation is not valid", problems: problems}
@@ -403,6 +404,7 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 				return nil, &invalidInstallation{status: http.StatusConflict, code: "fixed_fields", msg: why, problems: []string{"preset"}}
 			}
 			platformlife.KeepMachines(&old.Spec, &next.Spec)
+			platformlife.KeepSandbox(&old.Spec, &next.Spec)
 		}
 		if err := h.checked(r, &next, req.Preset, &old.Spec); err != nil {
 			return nil, err

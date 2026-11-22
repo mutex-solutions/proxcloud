@@ -24,6 +24,7 @@ const (
 	ClassSite       = "site"        // the run writes it on the Proxmox site, outside the platform's clusters
 	ClassSeed       = "seed"        // the run replaces k3s on the running seed VM (stage seed-k3s)
 	ClassMachines   = "machines"    // the run replaces machines of the platform cluster, one unit at a time (stage cluster, roll.go)
+	ClassAdded      = "added"       // a component the target BOM adds, rendered only for settings that ask for its feature (Component.Feature)
 )
 
 // PlanChange is one difference: a component (Cluster and Name), a top-level pin (Name only), or a control plane the
@@ -149,7 +150,7 @@ func PlanFor(in *Installation, target string) (Plan, error) {
 		if target != "" && target != cur.SHA256 {
 			return p, ErrBadTarget
 		}
-		for _, c := range cur.Components {
+		for _, c := range cur.BOM.For(in.Spec).Components {
 			p.Changes = append(p.Changes, PlanChange{Cluster: c.Cluster, Name: c.Name, To: c.Chart.Version})
 		}
 		return p, nil
@@ -163,6 +164,11 @@ func PlanFor(in *Installation, target string) (Plan, error) {
 	}
 	if c := in.argoAccessChange(); c != nil {
 		p.Changes = append(p.Changes, *c)
+	}
+	for _, c := range in.sandboxChanges() {
+		if p.Changes = append(p.Changes, c); c.Blocking != "" {
+			p.Blocking = append(p.Blocking, c.Name+": "+c.Blocking)
+		}
 	}
 	if _, ok := Lookup(in.Status.BOM.SHA256); !ok {
 		p.Blocking = append(p.Blocking, ErrBOMNotHere.Error())
@@ -266,7 +272,7 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 	// In a roll that still has a unit to replace, a build whose BOM differs from the unfinished target only in the
 	// product's own charts and the release line takes the target's place (carries).
 	carried := false
-	if roll := rollOf(in); roll != nil && len(in.Spec.Clusters) > 0 && roll.Step <= len(rollUnits(in.Spec.Clusters[0])) && pending != nil && pending.SHA256 != cur.SHA256 && (target == "" || target == cur.SHA256) {
+	if roll := rollOf(in); roll != nil && len(in.Spec.Clusters) > 0 && roll.Step <= len(rollUnits(in.Spec.platformCluster())) && pending != nil && pending.SHA256 != cur.SHA256 && (target == "" || target == cur.SHA256) {
 		if mid, ok := Lookup(pending.SHA256); ok && carries(from, mid, cur) {
 			want, carried = cur.SHA256, true
 		}
@@ -302,6 +308,18 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 	machines := hasMachines(u.Changes)
 	if machines && in.Spec.NodeImage.Mode != ImageBOM {
 		u.Blocking = append(u.Blocking, "kubernetes.nodeImage: "+later+"this installation names its own node templates; the roll needs the BOM's image")
+	}
+	// The separate sandbox cluster is a tenant-style cluster, and no run upgrades one in place. A move that replaces the
+	// platform's machines is refused while it exists or is asked for: it would leave pc-sandbox on the version it left.
+	if built := in.Status.Sandbox; machines && (in.Spec.sandboxMode() == SandboxSeparate || (built != nil && built.Placement == SandboxSeparate)) {
+		u.Blocking = append(u.Blocking, "spec.sandbox: "+later+"the sandbox cluster "+SandboxClusterName+" is not upgraded in place, and this upgrade changes the Kubernetes version or the node image. "+
+			"Set spec.sandbox.placement off and apply (every sandbox ends, the cluster and its machines are deleted), make this upgrade, then set placement separate again: the cluster is built new on the new version")
+	}
+	// A roll renders every unit it has not reached at the version and the templates the platform left: a group that
+	// does not exist yet has neither. The group is added by an apply before the upgrade or after it.
+	if machines && in.Spec.sandboxMode() == SandboxShared && (in.Status.Sandbox == nil || in.Status.Sandbox.BuiltAt == nil) {
+		u.Blocking = append(u.Blocking, "spec.sandbox: "+later+"the node group sandbox is not built yet, and this upgrade replaces the platform cluster's machines. "+
+			"Apply the settings on the installed release first (that builds the group), or leave spec.sandbox out until the upgrade is done")
 	}
 	switch {
 	case pending != nil && (pending.SHA256 == to.SHA256 || carried):
@@ -366,7 +384,7 @@ func carries(from, mid, cur Embedded) bool {
 		}
 	}
 	for _, c := range Classify(mid.BOM, cur.BOM) {
-		if c.Blocking != "" || (c.Class != ClassRecordOnly && c.Class != ClassChart) {
+		if c.Blocking != "" || (c.Class != ClassRecordOnly && c.Class != ClassChart && c.Class != ClassAdded) {
 			return false
 		}
 	}
@@ -551,6 +569,13 @@ func Classify(from, to *BOM) []PlanChange {
 		t := &to.Components[i]
 		f := find(from, t.Cluster, t.Name)
 		switch {
+		case f == nil && t.Feature != "" && ownPackage(t.Chart.Repo):
+			// The one addition an upgrade makes: a chart of our own that only an installation whose settings ask for
+			// its feature renders (BOM.For). For every other installation the move changes nothing of it.
+			wave := t.Wave
+			out = append(out, PlanChange{Cluster: t.Cluster, Name: t.Name, To: t.Chart.Version, Class: ClassAdded, Stage: stageWorkloadPlatform, Wave: &wave,
+				Impact: "New in this release, and rendered only when the settings ask for it (feature " + t.Feature + ", spec." + t.Feature + "): nothing is synced for it on a " +
+					"platform whose settings do not. No pod of a tenant restarts and no machine is replaced."})
 		case f == nil:
 			refuse(t, "", t.Chart.Version, "a component is added to an installed platform only by a later release")
 		case f.Wave != t.Wave || f.Install != t.Install || f.Namespace != t.Namespace || f.Group != t.Group || f.Stateful != t.Stateful ||
