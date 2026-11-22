@@ -166,8 +166,9 @@ func RenderLVS(s LBSpec, vips []string) string {
 		if hc.Type != "none" {
 			b.WriteString("  alpha\n")
 		}
-		// keepalived counts the tries after a first failed check: "fall 3" is retry 2.
-		fmt.Fprintf(&b, "  delay_loop %d\n  retry %d\n  delay_before_retry %d\n", interval, in(hc.Fall, 1, 10, lvsRetry+1)-1, min(lvsRetryDelay, interval))
+		// keepalived counts the tries after a first failed check: "fall 3" is retry 2. It takes no "retry 0" (both
+		// images' keepalived -t: "number '0' outside range"), so a member is out after two failed checks at least.
+		fmt.Fprintf(&b, "  delay_loop %d\n  retry %d\n  delay_before_retry %d\n", interval, in(hc.Fall, 2, 10, lvsRetry+1)-1, min(lvsRetryDelay, interval))
 		if sp := p.SessionPersistence; sp != nil && sp.Type == "source_ip" {
 			fmt.Fprintf(&b, "  persistence_timeout %d\n", in(sp.Timeout, 1, 86400, lbPersistenceTimeout))
 		}

@@ -259,6 +259,9 @@ func (s *LBSpec) Validate() string {
 				return "Pool " + p.Name + ": health check payload must be 1 to 128 bytes written as hexadecimal digits, such as 70696e67"
 			case udp && hc.Rise != 0:
 				return "Pool " + p.Name + ": a UDP pool's member is up again at its first good check, so its health check takes no rise"
+			case udp && hc.Fall == 1:
+				// keepalived tries a failed check again at least once ("retry" is 1 or more, 2.3.3 and 2.3.4).
+				return "Pool " + p.Name + ": a UDP pool's member is down after 2 to 10 failed checks, so its health check's fall cannot be 1"
 			case hc.Type == "none" && *hc != (LBHealthCheck{Type: "none"}):
 				return "Pool " + p.Name + ": a pool without a health check takes no port, path or figures of one"
 			case hc.Port < 0 || hc.Port > 65535:

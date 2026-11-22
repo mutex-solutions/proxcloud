@@ -27,7 +27,11 @@ import type { CloudResource } from "@/lib/types"
 // node: a worker of a Kubernetes cluster, named by its address alone.
 interface Member { serverId: string; port: number; weight?: number; address?: string; missing?: boolean; node?: boolean }
 // interval and timeout in seconds, rise and fall in checks; absent = the load balancer's own (3 s, 2 and 2).
-interface HealthCheck { type: string; port?: number; path?: string; interval?: number; timeout?: number; rise?: number; fall?: number }
+// payload (hexadecimal digits) and requireReply belong to a UDP pool's own check, "udp-connect".
+interface HealthCheck {
+  type: string; port?: number; path?: string; interval?: number; timeout?: number; rise?: number; fall?: number
+  payload?: string; requireReply?: boolean
+}
 // protocol: what the members are spoken to in. proxyVersion 1 or 2 (absent = 2). The timeouts are milliseconds.
 interface Pool {
   name: string; protocol: string; algorithm: string; members: Member[]; healthCheck?: HealthCheck | null
@@ -120,8 +124,19 @@ export function ClusterServices({ lb, health }: { lb: LB; health?: Health[] }) {
   )
 }
 const BUSY = new Set(["BUILD"])
-// The listener protocols a load balancer serves today.
+// The listener protocols a load balancer serves today. UDP is served by a pair of appliances only: a load balancer
+// on one VM has no keepalived, which is what fills the kernel's table for UDP.
 const PROTOCOLS = [{ value: "tcp", label: "TCP" }, { value: "http", label: "HTTP" }]
+const UDP = { value: "udp", label: "UDP" }
+// A UDP pool's checks are keepalived's, not HAProxy's: its own, a datagram to the port, or a TCP or HTTP check of a
+// port the service also has.
+const UDP_CHECKS = [
+  { value: "udp-connect", label: "UDP datagram" }, { value: "tcp", label: "TCP connection" }, { value: "http", label: "HTTP GET" }, { value: "none", label: "None" },
+]
+// The figures of a health check and what an empty one means: HAProxy's for a TCP or HTTP pool, keepalived's for UDP,
+// where a member is up again at its first good check.
+const CHECK_FIGURES = [["interval", "Every (s)", "3", 300], ["timeout", "Timeout (s)", "interval", 300], ["rise", "Up after", "2", 10], ["fall", "Down after", "2", 10]] as const
+const UDP_CHECK_FIGURES = [["interval", "Every (s)", "5", 300], ["timeout", "Timeout (s)", "5", 300], ["fall", "Down after", "3", 10]] as const
 const CHECKS = [
   { value: "tcp", label: "TCP connection" }, { value: "http", label: "HTTP GET" }, { value: "https", label: "HTTPS GET" },
   { value: "tls-hello", label: "TLS hello" }, { value: "none", label: "None" },
@@ -382,21 +397,37 @@ export function LoadBalancerDetailPage() {
   const setPool = (i: number, patch: Partial<Pool>) => edit(() => setPools(pools.map((p, j) => (j === i ? { ...p, ...patch } : p))))
   const setMember = (i: number, k: number, patch: Partial<Member>) =>
     setPool(i, { members: pools[i].members.map((m, j) => (j === k ? { ...m, ...patch } : m)) })
-  // A TCP check on the member's own port with no figure of its own is the default, sent as no check at all.
+  // A pool's own check (TCP, or a datagram for a UDP pool) on the member's own port with no figure of its own is the
+  // default, sent as no check at all.
+  const ownCheck = (p: Pool) => (p.protocol === "udp" ? "udp-connect" : "tcp")
   const setCheck = (i: number, patch: Partial<HealthCheck>) => {
-    let next: HealthCheck = { ...(pools[i].healthCheck ?? { type: "tcp" }), ...patch }
+    const own = ownCheck(pools[i])
+    let next: HealthCheck = { ...(pools[i].healthCheck ?? { type: own }), ...patch }
     if (next.type === "none") next = { type: "none" }
     if (next.type !== "http" && next.type !== "https") delete next.path
-    for (const k of ["port", "interval", "timeout", "rise", "fall"] as const) if (!next[k]) delete next[k]
-    setPool(i, { healthCheck: next.type === "tcp" && Object.keys(next).length === 1 ? null : next })
+    if (next.type !== "udp-connect") { delete next.payload; delete next.requireReply }
+    for (const k of ["port", "interval", "timeout", "rise", "fall", "payload", "requireReply"] as const) if (!next[k]) delete next[k]
+    setPool(i, { healthCheck: next.type === own && Object.keys(next).length === 1 ? null : next })
   }
   const setListener = (i: number, patch: Partial<Listener>) => edit(() => setListeners(listeners.map((x, j) => (j === i ? { ...x, ...patch } : x))))
   const protocolOf = (l: Listener) => l.protocol ?? pools.find((p) => p.name === l.pool)?.protocol ?? "http"
   // A pool speaks one protocol to its servers, the one its listeners need: the pool and its other listeners follow.
   const setProtocol = (i: number, protocol: string) => edit(() => {
     const pool = listeners[i].pool
-    setListeners(listeners.map((x, j) => (j === i || x.pool === pool ? { ...x, protocol } : x)))
-    setPools(pools.map((p) => (p.name === pool ? { ...p, protocol } : p)))
+    // UDP and the TCP family share no option but the algorithm, persistence and the members: what the other side
+    // does not take (PROXY, the timeouts, its kind of check) goes with the change.
+    const crosses = (from: string) => (from === "udp") !== (protocol === "udp")
+    setListeners(listeners.map((x, j) => {
+      if (j !== i && x.pool !== pool) return x
+      const next = { ...x, protocol }
+      if (crosses(protocolOf(x))) delete next.timeoutClientData
+      return next
+    }))
+    setPools(pools.map((p) => {
+      if (p.name !== pool) return p
+      if (!crosses(p.protocol)) return { ...p, protocol }
+      return { name: p.name, protocol, algorithm: p.algorithm, members: p.members, sessionPersistence: p.sessionPersistence, healthCheck: null, proxyProtocol: false }
+    }))
   })
 
   const save = useMutation({
@@ -539,14 +570,14 @@ export function LoadBalancerDetailPage() {
                         onChange={(e) => setPool(i, { sessionPersistence: { type: "source_ip", timeout: numberOf(e.target.value) } })} />
                     </div>
                   )}
-                  <div className="grid gap-1">
+                  {p.protocol !== "udp" && <div className="grid gap-1">
                     <Label>PROXY protocol</Label>
                     <Select value={!p.proxyProtocol ? "off" : p.proxyVersion === 1 ? "1" : "2"}
                       onValueChange={(v) => setPool(i, { proxyProtocol: v !== "off", proxyVersion: v === "off" ? undefined : Number(v) })}>
                       <SelectTrigger className="w-24" aria-label="PROXY protocol"><SelectValue /></SelectTrigger>
                       <SelectContent><SelectItem value="off">Off</SelectItem><SelectItem value="1">v1</SelectItem><SelectItem value="2">v2</SelectItem></SelectContent>
                     </Select>
-                  </div>
+                  </div>}
                   <Button variant="ghost" size="sm" onClick={() => edit(() => {
                     setPools(pools.filter((_, j) => j !== i))
                     setListeners(listeners.filter((l) => l.pool !== p.name))
@@ -555,9 +586,9 @@ export function LoadBalancerDetailPage() {
                 <div className="flex flex-wrap items-end gap-2">
                   <div className="grid gap-1">
                     <Label>Health check</Label>
-                    <Select value={p.healthCheck?.type ?? "tcp"} onValueChange={(v) => setCheck(i, { type: v })}>
+                    <Select value={p.healthCheck?.type ?? ownCheck(p)} onValueChange={(v) => setCheck(i, { type: v })}>
                       <SelectTrigger className="w-40" aria-label="Health check"><SelectValue /></SelectTrigger>
-                      <SelectContent>{CHECKS.map((c) => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}</SelectContent>
+                      <SelectContent>{(p.protocol === "udp" ? UDP_CHECKS : CHECKS).map((c) => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}</SelectContent>
                     </Select>
                   </div>
                   {(p.healthCheck?.type === "http" || p.healthCheck?.type === "https") && (
@@ -571,14 +602,25 @@ export function LoadBalancerDetailPage() {
                       <Label htmlFor={`check-port-${i}`}>Check port</Label>
                       <Input id={`check-port-${i}`} className="w-28" type="number" placeholder="member's" value={p.healthCheck?.port ?? ""} onChange={(e) => setCheck(i, { port: numberOf(e.target.value) })} />
                     </div>
-                    {([["interval", "Every (s)", "3", 300], ["timeout", "Timeout (s)", "interval", 300], ["rise", "Up after", "2", 10], ["fall", "Down after", "2", 10]] as const).map(([key, label, own, most]) => (
+                    {(p.protocol === "udp" ? UDP_CHECK_FIGURES : CHECK_FIGURES).map(([key, label, own, most]) => (
                       <div key={key} className="grid gap-1">
                         <Label htmlFor={`check-${key}-${i}`}>{label}</Label>
                         <Input id={`check-${key}-${i}`} className="w-24" type="number" min={1} max={most} placeholder={own} value={p.healthCheck?.[key] ?? ""} onChange={(e) => setCheck(i, { [key]: numberOf(e.target.value) })} />
                       </div>
                     ))}
                   </>}
-                  <div className="grid gap-1">
+                  {p.protocol === "udp" && (p.healthCheck?.type ?? "udp-connect") === "udp-connect" && <>
+                    <div className="grid gap-1">
+                      <Label htmlFor={`check-payload-${i}`}>Payload (hex)</Label>
+                      <Input id={`check-payload-${i}`} className="w-44 font-mono" placeholder="random bytes" value={p.healthCheck?.payload ?? ""}
+                        onChange={(e) => setCheck(i, { payload: e.target.value.replace(/[^0-9a-fA-F]/g, "") })} />
+                    </div>
+                    <div className="flex items-center gap-2 pb-2">
+                      <Switch id={`check-reply-${i}`} checked={!!p.healthCheck?.requireReply} onCheckedChange={(v) => setCheck(i, { requireReply: v })} />
+                      <Label htmlFor={`check-reply-${i}`}>Require a reply</Label>
+                    </div>
+                  </>}
+                  {p.protocol !== "udp" && <><div className="grid gap-1">
                     <Label htmlFor={`connect-${i}`}>Connect timeout (s)</Label>
                     <Input id={`connect-${i}`} className="w-32" type="number" min={1} max={86400} placeholder="2" value={p.timeoutMemberConnect ? p.timeoutMemberConnect / 1000 : ""}
                       onChange={(e) => setPool(i, { timeoutMemberConnect: numberOf(e.target.value, 1000) })} />
@@ -587,11 +629,21 @@ export function LoadBalancerDetailPage() {
                     <Label htmlFor={`server-idle-${i}`}>Server idle timeout (s)</Label>
                     <Input id={`server-idle-${i}`} className="w-36" type="number" min={1} max={86400} placeholder="60" value={p.timeoutMemberData ? p.timeoutMemberData / 1000 : ""}
                       onChange={(e) => setPool(i, { timeoutMemberData: numberOf(e.target.value, 1000) })} />
-                  </div>
+                  </div></>}
                 </div>
                 <p className="text-xs text-muted-foreground" data-testid={`pool-protocol-${i}`}>
-                  Its servers are spoken to in {p.protocol === "tcp" ? "TCP" : "HTTP"}, as its listeners say. An empty figure is the load balancer's own.
+                  Its servers are spoken to in {p.protocol === "udp" ? "UDP" : p.protocol === "tcp" ? "TCP" : "HTTP"}, as its listeners say. An empty figure is the load balancer's own.
                 </p>
+                {p.protocol === "udp" && (
+                  <p className="text-xs text-muted-foreground" data-testid={`pool-udp-${i}`}>
+                    The servers see the load balancer's address, not the client's, and their security group must let the load balancer's
+                    private addresses in on the port, for UDP. The UDP datagram check sends random bytes to the port unless a payload is
+                    given, and takes a server out only when it stops answering pings (about 10 seconds) or answers "port unreachable":
+                    a closed port on a running server is not seen while the port has traffic, and a server whose firewall drops in silence
+                    is never seen. For a real check give a payload the service answers and require the reply, or check a TCP or HTTP port
+                    of the service. After a failover of the load balancer a client may reach another server.
+                  </p>
+                )}
                 {p.members.length > 0 && <p className="text-xs text-muted-foreground">Server, port and weight</p>}
                 {p.members.map((m, k) => (
                   <div key={k} className="flex flex-wrap items-center gap-2">
@@ -627,11 +679,12 @@ export function LoadBalancerDetailPage() {
           </CardHeader>
           <CardContent className="grid gap-3">
             {!listeners.length && <p className="text-sm text-muted-foreground">A listener opens a port on the public address.</p>}
+            {lb && !lb.ha && <p className="text-xs text-muted-foreground" data-testid="lb-udp-needs-ha">UDP listeners need a load balancer with high availability: this one runs on one VM.</p>}
             {listeners.map((l, i) => (
               <div key={i} className="flex flex-wrap items-center gap-2">
                 <Select value={protocolOf(l)} onValueChange={(v) => setProtocol(i, v)}>
                   <SelectTrigger className="w-24" aria-label="Listener protocol"><SelectValue /></SelectTrigger>
-                  <SelectContent>{PROTOCOLS.map((x) => <SelectItem key={x.value} value={x.value}>{x.label}</SelectItem>)}</SelectContent>
+                  <SelectContent>{(lb?.ha ? [...PROTOCOLS, UDP] : PROTOCOLS).map((x) => <SelectItem key={x.value} value={x.value}>{x.label}</SelectItem>)}</SelectContent>
                 </Select>
                 <Input className="w-24" type="number" aria-label="Listener port" value={l.port} onChange={(e) => setListener(i, { port: Number(e.target.value) })} />
                 <span className="text-sm text-muted-foreground">forwards to</span>
@@ -643,12 +696,14 @@ export function LoadBalancerDetailPage() {
                 <Input className="w-72" aria-label="Allowed sources" placeholder="Any address, or networks such as 203.0.113.0/24"
                   value={(l.sourceRanges ?? []).join(", ")}
                   onChange={(e) => setListener(i, { sourceRanges: e.target.value.split(/[\s,]+/) })} />
-                <span className="text-sm text-muted-foreground">connections</span>
+                <span className="text-sm text-muted-foreground">{protocolOf(l) === "udp" ? "connections per server" : "connections"}</span>
                 <Input className="w-28" type="number" min={1} max={20000} aria-label="Connection limit" placeholder="No limit" value={l.connectionLimit ?? ""}
                   onChange={(e) => setListener(i, { connectionLimit: numberOf(e.target.value) })} />
-                <span className="text-sm text-muted-foreground">idle timeout (s)</span>
-                <Input className="w-24" type="number" min={1} max={86400} aria-label="Client idle timeout in seconds" placeholder="60" value={l.timeoutClientData ? l.timeoutClientData / 1000 : ""}
-                  onChange={(e) => setListener(i, { timeoutClientData: numberOf(e.target.value, 1000) })} />
+                {protocolOf(l) !== "udp" && <>
+                  <span className="text-sm text-muted-foreground">idle timeout (s)</span>
+                  <Input className="w-24" type="number" min={1} max={86400} aria-label="Client idle timeout in seconds" placeholder="60" value={l.timeoutClientData ? l.timeoutClientData / 1000 : ""}
+                    onChange={(e) => setListener(i, { timeoutClientData: numberOf(e.target.value, 1000) })} />
+                </>}
                 <Button variant="ghost" size="sm" onClick={() => edit(() => setListeners(listeners.filter((_, j) => j !== i)))}>Remove</Button>
               </div>
             ))}

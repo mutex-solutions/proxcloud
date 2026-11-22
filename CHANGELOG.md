@@ -37,6 +37,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Load balancers: UDP listeners, on a load balancer with high availability** (`internal/cloud/pve/lblvs.go`,
+  `internal/platform/project/cloud_lb_pair_pve.go`, the tenant console's load balancer page). A listener and its
+  pool take `protocol: "udp"`; a TCP and a UDP listener may share a port number.
+  - **How it is served.** HAProxy balances no generic UDP: the kernel's IPVS does, in NAT mode, filled by a second
+    keepalived that runs only health checks, in a unit of its own (`proxcloud-lvs.service`). An nftables rule
+    masquerades the datagrams on the project NIC, so the servers answer the appliance on their own subnet and need
+    no change; the answer leaves the public NIC with the load balancer's address as its source. The VRRP keepalived
+    is not touched: a server that comes or goes reloads the UDP service alone.
+  - **What the servers see:** the appliance's private address, never the client's (UDP has no PROXY protocol).
+  - **Options:** round robin, least connections or source address with weights; session persistence by source
+    address; a connection limit that counts **per server**; source ranges (one `udp` firewall rule per address and
+    source list).
+  - **Health checks:** `udp-connect` (default: a datagram to the port and a ping; a stopped server leaves in about
+    10 s), with an optional `payload` and `requireReply` for a check that sees a closed port; `tcp` or `http` on a
+    port of your choice; `none`. A server enters the pool at its first good check and leaves after 2 to 10 failed
+    ones. **Read the caveat:** without a payload the check sends random bytes to the service, and without a
+    required reply a closed port on a running server is not seen while the port has traffic. The page and the
+    guide say so.
+  - **The appliance is no router.** Forwarding is on only while an nftables chain with policy drop is loaded that
+    lets through nothing but the answers of balanced flows; the unit loads the table first and switches forwarding
+    off when it stops or fails to start. TCP is not connection-tracked, so HAProxy's traffic cannot fill the table.
+  - **Only where it is used.** A load balancer without a UDP listener gets no file, no package and no service of
+    this, and its recorded hashes do not move. The first UDP listener installs `nftables` where the image lacks it;
+    removing the last one takes the service, the table and the files off again.
+  - **Not on one VM.** A load balancer without high availability answers `400` "UDP needs a high-availability load
+    balancer". A Kubernetes Service with a UDP port is still refused (`UDPNotSupported`) until the cluster
+    gateway maps it.
+  - **After a failover** the other appliance spreads clients afresh (no connection sync, as in Octavia).
+  - Tested in real guests of both appliance images (Debian 13 and Ubuntu 26.04 containers with systemd, keepalived,
+    nftables and HAProxy, on the CI runner's kernel) with network namespaces for client, servers and gateway: the
+    reply path, the dead server, the dropped forwarding, the untracked TCP, the refused config. Run on the lab on
+    Ubuntu 26.04 appliances in the spike; a Debian 13 pair is part of the release drill.
+
 - **Load balancers: a protocol per listener and the layer 4 options** (`internal/cloud/pve/lb.go`,
   `internal/platform/project/cloud_lb_pve.go`, the tenant console's load balancer page). `UPDATE_CONFIG` and the
   page take, on a single appliance and on a pair:
@@ -104,6 +137,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A load balancer's config files are compared with what was applied, at every pass.** The state read of an
+  appliance now also answers what `haproxy.cfg`, `keepalived.conf` and the UDP files hash to; an appliance whose
+  file is not the one the platform recorded (edited by hand, or lost) is pushed again, on a single appliance and on
+  a pair. Before, only "HAProxy listens on every bind" was asked, and a file changed by hand stayed.
 - **The platform BOM on `main` is `0.12.0-dev`, and the build carries the BOM of `0.11.0`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.0.yaml`, sha256
   `d8e37db2fd204a6a58a4d6357f4c54bb6dccc82de52430340f2c8c7ca0e0d7ff`, the file of the tag byte for byte). The `v0.11.0`
