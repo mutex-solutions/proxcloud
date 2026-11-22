@@ -75,6 +75,7 @@ export default function App() {
           <Route path="networks/:resourceId" element={lazyPage(() => import("@/pages/network/NetworkDetailPage"))} />
           <Route path="load-balancers" element={lazyPage(() => import("@/pages/network/LoadBalancersPage"))} />
           <Route path="load-balancers/:resourceId" element={lazyPage(() => import("@/pages/network/LoadBalancersPage").then((m) => ({ default: m.LoadBalancerDetailPage })))} />
+          <Route path="certificates" element={lazyPage(() => import("@/pages/network/CertificatesPage"))} />
           <Route path="security-groups" element={lazyPage(() => import("@/pages/network/SecurityGroupsPage"))} />
           <Route path="security-groups/:resourceId" element={lazyPage(() => import("@/pages/network/SecurityGroupDetailPage"))} />
 

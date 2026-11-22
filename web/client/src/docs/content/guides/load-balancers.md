@@ -40,7 +40,7 @@ A load balancer named `k8s-…` whose row names a Kubernetes cluster belongs to 
 
 - A **pool** is a set of your servers. Choose how to spread traffic: round robin, least connections, or by source address.
 - Each server in a pool has a **port** and a **weight**. A server with twice the weight gets twice the traffic.
-- A **listener** opens a port on the public address and forwards it to a pool. Its **protocol** is TCP, HTTP or, on a load balancer with high availability, UDP, and the pool speaks the same to your servers: a pool serves listeners of one protocol, so changing a listener's protocol changes its pool and the pool's other listeners with it. Under **Allowed sources** you can list the networks that may connect, such as `203.0.113.0/24`; empty means any address. Other clients are dropped before they reach the load balancer.
+- A **listener** opens a port on the public address and forwards it to a pool. Its **protocol** is TCP, TLS, HTTP, HTTPS or, on a load balancer with high availability, UDP. The pool speaks TCP behind a TCP or TLS listener, HTTP behind an HTTP or HTTPS listener and UDP behind a UDP listener: a pool serves listeners of one kind, so changing a listener's protocol can change its pool and the pool's other listeners with it. Under **Allowed sources** you can list the networks that may connect, such as `203.0.113.0/24`; empty means any address. Other clients are dropped before they reach the load balancer.
 - A listener's **connection limit** is the most connections it holds open at a time; further clients wait until one closes. Empty means no limit of its own. The load balancer as a whole holds 20000. Its **idle timeout** closes a client's connection after that many seconds without data (60 when empty).
 - **Session persistence** by source address keeps each client address on the server it first reached, until that address has made no new connection for the time you set (three hours when empty). The load balancer forgets these choices when you save a change and when the other appliance takes over, and clients are then spread afresh.
 - **PROXY protocol** on a pool passes the client's address to your servers in a PROXY header, version 1 (a text line) or 2 (binary). Turn it on only when your servers expect that header, in that version.
@@ -50,7 +50,41 @@ TLS termination on the load balancer is not available yet. UDP has a section of 
 
 Press **Save configuration**. The change reaches the load balancer within seconds. If HAProxy refuses it, the page shows why and the load balancer keeps running the last configuration that worked.
 
-Only servers of this project, on the load balancer's own network and subnet, can be added. HTTP pools add an `X-Forwarded-For` header with the client's address. To serve HTTPS, use a TCP pool on port 443 and terminate TLS on your servers.
+Only servers of this project, on the load balancer's own network and subnet, can be added. HTTP pools add an `X-Forwarded-For` header with the client's address. To serve HTTPS, either let the load balancer end TLS (next section) or use a TCP listener on port 443 and end TLS on your servers.
+
+## TLS and HTTPS
+
+A **TLS** or **HTTPS** listener ends TLS on the load balancer, with a certificate you upload, and speaks plain to your servers:
+
+- **HTTPS** speaks HTTP to the pool. Your servers read the client's address in `X-Forwarded-For` and the scheme in `X-Forwarded-Proto: https` (whatever the client sent in that header is replaced). Clients may use HTTP/2 or HTTP/1.1; your servers are spoken to in HTTP/1.1.
+- **TLS** passes the bytes on as TCP, for any protocol over TLS. Turn on the pool's PROXY protocol if your servers need the client's address.
+
+The connection from the load balancer to your servers is not encrypted: it stays on your project's network. If it must be encrypted too, use a TCP listener and end TLS on the servers.
+
+Pick one or more certificates on the listener. A client gets the certificate that holds the host name it asks for; the **first** certificate answers every other name, and clients that ask for none. The load balancer accepts TLS 1.2 and 1.3 with modern ciphers only; this is not configurable.
+
+### Certificates
+
+Upload a certificate on the **Certificates** page: a name, the certificate chain as PEM text (your server's certificate first, then each intermediate; this is `fullchain.pem` from most tools) and its private key (RSA of 2048 bits or more, or ECDSA P-256 or P-384, without a passphrase). The page then shows the names the certificate is valid for, when it expires, its SHA-256 fingerprint and which load balancers use it. An expired certificate is accepted with a warning: clients will refuse it.
+
+The page and each listener warn from 30 days before a certificate expires. Nothing renews a certificate for you.
+
+### Replace a certificate
+
+A certificate does not change after its upload. Before it expires:
+
+1. Upload the new certificate under a new name.
+2. On each listener that uses the old one, add the new certificate and take the old one off, then **Save configuration**.
+3. Delete the old certificate. One that a listener still uses cannot be deleted.
+
+The load balancer takes the change within seconds. Open connections are not closed; new connections get the new certificate.
+
+### Where your private key is kept
+
+- It is stored encrypted in the platform's database and no page or API call shows it again: keep your own copy.
+- It is written to your load balancer's appliances, in a file only the system administrator of that VM can read. You cannot log in to an appliance, snapshot it or back it up.
+- Your provider's operators can reach it: a backup of the platform holds the encrypted key and, next to it, the key that decrypts it, and a backup or snapshot of an appliance VM made on the virtualisation host holds the file itself. This is the same trust you place in the provider for the disks of your servers.
+- Deleting a certificate removes it from the database; the appliances drop its file when their configuration no longer names it. Copies in backups made before stay until those backups are deleted.
 
 ## UDP
 

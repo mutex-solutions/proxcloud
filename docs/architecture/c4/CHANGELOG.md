@@ -4,6 +4,77 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: TLS termination and certificates on a load balancer (#434)
+
+**What changed:** no new container. One new trust relation and one new store: the portal now holds tenants' TLS
+private keys and writes them to load balancer appliances.
+
+- `internal/cloud/pve/lbtls.go` (new): `CheckLBCertificate` (the checks of an upload and the PEM file an appliance
+  gets, the key written out as PKCS #8), `haproxyTLS` (three lines of `global`, present only when a listener ends
+  TLS), `lbBindTLS` (`ssl crt <file> ... [alpn h2,http/1.1]`), `LBCertFile`, `Service.pushCertificates` (directory
+  made 0700 and proven, files written inside it under a temporary name, 0600 proven, moved in place) and
+  `lbCertPrune` (run by the config's apply after the new config is served).
+- `internal/cloud/pve/lb.go`: `lbNotServed` is gone, `tls` and `https` render (`lbFrontendMode`, `renderHAProxy`);
+  `LBListener.CertFiles` (the platform's, cleared by `Validate`); `PushHAProxy` and `PushPairHAProxy` take the
+  certificate files and write them before the config; `https` sets `X-Forwarded-Proto`.
+- `internal/platform/project/cloud_lb_certs.go` (new): the collection `lb_certificates` and its four routes under
+  `/api/v1/project/{id}/certificates`; the blob sealed with `textcrypt.BlobKeys` (the key the mail outbox already
+  uses), additional data = project id and certificate id; `lbResolveCerts` at `UPDATE_CONFIG` and at every apply
+  (`lbApplyLocked`, `lbApplyPair`); project teardown deletes the rows.
+- `cmd/api/main.go`: `SetLBCertificates(pg.C("lb_certificates"), blobKeys)`.
+- `web/client`: the Certificates page, TLS and HTTPS in the listener protocols with the certificate picker.
+- Diagrams: none redrawn. `c2-containers.md` (the load balancer row) and `c4-code.md` (C4.2a) name the path.
+
+**Trust boundaries, as they are now:** a tenant's private key crosses from the browser to the portal (TLS), rests in
+PostgreSQL sealed, crosses to the Proxmox API in a POST body (`agent/file-write`) and from there over the guest
+agent channel to the appliance, where it rests in clear in a root-only file. It therefore also rests in the
+portal's own backup next to the key that opens it (`proxcloud-up.sh backup` writes the dump and `.env` side by
+side) and in any Proxmox backup, snapshot, clone or replica of an appliance VM. The docs say so in three places
+(Compose README, cloud integration, tenant guide).
+
+**Why:** v0.11.1 is to be a complete layer 4 balancer: TCP, UDP and TLS. TLS on the balancer is what a tenant
+expects from one, and what the Kubernetes controller needs next to serve a Service's TLS Secret.
+
+**Why these choices:**
+
+- *Files named by the chain's SHA-256, not by the certificate id.* A change of certificate is then a new file and
+  a new config line: the existing check, swap and roll back of `haproxy.cfg` covers it, the file in use is still
+  there when the new config is refused, and the config hash covers the certificate. An overwrite in place leaves a
+  balancer that cannot reload or boot after a refused file.
+- *The directory before any write.* qemu-ga creates a file with mode 0666 and ignores the umask (qemu `8f66cb79`
+  `qga/commands-posix.c`:452-454, :469-490) and creates no directory (lab spike, 2026-11-22). The key is only ever
+  written inside a directory already proven to be root's with mode 0700, under its temporary name too.
+- *No update route.* With files named by content, a replacement is an upload and a listener change, which is one
+  checked push; an in-place update would need its own converge of every balancer that names the certificate.
+- *The cipher lists.* Octavia's default for a listener is TLS 1.2 and 1.3 with `CIPHERS_OWASP_SUITE_B`
+  (`octavia/common/constants.py` at `9718c66`: three TLS 1.3 names, six ECDHE names, three DHE names). HAProxy
+  takes the TLS 1.3 names in `ssl-default-bind-ciphersuites` and the others in `ssl-default-bind-ciphers` (HAProxy
+  3.0 `doc/configuration.txt`, the two directives), and offers no DHE suite without DH parameters, so the three DHE
+  names are left out instead of being dead text. `haproxy -c` warns for none of this, so the policy is tested by
+  handshakes: TLS 1.1 and 1.0 refused, the six suites accepted each with a certificate of its kind, RSA key
+  exchange, CBC and DHE refused (`TestLBApplianceTLS`, both appliance images).
+- *SNI with a default, no `strict-sni`.* HAProxy presents the certificate whose CN or alternative names match the
+  server name, and the first loaded one otherwise (HAProxy `doc/configuration.txt`, `crt`): the first certificate
+  of a listener is its default, as on the load balancers tenants know.
+- *Sealing.* `textcrypt.BlobKeys.Seal` (AES-256-GCM, a key derived per purpose from the configured encryption key,
+  fails closed without one) with project and certificate id as additional data, so a blob moved to another row or
+  project does not open.
+- *Proxmox side.* `agent/file-write` takes 60 KiB of content, is `protected`, and runs inline with no worker task
+  (qemu-server `58474c07` `src/PVE/API2/Qemu/Agent.pm`:612-680), so no task log holds a key. The access log of
+  pveproxy and the node's journal are a drill check, not a test.
+
+**Not in this change:** TLS from a Service's Secret (the controller's change), TLS to the members, client
+certificates, a per-listener policy, OCSP stapling, a check of the certificate files' content in the applied-state
+read (a file changed by hand is put right by the next push, and a push happens when the config's hash differs or
+HAProxy does not serve).
+
+**Files:** `internal/cloud/pve/lbtls.go`, `lbtls_test.go`, `lb.go`, `lbpair.go`, `lbl4_test.go`,
+`lbcerttest/lbcerttest.go`, `testdata/haproxy-tls*.cfg`; `internal/platform/project/cloud_lb_certs.go`,
+`cloud_lb_certs_test.go`, `cloud_lb_certs_integration_test.go`, `cloud_lb_pve.go`, `cloud_lb_pair_pve.go`,
+`handler.go`, `teardown.go`; `cmd/api/main.go`; `test/integration/lb_tls_test.go`, `lb_certificates_test.go`;
+`web/client/src/pages/network/CertificatesPage.tsx`, `LoadBalancersPage.tsx`; `docs/api.md`,
+`docs/cloud-integration.md`, `docs/data-model.md`, `deploy/compose/README.md`, the tenant guide.
+
 ## 2026-11-22: UDP listeners on an appliance pair
 
 **What changed:** no new container or relation: the load balancer appliance of a pair gains a second service, and

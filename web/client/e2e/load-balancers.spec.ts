@@ -55,7 +55,7 @@ test("a listener's protocol and limits and a pool's layer 4 options are saved as
   await expect(protocol).toContainText("HTTP")
   await expect(page.getByTestId("pool-protocol-0")).toContainText("spoken to in HTTP")
   await protocol.click()
-  await expect(page.getByRole("option")).toHaveText(["TCP", "HTTP", "UDP"]) // what a load balancer on two appliances serves today
+  await expect(page.getByRole("option")).toHaveText(["TCP", "TLS", "HTTP", "HTTPS", "UDP"]) // what a load balancer on two appliances serves
   await page.getByRole("option", { name: "TCP", exact: true }).click()
   await expect(page.getByTestId("pool-protocol-0")).toContainText("spoken to in TCP")
 

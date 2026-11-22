@@ -64,11 +64,17 @@ func TestLBSpecOfRequest(t *testing.T) {
 			t.Errorf("the row lacks %s: %s", key, row)
 		}
 	}
+	// A tenant names certificates by id; the files on an appliance are the platform's to name.
+	tlsSpec, err := lbSpecOfRequest(body(`{"listeners":[{"port":443,"protocol":"https","pool":"web","certificates":["c1","c2"],"certFiles":["x"]}],"pools":[{"name":"web","members":[]}]}`))
+	if err != nil || !reflect.DeepEqual(tlsSpec.Listeners[0].Certificates, []string{"c1", "c2"}) || tlsSpec.Listeners[0].CertFiles != nil || tlsSpec.Pools[0].Protocol != "http" {
+		t.Errorf("an https listener: %+v %v", tlsSpec, err)
+	}
 	for name, c := range map[string]struct{ body, say string }{
 		"udp over tcp":     {`{"listeners":[{"port":53,"protocol":"udp","pool":"dns"}],"pools":[{"name":"dns","protocol":"tcp","members":[]}]}`, "a udp listener needs a udp pool"},
 		"udp with PROXY":   {`{"listeners":[{"port":53,"protocol":"udp","pool":"dns"}],"pools":[{"name":"dns","proxyProtocol":true,"members":[]}]}`, "UDP has no PROXY protocol"},
-		"tls":              {`{"listeners":[{"port":443,"protocol":"tls","pool":"web"}],"pools":[{"name":"web","members":[]}]}`, "TLS termination is not available"},
-		"https":            {`{"listeners":[{"port":443,"protocol":"https","pool":"web","certificates":["c1"]}],"pools":[{"name":"web","members":[]}]}`, "TLS termination is not available"},
+		"tls, no cert":     {`{"listeners":[{"port":443,"protocol":"tls","pool":"web"}],"pools":[{"name":"web","members":[]}]}`, "a tls listener needs a certificate"},
+		"https over tcp":   {`{"listeners":[{"port":443,"protocol":"https","pool":"web","certificates":["c1"]}],"pools":[{"name":"web","protocol":"tcp","members":[]}]}`, "an https listener needs an http pool"},
+		"a file named":     {`{"listeners":[{"port":443,"protocol":"https","pool":"web","certificates":["../c1"]}],"pools":[{"name":"web","members":[]}]}`, "a certificate is named by its id"},
 		"mismatch":         {`{"listeners":[{"port":80,"protocol":"http","pool":"db"}],"pools":[{"name":"db","protocol":"tcp","members":[]}]}`, "an http listener needs an http pool"},
 		"a limit in words": {`{"listeners":[{"port":80,"pool":"web","connectionLimit":"many"}],"pools":[{"name":"web","members":[]}]}`, "expected shape"},
 		"a limit too high": {`{"listeners":[{"port":80,"pool":"web","connectionLimit":20001}],"pools":[{"name":"web","members":[]}]}`, "connection limit must be 1 to 20000"},

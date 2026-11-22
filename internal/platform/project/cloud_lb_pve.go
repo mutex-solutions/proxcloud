@@ -565,6 +565,10 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 			}
 		}
 	}
+	certs, ok := h.lbApplyCerts(ctx, proj, lb)
+	if !ok {
+		return nil
+	}
 	config := pve.RenderHAProxy(lb.LBSpec)
 	hash := lbHash(config)
 	if hash == lb.AppliedHash {
@@ -586,7 +590,7 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 	if err := ps.SetLBRules(ctx, vm.Node, vm.VMID, pve.LBListenerRules(lb.Listeners, nil)); err != nil {
 		return err
 	}
-	if err := ps.PushHAProxy(ctx, vm.Node, vm.VMID, config); err != nil {
+	if err := ps.PushHAProxy(ctx, vm.Node, vm.VMID, config, certs...); err != nil {
 		switch {
 		case !errors.Is(err, pve.ErrLBNotReady):
 			lb.Status, lb.StatusMessage = lbStatusError, err.Error()
@@ -766,6 +770,14 @@ func (h *Handler) pveLBUpdateConfig(ctx context.Context, es *externalservice.Ext
 		}
 	}
 	if why := lbUDPNeedsPair(spec, lb.HA); why != "" {
+		return httpx.BadRequest(why)
+	}
+	// The certificates a listener names must be the project's; their files' names go into the spec for the size check.
+	if _, why, err := h.lbResolveCerts(ctx, proj.ID, &spec, false); err != nil {
+		return err
+	} else if why == lbCertNoKeyMsg {
+		return httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, why)
+	} else if why != "" {
 		return httpx.BadRequest(why)
 	}
 	if len(pve.RenderHAProxyOn(spec, lb.VIPs)) > pve.LBMaxConfig || len(pve.RenderLVS(spec, lb.VIPs)) > pve.LBMaxConfig {

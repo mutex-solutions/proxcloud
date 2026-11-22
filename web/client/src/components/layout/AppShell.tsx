@@ -2,7 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate, useParams } from "react-rout
 import {
   Boxes, BarChart3, BookOpen, Camera, Check, ChevronsUpDown, CreditCard, Database, DatabaseZap, FileClock, FolderKanban, HardDrive,
   Image, KeyRound, LayoutDashboard, LogOut, Monitor, Moon, Network, Receipt, Scale,
-  ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, SquareTerminal, Sun, UserCircle, Users, Wallet, FolderTree, Globe } from "lucide-react"
+  ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, ShieldCheck, SquareTerminal, Sun, UserCircle, Users, Wallet, FolderTree, Globe } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAuth } from "@/lib/auth"
 import { useCloudFeatures, useFeatures, useLocations, useProjects, useProjectInit, useUIMenu, type CloudFeature } from "@/lib/hooks"
@@ -67,6 +67,7 @@ function navGroups(pid: string): Group[] {
       items: [
         { to: `${p}/networks`, label: "Networks", icon: Network, service: "network" },
         { to: `${p}/load-balancers`, label: "Load balancers", icon: Scale, service: "network" },
+        { to: `${p}/certificates`, label: "Certificates", icon: ShieldCheck, service: "network" },
         { to: `${p}/security-groups`, label: "Security groups", icon: Shield, service: "network" },
       ],
     },

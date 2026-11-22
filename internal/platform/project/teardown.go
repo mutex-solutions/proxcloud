@@ -467,6 +467,12 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 			slog.Warn("teardown: delete sandbox API keys", "project", p.ID, "err", err)
 		}
 	}
+	if p.Status == StatusDeleted && h.lbCerts != nil {
+		// The balancers went with the project's resources above; the certificates and their sealed keys go after them.
+		if _, err := h.lbCerts.DeleteMany(ctx, pgdoc.M{"projectId": p.ID}); err != nil {
+			slog.Warn("teardown: delete load balancer certificates", "project", p.ID, "err", err)
+		}
+	}
 	if sandboxesLeft {
 		return fmt.Errorf("teardown could not remove the project's sandboxes or their namespace; the deletion job retries")
 	}

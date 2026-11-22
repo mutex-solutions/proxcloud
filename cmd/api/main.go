@@ -333,6 +333,9 @@ func run() error {
 	projectH.SetE2BConsoleURL(cfg.Self.UIBaseURL)
 	// Sandbox API keys (SHA-256 only) for the E2B-compatible API at /e2b.
 	projectH.SetSandboxKeys(pg.C("sandbox_api_keys"))
+	// TLS certificates of load balancers, sealed with the portal's encryption key. blobKeys is nil when the key is
+	// missing or shorter than 32 characters: uploads then answer 503 and nothing is stored in clear.
+	projectH.SetLBCertificates(pg.C("lb_certificates"), blobKeys)
 	// Custom templates and their builds (the E2B v3 template API).
 	projectH.SetSandboxTemplates(pg.C("sandbox_templates"))
 	if err := registrypins.EnsureSchema(context.Background(), pg); err != nil {

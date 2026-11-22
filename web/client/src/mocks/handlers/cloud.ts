@@ -344,3 +344,45 @@ on("DELETE /project/:pid/s3-keys/:id", ({ params }) => {
 
 on("GET /flavor-categories", () => ({ data: flavorCategories }))
 on("GET /groups/images", () => ({ data: imageGrouping }))
+
+// --- TLS certificates of a project's load balancers --------------------------
+// What each certificate says, and never its key. prj-aurora holds one with months left and one that expires in days.
+type MockCert = {
+  id: string; name: string; createdAt: string; subject: string; issuer: string; dnsNames: string[]
+  notBefore: string; notAfter: string; fingerprint: string; keyType: string; chainLength: number
+}
+const inDays = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString()
+const certificates: Record<string, MockCert[]> = {
+  "prj-aurora": [
+    { id: "c0ffee00000000000000000000000001", name: "shop-2027", createdAt: inDays(-20), subject: "CN=shop.example.org", issuer: "CN=Example Issuing CA",
+      dnsNames: ["shop.example.org", "www.shop.example.org"], notBefore: inDays(-20), notAfter: inDays(240), fingerprint: "9f".repeat(32), keyType: "ECDSA P-256", chainLength: 2 },
+    { id: "c0ffee00000000000000000000000002", name: "api-2026", createdAt: inDays(-78), subject: "CN=api.example.org", issuer: "CN=Example Issuing CA",
+      dnsNames: ["api.example.org"], notBefore: inDays(-78), notAfter: inDays(12.5), fingerprint: "3c".repeat(32), keyType: "RSA 2048", chainLength: 2 },
+  ],
+}
+const certUsedBy = (pid: string, id: string): string[] => db.cloud
+  .filter((x) => x.type === "LOAD_BALANCER" && pid === "prj-aurora" && (x.data?.loadbalancer?.listeners ?? []).some((l: any) => (l.certificates ?? []).includes(id)))
+  .map((x) => x.data?.loadbalancer?.name as string)
+on("GET /project/:pid/certificates", ({ params }) => ({
+  data: (certificates[params.pid] ?? []).map((c) => ({ ...c, usedBy: certUsedBy(params.pid, c.id) })),
+}))
+on("POST /project/:pid/certificates", ({ params, opts }) => {
+  const body = (opts.body ?? {}) as { name?: string; certificate?: string; privateKey?: string }
+  if (!/^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/.test(body.name ?? "")) throw new ApiError(400, 400, "Certificate names use lowercase letters, digits and dashes, at most 32 characters")
+  if (!body.certificate?.includes("BEGIN CERTIFICATE")) throw new ApiError(400, 400, "The certificate is not PEM text: no BEGIN CERTIFICATE line was found")
+  if (!body.privateKey?.includes("PRIVATE KEY")) throw new ApiError(400, 400, "The private key is not PEM text with one key in it")
+  const list = (certificates[params.pid] ??= [])
+  if (list.some((c) => c.name === body.name)) throw new ApiError(409, 409, `This project already has a certificate named ${body.name}`)
+  const made: MockCert = {
+    id: db.nextId("cert"), name: body.name!, createdAt: inDays(0), subject: "CN=new.example.org", issuer: "CN=Example Issuing CA",
+    dnsNames: ["new.example.org"], notBefore: inDays(-1), notAfter: inDays(89), fingerprint: "7a".repeat(32), keyType: "RSA 2048", chainLength: 2,
+  }
+  list.unshift(made)
+  return { data: { ...made, usedBy: [] } } // the answer of an upload holds what the certificate says, and no key
+})
+on("DELETE /project/:pid/certificates/:certId", ({ params }) => {
+  const used = certUsedBy(params.pid, params.certId)
+  if (used.length) throw new ApiError(409, 409, `This certificate is used by a listener of load balancer ${used.join(", ")}. Take it off the listener first`)
+  certificates[params.pid] = (certificates[params.pid] ?? []).filter((c) => c.id !== params.certId)
+  return { data: {} }
+})

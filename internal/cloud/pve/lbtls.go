@@ -1,0 +1,288 @@
+package pve
+
+// lbtls.go — TLS on a load balancer: the check of an uploaded certificate, the lines of HAProxy's TLS policy and
+// the delivery of the certificate files to an appliance.
+//
+// A tls listener ends TLS and speaks plain TCP to its members; an https listener ends TLS and speaks HTTP to them.
+// Both present the certificates of LBListener.Certificates, chosen by the name the client asks for (SNI); the first
+// one answers a client that asks for no name or for one no certificate holds.
+//
+// A certificate reaches an appliance as one PEM file (chain, then key) in lbCertDir, named by the SHA-256 of its
+// chain and never by its id. The config names the files, so a change of certificate is a new file and a new config
+// line: it rides the check, swap and roll back of the config (haproxyReload), the file of before is still there if
+// HAProxy refuses the new config, and the config's hash covers the certificates without a term of its own.
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
+	"fmt"
+	"log/slog"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+)
+
+const (
+	// lbCertDir holds the certificate files of an appliance: root's, mode 0700, each file 0600.
+	lbCertDir = "/etc/haproxy/certs"
+	// lbMaxListenerCerts: HAProxy reads a config line of at most 2048 characters, and a certificate takes 92 of the
+	// bind line.
+	lbMaxListenerCerts = 10
+	// LBMaxCertBundle is what a certificate's chain and key may hold together, and lbMaxChain how many certificates
+	// the chain may hold: the server's own and its intermediates.
+	LBMaxCertBundle = 16 << 10
+	lbMaxChain      = 5
+
+	// haproxyTLS is the TLS policy of every tls and https listener, written into "global" only when the config holds
+	// one: TLS 1.2 and 1.3, the three TLS 1.3 suites, and for TLS 1.2 the six suites with forward secrecy and an
+	// AEAD cipher, for an RSA and for an ECDSA certificate. No suite with DHE: HAProxy has no DH parameters here, so
+	// it would offer none anyway. HAProxy takes the list for TLS 1.2 and the one for TLS 1.3 in two directives.
+	// (Where the list comes from: docs/architecture/c4/CHANGELOG.md, 2026-11-23.)
+	haproxyTLS = `  ssl-default-bind-options ssl-min-ver TLSv1.2
+  ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
+  ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305
+`
+)
+
+var (
+	// lbCertIDRe is what a listener may name as a certificate: the id of a certificate of the project.
+	lbCertIDRe = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+	// lbCertFileRe is a certificate file's name without ".pem": a SHA-256 in hexadecimal digits, so nothing else can
+	// become a path on an appliance or a word of the config.
+	lbCertFileRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// lbTerminatesTLS: the listener protocol ends TLS on the balancer.
+func lbTerminatesTLS(protocol string) bool { return protocol == "tls" || protocol == "https" }
+
+// lbCertFiles is the listener's certificate files as the config may name them: none when one is not a file name.
+func lbCertFiles(l LBListener) []string {
+	if len(l.CertFiles) == 0 || len(l.CertFiles) > lbMaxListenerCerts || slices.ContainsFunc(l.CertFiles, func(f string) bool { return !lbCertFileRe.MatchString(f) }) {
+		return nil
+	}
+	return l.CertFiles
+}
+
+// lbBindTLS is what follows the address of a tls or https listener's bind line.
+func lbBindTLS(l LBListener) string {
+	var b strings.Builder
+	b.WriteString(" ssl")
+	for _, f := range lbCertFiles(l) {
+		b.WriteString(" crt " + lbCertDir + "/" + f + ".pem")
+	}
+	if l.Protocol == "https" {
+		b.WriteString(" alpn h2,http/1.1")
+	}
+	return b.String()
+}
+
+// LBCertFile is one certificate as an appliance holds it: Name is the SHA-256 of its chain, PEM the chain and then
+// the key. PEM is a secret: it is written to the appliance and to nothing else.
+type LBCertFile struct {
+	Name string
+	PEM  string
+}
+
+// String and LogValue keep a certificate file out of a log line whatever prints it.
+func (LBCertFile) String() string       { return "[certificate file redacted]" }
+func (LBCertFile) LogValue() slog.Value { return slog.StringValue("[certificate file redacted]") }
+
+// LBCertificate is what a certificate says of itself, with nothing of its key but the kind.
+type LBCertificate struct {
+	Subject     string    `json:"subject"`
+	Issuer      string    `json:"issuer"`
+	DNSNames    []string  `json:"dnsNames"` // the names and addresses it is valid for (subject alternative names)
+	NotBefore   time.Time `json:"notBefore"`
+	NotAfter    time.Time `json:"notAfter"`
+	Fingerprint string    `json:"fingerprint"` // SHA-256 of the server's certificate, as openssl x509 -fingerprint prints it without the colons
+	KeyType     string    `json:"keyType"`     // "RSA 2048", "ECDSA P-256"
+	ChainLength int       `json:"chainLength"`
+	// File is the name of the certificate's file on an appliance: the SHA-256 of the whole chain.
+	File string `json:"file"`
+}
+
+// CheckLBCertificate checks an uploaded certificate: chainPEM holds the server's certificate first and then its
+// intermediates, keyPEM the private key. It answers what the certificate says, the file an appliance gets (the chain
+// and the key, written afresh so that the same upload gives the same bytes), warnings that do not refuse it, and a
+// text for the customer when it is refused. No text holds anything of the key.
+func CheckLBCertificate(chainPEM, keyPEM string, now time.Time) (info LBCertificate, bundle string, warnings []string, refused string) {
+	if len(chainPEM)+len(keyPEM) > LBMaxCertBundle {
+		return info, "", nil, fmt.Sprintf("The certificate and its key are larger than %d KiB together", LBMaxCertBundle>>10)
+	}
+	var chain []*x509.Certificate
+	for rest := []byte(chainPEM); ; {
+		var block *pem.Block
+		if block, rest = pem.Decode(rest); block == nil {
+			if len(bytes.TrimSpace(rest)) != 0 {
+				return info, "", nil, "The certificate is not PEM text: it holds something outside its BEGIN and END lines"
+			}
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			return info, "", nil, "The certificate field takes certificates only: the private key goes into its own field"
+		}
+		c, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return info, "", nil, fmt.Sprintf("Certificate %d of the chain cannot be read", len(chain)+1)
+		}
+		chain = append(chain, c)
+	}
+	switch {
+	case len(chain) == 0:
+		return info, "", nil, "The certificate is not PEM text: no BEGIN CERTIFICATE line was found"
+	case len(chain) > lbMaxChain:
+		return info, "", nil, fmt.Sprintf("The chain holds more than %d certificates: send the server's certificate and its intermediates, not the root store", lbMaxChain)
+	}
+	block, rest := pem.Decode([]byte(keyPEM))
+	switch {
+	case block == nil || len(bytes.TrimSpace(rest)) != 0:
+		return info, "", nil, "The private key is not PEM text with one key in it"
+	case block.Type == "ENCRYPTED PRIVATE KEY" || strings.Contains(block.Headers["Proc-Type"], "ENCRYPTED"):
+		return info, "", nil, "The private key is encrypted with a passphrase. Remove the passphrase before the upload: the platform encrypts the key itself"
+	}
+	var key any
+	var err error
+	switch block.Type {
+	case "PRIVATE KEY":
+		key, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+	case "RSA PRIVATE KEY":
+		key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+	case "EC PRIVATE KEY":
+		key, err = x509.ParseECPrivateKey(block.Bytes)
+	default:
+		return info, "", nil, "The private key is not PEM text with one key in it"
+	}
+	if err != nil {
+		return info, "", nil, "The private key cannot be read"
+	}
+	leaf := chain[0]
+	const kinds = "The key must be RSA of 2048 to 8192 bits, or ECDSA on the curve P-256 or P-384"
+	switch k := key.(type) {
+	case *rsa.PrivateKey:
+		if bits := k.N.BitLen(); bits < 2048 || bits > 8192 {
+			return info, "", nil, kinds
+		}
+		if pub, ok := leaf.PublicKey.(*rsa.PublicKey); !ok || !k.PublicKey.Equal(pub) {
+			return info, "", nil, "The private key does not belong to the certificate: the first certificate must be the server's own"
+		}
+		info.KeyType = fmt.Sprintf("RSA %d", k.N.BitLen())
+	case *ecdsa.PrivateKey:
+		if k.Curve != elliptic.P256() && k.Curve != elliptic.P384() {
+			return info, "", nil, kinds
+		}
+		if pub, ok := leaf.PublicKey.(*ecdsa.PublicKey); !ok || !k.PublicKey.Equal(pub) {
+			return info, "", nil, "The private key does not belong to the certificate: the first certificate must be the server's own"
+		}
+		info.KeyType = "ECDSA " + k.Curve.Params().Name
+	default:
+		return info, "", nil, kinds
+	}
+	for i := 0; i+1 < len(chain); i++ {
+		if chain[i].CheckSignatureFrom(chain[i+1]) != nil {
+			return info, "", nil, fmt.Sprintf("Certificate %d of the chain did not sign certificate %d: put the server's certificate first, then each intermediate that signed the one before it", i+2, i+1)
+		}
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return info, "", nil, "The private key cannot be read"
+	}
+	var out bytes.Buffer
+	whole := sha256.New()
+	for _, c := range chain {
+		_ = pem.Encode(&out, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
+		whole.Write(c.Raw)
+	}
+	_ = pem.Encode(&out, &pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	sum := sha256.Sum256(leaf.Raw)
+	info.Subject, info.Issuer = leaf.Subject.String(), leaf.Issuer.String()
+	info.NotBefore, info.NotAfter = leaf.NotBefore.UTC(), leaf.NotAfter.UTC()
+	info.Fingerprint, info.File, info.ChainLength = hex.EncodeToString(sum[:]), hex.EncodeToString(whole.Sum(nil)), len(chain)
+	info.DNSNames = slices.Clone(leaf.DNSNames)
+	for _, ip := range leaf.IPAddresses {
+		info.DNSNames = append(info.DNSNames, ip.String())
+	}
+	switch {
+	case now.After(leaf.NotAfter):
+		warnings = append(warnings, "This certificate expired on "+leaf.NotAfter.UTC().Format("2 January 2006")+": clients will refuse it")
+	case now.Before(leaf.NotBefore):
+		warnings = append(warnings, "This certificate is not valid before "+leaf.NotBefore.UTC().Format("2 January 2006"))
+	}
+	if len(info.DNSNames) == 0 {
+		info.DNSNames = []string{}
+		warnings = append(warnings, "This certificate names no host (it has no subject alternative name): browsers refuse it")
+	}
+	return info, out.String(), warnings, ""
+}
+
+const (
+	// lbCertDirScript makes lbCertDir a directory only root can enter, and proves it, before anything is written
+	// into it: the guest agent creates a file with mode 0666 whatever the umask, so a key is only ever written
+	// inside a directory nobody else reaches, under its temporary name too. A leftover of a push that did not end
+	// goes.
+	lbCertDirScript = `set -e
+D=` + lbCertDir + `
+[ ! -L $D ] || { echo "$D is a link" >&2; exit 1; }
+mkdir -p $D
+chown root:root $D
+chmod 0700 $D
+[ "$(stat -c %a:%U:%G:%F $D)" = "700:root:root:directory" ] || { echo "$D is not a directory of root alone" >&2; exit 1; }
+rm -f $D/*.new`
+	// lbCertInstallScript gives each file written as <name>.pem.new to root with mode 0600, proves it, and moves it
+	// in place. Its arguments are the names.
+	lbCertInstallScript = `set -e
+D=` + lbCertDir + `
+for n in "$@"; do
+  chown root:root $D/$n.pem.new
+  chmod 0600 $D/$n.pem.new
+  [ "$(stat -c %a:%U:%G $D/$n.pem.new)" = 600:root:root ] || { echo "a certificate file is not root's alone" >&2; exit 1; }
+  mv -f $D/$n.pem.new $D/$n.pem
+done`
+	// lbCertPrune, after a config was seen to be served, removes every certificate file it does not name. Before
+	// that the files of the config of before stay: it is what HAProxy is put back on when it refuses the new one.
+	lbCertPrune = `for c in ` + lbCertDir + `/*.pem ` + lbCertDir + `/*.new; do [ -e "$c" ] || continue; grep -qF " $c" $F || rm -f "$c"; done
+`
+)
+
+// pushCertificates writes the certificate files a config names, before the config: the directory first, made and
+// proven private, then each file under a temporary name inside it, then mode, owner and the move in place. A file
+// that is there already is written again: it costs one call, and a file changed by hand is put right.
+func (s *Service) pushCertificates(ctx context.Context, node string, vmid int, certs []LBCertFile) error {
+	if len(certs) == 0 {
+		return nil
+	}
+	names := make([]string, len(certs))
+	for i, c := range certs {
+		if !lbCertFileRe.MatchString(c.Name) {
+			return fmt.Errorf("certificate file %d has no valid name", i+1)
+		}
+		names[i] = c.Name
+	}
+	exit, _, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbCertDirScript)
+	if err != nil {
+		return err
+	}
+	if exit != 0 {
+		return fmt.Errorf("the appliance's certificate directory could not be made private, nothing was written: %s", strings.TrimSpace(stderr))
+	}
+	for _, c := range certs {
+		if err := s.C.GuestWriteFile(ctx, node, vmid, lbCertDir+"/"+c.Name+".pem.new", c.PEM); err != nil {
+			return fmt.Errorf("write certificate file %s: %w", c.Name[:12], err)
+		}
+	}
+	exit, _, stderr, err = s.C.GuestRun(ctx, node, vmid, guestTimeout, append([]string{"sh", "-c", lbCertInstallScript, "sh"}, names...)...)
+	if err != nil {
+		return err
+	}
+	if exit != 0 {
+		return fmt.Errorf("the certificate files could not be put in place: %s", strings.TrimSpace(stderr))
+	}
+	return nil
+}

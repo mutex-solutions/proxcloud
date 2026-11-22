@@ -2,7 +2,6 @@ package pve
 
 import (
 	"encoding/json"
-	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -133,7 +132,7 @@ func TestRenderHAProxyEachOption(t *testing.T) {
 // A stored row no validation saw, whose listener names another protocol than its pool speaks: that listener gets no
 // frontend, the others keep theirs, and the health read does not report it as a listener HAProxy failed to load.
 func TestRenderHAProxySkipsAMismatchedListener(t *testing.T) {
-	for _, protocol := range []string{"http", "tls"} { // in front of the tcp pool: the wrong one, and one not served
+	for _, protocol := range []string{"http", "https"} { // in front of the tcp pool: both need an http pool
 		s := legacyGoldenSpec()
 		s.Listeners[1].Protocol = protocol
 		cfg := RenderHAProxy(s)
@@ -204,10 +203,10 @@ func TestLBSpecValidateLayer4(t *testing.T) {
 		"a udp pool":           {pool: "udp", wantListener: "udp", wantPool: "udp"},
 		"udp in front of tcp":  {listener: "udp", pool: "tcp", refused: "a udp listener needs a udp pool, and pool web is tcp"},
 		"tcp in front of udp":  {listener: "tcp", pool: "udp", refused: "a tcp listener needs a tcp pool, and pool web is udp"},
-		"tls":                  {listener: "tls", pool: "tcp", refused: lbNotServed["tls"]},
-		"https":                {listener: "https", refused: lbNotServed["https"]},
-		"sctp":                 {listener: "sctp", refused: "protocol must be tcp, udp or http"},
-		"upper case":           {listener: "TCP", refused: "protocol must be tcp, udp or http"},
+		"tls, no certificate":  {listener: "tls", pool: "tcp", refused: "a tls listener needs a certificate"},
+		"https, none either":   {listener: "https", refused: "an https listener needs a certificate"},
+		"sctp":                 {listener: "sctp", refused: "protocol must be tcp, udp, tls, http or https"},
+		"upper case":           {listener: "TCP", refused: "protocol must be tcp, udp, tls, http or https"},
 		"a pool off the list":  {pool: "https", refused: "protocol must be http, tcp or udp"},
 	} {
 		s := base()
@@ -290,13 +289,9 @@ func TestLBSpecValidateLayer4(t *testing.T) {
 	}
 }
 
-// lbNotServed is the whole refusal of UDP and of TLS: with a protocol taken out of it (what the change that serves
-// the protocol does), the model, the matrix, the listener key and the firewall already carry it, and HAProxy gets
-// no frontend it cannot serve.
-func TestNotServedIsTheOnlyRefusal(t *testing.T) {
-	saved := maps.Clone(lbNotServed)
-	t.Cleanup(func() { lbNotServed = saved })
-	lbNotServed = map[string]string{}
+// The five listener protocols share one model: the matrix, the listener key, the firewall rule and the health read
+// carry each of them, and HAProxy gets a frontend for every one but UDP, which keepalived serves.
+func TestListenerProtocolsShareOneModel(t *testing.T) {
 	s := LBSpec{
 		Listeners: []LBListener{
 			{Port: 53, Protocol: "tcp", Pool: "dns-tcp"},
@@ -311,7 +306,7 @@ func TestNotServedIsTheOnlyRefusal(t *testing.T) {
 		},
 	}
 	if msg := s.Validate(); msg != "" {
-		t.Fatalf("refused with nothing in lbNotServed: %s", msg)
+		t.Fatalf("refused: %s", msg)
 	}
 	if got := []string{s.Pools[0].Protocol, s.Pools[1].Protocol, s.Pools[2].Protocol}; !slices.Equal(got, []string{"tcp", "udp", "http"}) {
 		t.Fatalf("pool protocols %q", got)
@@ -339,15 +334,26 @@ func TestNotServedIsTheOnlyRefusal(t *testing.T) {
 	if want := []string{"tcp  53,443,8443", "udp 198.51.100.0/24 53"}; !slices.Equal(rules, want) {
 		t.Errorf("rules %q, want %q", rules, want)
 	}
-	// HAProxy gets a frontend for the TCP listener alone, and the health read misses none of the others.
+	// Without the files of their certificates (which only the platform names), HAProxy gets a frontend for the TCP
+	// listener alone, and the health read says which listeners it does not run.
 	for i := range s.Pools {
 		s.Pools[i].Members[0].Address = "10.0.0.11"
 	}
 	cfg := RenderHAProxy(s)
-	if n := strings.Count(cfg, "\nfrontend "); n != 1 || !strings.Contains(cfg, "\nfrontend l53\n  bind :53\n  mode tcp\n") {
+	if n := strings.Count(cfg, "\nfrontend "); n != 1 || !strings.Contains(cfg, "\nfrontend l53\n  bind :53\n  mode tcp\n") || strings.Contains(cfg, "ssl") {
 		t.Errorf("frontends: %d\n%s", n, cfg)
 	}
 	_, notLoaded, err := ParseHAProxyStat("# pxname,svname,status\nl53,FRONTEND,OPEN\n", s)
+	if err != nil || !slices.Equal(notLoaded, []string{"443", "8443"}) {
+		t.Errorf("listeners read as not loaded: %q %v", notLoaded, err)
+	}
+	// With them, a frontend each.
+	s.Listeners[2].CertFiles = []string{strings.Repeat("a", 64), strings.Repeat("b", 64)}
+	s.Listeners[3].CertFiles = []string{strings.Repeat("a", 64)}
+	if n := strings.Count(RenderHAProxy(s), "\nfrontend "); n != 3 {
+		t.Errorf("frontends with certificate files: %d", n)
+	}
+	_, notLoaded, err = ParseHAProxyStat("# pxname,svname,status\nl53,FRONTEND,OPEN\nl443,FRONTEND,OPEN\nl8443,FRONTEND,OPEN\n", s)
 	if err != nil || len(notLoaded) != 0 {
 		t.Errorf("listeners read as not loaded: %q %v", notLoaded, err)
 	}
