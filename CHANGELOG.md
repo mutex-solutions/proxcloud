@@ -18,6 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   states that answer, and `TestUpgradeRollsNoMachine` compares eight of the seventeen previous BOMs with the BOM on
   `main`, none of them rolling. No apply on such a platform was run on a lab by this change.
 
+### Fixed
+
+- **The sandbox network guard accepts Cilium's CNI hand-over per node** (`cmd/sandbox-netguard`,
+  `internal/ciliumcni`, `internal/cloud/sandbox/netguard.go`, `deploy/sandbox-cluster/telemetry.yaml`). `node-setup`'s
+  `sandbox-netguard -install` and the network-guard gate read only the cluster-wide `cilium-config`, so on a cluster
+  where Cilium keeps the CNI config everywhere except on the sandbox nodes (a `CiliumNodeConfig` selecting them, the
+  platform's shared mode) node-setup would never become Ready and the gate never pass. Both now compute each node's
+  Cilium config the way the agent does (the ConfigMap, then every `CiliumNodeConfig` of `kube-system` whose selector
+  matches the node, in name order) and require `custom-cni-conf` `"true"` and an empty `write-cni-conf-when-ready`:
+  a `CiliumNodeConfig` must set that key to `""`, because left out the ConfigMap's path stays and Cilium rewrites the
+  conflist without the netguard chain. The gate checks it per schedulable node, beside the heartbeat. netguard's
+  service account may now get Nodes and get/list `ciliumnodeconfigs`; the portal's sandbox identity gets the same
+  read through the existing `kube-system` Role. With the older RBAC (403) or no CRD (404) the ConfigMap alone decides,
+  as before. Ships in the next sandbox runtime image built by CI from main. Not run on a lab.
+
 ## [0.11.0] - 2026-11-22
 
 The release after `v0.10.2`. It brings highly available load balancers: a load balancer runs on a pair of appliance
@@ -316,18 +331,6 @@ Where an entry below says the BOM on `main` is `0.11.0-dev`, that was the state 
   removes the apt source earlier versions wrote. Nodes keep the IPv6 refusal, the drop-in containerd config and
   stage 55's edits of the runtime image and `RUNSC_ALLOW_SUID`. The docs no longer say the node image ships the
   `gvisor` handler: the drop-in writes it. Not run on a lab.
-- **The sandbox network guard accepts Cilium's CNI hand-over per node** (`cmd/sandbox-netguard`,
-  `internal/ciliumcni`, `internal/cloud/sandbox/netguard.go`, `deploy/sandbox-cluster/telemetry.yaml`). `node-setup`'s
-  `sandbox-netguard -install` and the network-guard gate read only the cluster-wide `cilium-config`, so on a cluster
-  where Cilium keeps the CNI config everywhere except on the sandbox nodes (a `CiliumNodeConfig` selecting them, the
-  platform's shared mode) node-setup would never become Ready and the gate never pass. Both now compute each node's
-  Cilium config the way the agent does (the ConfigMap, then every `CiliumNodeConfig` of `kube-system` whose selector
-  matches the node, in name order) and require `custom-cni-conf` `"true"` and an empty `write-cni-conf-when-ready`:
-  a `CiliumNodeConfig` must set that key to `""`, because left out the ConfigMap's path stays and Cilium rewrites the
-  conflist without the netguard chain. The gate checks it per schedulable node, beside the heartbeat. netguard's
-  service account may now get Nodes and get/list `ciliumnodeconfigs`; the portal's sandbox identity gets the same
-  read through the existing `kube-system` Role. With the older RBAC (403) or no CRD (404) the ConfigMap alone decides,
-  as before. Ships in the next sandbox runtime image built by CI from main. Not run on a lab.
 
 ### Changed
 

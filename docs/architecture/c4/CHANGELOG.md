@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-21: sandbox-netguard reads per-node Cilium config (#422)
+## 2026-11-22: sandbox-netguard reads per-node Cilium config (#422)
 
 **What changed:** no new component or container. `sandbox-netguard -install` (node-setup on every sandbox node) now
 reads, besides `kube-system/cilium-config`, the `CiliumNodeConfig` list of `kube-system` and its own Node's labels,
@@ -18,6 +18,7 @@ nodes of the platform cluster hand the CNI config to netguard, through a `Cilium
 kept node-setup from ever becoming Ready there.
 
 **Diagrams:** C3 (a read edge from sandbox-netguard to the sandbox cluster).
+
 ## 2026-11-22: the services sync keeps running when an appliance is down
 
 **What changed:** no new component, container or relation. `internal/cloud/pve`: a load balancer's appliance is never
