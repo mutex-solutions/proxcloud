@@ -683,6 +683,11 @@ func (c *Client) ApplyClusterScoped(ctx context.Context, group, version, plural 
 	return err
 }
 
+// GetClusterScoped reads one cluster-scoped object (group "" for core kinds).
+func (c *Client) GetClusterScoped(ctx context.Context, group, version, plural, name string) (map[string]any, error) {
+	return c.get(ctx, clusterPath(group, version, plural), name)
+}
+
 // CreateServiceAccountToken asks for a token of service account ns/name (TokenRequest, the API behind
 // `kubectl create token`): no Secret holds it, and deleting the account revokes it. The API server may
 // shorten ttl (--service-account-max-token-expiration), so the expiry it granted is returned.

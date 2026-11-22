@@ -120,6 +120,7 @@ func sandboxFirewall(ctx context.Context, ps *pve.Service, netCfg externalservic
 		RegistryAddress: cfg.Registry.Address, RegistryPort: cfg.Registry.Port,
 		BuildStorageAddress: cfg.BuildStorage.Address, BuildStoragePort: cfg.BuildStorage.Port,
 		PortalAddress: cfg.Portal.Address, PortalPort: cfg.Portal.Port,
+		Bridge: cfg.Bridge, VLAN: cfg.VLAN, Peers: cfg.Peers,
 	}, nil
 }
 
@@ -140,7 +141,7 @@ func sandboxDeny(ctx context.Context, ps *pve.Service, netCfg externalservice.PV
 		// ponytail: a down node pauses the whole pass (new workers stay tainted); keep the last complete list if that hurts.
 		return nil, errors.New("sandbox: a PVE node did not report its networks; the workers keep their current firewall this pass")
 	}
-	deny := append(append(append(mgmt, hosts...), netCfg.BlockedCIDRs...), netCfg.CIDRPool)
+	deny := append(append(append(append(mgmt, hosts...), netCfg.BlockedCIDRs...), netCfg.CIDRPool), cfg.Deny...)
 	if ip := net.ParseIP(cfg.SNAT); ip != nil {
 		deny = append(deny, cfg.SNAT)
 	}

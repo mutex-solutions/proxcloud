@@ -75,7 +75,7 @@ func (j *Job) SandboxReleaseGates(ctx context.Context, es *externalservice.Exter
 	netCfg := pes.PVENetworkConfig()
 	set(1, ps.CheckSandboxIsolation(ctx, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs, pes.PVESandboxEndpoints()...),
 		"the cluster firewall drops "+strings.Join(netCfg.SandboxCIDRs, ",")+" to and from the tenant pool and the blocked networks")
-	open, ferr := openWorkers(ctx, kc)
+	open, ferr := openWorkers(ctx, kc, cfg.Mode == sandbox.ModeShared)
 	if ferr == nil {
 		var f pve.SandboxFirewall
 		if f, ferr = sandboxFirewall(ctx, ps, netCfg, cfg, kc.Server()); ferr == nil {
@@ -133,20 +133,64 @@ func (j *Job) sandboxSite(ctx context.Context, es *externalservice.ExternalServi
 	return pes, cfg, kc, ps, nil
 }
 
-// openWorkers is every Node without the unsecured taint (the scheduler may put tenant pods there) → the address it
-// reports.
-func openWorkers(ctx context.Context, kc SandboxNodes) (map[string]string, error) {
+// gateNodes is what the fence gate reads of the sandbox cluster (kamajik8s.Client).
+type gateNodes interface {
+	SandboxNodes
+	GetClusterScoped(ctx context.Context, group, version, plural, name string) (map[string]any, error)
+}
+
+// openWorkers is every Node the scheduler may put a sandbox on → the address it reports: every Node without the
+// unsecured taint. On a shared cluster most Nodes are not sandbox machines and take no sandbox: what keeps sandboxes
+// off them is the RuntimeClass every tenant pod must name (the chart's pod policy), whose scheduling Kubernetes merges
+// into the pod. So there the gate first requires that class to select the sandbox group and to tolerate nothing but
+// the sandbox taint (checkSandboxClass), and then asks for the Nodes of that group alone. A class changed by hand
+// fails the gate; it never makes a platform machine count as fenced or a sandbox machine go unasked.
+func openWorkers(ctx context.Context, kc gateNodes, shared bool) (map[string]string, error) {
+	if shared {
+		rc, err := kc.GetClusterScoped(ctx, "node.k8s.io", "v1", "runtimeclasses", sandboxRuntimeClass)
+		if err != nil {
+			return nil, fmt.Errorf("RuntimeClass %s could not be read, so nothing shows that sandboxes stay on the sandbox machines: %w", sandboxRuntimeClass, err)
+		}
+		if err := checkSandboxClass(rc); err != nil {
+			return nil, err
+		}
+	}
 	nodes, err := kc.ListNodes(ctx)
 	if err != nil {
 		return nil, err
 	}
 	open := map[string]string{}
 	for _, n := range nodes {
+		if shared && strAt(n, "metadata", "labels", sandbox.LabelNodeGroup) != sandbox.NodeGroupSandbox {
+			continue
+		}
 		if !hasTaint(n, pve.SandboxUnsecuredTaint) {
 			open[strAt(n, "metadata", "name")] = internalIP(n)
 		}
 	}
 	return open, nil
+}
+
+// sandboxRuntimeClass is the class every sandbox pod names (sandbox.Config's default; the chart's runtimeClass.name).
+const sandboxRuntimeClass = "gvisor"
+
+// checkSandboxClass requires of a shared cluster's RuntimeClass that its scheduling selects exactly the sandbox group
+// by the label a kubelet cannot set, and tolerates the sandbox taint and nothing else: with the unsecured taint
+// tolerated a sandbox would start on a machine whose VM firewall is not written yet.
+func checkSandboxClass(rc map[string]any) error {
+	sched, _ := rc["scheduling"].(map[string]any)
+	sel, _ := sched["nodeSelector"].(map[string]any)
+	if len(sel) != 1 || sel[sandbox.LabelNodeGroup] != sandbox.NodeGroupSandbox {
+		return fmt.Errorf("RuntimeClass %s does not keep sandboxes on the sandbox machines: its scheduling.nodeSelector must be {%s: %s} and nothing else",
+			sandboxRuntimeClass, sandbox.LabelNodeGroup, sandbox.NodeGroupSandbox)
+	}
+	tols, _ := sched["tolerations"].([]any)
+	for _, t := range tols {
+		if m, _ := t.(map[string]any); m["key"] != sandbox.TaintSandbox {
+			return fmt.Errorf("RuntimeClass %s tolerates %v: it may tolerate %s alone, or a sandbox starts on a machine that is not fenced yet", sandboxRuntimeClass, m["key"], sandbox.TaintSandbox)
+		}
+	}
+	return nil
 }
 
 // syncSandboxService reconciles the project's SANDBOX rows off the sandbox cluster. A sandbox the controller removed at

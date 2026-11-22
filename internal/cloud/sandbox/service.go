@@ -95,14 +95,86 @@ func (s *Service) ownerSelector(projectID string) string {
 	return LabelProject + "=" + projectID + "," + LabelManagedBy + "=" + ManagedByValue + "," + LabelService + "=" + s.serviceID
 }
 
-// ensureTenantNamespace creates/labels sb-<projectId> and leaves its quota alone.
+// ensureTenantNamespace creates/labels sb-<projectId> and leaves its quota alone. On a shared cluster it then binds
+// SharedRole to the portal's identity there: until that RoleBinding exists the identity can do nothing in the
+// namespace, and the cluster's admission policies let it bind nothing else and nowhere else.
 func (s *Service) ensureTenantNamespace(ctx context.Context, projectID string) error {
-	return s.api.EnsureNamespace(ctx, NamespaceFor(projectID), map[string]string{
+	ns := NamespaceFor(projectID)
+	if err := s.api.EnsureNamespace(ctx, ns, map[string]string{
 		LabelProject:   projectID,
 		LabelService:   s.serviceID,
 		LabelManagedBy: ManagedByValue,
 		LabelTenant:    "true",
-	}, nil)
+	}, nil); err != nil || !s.cfg.Shared {
+		return err
+	}
+	return s.api.ApplyCR(ctx, "rbac.authorization.k8s.io", "v1", "rolebindings", map[string]any{
+		"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+		"metadata": map[string]any{"name": SharedAccount, "namespace": ns, "labels": map[string]any{LabelManagedBy: ManagedByValue, LabelService: s.serviceID}},
+		"roleRef":  map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": SharedRole},
+		"subjects": []any{map[string]any{"kind": "ServiceAccount", "name": SharedAccount, "namespace": SharedAccountNS}},
+	})
+}
+
+// tenantNamespaces are the sb-* namespaces of this service on a shared cluster, where the identity may list
+// namespaces cluster-wide and everything else only inside the ones it bound.
+func (s *Service) tenantNamespaces(ctx context.Context) ([]string, error) {
+	api, ok := s.api.(interface {
+		ListNamespaces(ctx context.Context, labelSelector string) ([]map[string]any, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("sandbox: namespace lister unavailable")
+	}
+	items, err := api.ListNamespaces(ctx, LabelTenant+"=true,"+LabelService+"="+s.serviceID)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, it := range items {
+		if name := digStr(it, "metadata", "name"); strings.HasPrefix(name, "sb-") && dig(it, "metadata", "deletionTimestamp") == nil {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+// listCRsAll and listPodsAll list across every project. A sandbox cluster of its own answers that in one call; on a
+// shared cluster the identity has no cluster-wide read (it would see every platform pod), so the list is made
+// namespace by namespace over this service's sb-* namespaces.
+// ponytail: one call per project namespace; a paged fan-out if a shared cluster ever holds hundreds of projects.
+func (s *Service) listCRsAll(ctx context.Context, group, version, plural, labelSelector string) ([]map[string]any, error) {
+	if !s.cfg.Shared {
+		return s.api.ListCRsAllNamespaces(ctx, group, version, plural, labelSelector)
+	}
+	return s.perNamespace(ctx, func(ns string) ([]map[string]any, error) {
+		return s.api.ListCRs(ctx, group, version, plural, ns, labelSelector)
+	})
+}
+
+func (s *Service) listPodsAll(ctx context.Context, labelSelector string) ([]map[string]any, error) {
+	if !s.cfg.Shared {
+		return s.api.ListPodsAllNamespaces(ctx, labelSelector)
+	}
+	return s.perNamespace(ctx, func(ns string) ([]map[string]any, error) { return s.api.ListPods(ctx, ns, labelSelector) })
+}
+
+func (s *Service) perNamespace(ctx context.Context, list func(ns string) ([]map[string]any, error)) ([]map[string]any, error) {
+	nss, err := s.tenantNamespaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []map[string]any
+	for _, ns := range nss {
+		items, err := list(ns)
+		if kamajik8s.NotFound(err) { // deleted since the list
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, items...)
+	}
+	return out, nil
 }
 
 // EnsureProjectNamespace creates/labels sb-<projectId> and its ResourceQuota (the bootstrap
@@ -713,7 +785,7 @@ type Due struct{ ProjectID, ID string }
 
 // DueForAutoPause lists this service's auto-pause sandboxes past their end-at.
 func (s *Service) DueForAutoPause(ctx context.Context) ([]Due, error) {
-	items, err := s.api.ListCRsAllNamespaces(ctx, CRGroup, CRVersion, CRPlural, LabelManagedBy+"="+ManagedByValue+","+LabelService+"="+s.serviceID)
+	items, err := s.listCRsAll(ctx, CRGroup, CRVersion, CRPlural, LabelManagedBy+"="+ManagedByValue+","+LabelService+"="+s.serviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -734,7 +806,7 @@ func (s *Service) DueForAutoPause(ctx context.Context) ([]Due, error) {
 // Sandbox CR (any labels, terminating ones too) and the source/destination refs of build and
 // snapshot pods in sbx-build. Registry pruning must keep all of them.
 func (s *Service) RegistryRefsInUse(ctx context.Context) ([]string, error) {
-	crs, err := s.api.ListCRsAllNamespaces(ctx, CRGroup, CRVersion, CRPlural, "")
+	crs, err := s.listCRsAll(ctx, CRGroup, CRVersion, CRPlural, "")
 	if err != nil {
 		return nil, err
 	}

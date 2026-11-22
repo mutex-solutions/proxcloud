@@ -534,6 +534,18 @@ type PVESandbox struct {
 	// Portal is config.sandbox.portal: the portal API's address and port as sandbox-proxy reaches it to wake a paused
 	// sandbox (docs/managed-sandbox.md §8), when it is a private address. Empty: no rule.
 	Portal PVESandboxRegistry
+	// What a managed platform's run writes for its own sandbox machines (docs/managed-services.md, Sandboxes), which
+	// sit on the platform network and not on a vnet of their own. Owner is config.sandbox.platformInstallationId, the
+	// installation the block belongs to ("" = the installer's). Mode is shared (a node group of the platform cluster)
+	// or separate (the cluster pc-sandbox). Bridge and VLAN say where the machines' NIC is; Peers are the platform
+	// cluster's own machines (shared only); Deny is what no sandbox machine reaches on top of what the sync reads from
+	// the site: the platform network.
+	Owner  string
+	Mode   string
+	Bridge string
+	VLAN   int
+	Peers  []string
+	Deny   []string
 }
 
 // PVESandboxRegistry is config.sandbox.registry: the sandbox registry's address and port (docs/managed-sandbox.md §6),
@@ -561,6 +573,8 @@ func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
 		Pool: str(s["pool"]), Nodes: strList(s["nodes"]), LoadBalancers: strList(s["loadBalancers"]),
 		DNS: strList(s["dns"]), KubeletSources: strList(s["kubeletSources"]), SNAT: str(s["snat"]),
 		UnsecuredMinAge: 20 * time.Minute, Kubeconfig: str(e.secretMap()["sandboxKubeconfig"]),
+		Owner: str(s["platformInstallationId"]), Mode: str(s["mode"]), Bridge: str(s["bridge"]), VLAN: intOf(s["vlan"]),
+		Peers: strList(s["peers"]), Deny: strList(s["deny"]),
 	}
 	if m := intOf(s["unsecuredMinAgeMinutes"]); m > 0 {
 		cfg.UnsecuredMinAge = time.Duration(m) * time.Minute

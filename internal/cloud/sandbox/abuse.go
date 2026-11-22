@@ -189,11 +189,11 @@ func (s *Service) AbuseSamples(ctx context.Context) ([]Sample, error) {
 			stats[x.PodUID] = x
 		}
 	}
-	crs, err := s.api.ListCRsAllNamespaces(ctx, CRGroup, CRVersion, CRPlural, LabelManagedBy+"="+ManagedByValue+","+LabelService+"="+s.serviceID)
+	crs, err := s.listCRsAll(ctx, CRGroup, CRVersion, CRPlural, LabelManagedBy+"="+ManagedByValue+","+LabelService+"="+s.serviceID)
 	if err != nil {
 		return nil, err
 	}
-	pods, err := s.api.ListPodsAllNamespaces(ctx, LabelManagedBy+"="+ManagedByValue+","+LabelService+"="+s.serviceID)
+	pods, err := s.listPodsAll(ctx, LabelManagedBy+"="+ManagedByValue+","+LabelService+"="+s.serviceID)
 	if err != nil {
 		return nil, err
 	}
