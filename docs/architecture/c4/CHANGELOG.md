@@ -4,6 +4,34 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-22: a load balancer loses no request at a reload or a node change (#430)
+
+**What changed:** no new component, container or relation. `internal/cloud/pve`: the HAProxy config of every balancer
+names a state file and reads it back (`haproxyGlobal`), sends a connection a member does not take to another member
+(`option redispatch 1`, `retries 3`, connect timeout 2 s, was 5), and names a backend by its pool instead of its
+place (`lbBackends`, used by the render and by `ParseHAProxyStat`); the apply saves `show servers state` before its
+reload (`haproxyReload`); keepalived's track script also asks for the config's first listener (`lbPairFiles`,
+`lbWorkerFn`); `LBHealth` tells a HAProxy that does not answer from a VM that does not (`ErrLBNoHAProxy`); the VM
+inventory takes `paused` for a known status (`inventoryVMPage`). `internal/platform/project`: a balancer's lock is a
+lease its holder extends (`lbLock`, `lbLease`; it was a three-minute lock at seven places), a cluster's pool is named
+by its Service and node port (`lbClusterServiceSpec`), a Service is ready when the appliance that holds the address
+serves the config (`lbClusterApply`), a config an appliance refused goes to no other appliance in that pass and a
+paused appliance holds no address (`lbApplyPair`), the pair's message names a paused appliance and an address holder
+that is behind (`lbPairStatus`), and a replace reads the remaining appliance before it builds (`lbReplaceStep`).
+`cmd/lb-controller`: a Node is sent from its first turn Ready on, and a controller that starts takes every node it
+finds for a member (`readNodes`, `controller.members`), and a
+Service's address is written when the portal answers ready (`turn`, `hasIngress`), as cloud-provider-openstack
+does (`pkg/openstack/loadbalancer.go`, `ensureOctaviaLoadBalancer`, v1.34.0: an error while the balancer's
+provisioning status is not `ACTIVE`, the status after it).
+
+**Why:** the known issues `v0.11.0` shipped with (drill N3 of v0.11.0-rc.2: N3-8, N3-9, N3-5, N3-6, N3-7, N3-3 and
+the nits N3-1, N3-2, N3-4): requests lost for 2.2 to 10.3 s at a reload or a node change, a change live 190 to 209 s
+after an API stop, a paused VM that left its project's inventory unproved, a Service's address written minutes before
+it answered.
+
+**Diagrams:** none (C4.2a's rows of `RenderHAProxy`, `PushHAProxy`, `lbApplyPair`, `LBClusterState` and
+`controller.turn` say the new behaviour). Every balancer's config changes: each is pushed once after the upgrade
+(CHANGELOG, Upgrade notes).
 ## 2026-11-22: the sandbox chart and the cluster chart's per-group pool, range and DNS
 
 **What changed:** a new chart, `proxcloud-sandbox` 0.1.0 (`deploy/charts/proxcloud-sandbox`, tag `proxcloud-sandbox-v*`

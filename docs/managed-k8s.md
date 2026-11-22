@@ -931,16 +931,22 @@ cluster with one or two workers, clients outside the cluster; a sample, not a pr
   a member 14 s after its Node object appeared, 53 s before it was Ready, and HAProxy takes a new member for healthy
   until two checks fail: 22 of 44 requests failed in 4.4 s. A removed worker left the config 14 s after its Node was
   gone, but its VM had stopped before: 52 requests failed in 10.3 s. The same is to be expected at every worker
-  replacement.
+  replacement. **From v0.11.1** a node is sent once it is Ready, and a connection a member does not take is tried on
+  another member after a connect timeout of 2 s (`option redispatch 1`): a request waits instead of failing. Not run
+  on a lab.
 - **A member that is down is tried again after every reload** (rc.2, twice). With a policy `Local` Service on a
   cluster where one node has no local endpoint, each change of another Service of the cluster cost that Service 11 to
-  12 requests in 2.2 to 2.4 s: a reload starts every member as up. A dead node across a reload was not run.
+  12 requests in 2.2 to 2.4 s: a reload starts every member as up. A dead node across a reload was not run. **From
+  v0.11.1** a member's state is kept over a reload (the apply saves `show servers state`, the config reads it back,
+  and a backend is named by its pool so that a change of another Service does not rename it). Shown on HAProxy 3.0
+  and 3.2 in the container test (`test/integration/lb_appliance_test.go`), not on a lab.
 - **A stopped master appliance** cost 3.1 to 3.5 s. The portal started it again 31 s later on rc.2, with no sync and
   no tenant action (one run; the bound is about 70 s, the look once a minute).
 - **The controller's cost** (rc.2, one idle cluster with one Service): 18.6 Proxmox calls a minute, against 132 on
   rc.1, where every PUT started a pass.
 - **An API stopped during a change** (rc.2, three times): the cluster's lock ran out after about 58 s, and the change
-  was live 190 to 209 s after the stop, because the balancer's own lock is held for up to 3 minutes. On rc.1 the
+  was live 190 to 209 s after the stop, because the balancer's own lock was held for up to 3 minutes (a one-minute
+  lease its holder extends from v0.11.1, as the cluster's; tests only). On rc.1 the
   cluster's lock was held for 20 minutes (24.7 minutes without a converge). Traffic was not touched in either.
 - **A refused credential** (rc.2): after a rotation the old one was refused with one log line that names the cluster
   and the reason, and one audit row; the controller had the new one after 75 s.
@@ -969,15 +975,24 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
 - Every 10 s it lists every Service and Node and PUTs the whole state: a poll, not a watch, so a PUT never comes from a
   half-filled cache (a watch when a cluster has hundreds of Services). It owns a Service of type LoadBalancer of class
   `proxcloud.io/lb`, and in default mode also one without a class; never `proxcloud.io/internal` or another class.
-  Nodes labelled `node.kubernetes.io/exclude-from-external-load-balancers` and nodes being deleted are left out; the
-  balancer's health check decides whether a node serves, so a node that is not Ready yet is sent too (the lab's
-  figures below say what that costs). The oldest Service is sent first, so a full balancer refuses
-  the newest.
+  Nodes labelled `node.kubernetes.io/exclude-from-external-load-balancers` and nodes being deleted are left out. A
+  node is sent from its first turn Ready on, and then for as long as it exists: a member that goes NotReady stays,
+  and the balancer's health check decides whether it serves, as with Kubernetes' own service controller, which
+  hands a balancer every node that is not deleted, excluded or tainted for removal (`k8s.io/cloud-provider`
+  `controllers/service/controller.go`, `stableNodeSetPredicates`). It differs from that controller in waiting for
+  the first Ready, because HAProxy before 3.1 starts a member new to its config as up (v0.11.0 sent a node as soon as
+  its object existed; the lab's figures below say what that cost). What was sent is the process's memory: a
+  controller that starts takes every node it finds for a member, Ready or not, so a restart takes no member out of
+  a balancer, and a node that joins in that very turn is sent before it is Ready. The oldest Service is sent first,
+  so a full balancer refuses the newest.
 - An owned Service gets the finalizer `proxcloud.io/load-balancer` before it is first sent. A Service deleted, turned
   into another type or of another class keeps it until a PUT without it is accepted, then loses it (and its address in
   the status); while the gateway cannot be reached it stays `Terminating`, as with any cloud controller.
-- `status.loadBalancer.ingress` gets the address once the portal has one, which for a cluster's first Service is
-  minutes before the pair serves it; `ipMode: Proxy` with the annotation
+- `status.loadBalancer.ingress` gets the address when the portal answers the Service `ready`, which it does when the
+  appliance that holds the address serves the Service's listeners (v0.11.0 wrote it as soon as an address was
+  allocated, minutes before a cluster's first Service answered; Kubernetes' own service controller also patches the
+  status only with what a provider returns once its balancer is provisioned). An address already written stays while
+  a later change is building and goes when the portal names none. `ipMode: Proxy` with the annotation
   `proxcloud.io/lb-proxy-protocol: "true"` and `VIP` otherwise. **With `VIP`, a client inside the cluster never
   reaches the balancer**: kube-proxy treats an address with that mode as one of the Service's own and sends a pod's or
   a node's connection to it straight to an endpoint. Such a client does not see an outage of the pair or a switch

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 type fakeTenant struct {
 	services map[string]map[string]any
 	nodes    []map[string]any
+	nodesErr error // ListNodes fails with it
 	events   []map[string]any
 	rv       int
 }
@@ -36,7 +38,7 @@ func (f *fakeTenant) ListServicesAllNamespaces(context.Context) ([]map[string]an
 	return out, nil
 }
 
-func (f *fakeTenant) ListNodes(context.Context) ([]map[string]any, error) { return f.nodes, nil }
+func (f *fakeTenant) ListNodes(context.Context) ([]map[string]any, error) { return f.nodes, f.nodesErr }
 
 func (f *fakeTenant) PatchService(_ context.Context, ns, name string, patch map[string]any) error {
 	s := f.services[ns+"/"+name]
@@ -121,10 +123,135 @@ func tcp(port, nodePort int) map[string]any {
 	return map[string]any{"name": "p" + strconv.Itoa(port), "protocol": "TCP", "port": float64(port), "nodePort": float64(nodePort)}
 }
 
+// node is a Node as the kubelet keeps it once it runs: Ready.
 func node(name, ip string, labels map[string]any) map[string]any {
 	return map[string]any{
 		"metadata": map[string]any{"name": name, "labels": labels},
-		"status":   map[string]any{"addresses": []any{map[string]any{"type": "Hostname", "address": name}, map[string]any{"type": "InternalIP", "address": ip}}},
+		"status": map[string]any{"addresses": []any{map[string]any{"type": "Hostname", "address": name}, map[string]any{"type": "InternalIP", "address": ip}},
+			"conditions": []any{map[string]any{"type": "MemoryPressure", "status": "False"}, map[string]any{"type": "Ready", "status": "True"}}},
+	}
+}
+
+// ready sets a Node's Ready condition: "True", "False" (the kubelet says so: no CNI yet), "Unknown" (the kubelet is
+// silent), or "" for a Node that has no condition yet, as in its first seconds.
+func ready(n map[string]any, status string) map[string]any {
+	st := n["status"].(map[string]any)
+	st["conditions"] = []any{}
+	if status != "" {
+		st["conditions"] = []any{map[string]any{"type": "Ready", "status": status}}
+	}
+	return n
+}
+
+func addresses(req *lbgw.Request) []string {
+	out := []string{}
+	for _, n := range req.Nodes {
+		out = append(out, n.Address)
+	}
+	return out
+}
+
+// A node is a member from its first turn Ready on (drill N3-8: a worker sent 53 s before it was Ready took every
+// second request for 4.4 s), and stays one while it exists, Ready or not, as with Kubernetes' own service controller:
+// its health check decides. A node that is deleted, or labelled out, leaves and starts over.
+func TestNodesAreSentFromTheirFirstReadyOn(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTenant{services: map[string]map[string]any{}}
+	f.add("web", "a", "u-1", "2026-11-21T10:00:00Z", lbSpec(Class, tcp(80, 30080)))
+	g := &gatewayFake{answer: func(s lbgw.Service) lbgw.ServiceStatus {
+		return lbgw.ServiceStatus{UID: s.UID, State: lbgw.StateBuilding}
+	}}
+	c := &controller{api: f, put: g.put, log: quiet()}
+	turn := func(when string, want ...string) {
+		t.Helper()
+		if err := c.turn(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := addresses(g.last); !slices.Equal(got, want) {
+			t.Fatalf("%s: nodes sent %v, want %v", when, got, want)
+		}
+	}
+	w1, w2 := node("w1", "10.0.0.11", nil), ready(node("w2", "10.0.0.12", nil), "")
+	f.nodes = []map[string]any{w1}
+	turn("the controller's first turn", "10.0.0.11")
+	f.nodes = []map[string]any{w1, w2}
+	turn("a Node object without conditions", "10.0.0.11")
+	ready(w2, "False")
+	turn("a node that is NotReady and never was a member", "10.0.0.11")
+	ready(w2, "Unknown")
+	turn("a node whose kubelet is silent and never was a member", "10.0.0.11")
+	ready(w2, "True")
+	turn("Ready", "10.0.0.11", "10.0.0.12")
+	ready(w1, "False")
+	turn("a member that goes NotReady stays: its health check decides", "10.0.0.11", "10.0.0.12")
+	ready(w1, "Unknown")
+	turn("a member whose kubelet is silent stays", "10.0.0.11", "10.0.0.12")
+	// Labelled out and back in while NotReady: it starts over.
+	w1["metadata"].(map[string]any)["labels"] = map[string]any{excludeLabel: ""}
+	turn("labelled out", "10.0.0.12")
+	w1["metadata"].(map[string]any)["labels"] = nil
+	turn("labelled in again, still not Ready", "10.0.0.12")
+	// Deleted and replaced by a machine of the same name that is not Ready yet.
+	w2["metadata"].(map[string]any)["deletionTimestamp"] = "2026-11-22T10:00:00Z"
+	turn("being deleted", []string{}...)
+	f.nodes = []map[string]any{w1, ready(node("w2", "10.0.0.14", nil), "False")}
+	turn("a new machine under an old name", []string{}...)
+	ready(f.nodes[1], "True")
+	turn("the new machine is Ready", "10.0.0.14")
+	// A controller that starts over does not know what the balancer has: every node it finds is a member, Ready or
+	// not (w1 is not), so a restart takes no member out. A node that joins after that waits for its first Ready.
+	c = &controller{api: f, put: g.put, log: quiet()}
+	turn("after a restart", "10.0.0.11", "10.0.0.14")
+	f.nodes = append(f.nodes, ready(node("w3", "10.0.0.15", nil), "False"))
+	turn("a node that joins a restarted controller, not Ready", "10.0.0.11", "10.0.0.14")
+	// A turn that could not list the nodes is not the first one: the next still takes every node.
+	c = &controller{api: f, put: g.put, log: quiet()}
+	f.nodesErr = errors.New("no answer")
+	if err := c.turn(ctx); err == nil {
+		t.Fatal("a turn without the list of nodes passed")
+	}
+	f.nodesErr = nil
+	turn("the first turn that read the nodes", "10.0.0.11", "10.0.0.14", "10.0.0.15")
+}
+
+// The address is written when the portal says the Service is served, not when it has an address (drill N3-7: 3 min
+// 12 s before the first answer), stays while a later change is building, and goes when the portal names none.
+func TestIngressIsWrittenWhenTheServiceIsServed(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTenant{services: map[string]map[string]any{}}
+	f.add("web", "a", "u-1", "2026-11-21T10:00:00Z", lbSpec(Class, tcp(80, 30080)))
+	f.nodes = []map[string]any{node("w1", "10.0.0.11", nil)}
+	st := lbgw.ServiceStatus{UID: "u-1", State: lbgw.StateBuilding}
+	g := &gatewayFake{answer: func(lbgw.Service) lbgw.ServiceStatus { return st }}
+	c := &controller{api: f, put: g.put, log: quiet()}
+	turn := func(when string, want ...string) {
+		t.Helper()
+		if err := c.turn(ctx); err != nil {
+			t.Fatal(err)
+		}
+		got := []string{}
+		for _, i := range ingress(f.svc("web", "a")) {
+			got = append(got, i.(map[string]any)["ip"].(string))
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s: ingress %v, want %v", when, got, want)
+		}
+	}
+	turn("building, no address yet")
+	st.Address = "203.0.113.7"
+	turn("the address is allocated and the appliances are being built")
+	st.State = lbgw.StateReady
+	turn("served", "203.0.113.7")
+	st.State = lbgw.StateBuilding
+	turn("a later change is building: the address answers and stays", "203.0.113.7")
+	st.Address = "203.0.113.8"
+	turn("building on another address: the one written stays until the new one is served", "203.0.113.7")
+	st.State = lbgw.StateReady
+	turn("the new address is served", "203.0.113.8")
+	st = lbgw.ServiceStatus{UID: "u-1", State: lbgw.StateRefused, Reason: lbgw.ReasonQuotaExceeded, Message: "no"}
+	turn("refused, the address given back")
+	if got := reasons(f.events); !slices.Equal(got, []string{"a:EnsuringLoadBalancer", "a:EnsuredLoadBalancer", "a:EnsuringLoadBalancer", "a:EnsuredLoadBalancer", "a:QuotaExceeded"}) {
+		t.Fatalf("events = %v", got)
 	}
 }
 

@@ -140,9 +140,10 @@ swap || { mv $F.old $F; swap; exit 1; }`
 // appliance is built from, with the distribution's systemd, dpkg, HAProxy and keepalived; the product's own calls
 // (PushKeepalived, PushPairHAProxy, PushHAProxy, ReadVRRPState, HAProxyServing, LBHealth) reach it through the guest
 // agent API. Shown: the first push through the product's own install, never taken before dpkg is done; the package's
-// first start still under way, where the apply of v0.11.0-rc.1 answered success with nothing listening; a stopped
-// HAProxy and a stopped keepalived on a running guest; an apply whose proof fails; the single appliance's config; and
-// the mode of every file the agent wrote.
+// first start still under way, where the apply of v0.11.0-rc.1 answered success with nothing listening, and where
+// keepalived now gives the address up (drill N3-3); a stopped HAProxy and a stopped keepalived on a running guest; an
+// apply whose proof fails; a member that does not answer, which costs no request and stays DOWN over a reload (drill
+// N3-8); the single appliance's config; and the mode of every file the agent wrote.
 func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
 		t.Run(image, func(t *testing.T) {
@@ -262,6 +263,19 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			if _, notLoaded, err := ps.LBHealth(ctx, "n1", 100, spec(80)); err != nil || len(notLoaded) != 1 || notLoaded[0] != "80" {
 				t.Fatalf("control: health of an appliance on the package's config: %q %v", notLoaded, err)
 			}
+			// Drill N3-3: such an appliance kept the address for 25 s, until the next pass, since keepalived's track
+			// script only asked for HAProxy's worker. It asks for the config's first listener too, once the file is
+			// ten seconds old: FAULT, with HAProxy running, and the address is given up for the peer to take. It is
+			// asked 15 s on: the stop a moment ago made a FAULT of its own, which is over by then (with the script
+			// of v0.11.0 the appliance is MASTER and holds the address again, and this step fails).
+			for asked, deadline := time.Now().Add(15*time.Second), time.Now().Add(45*time.Second); ; time.Sleep(500 * time.Millisecond) {
+				if st := state(); time.Now().After(asked) && st.State == "FAULT" && !st.HoldsVIP && st.HAProxy && !st.Serving {
+					break
+				} else if time.Now().After(deadline) {
+					t.Fatalf("an appliance whose HAProxy runs without the balancer's listeners kept the address: %+v\n%s", st,
+						g.run(ctx, "cat /usr/local/sbin/proxcloud-lb-check; journalctl -u keepalived --no-pager | tail -20"))
+				}
+			}
 			// The same start, and the product's apply: it waits for the start, reloads, and listens.
 			g.run(ctx, lbPackageStart)
 			if err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
@@ -317,7 +331,121 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 				t.Fatalf("health of a serving appliance: %+v %q %v", health, notLoaded, err)
 			}
 
-			// 5. A single appliance's config binds every address.
+			// 5. Members and reloads (drill N3-8 of v0.11.0: 2.2 to 10.3 s of lost requests at every reload or node
+			// change). A pool of two members: one answers (a listener in the guest), one never does (its address is
+			// routed into the guest's loopback, where nobody has it: a connection to it gets no answer, as to a VM
+			// that was just stopped).
+			g.run(ctx, "ip route replace 10.0.0.12/32 dev lo && systemd-run -q --unit=lb-test-member socat TCP-LISTEN:18080,bind=127.0.0.1,fork,reuseaddr SYSTEM:'echo ok'")
+			members := func(listen80 bool) pve.LBSpec {
+				s := pve.LBSpec{}
+				if listen80 { // a pool before the one this step looks at, which comes and goes
+					s = spec(80)
+				}
+				s.Pools = append(s.Pools, pve.LBPool{Name: "tcp", Protocol: "tcp", Algorithm: "roundrobin", Members: []pve.LBMember{
+					{ServerID: "201", Port: 18080, Weight: 1, Address: "127.0.0.1"}, {ServerID: "202", Port: 18080, Weight: 1, Address: "10.0.0.12"}}})
+				s.Listeners = append(s.Listeners, pve.LBListener{Port: 8082, Pool: "tcp"})
+				return s
+			}
+			// What HAProxy says of the two members right now: UP or DOWN. Its own words say more ("UP 1/2" is a
+			// member new to a config, which goes down at its first failed check).
+			says := func(s pve.LBSpec) string {
+				t.Helper()
+				health, notLoaded, err := ps.LBHealth(ctx, "n1", 100, s)
+				if err != nil || len(notLoaded) != 0 {
+					t.Fatalf("health: %q %v", notLoaded, err)
+				}
+				var out []string
+				for _, m := range health {
+					if m.Pool == "tcp" {
+						out = append(out, m.ServerID+" "+strings.Join(strings.Fields(m.Status)[:1], ""))
+					}
+				}
+				return strings.Join(out, ", ")
+			}
+			// n requests through the balancer's address, one after the other; each must get the member's answer.
+			requests := func(when string, n int) time.Duration {
+				t.Helper()
+				start := time.Now()
+				for i := range n {
+					if code, out, stderr := g.sh(ctx, "req", "socat", "-u", "TCP:"+vip+":8082,connect-timeout=10", "-"); code != 0 || strings.TrimSpace(out) != "ok" {
+						t.Fatalf("%s: request %d of %d was lost: exit %d %q %s\n%s", when, i+1, n, code, out, stderr, says(members(true)))
+					}
+				}
+				return time.Since(start)
+			}
+			redispatched := func() string {
+				return g.run(ctx, `echo "show stat" | socat - /run/haproxy/admin.sock | awk -F, 'NR==1{for(i=1;i<=NF;i++) if($i=="wredis") c=i} $1=="p-tcp" && $2=="BACKEND"{print $c}'`)
+			}
+			for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(500 * time.Millisecond) { // the steps before restarted HAProxy
+				if st := state(); st.State == "MASTER" && st.HoldsVIP {
+					break
+				} else if time.Now().After(deadline) {
+					t.Fatalf("the appliance does not hold the address: %+v", st)
+				}
+			}
+			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
+				t.Fatalf("push the pool of two members: %v", err)
+			}
+			// Both members are new to the config, so both start UP: the one that never answers gets every second
+			// request until its first check has failed. None is lost: its connect times out and the request goes to
+			// the other member.
+			if got := says(members(true)); got != "201 UP, 202 UP" {
+				t.Fatalf("members new to a config: %s", got)
+			}
+			took := requests("a member that does not answer, not found out yet", 4)
+			if n := redispatched(); n == "" || n == "0" {
+				t.Fatalf("no request went to the member that does not answer (redispatched %q in %s): the step proves nothing", n, took)
+			}
+			t.Logf("4 requests while a member that does not answer still counted as UP: all answered, in %s, %s of them on a second member", took, redispatched())
+			for deadline := time.Now().Add(40 * time.Second); says(members(true)) != "201 UP, 202 DOWN"; time.Sleep(500 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatalf("the member that does not answer was never found out: %s", says(members(true)))
+				}
+			}
+			// A reload that changes the pools before it (the listener on 80 and its pool go): the member that was
+			// DOWN is DOWN from the first moment, under a backend whose name did not move, and no request waits.
+			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(false), []string{vip})); err != nil {
+				t.Fatalf("reload: %v", err)
+			}
+			if got := says(members(false)); got != "201 UP, 202 DOWN" {
+				t.Fatalf("right after a reload: %s, want the member that was DOWN still DOWN\n%s", got, g.run(ctx, "cat /var/lib/haproxy/server-state"))
+			}
+			if took := requests("right after a reload", 6); redispatched() != "0" || took > 3*time.Second {
+				t.Fatalf("after a reload a request went to the member that was DOWN: %s redispatched, 6 requests took %s", redispatched(), took)
+			}
+			listens("after the reload that kept the members' state", vip+":8082")
+			if got := g.run(ctx, "stat -c %a:%U:%G /var/lib/haproxy/server-state"); got != "644:root:root" {
+				t.Fatalf("the state file is %s", got)
+			}
+			// The control: the same reload with no state saved starts the member UP again, as every reload did
+			// before. It also shows that HAProxy loads a config whose state file is not there.
+			g.run(ctx, `rm /var/lib/haproxy/server-state && printf 'reload\n' | socat -t30 - /run/haproxy-master.sock | grep -q 'Success=1'`)
+			if got := says(members(false)); got != "201 UP, 202 UP" {
+				t.Fatalf("control: a reload with no saved state: %s, want every member UP", got)
+			}
+			requests("control: after a reload with no saved state", 2)
+			if n := redispatched(); n == "0" {
+				t.Fatalf("control: no request went to the member a reload without state brought back")
+			}
+			// A HAProxy that was stopped has no state: the apply leaves no stale file for the start to read.
+			for deadline := time.Now().Add(40 * time.Second); says(members(false)) != "201 UP, 202 DOWN"; time.Sleep(500 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatalf("control: the member was never found out again: %s", says(members(false)))
+				}
+			}
+			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
+				t.Fatalf("reload: %v", err)
+			}
+			g.run(ctx, "test -s /var/lib/haproxy/server-state && systemctl stop haproxy")
+			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
+				t.Fatalf("push with HAProxy stopped: %v", err)
+			}
+			if got := says(members(true)); got != "201 UP, 202 UP" {
+				t.Fatalf("a HAProxy started from nothing read a state: %s", got)
+			}
+			g.run(ctx, "systemctl stop lb-test-member")
+
+			// 6. A single appliance's config binds every address.
 			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
 				t.Fatalf("single appliance: %v", err)
 			}
@@ -334,7 +462,7 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			}
 			listens("single appliance started again", "0.0.0.0:80")
 
-			// 6. The agent made every file 0666 (the control; /tmp is a mount docker cp does not reach); what the
+			// 7. The agent made every file 0666 (the control; /tmp is a mount docker cp does not reach); what the
 			// product left is root's, 0644, scripts 0755.
 			if err := g.c.CopyToContainer(ctx, []byte("x"), "/root/agent-wrote", 0o666); err != nil {
 				t.Fatal(err)

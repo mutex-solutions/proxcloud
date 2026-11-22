@@ -35,6 +35,11 @@ func TestLBPairStatus(t *testing.T) {
 		{"first build", []lbAppliance{{ServerID: "1", State: lbAppBuilding}, {ServerID: "2", State: lbAppBuilding}}, false, lbStatusBuild, ""},
 		{"first build past the limit", []lbAppliance{{ServerID: "1", State: lbAppBuilding}, {ServerID: "2", State: lbAppBuilding}}, true, lbStatusError, "keepalived"},
 		{"only one appliance in the row (replace)", []lbAppliance{up("1", true)}, false, lbStatusDegraded, "no standby"},
+		// Drill N3-6: a paused VM holds nothing (lbApplyPair clears what the row said), and the row names the pause.
+		{"one paused", []lbAppliance{up("1", true), down("2", lbReasonPaused)}, false, lbStatusDegraded, "no standby (appliance 2: its VM is paused). A paused VM serves again when it is resumed"},
+		// Drill N3-4: the master could not take a change yet and serves the config of before; the standby has it.
+		{"the holder is the one behind", []lbAppliance{up("1", false), {ServerID: "2", State: lbAppDown, HoldsVIP: true, HAProxyHash: "old", Reason: "it runs an older configuration"}}, false,
+			lbStatusDegraded, "The appliance that holds the address is the one that is not in order (appliance 2: it runs an older configuration); the other one is ready, as its standby"},
 	} {
 		status, msg := lbPairStatus(c.apps, c.stuck, false)
 		if status != c.status || !strings.Contains(msg, c.says) {

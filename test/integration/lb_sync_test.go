@@ -28,7 +28,7 @@ import (
 // syncVM is one VM of the Proxmox cluster syncWire fakes, as the v0.11.0-rc.1 drill met them (N2-1).
 type syncVM struct {
 	pool, tags, own string   // its project pool, its tags, the address the product configured on net0
-	power           string   // "" running, "stopped" or "paused": Proxmox says so, and the guest agent of such a VM answers nobody
+	power           string   // "" running, "stopped" or "paused": Proxmox says so, in its list too, and the guest agent of such a VM answers nobody
 	agentRefuses    bool     // it runs and its agent does not answer (403)
 	extra           []string // what its running guest reports on top of own: a pair's address on the master, a container bridge
 	role            string   // an appliance's keepalived state while it runs
@@ -156,8 +156,8 @@ func (f *syncWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, id := range ids {
 			vm := f.vms[id]
 			status := "running"
-			if vm.power == "stopped" {
-				status = "stopped"
+			if vm.power != "" { // "stopped", and "paused" as the lab's Proxmox lists it (drill N3-5)
+				status = vm.power
 			}
 			rows = append(rows, map[string]any{"id": fmt.Sprintf("qemu/%d", id), "type": "qemu", "vmid": id, "node": "n1", "pool": vm.pool,
 				"name": fmt.Sprintf("vm-%d", id), "status": status, "template": 0, "tags": vm.tags, "maxcpu": 2, "maxmem": int64(2 << 30), "maxdisk": int64(8 << 30)})
@@ -348,5 +348,101 @@ func TestSyncRepairsAStoppedApplianceWhateverElseIsUnknown(t *testing.T) {
 				t.Fatalf("the unknown project: seed sweeps %d, row\n%s\nwant\n%s", seeds, after, before)
 			}
 		})
+	}
+}
+
+// N3-5 and N3-6 of the v0.11.0-rc.2 drill. Proxmox lists a paused VM as "paused", a status the inventory had never
+// seen: the VM's project was untrusted for as long as the pause lasted, which is every VM of a project an operator
+// suspends. And the pair whose master was paused read "Both appliances hold the address", from what the paused one
+// held before. Here a tenant's VM and a pair's former master are paused: one sync trusts the provider, the rows read
+// PAUSED, nobody starts a paused VM, and the balancer's row names the pause.
+func TestSyncKnowsAPausedVM(t *testing.T) {
+	const vip = "198.51.100.9"
+	ctx := context.Background()
+	db := freshPG(t)
+	repo := cloud.NewRepo(db)
+	f := &syncWire{t: t, vms: map[int]*syncVM{
+		101: {pool: "pc-pl", tags: "proxcloud", own: "10.0.0.5", power: "paused"},
+		301: {pool: "pc-pl", tags: "proxcloud;pc-lb-abc", own: "10.0.0.31", role: "MASTER", extra: []string{vip}}, // it took over
+		302: {pool: "pc-pl", tags: "proxcloud;pc-lb-abc", own: "10.0.0.32", role: "BACKUP", power: "paused"},
+	}}
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "s", "name": "fixture", "type": "CLOUD", "status": "PUBLIC", "config": pgdoc.M{
+		"provider": "proxmox", "apiUrl": srv.URL, "region": "r", "poolPrefix": "pc-", "network": pgdoc.M{"cidrPool": "10.100.0.0/16",
+			"publicNetworks": []any{pgdoc.M{"id": "vmbr1", "cidr": "198.51.100.0/24", "gateway": "198.51.100.1", "ranges": []any{"198.51.100.5-198.51.100.20"}}}}}})
+	mustInsert(t, db, "project", pgdoc.M{"_id": "pl", "name": "pl", "status": "ENABLED", "services": []any{pgdoc.M{"serviceId": "s"}}})
+	past := time.Now().UTC().Add(-time.Hour)
+	rows := map[string]*cloud.CloudResource{}
+	for id, own := range map[string]string{"101": "10.0.0.5", "301": "10.0.0.31", "302": "10.0.0.32"} {
+		n, _ := strconv.Atoi(id)
+		cr, err := repo.Insert(ctx, &cloud.CloudResource{ProjectID: "pl", ServiceID: "s", ExternalID: id, Region: "r", Type: cloud.TypeServer,
+			CreatedAt: &past, UpdatedAt: &past, Data: map[string]any{"pveUUID": fmt.Sprintf("11111111-1111-4111-8111-%012d", n),
+				"server": map[string]any{"status": "ACTIVE", "host": "n1", "addresses": map[string]any{"private": []any{map[string]any{"addr": own, "version": 4}}}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows[id] = cr
+	}
+	// The pair as its last apply left it: 302 the master, holding the address.
+	if _, err := repo.Insert(ctx, &cloud.CloudResource{ProjectID: "pl", ServiceID: "s", ExternalID: "lb-abc", Region: "r", Type: cloud.TypeLoadBalancer,
+		CreatedAt: &past, UpdatedAt: &past, Data: map[string]any{"loadbalancer": map[string]any{
+			"id": "abc", "name": "web", "status": "ACTIVE", "networkId": "v1", "publicNetworkId": "vmbr1", "ha": true, "vips": []any{vip},
+			"privateIp": "10.0.0.31", "privatePrefix": 24,
+			"appliances": []any{
+				map[string]any{"serverId": "301", "node": "n1", "privateIp": "10.0.0.31", "tenantIface": "eth0", "publicIface": "eth1", "role": "BACKUP", "state": "up"},
+				map[string]any{"serverId": "302", "node": "n1", "privateIp": "10.0.0.32", "tenantIface": "eth0", "publicIface": "eth1", "role": "MASTER", "holdsVip": true, "state": "up"},
+			}}}}); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "portal@pve!sync", Secret: "key"}, "s", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pveFor := func(*externalservice.ExternalService) (*pve.Service, error) { return ps, nil }
+	es := externalservice.NewService(externalservice.NewRepo(db), textcrypt.New("k"))
+	locks := lock.New(db)
+	h := project.NewHandler(project.NewService(project.NewRepo(db), nil, nil, nil, nil), nil, nil, nil, nil, nil, repo, es, nil, nil, "")
+	h.SetProxmox(pveFor)
+	h.SetSDNLock(locks)
+	h.SetPublicIPs(project.NewPublicIPRepo(db))
+	seeds := 0
+	j := syncjob.New(project.NewRepo(db), es, repo, nil).WithProxmoxFactory(pveFor).WithSDNLock(locks).
+		WithLoadBalancers(h.ReconcileLoadBalancers).
+		WithStaleSeeds(func(context.Context, *pve.Service, *externalservice.ExternalService) error { seeds++; return nil })
+	for round := 0; round < 2; round++ {
+		if _, err := j.Run(ctx); err != nil {
+			t.Fatal(err)
+		}
+		// The provider is trusted: the one pass that deletes on a row's absence ran.
+		if seeds != round+1 {
+			t.Fatalf("round %d: a paused VM made the provider untrusted: seed sweeps %d\nwrites: %v", round, seeds, f.writes)
+		}
+		for _, id := range []string{"101", "302"} {
+			if row, _ := repo.FindByID(ctx, rows[id].ID); row.Data["server"].(map[string]any)["status"] != "PAUSED" {
+				t.Fatalf("round %d: the row of paused VM %s reads %v", round, id, row.Data["server"].(map[string]any)["status"])
+			}
+		}
+		if row, _ := repo.FindByID(ctx, rows["301"].ID); row.Data["server"].(map[string]any)["status"] != "ACTIVE" {
+			t.Fatalf("round %d: the running appliance's row reads %v", round, row.Data["server"].(map[string]any)["status"])
+		}
+		lb, err := repo.FindByServiceIDAndExternalID(ctx, "s", "lb-abc")
+		if err != nil || lb == nil {
+			t.Fatalf("balancer row: %v", err)
+		}
+		data, _ := lb.Data["loadbalancer"].(map[string]any)
+		msg, _ := data["statusMessage"].(string)
+		if data["status"] != "DEGRADED" || !strings.Contains(msg, "One appliance carries the traffic, with no standby (appliance 302: its VM is paused)") ||
+			strings.Contains(msg, "Both appliances hold") {
+			t.Fatalf("round %d: balancer row %v %q", round, data["status"], msg)
+		}
+		for _, a := range data["appliances"].([]any) {
+			if app := a.(map[string]any); (app["serverId"] == "302") == (app["holdsVip"] == true) {
+				t.Fatalf("round %d: who holds the address: %v", round, data["appliances"])
+			}
+		}
+	}
+	if f.vms[101].starts+f.vms[302].starts != 0 {
+		t.Fatalf("a paused VM was started: %v", f.writes)
 	}
 }

@@ -158,6 +158,11 @@ type controller struct {
 	// events is what the last Event of each Service (by UID) said, so a standing state is one Event, not one a turn.
 	// ponytail: per process; a restart reports each Service's state once more.
 	events map[string]string
+	// members are the nodes sent so far, by name: a node is sent from its first turn Ready on (readNodes). nil until
+	// the first list of nodes was read.
+	// ponytail: per process; a controller that starts takes every node it finds for a member, so a node that joins
+	// in that very turn is sent before it is Ready. Keep it in the portal's state if that ever matters.
+	members map[string]bool
 }
 
 // service is what a turn reads of one Service.
@@ -194,7 +199,9 @@ func (c *controller) turn(ctx context.Context) error {
 	slices.SortFunc(services, func(a, b *service) int {
 		return strings.Compare(a.created+a.uid, b.created+b.uid)
 	})
-	req := &lbgw.Request{Services: []lbgw.Service{}, Nodes: readNodes(nodeItems)}
+	nodes, members := readNodes(nodeItems, c.members)
+	c.members = members
+	req := &lbgw.Request{Services: []lbgw.Service{}, Nodes: nodes}
 	var owned []*service
 	for _, s := range services {
 		if !s.owned || s.deleting {
@@ -233,7 +240,16 @@ func (c *controller) turn(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		c.setStatus(ctx, s, st.Address)
+		// The address goes into the Service's status when the portal says it is served, not when it is allocated:
+		// what waits for status.loadBalancer.ingress (helm --wait, Argo CD's health, external-dns) takes the Service
+		// for reachable (drill N3-7: 3 min 12 s too early for a cluster's first Service). Kubernetes' own service
+		// controller does the same: it patches the status with what the provider's EnsureLoadBalancer returned, and
+		// a provider returns a status once its balancer is provisioned, an error before (k8s.io/cloud-provider
+		// controllers/service/controller.go, syncLoadBalancerIfNeeded, v0.34.0). An address already written stays
+		// while a later change is building, and goes when the portal names none (refused, or given back).
+		if st.State == lbgw.StateReady || st.Address == "" || hasIngress(s.ingress, st.Address) {
+			c.setStatus(ctx, s, st.Address)
+		}
 		switch st.State {
 		case lbgw.StateReady:
 			c.report(ctx, s, "state", "Normal", "EnsuredLoadBalancer", "Public address "+st.Address+" on the cluster's load balancer")
@@ -312,25 +328,69 @@ func readService(obj map[string]any, defaultClass bool) *service {
 }
 
 // readNodes lists the nodes' IPv4 InternalIP, without the nodes labelled to stay out of external load balancers and
-// those being deleted. Whether a node serves is the balancer's health check, not this list.
-func readNodes(items []map[string]any) []lbgw.Node {
+// those being deleted. members is the controller's memory of the nodes it sent, which readNodes keeps.
+//
+// A node is sent from its first turn Ready on, and then for as long as it exists. Kubernetes' own service controller
+// hands a balancer every node that is not deleted, not excluded and not tainted for removal, Ready or not, and leaves
+// the rest to the balancer's health check (k8s.io/cloud-provider controllers/service/controller.go,
+// stableNodeSetPredicates, v0.34.0; KEP-3458): a Ready condition that flaps must not reconfigure every balancer, and
+// a node whose kubelet is silent may still forward. The second half is kept: a member that goes NotReady stays, and
+// its health check decides. The first half is not: HAProxy starts a member new to its config as UP ("init-state
+// down" needs 3.1, Debian 13 ships 3.0), so a node sent before it is Ready took its share of the requests until its
+// first check had failed (drill N3-8 of v0.11.0: 4.4 s, 22 of 44 requests, at each worker added or replaced).
+//
+// members nil is a controller that just started: it does not know what the balancer has, so every node it finds
+// counts as a member, as that controller would have it. Waiting for Ready there would take a member that is NotReady
+// at that moment out of a balancer it may still serve through, and all of them when no kubelet reaches the control
+// plane while the controller is restarted.
+func readNodes(items []map[string]any, members map[string]bool) ([]lbgw.Node, map[string]bool) {
+	started := members == nil
+	if started {
+		members = map[string]bool{}
+	}
 	out := []lbgw.Node{}
+	seen := map[string]bool{}
 	for _, n := range items {
 		meta, _ := n["metadata"].(map[string]any)
 		labels, _ := meta["labels"].(map[string]any)
+		name := str(meta["name"])
 		if _, excluded := labels[excludeLabel]; excluded || meta["deletionTimestamp"] != nil {
 			continue
 		}
 		status, _ := n["status"].(map[string]any)
+		if !started && !members[name] && !nodeReady(status) {
+			continue
+		}
+		members[name], seen[name] = true, true
 		for _, a := range list(status["addresses"]) {
 			m, _ := a.(map[string]any)
 			if ip, err := netip.ParseAddr(str(m["address"])); err == nil && ip.Is4() && str(m["type"]) == "InternalIP" {
-				out = append(out, lbgw.Node{Name: str(meta["name"]), Address: ip.String()})
+				out = append(out, lbgw.Node{Name: name, Address: ip.String()})
 				break
 			}
 		}
 	}
-	return out
+	for name := range members { // gone, deleting or excluded: a node of that name starts over
+		if !seen[name] {
+			delete(members, name)
+		}
+	}
+	return out, members
+}
+
+// nodeReady: the node's Ready condition is True.
+func nodeReady(status map[string]any) bool {
+	for _, c := range list(status["conditions"]) {
+		if m, _ := c.(map[string]any); str(m["type"]) == "Ready" {
+			return str(m["status"]) == "True"
+		}
+	}
+	return false
+}
+
+// hasIngress: the Service's status already names address.
+func hasIngress(ingress []any, address string) bool {
+	return slices.ContainsFunc(ingress, func(i any) bool { m, _ := i.(map[string]any); return str(m["ip"]) == address })
 }
 
 // setFinalizers writes the Service's finalizers, at the resourceVersion it was read at.

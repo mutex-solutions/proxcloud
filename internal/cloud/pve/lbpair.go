@@ -144,9 +144,17 @@ func lbPairFiles(publicIface string) map[string]string {
 		lbSysctlFile: "net.ipv4.ip_nonlocal_bind = 1\nnet.ipv4.conf.all.rp_filter = 2\nnet.ipv4.conf.default.rp_filter = 2\n",
 		// No cloud-init config names the public NIC, so nothing else brings its link up.
 		lbDropIn: "[Service]\nExecStartPre=/usr/sbin/ip link set dev " + publicIface + " up\n",
-		// The track script: HAProxy's master answers and has a worker. A stopped HAProxy puts the appliance in
-		// FAULT, and the peer takes over.
-		lbCheckScript: "#!/bin/sh\nout=$(echo 'show proc' | socat -t1 - UNIX-CONNECT:/run/haproxy-master.sock 2>/dev/null) || exit 1\necho \"$out\" | grep -qw worker\n",
+		// The track script: HAProxy's master answers and has a worker, and the first address the config binds is
+		// listened on. A stopped HAProxy, or one that runs without the balancer's listeners (another config than
+		// the file: drill N3-3, the address stayed on it for 25 s), puts the appliance in FAULT, and the peer takes
+		// over. One bind and no process names keep it cheap: keepalived runs it every second. A config with no
+		// listener binds nothing to look for, and one an apply put in place in the last ten seconds is still being
+		// loaded (haproxyReload sets its time): the listeners are not asked for meanwhile.
+		lbCheckScript: "#!/bin/sh\n" + lbWorkerFn + "worker || exit 1\n" +
+			"[ $(( $(date +%s) - $(stat -c %Y " + haproxyConfig + " 2>/dev/null || echo 0) )) -ge 10 ] || exit 0\n" +
+			"b=$(awk '$1==\"bind\" && $2 !~ /^unix@/{print $2; exit}' " + haproxyConfig + " 2>/dev/null)\n" +
+			"[ -n \"$b\" ] || exit 0\ncase \"$b\" in :*) b=\"0.0.0.0$b\" ;; esac\n" +
+			"ss -Hltn | awk '{print $4}' | grep -qxF -e \"$b\"\n",
 		// keepalived calls it with TYPE NAME STATE PRIORITY; the portal reads the state back.
 		lbNotifyScript: "#!/bin/sh\necho \"$3\" > " + lbStateFile + "\n",
 	}
@@ -162,6 +170,9 @@ func LBPairFilesDigest(publicIface string) string {
 	}
 	return b.String()
 }
+
+// lbWorkerFn defines worker(): HAProxy's master answers and has a worker.
+const lbWorkerFn = "worker() { out=$(echo 'show proc' | socat -t1 - UNIX-CONNECT:/run/haproxy-master.sock 2>/dev/null) && echo \"$out\" | grep -qw worker; }\n"
 
 const (
 	// lbPairInstall is the pair's own install line; a single appliance keeps haproxyInstall (C13).
@@ -253,7 +264,7 @@ func (s *Service) StopKeepalived(ctx context.Context, node string, vmid int) err
 // VRRPState is one appliance as the guest says it is.
 type VRRPState struct {
 	State    string // MASTER, BACKUP, FAULT, STOPPED (keepalived not running), UNKNOWN
-	HAProxy  bool   // the track script passes
+	HAProxy  bool   // HAProxy's master has a worker
 	HoldsVIP bool   // the public NIC carries a VIP
 	Serving  bool   // HAProxy listens on every bind of its config (lbServingFn)
 }
@@ -265,8 +276,8 @@ func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip 
 	if a, err := netip.ParseAddr(vip); err == nil && a.Is4() {
 		holds = "ip -o -4 addr show | grep -qF ' " + a.String() + "/' && v=1 || v=0"
 	}
-	script := lbServingFn + "s=$(cat " + lbStateFile + " 2>/dev/null); systemctl is-active -q keepalived || s=STOPPED; " +
-		lbCheckScript + " && h=1 || h=0; " + holds + "; serving >/dev/null 2>&1 && c=1 || c=0; echo \"${s:-UNKNOWN} $h $v $c\""
+	script := lbServingFn + lbWorkerFn + "s=$(cat " + lbStateFile + " 2>/dev/null); systemctl is-active -q keepalived || s=STOPPED; " +
+		"worker && h=1 || h=0; " + holds + "; serving >/dev/null 2>&1 && c=1 || c=0; echo \"${s:-UNKNOWN} $h $v $c\""
 	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", script)
 	if err != nil {
 		return VRRPState{}, err

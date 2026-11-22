@@ -40,7 +40,10 @@ type vmInventoryWire struct {
 	documented bool
 	nextids    int
 	// What the drill of v0.11.0-rc.1 saw and this fake did not model (N2-1). power "stopped" or "paused": Proxmox says
-	// so, and the guest agent of such a VM answers nobody. lb: the VM is a load balancer's appliance (its tag), with
+	// so, and the guest agent of such a VM answers nobody. A paused VM is listed as "paused" in /cluster/resources, as
+	// the lab's Proxmox lists it (v0.11.0-rc.2 drill, N3-5: this fake listed it "running", and the inventory refused
+	// the status it had never seen); power "paused-unlisted" is a Proxmox that lists it "running", where only
+	// status/current tells. lb: the VM is a load balancer's appliance (its tag), with
 	// the address the product configured on net0. agentIPs: what a running guest reports on its second NIC, as the
 	// master of a pair reports the balancer's address. agentAsked counts the agent reads.
 	power      string
@@ -225,8 +228,8 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.lb {
 			row["tags"] = f.tags()
 		}
-		if f.power == "stopped" { // a paused VM reads "running" here: only status/current tells
-			row["status"] = "stopped"
+		if f.power == "stopped" || f.power == "paused" {
+			row["status"] = f.power
 		}
 		write([]any{row})
 	case path == "/nodes":
@@ -391,7 +394,7 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch f.power {
 		case "stopped":
 			write(map[string]any{"status": "stopped", "qmpstatus": "stopped"})
-		case "paused":
+		case "paused", "paused-unlisted":
 			write(map[string]any{"status": "running", "qmpstatus": "paused"})
 		default:
 			write(map[string]any{"status": "running", "qmpstatus": "running"})
@@ -951,6 +954,7 @@ func TestVMInventoryApplianceRowNeverHoldsTheBalancersAddress(t *testing.T) {
 	for _, tc := range []struct{ name, power, mode string }{
 		{"master stopped", "stopped", ""},
 		{"master paused", "paused", ""},
+		{"master paused, listed as running", "paused-unlisted", ""},
 		{"running, agent refuses", "", "agent-403"},
 		{"running, holds the address", "", ""},
 	} {
@@ -996,7 +1000,7 @@ func TestVMInventoryApplianceRowNeverHoldsTheBalancersAddress(t *testing.T) {
 // (TestVMInventoryUnknownAgentPreservesDynamicAddressesAndLegacy).
 func TestVMInventoryStoppedVMIsKnownToHaveNoAgent(t *testing.T) {
 	const own, dynamic = "10.0.0.31", "172.17.0.1"
-	for _, power := range []string{"stopped", "paused"} {
+	for _, power := range []string{"stopped", "paused", "paused-unlisted"} {
 		t.Run(power, func(t *testing.T) {
 			ctx := context.Background()
 			db := freshPG(t)
@@ -1019,6 +1023,10 @@ func TestVMInventoryStoppedVMIsKnownToHaveNoAgent(t *testing.T) {
 			}
 			if got := serverAddrs(t, repo, old.ID); !slices.Equal(got, []string{own}) {
 				t.Fatalf("%s: row addresses %v, want the configured %s", power, got, own)
+			}
+			wantStatus := map[string]string{"stopped": "SHUTOFF", "paused": "PAUSED", "paused-unlisted": "PAUSED"}[power]
+			if row, _ := repo.FindByID(ctx, old.ID); row.Data["server"].(map[string]any)["status"] != wantStatus {
+				t.Fatalf("%s: the row reads %v, want %s", power, row.Data["server"].(map[string]any)["status"], wantStatus)
 			}
 			// Running again with an agent that does not answer yet: unknown, and nothing is lost meanwhile.
 			f.power, f.agentIPs = "", []string{dynamic}

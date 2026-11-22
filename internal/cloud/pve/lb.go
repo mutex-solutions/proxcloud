@@ -6,7 +6,9 @@ package pve
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -236,6 +238,17 @@ func lbSourceRanges(in []string) ([]string, string) {
 	return out, ""
 }
 
+// haproxyGlobal opens every config. Three things in it keep a request from being lost when a member goes away or
+// HAProxy is reloaded (drill N3-8 of v0.11.0: 2.2 to 10.3 s of lost requests at a reload or a node change):
+//   - server-state-file with load-server-state-from-file: a reload starts every member UP unless it is told what the
+//     member was; the apply saves "show servers state" there just before it reloads (haproxyReload), and HAProxy
+//     finds a member again by its backend's and its own name (src/server_state.c, "be_name srv_name"). A member new
+//     to the config still starts UP: "init-state down" needs HAProxy 3.1, and Debian 13 ships 3.0.
+//   - option redispatch 1 with retries: a connection a member does not take is tried on another member at once, so
+//     a member that just went away costs a request the connect timeout, not its answer. Only the connect is tried
+//     again, never a request that was sent.
+//   - a connect timeout of 2 s (it was 5): members are on the balancer's own network, and the timeout is what a
+//     client waits before the next member is tried.
 const haproxyGlobal = `global
   log /dev/log local0
   chroot /var/lib/haproxy
@@ -243,10 +256,14 @@ const haproxyGlobal = `global
   group haproxy
   maxconn 20000
   stats socket /run/haproxy/admin.sock mode 660 level admin
+  server-state-file ` + haproxyState + `
 
 defaults
   log global
-  timeout connect 5s
+  timeout connect 2s
+  retries 3
+  option redispatch 1
+  load-server-state-from-file global
 `
 
 // haproxyTimeouts follows haproxyGlobal: how long a connection may stay idle (C5). A tenant's own balancer keeps
@@ -256,6 +273,30 @@ const haproxyTimeouts = `  timeout client %[1]s
   timeout server %[1]s
   default-server inter 3s fall 2 rise 2
 `
+
+// lbBackends names each pool's backend. A reload carries a member's state over by the names of its backend and of
+// the member, so a backend's name must not move when another pool comes or goes (it was the pool's place, p0, p1,
+// ...: a port added to one Service of a cluster renamed the backends of every Service after it). It is "p-" and the
+// pool's name, which HAProxy's log then shows next to a member that went down. Still nothing typed into a name can
+// become a directive: only a plain name (LBNameOK: lowercase letters, digits, dashes) is used as it is; of any other
+// (a stored row no validation saw) a digest is, and a name a pool before it has keeps the pool's place.
+func lbBackends(pools []LBPool) []string {
+	out := make([]string, len(pools))
+	seen := map[string]bool{}
+	for i, p := range pools {
+		switch {
+		case seen[p.Name]:
+			out[i] = "p" + strconv.Itoa(i)
+		case LBNameOK(p.Name):
+			out[i] = "p-" + p.Name
+		default:
+			sum := sha256.Sum256([]byte(p.Name))
+			out[i] = "p" + hex.EncodeToString(sum[:6])
+		}
+		seen[p.Name] = true
+	}
+	return out
+}
 
 // lbServerName is a member's name in the config: its server and port, or a worker's address and port.
 func lbServerName(m LBMember) string {
@@ -301,6 +342,7 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 	for i, p := range s.Pools {
 		idx[p.Name] = i
 	}
+	backends := lbBackends(s.Pools)
 	listeners := 0
 	for _, l := range s.Listeners {
 		i, ok := idx[l.Pool]
@@ -321,7 +363,7 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		for _, a := range on {
 			fmt.Fprintf(&b, "  bind %s:%d\n", a, l.Port)
 		}
-		fmt.Fprintf(&b, "  mode %s\n  default_backend p%d\n", m, i)
+		fmt.Fprintf(&b, "  mode %s\n  default_backend %s\n", m, backends[i])
 		if m == "http" {
 			b.WriteString("  option forwardfor\n")
 		}
@@ -334,7 +376,7 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		if slices.Contains(lbAlgorithms, p.Algorithm) {
 			algo = p.Algorithm
 		}
-		fmt.Fprintf(&b, "\nbackend p%d\n  mode %s\n  balance %s\n", i, mode(p), algo)
+		fmt.Fprintf(&b, "\nbackend %s\n  mode %s\n  balance %s\n", backends[i], mode(p), algo)
 		check, extra := "check", ""
 		if hc := p.HealthCheck; hc != nil {
 			if hc.Type == "http" {
@@ -394,6 +436,9 @@ var ErrLBNotReady = errors.New("the appliance is not ready yet")
 
 const (
 	haproxyConfig = "/etc/haproxy/haproxy.cfg"
+	// haproxyState is where an apply saves what every member is (UP, DOWN) for the reload that follows. It stays on
+	// disk: a boot reads the state of the last apply, and a member that was DOWN then needs its two good checks.
+	haproxyState = "/var/lib/haproxy/server-state"
 	// lbServingFn defines serving(): HAProxy is active and listens on every TCP bind line of the config on disk; it
 	// prints what is missing otherwise. A master with a worker is not enough: the package's own first start runs
 	// the package's config, with no listener of the product's (drill N2-2: a pair refused connections for 458 s
@@ -419,15 +464,23 @@ const (
 	// loaded again, so the next boot does not read a config that never ran, and the answer is 1: not applied.
 	// The agent creates a file with mode 0666, so the mode is set here. Nothing a tenant wrote is in this
 	// command. sshd goes first: nobody logs in to an appliance, and a listener may want its port.
+	//
+	// Before the check, the members' state is saved for the reload (haproxyGlobal). A HAProxy that does not answer
+	// has no state to keep: the file goes, and HAProxy starts every member UP, as it does without one (a missing
+	// file is a notice to it, src/server_state.c). The save can never fail the apply. The file's time is set when
+	// it goes in: a pair's track script does not ask for its listeners while HAProxy loads it (lbpair.go).
 	haproxyReload = `systemctl disable --now ssh ssh.socket 2>/dev/null
 set -e
 F=` + haproxyConfig + `
+S=` + haproxyState + `
+if echo "show servers state" | socat -t5 - /run/haproxy/admin.sock > $S.new 2>/dev/null && [ "$(head -n1 $S.new)" = 1 ]; then mv $S.new $S; else rm -f $S $S.new; fi
 chown root:root $F.new
 chmod 0644 $F.new
 haproxy -c -q -f $F.new
 cp $F $F.old
 mv $F.new $F
 ` + lbServingFn + `swap() {
+  touch $F
   systemctl is-active -q haproxy || systemctl start haproxy || return 1
   n=0
   until out=$(printf 'reload\n' | socat -t30 - /run/haproxy-master.sock 2>/dev/null); do
@@ -711,15 +764,19 @@ type LBMemberHealth struct {
 	Status   string `json:"status"` // UP, DOWN, ... as HAProxy says; LBNotLoaded; "" = the config leaves it out
 }
 
+// ErrLBNoHAProxy: the appliance answered and its HAProxy did not (it is stopped). The next pass starts it.
+var ErrLBNoHAProxy = errors.New("HAProxy does not answer on the appliance")
+
 // LBHealth reads the running HAProxy's view of every member, and the listeners of spec it does not run (each as
-// "port" or "address:port"): none when it runs the stored config.
+// "port" or "address:port"): none when it runs the stored config. ErrLBNoHAProxy when the guest ran the command and
+// HAProxy's socket did not answer.
 func (s *Service) LBHealth(ctx context.Context, node string, vmid int, spec LBSpec) ([]LBMemberHealth, []string, error) {
 	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", `echo "show stat" | socat - /run/haproxy/admin.sock`)
 	if err != nil {
 		return nil, nil, err
 	}
 	if exit != 0 {
-		return nil, nil, fmt.Errorf("haproxy stats: %s", strings.TrimSpace(stderr))
+		return nil, nil, fmt.Errorf("%w: %s", ErrLBNoHAProxy, strings.TrimSpace(stderr))
 	}
 	return ParseHAProxyStat(out, spec)
 }
@@ -748,6 +805,7 @@ func ParseHAProxyStat(out string, spec LBSpec) ([]LBMemberHealth, []string, erro
 	}
 	health := []LBMemberHealth{}
 	pools := map[string]bool{}
+	backends := lbBackends(spec.Pools)
 	for i, p := range spec.Pools {
 		pools[p.Name] = true
 		for _, m := range p.Members {
@@ -755,7 +813,7 @@ func ParseHAProxyStat(out string, spec LBSpec) ([]LBMemberHealth, []string, erro
 			if m.Node {
 				addr = m.Address
 			}
-			state, running := status["p"+strconv.Itoa(i)+"/"+lbServerName(m)]
+			state, running := status[backends[i]+"/"+lbServerName(m)]
 			if _, rendered := lbMemberAddr(m); rendered && !running {
 				state = LBNotLoaded
 			}

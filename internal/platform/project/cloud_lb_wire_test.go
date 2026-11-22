@@ -3,6 +3,7 @@ package project
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -17,9 +18,14 @@ import (
 // keepalived. The drill of v0.11.0-rc.1 found the product's view apart from this one in three ways, and the fake
 // keeps them apart too: binaries that exist while dpkg still configures the package (packages "unpacked"), an
 // HAProxy whose master has a worker and which runs the package's config (loaded != file), and a stopped service on a
-// running VM. A stopped VM has no agent at all.
+// running VM. A stopped VM has no agent at all, and neither has a paused one, which Proxmox lists as "paused".
+//
+// The drill of v0.11.0-rc.2 added the members (N3-8): HAProxy holds a state for each, a reload starts every member UP
+// whatever its checks said before, unless the config reads the state file and the apply saved the state to it just
+// before, and then only for a member the new config has under the same backend and server name.
 type lbGuest struct {
 	stopped    bool   // the VM is stopped: its status says so, and the guest agent does not answer
+	paused     bool   // the VM is paused: Proxmox lists it as "paused", its qmpstatus says so, no agent answers
 	agentDown  bool   // the VM runs and its agent does not answer
 	packages   string // "unpacked": the binaries exist, dpkg is not done; "installed"
 	aptRunning bool   // a package manager runs in the guest
@@ -31,6 +37,46 @@ type lbGuest struct {
 	keepalived bool
 	role       string // MASTER or BACKUP while keepalived and HAProxy run
 	holds      bool
+	dead       []string          // members no check can reach, by address:port
+	members    map[string]string // what the running HAProxy holds of each member, "backend/server" -> UP or DOWN
+	saved      map[string]string // the state file: what the last apply saved, nil when there is none
+}
+
+// lbConfigMembers lists a config's members as "backend/server" -> "address:port".
+func lbConfigMembers(config string) map[string]string {
+	out, px := map[string]string{}, ""
+	for _, line := range strings.Split(config, "\n") {
+		switch w := strings.Fields(line); {
+		case len(w) >= 2 && w[0] == "backend":
+			px = w[1]
+		case len(w) >= 3 && w[0] == "server":
+			out[px+"/"+w[1]] = w[2]
+		}
+	}
+	return out
+}
+
+// load is HAProxy reading config, at a start or a reload: every member is UP, but one the state file calls DOWN when
+// the config reads that file.
+func (g *lbGuest) load(config string) {
+	g.file, g.loaded, g.haproxy = config, config, true
+	g.members = map[string]string{}
+	for key := range lbConfigMembers(config) {
+		g.members[key] = "UP"
+		if strings.Contains(config, "load-server-state-from-file global") && g.saved[key] == "DOWN" {
+			g.members[key] = "DOWN"
+		}
+	}
+}
+
+// check runs HAProxy's health checks to their end: a member is what its checks say.
+func (g *lbGuest) check() {
+	for key, addr := range lbConfigMembers(g.loaded) {
+		g.members[key] = "UP"
+		if slices.Contains(g.dead, addr) {
+			g.members[key] = "DOWN"
+		}
+	}
 }
 
 // serving is the appliance's own answer to "does HAProxy listen on every bind of its config".
@@ -101,10 +147,17 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		return lbRun{}
 	case strings.Contains(cmd, "haproxy -c"):
 		f.log = append(f.log, vm+" haproxy reload")
+		// The apply saves the members' state first, when it says so and HAProxy answers; no answer, no file.
+		if strings.Contains(cmd, "show servers state") {
+			g.saved = nil
+			if g.haproxy {
+				g.saved = maps.Clone(g.members)
+			}
+		}
 		if g.applyFails != "" {
 			return lbRun{exit: 1, err: g.applyFails}
 		}
-		g.file, g.loaded, g.haproxy = g.pending, g.pending, true
+		g.load(g.pending)
 		return lbRun{}
 	case strings.Contains(cmd, "proxcloud-lb.state"):
 		f.reads++
@@ -139,7 +192,7 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 				px = w[1]
 				out += px + ",BACKEND,UP,1\n"
 			case w[0] == "server":
-				out += px + "," + w[1] + ",UP,1\n"
+				out += px + "," + w[1] + "," + g.members[px+"/"+w[1]] + ",1\n"
 			}
 		}
 		return lbRun{out: out}
@@ -180,8 +233,11 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for i, vm := range []string{"301", "302"} {
 			if g := f.guests[vm]; g != nil {
 				status := "running"
-				if g.stopped {
+				switch {
+				case g.stopped:
 					status = "stopped"
+				case g.paused: // what Proxmox lists (drill N3-5), not "running"
+					status = "paused"
 				}
 				vmid, _ := strconv.Atoi(vm)
 				out = append(out, map[string]any{"id": "qemu/" + vm, "type": "qemu", "vmid": vmid, "node": fmt.Sprintf("n%d", i+1), "pool": "pc-p1",
@@ -212,7 +268,7 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	vm, rest := p[2], strings.Join(p[3:], "/")
 	g := f.guests[vm]
-	if strings.HasPrefix(rest, "agent/") && (g.stopped || g.agentDown) {
+	if strings.HasPrefix(rest, "agent/") && (g.stopped || g.paused || g.agentDown) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"data":null,"message":"QEMU guest agent is not running\n"}`))
 		return
@@ -224,7 +280,11 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write(map[string]any{"status": "stopped", "qmpstatus": "stopped", "tags": "proxcloud;" + tag})
 			return
 		}
-		write(map[string]any{"status": "running", "qmpstatus": "running", "tags": "proxcloud;" + tag})
+		qmp := "running"
+		if g.paused {
+			qmp = "paused"
+		}
+		write(map[string]any{"status": "running", "qmpstatus": qmp, "tags": "proxcloud;" + tag})
 	case "POST status/start":
 		g.stopped = false
 		f.log = append(f.log, vm+" start")
