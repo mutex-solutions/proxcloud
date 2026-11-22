@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-23: TLS termination and certificates on a load balancer
+## 2026-11-23: TLS termination and certificates on a load balancer (#434)
 
 **What changed:** no new container. One new trust relation and one new store: the portal now holds tenants' TLS
 private keys and writes them to load balancer appliances.
