@@ -35,8 +35,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pool names of a cluster's balancer changed** from `s<service>-<port>` by position to `s<digest of the Service's
   UID>-<node port>`, in the row and in `GET_HEALTH`. Nothing reads them but people.
 
+### Added
+
+- **Chart `proxcloud-sandbox` 0.1.0: the sandbox runtime of the managed platform** (`deploy/charts/proxcloud-sandbox`,
+  published on a `proxcloud-sandbox-v*` tag; not pinned by the BOM yet, so nothing installs it). Mode `shared` runs it
+  on a node group `sandbox` of the platform cluster, mode `separate` on the platform-owned sandbox cluster. node-setup
+  (runsc 20261116.0 from the pinned package file, the network guard), telemetry and the template prepull run on the
+  sandbox nodes only (shared), so no platform node gets runsc or a containerd restart. RuntimeClass `gvisor` carries
+  `scheduling`: every gVisor pod lands on a sandbox node, tolerating `proxcloud.io/sandbox` only (never
+  `proxcloud.io/unsecured`). A CiliumNodeConfig gives the sandbox nodes alone the network guard's CNI chain
+  (`custom-cni-conf`, `write-cni-conf-when-ready` present and empty), the bandwidth manager and host-only socket LB.
+  agent-sandbox v1.0.9 and sandbox-proxy (its MetalLB address from `proxy.address`) run on the system side; the
+  release namespace gets no placement. In shared mode the portal's identity holds cluster-wide only namespaces,
+  RoleBindings and `bind` on one namespaced ClusterRole, which it binds in each `sb-*` namespace, and four
+  ValidatingAdmissionPolicies narrow it: namespaces `sb-*` with `proxcloud.io/tenant=true`, RoleBindings of that role
+  to itself only, the firewall identity's node writes on sandbox nodes only, and every pod of a tenant namespace
+  (both modes) on RuntimeClass `gvisor` with no privilege, added capability, host namespace, `nodeName` at create or
+  hostPath but `/opt/proxcloud-sandbox/bin` read-only, no hostPort, no volume type outside Pod Security restricted and
+  no toleration of `proxcloud.io/unsecured` or of every taint, ephemeral containers included. In shared mode the chart
+  refuses to render with an empty sandbox node selector or RuntimeClass scheduling. No Pod Security label: baseline
+  refuses the runtime hostPath of every sandbox. The firewall identity may get RuntimeClass `gvisor` (the fence gate),
+  the network guard and the portal may read CiliumNodeConfigs. Images by digest (the runtime built from `main` at
+  `d26edd2e`, the first with the network guard's per-node Cilium read, below; the proxy of `v0.11.0-rc.1`; busybox,
+  pause). Tests: goldens of both modes, the node-setup script, guardrail, telemetry, the network guard's RBAC and
+  agent-sandbox equal to `deploy/sandbox-cluster`, and the policies run through the API server's CEL against the pods
+  the portal's `BuildCR` makes.
+- **Cluster chart `proxmox-kamaji-cluster` 0.1.18: a node group's own pool, address range and DNS servers, and the
+  sandbox chart as an add-on.** A node group may set `pool`, `addresses` (an `InClusterIPPool` `<release>-<group>`,
+  `net0` on it with `defaultIPv4: false`, so the machines take no address from the cluster's range) and `dnsServers`;
+  `addons.sandbox` installs chart `proxcloud-sandbox` in mode separate through CAAPH. A group without the keys renders
+  what 0.1.17 rendered: every values fixture of this and every previous release renders the same control plane,
+  machine and bootstrap templates as the pinned chart, and the tenant goldens are unchanged.
+
+### Changed
+
+- **The platform BOM on `main` is `0.12.0-dev`, and the build carries the BOM of `0.11.0`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.0.yaml`, sha256
+  `d8e37db2fd204a6a58a4d6357f4c54bb6dccc82de52430340f2c8c7ca0e0d7ff`, the file of the tag byte for byte). The `v0.11.0`
+  release commit left the BOM at `0.11.0`, and the release gate refuses only `-dev`. A platform installed by `v0.11.0`
+  or moved to its BOM is not refused (`bom_unsupported`) under a later build while the file is carried. Its pins are
+  those of `main`, so the plan from it has one change, the release, record only. `TestPreviousBOMsMoveCertManager`
+  states that answer, and `TestUpgradeRollsNoMachine` compares eight of the seventeen previous BOMs with the BOM on
+  `main`, none of them rolling. No apply on such a platform was run on a lab by this change.
+
 ### Fixed
 
+- **The sandbox network guard accepts Cilium's CNI hand-over per node** (`cmd/sandbox-netguard`,
+  `internal/ciliumcni`, `internal/cloud/sandbox/netguard.go`, `deploy/sandbox-cluster/telemetry.yaml`). `node-setup`'s
+  `sandbox-netguard -install` and the network-guard gate read only the cluster-wide `cilium-config`, so on a cluster
+  where Cilium keeps the CNI config everywhere except on the sandbox nodes (a `CiliumNodeConfig` selecting them, the
+  platform's shared mode) node-setup would never become Ready and the gate never pass. Both now compute each node's
+  Cilium config the way the agent does (the ConfigMap, then every `CiliumNodeConfig` of `kube-system` whose selector
+  matches the node, in name order) and require `custom-cni-conf` `"true"` and an empty `write-cni-conf-when-ready`:
+  a `CiliumNodeConfig` must set that key to `""`, because left out the ConfigMap's path stays and Cilium rewrites the
+  conflist without the netguard chain. The gate checks it per schedulable node, beside the heartbeat. netguard's
+  service account may now get Nodes and get/list `ciliumnodeconfigs`; the portal's sandbox identity gets the same
+  read through the existing `kube-system` Role. With the older RBAC (403) or no CRD (404) the ConfigMap alone decides,
+  as before. Ships in the next sandbox runtime image built by CI from main. Not run on a lab.
 - **No request is lost at a reload or when a node changes** (`internal/cloud/pve/lb.go`,
   `internal/platform/project/cloud_lb_cluster_pve.go`, `cmd/lb-controller`). `v0.11.0` shipped with this as a known
   issue (drill N3-8): a scale-up lost 22 of 44 requests in 4.4 s, a scale-down 52 in 10.3 s, and a Service with
@@ -106,17 +161,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address holder runs the config of before a change it could not take yet read "One appliance carries the traffic,
   with no standby", with the healthy standby as the one listed up: it reads "The appliance that holds the address is
   the one that is not in order (...); the other one is ready, as its standby".
-
-### Changed
-
-- **The platform BOM on `main` is `0.12.0-dev`, and the build carries the BOM of `0.11.0`**
-  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.0.yaml`, sha256
-  `d8e37db2fd204a6a58a4d6357f4c54bb6dccc82de52430340f2c8c7ca0e0d7ff`, the file of the tag byte for byte). The `v0.11.0`
-  release commit left the BOM at `0.11.0`, and the release gate refuses only `-dev`. A platform installed by `v0.11.0`
-  or moved to its BOM is not refused (`bom_unsupported`) under a later build while the file is carried. Its pins are
-  those of `main`, so the plan from it has one change, the release, record only. `TestPreviousBOMsMoveCertManager`
-  states that answer, and `TestUpgradeRollsNoMachine` compares eight of the seventeen previous BOMs with the BOM on
-  `main`, none of them rolling. No apply on such a platform was run on a lab by this change.
 
 ## [0.11.0] - 2026-11-22
 

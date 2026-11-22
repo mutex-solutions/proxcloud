@@ -174,6 +174,13 @@ nodeGroups:
     # nodeLabels: {key: value}            # the kubelet sets these itself: a node can claim any of them
     # machineLabels: {node-restriction.kubernetes.io/key: value}  # CAPI sets these on the Node; the kubelet cannot
     # taints: [{key: k, value: v, effect: NoSchedule}]
+    # -- From chart 0.1.18, each part of the group's machine template (setting one replaces the group's machines):
+    # pool: the group's Proxmox pool instead of proxmox.pool; addresses: the group's own address ranges inside the
+    # network (an InClusterIPPool <release>-<group>; net0 takes its address there and none from proxmox.network.addresses);
+    # dnsServers: the group's resolvers instead of proxmox.network.dnsServers. For the platform's sandbox group.
+    # pool: proxcloud-sbx
+    # addresses: ["192.0.2.64/28"]
+    # dnsServers: ["192.0.2.53"]
 
 # -- Automatic replacement of a worker that never joined (from chart 0.1.14). One MachineHealthCheck per node group.
 # It has no Node-condition check: a node that joined and went NotReady is never replaced by it.
@@ -207,6 +214,8 @@ addonCharts:
   # Retained ONLY for an existing explicit addons.ingress block. No automatic traffic migration.
   ingress: {repoURL: "https://kubernetes.github.io/ingress-nginx", chart: ingress-nginx, version: "4.13.3"}
   nginxGatewayFabric: {repoURL: "oci://ghcr.io/nginx/charts", chart: nginx-gateway-fabric, version: "2.8.1"}
+  # From chart 0.1.18: the sandbox chart, for addons.sandbox only.
+  sandbox: {repoURL: "oci://ghcr.io/mutex-solutions/charts", chart: proxcloud-sandbox, version: "0.1.0"}
   nfsCsi: {repoURL: "https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts", chart: csi-driver-nfs, version: "4.13.6"}
 
 # -- Images of the services-side proxmox-csi controller (proxmox.csi.gateway), the versions of chart proxmoxCsi above.
@@ -224,3 +233,6 @@ addons:
   nginxGatewayFabric: {enabled: false}
   # Legacy compatibility only: preserves an existing release on a chart bump. Not offered at create.
   ingress: {enabled: false}
+  # -- From chart 0.1.18. The platform-owned sandbox cluster only: the sandbox chart (addonCharts.sandbox) in mode
+  # separate, with these values (the chart's values contract; mode is always separate). Never for a tenant cluster.
+  sandbox: {enabled: false, values: {}}

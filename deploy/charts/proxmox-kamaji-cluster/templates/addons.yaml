@@ -59,6 +59,12 @@ NGINX Gateway Fabric's Service class is left as it is in both modes. */ -}}
 {{- $fabricValues := dict "nginxGateway" (dict "gatewayClassName" "nginx" "gatewayControllerName" "gateway.nginx.org/nginx-gateway-controller" "productTelemetry" (dict "enable" false)) "nginx" (dict "service" (dict "type" "LoadBalancer" "externalTrafficPolicy" "Local")) "gateways" (list) }}
 {{- $proxies = append $proxies (dict "key" "nginxGatewayFabric" "ns" "nginx-gateway" "values" $fabricValues) }}
 {{- end }}
+{{- /* addons.sandbox (from chart 0.1.18): the platform-owned sandbox cluster (pc-sandbox) gets the sandbox chart in mode
+separate, with the values the platform's run writes. Off by default: no tenant cluster has it. */ -}}
+{{- $sandbox := .Values.addons.sandbox | default dict }}
+{{- if $sandbox.enabled }}
+{{- $proxies = append $proxies (dict "key" "sandbox" "ns" "sandbox-system" "values" (merge (dict "mode" "separate") (deepCopy ($sandbox.values | default dict)))) }}
+{{- end }}
 {{- range $p := $proxies }}
 {{- $chart := get $root.Values.addonCharts $p.key }}
 ---

@@ -33,7 +33,7 @@ func TestSandboxInstallerSafetyContracts(t *testing.T) {
 	}
 	for path, wants := range map[string][]string{
 		"../../../deploy/sandbox-cluster/node-setup.yaml":               {"hostNetwork: true", "sandbox-netguard -install", "serviceAccountName: sandbox-netguard"},
-		"../../../deploy/sandbox-cluster/telemetry.yaml":                {"resources: [nodes/stats]", "runAsUser: 65534", "/var/lib/kubelet/pki/kubelet.crt"},
+		"../../../deploy/sandbox-cluster/telemetry.yaml":                {"resources: [nodes/stats]", "resources: [ciliumnodeconfigs]", "runAsUser: 65534", "/var/lib/kubelet/pki/kubelet.crt"},
 		"../../../installer/playbooks/templates/sandbox-cluster.yml.j2": {"sandboxBandwidth: true", "node-restriction.kubernetes.io/proxcloud-sandbox-worker"},
 		"../../../installer/Makefile":                                   {"playbooks/55-sandbox-cluster.yml"},
 	} {

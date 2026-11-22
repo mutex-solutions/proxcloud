@@ -1,0 +1,21 @@
+{{- /*
+kubernetes-sigs/agent-sandbox v1.0.9 as vendored in deploy/sandbox-cluster/agent-sandbox (its README has the upstream
+checksum): files/agent-sandbox is a byte-for-byte copy of that file and its licence (internal/cloud/sandbox/chart_test.go
+holds them equal; the repository tracks no links). Every document verbatim but the controller's Deployment,
+which gets the system-side placement. The CRDs are too large for a client-side apply annotation: the Application syncs
+with ServerSideApply.
+*/ -}}
+{{- $sys := (include "sbx.placement" . | fromJson).system }}
+{{- range $doc := regexSplit "\n---\n" ($.Files.Get "files/agent-sandbox/sandbox-with-extensions.yaml") -1 }}
+{{- if regexMatch "(?m)^kind: Deployment$" $doc }}
+{{- $d := fromYaml $doc }}
+{{- $spec := $d.spec.template.spec }}
+{{- $_ := set $spec "nodeSelector" $sys.nodeSelector }}
+{{- with $sys.tolerations }}{{ $_ := set $spec "tolerations" . }}{{ end }}
+---
+{{ toYaml $d }}
+{{- else }}
+---
+{{ $doc }}
+{{- end }}
+{{- end }}
