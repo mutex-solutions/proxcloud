@@ -186,7 +186,8 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
 - **`UPDATE_CONFIG`** takes `listeners` and `pools`, whole: what the body leaves out is removed. Both kinds of
   balancer take every field below; a field left out or `0` is the balancer's own value, and a body from before
   v0.11.1 (the protocol on the pool only) is read as it was.
-  - A **listener**: `port`; `protocol`, what clients are spoken to in, `tcp` or `http` (absent: its pool's); `pool`;
+  - A **listener**: `port`; `protocol`, what clients are spoken to in, `tcp`, `tls`, `http`, `https` or `udp`
+    (absent: its pool's); `certificates`, for `tls` and `https` (below); `pool`;
     `sourceRanges`, IPv4 networks or addresses, at most 512 characters together (`400` past that), absent or empty
     for any address; `connectionLimit`, 1 to 20000 connections open at a time (absent: no limit of its own; 20000
     is what the load balancer holds in all); `timeoutClientData`, milliseconds a client's connection may stay idle,
@@ -212,9 +213,18 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
   - **The protocol of a listener decides the protocol of its pool**: a `tcp` listener needs a `tcp` pool, an `http`
     listener an `http` pool, a `udp` listener a `udp` pool (`400` otherwise, naming both), so a pool serves
     listeners of one protocol. One port holds one listener of each transport: a `tcp` (or `http`) listener and a
-    `udp` listener may share a port number. The model also knows `tls` and `https` listeners (with
-    `certificates`): until a load balancer serves them they answer `400` "TLS termination is not available on a
-    load balancer yet". `sctp` and any other value are a `400` too.
+    `udp` listener may share a port number. A `tls` listener needs a `tcp` pool and an `https` listener an `http`
+    pool: both end TLS on the load balancer and speak plain to the servers. `sctp` and any other value are a `400`.
+  - **TLS** (`protocol: "tls"` or `"https"`, on one VM and on a pair). `certificates` is a list of 1 to 10 ids of
+    the project's certificates (below); a `tls` or `https` listener without one, any other listener with one, an
+    id twice and an id that is not a certificate of this project are a `400`. A client gets the certificate whose
+    names hold the server name it asks for (SNI), and the **first** one when none does or it asks for none. The
+    policy is fixed: TLS 1.2 and 1.3, suites with forward secrecy and an AEAD cipher only (ECDHE with AES-GCM or
+    ChaCha20-Poly1305; no RSA key exchange, no CBC, no DHE). An `https` listener offers HTTP/2 and HTTP/1.1 (ALPN),
+    speaks HTTP/1.1 to the servers and sets `X-Forwarded-For` (the client's address) and `X-Forwarded-Proto: https`
+    (replacing what the client sent). A `tls` listener passes the bytes on as TCP; the client's address reaches the
+    servers with `proxyProtocol`. TLS to the servers is not offered. The row's listeners also carry `certFiles`,
+    which the platform sets and a request cannot. `503` when the portal has no encryption key (below).
   - **UDP** (`protocol: "udp"` on a listener and its pool) is served by a load balancer on two appliances only:
     on one VM it answers `400` "UDP needs a high-availability load balancer". The servers see the address of the
     appliance, not the client's; a UDP pool takes no `proxyProtocol` and no member timeouts, a UDP listener no
@@ -226,6 +236,26 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
     ICMP error it sends, which a server under traffic rate-limits. It takes `payload` (the datagram as 2 to 256
     hexadecimal digits; random bytes when absent) and `requireReply` (boolean: up only while the server answers
     the datagram). A UDP listener whose pool has no server to send to answers ICMP port unreachable.
+- **Certificates** of a project, for its `tls` and `https` listeners (`project:cloud_resource:read` to read,
+  `project:cloud_resource:manage` to change):
+  - `GET /api/v1/project/{id}/certificates` and `GET .../certificates/{certId}`: `id`, `name`, `subject`, `issuer`,
+    `dnsNames` (the subject alternative names, IP addresses among them), `notBefore`, `notAfter`, `fingerprint`
+    (SHA-256 of the server's certificate, hexadecimal), `keyType` (`RSA 2048`, `ECDSA P-256`), `chainLength`,
+    `file` (the name of its file on an appliance: the SHA-256 of the chain), `createdAt` and `usedBy` (the names of
+    the load balancers with a listener that names it). **No route returns the private key.**
+  - `POST /api/v1/project/{id}/certificates` with `name` (as a load balancer's), `certificate` (PEM: the server's
+    certificate first, then each intermediate that signed the one before it; at most 5) and `privateKey` (PEM,
+    PKCS #8, PKCS #1 or SEC 1, **without a passphrase**). Checked: the key belongs to the first certificate; the
+    chain is in order; RSA of 2048 to 8192 bits or ECDSA on P-256 or P-384; 16 KiB at most together. `400` with the
+    reason otherwise, `409` for a name the project has or past 50 certificates. An expired certificate, one not
+    valid yet and one that names no host are taken, and the answer carries `warnings`. The answer is the
+    certificate as `GET` gives it.
+  - `DELETE .../certificates/{certId}`: `409` naming the load balancer while a listener names it.
+  - There is no update: to replace a certificate, upload the new one, name it on the listeners with
+    `UPDATE_CONFIG` and delete the old one. The appliances take it in one reload, which closes no open connection.
+  - The chain and the key are stored as one blob encrypted with the portal's encryption key (AES-256-GCM, bound to
+    the project and the certificate id). `POST` answers `503` on a portal whose encryption key is missing or
+    shorter than 32 characters, and nothing is stored. A project's certificates are deleted with the project.
 - **`REPLACE_APPLIANCES`** (a pair only; `409` on a single VM, while it is still being created, or while a replace
   runs): answers the row with `replacing` set and rebuilds the appliances one at a time, the standby first. A
   delete answers `409` while it runs. Refused while the project is suspended, like any change.

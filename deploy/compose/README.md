@@ -303,7 +303,12 @@ In `docker compose` commands the Traefik service is named after the TLS mode:
 
 `./proxcloud-up.sh backup` writes `backups/proxcloud-<UTC time>.sql.gz` (a `pg_dumpall` of both
 databases: the portal and Keycloak with its users) and `backups/env-<UTC time>` (a copy of `.env`).
-Both hold secrets. Run it from cron and copy the files off the host. Not in the backup:
+Both hold secrets, and **together they open every secret the portal stores**: the dump holds provider
+credentials and your tenants' TLS private keys (the certificates of their load balancers) encrypted,
+and the copy of `.env` holds `ENCRYPTION_KEY`, which decrypts them. Whoever can read `backups/` can
+read every tenant's private key. Keep the directory readable by root alone, encrypt what you copy off
+the host, and store the two files apart if your tooling allows it. Every `upgrade` writes a backup
+here too. Run it from cron and copy the files off the host. Not in the backup:
 
 - the Let's Encrypt certificates: they are issued again;
 - `cf-token`: keep the Cloudflare token elsewhere, and pass it again when you restore on a new host.

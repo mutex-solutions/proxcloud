@@ -37,6 +37,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Load balancers: TLS and HTTPS listeners, and a project's certificates** (`internal/cloud/pve/lbtls.go`,
+  `internal/platform/project/cloud_lb_certs.go`, the tenant console's Certificates page and load balancer page).
+  A listener takes `protocol: "tls"` (TLS ends on the load balancer, TCP to the servers) or `"https"` (TLS ends on
+  the load balancer, HTTP to the servers), on one VM and on a pair, with `certificates`: one to ten of the project's
+  certificates. They were refused with "TLS termination is not available" until now.
+  - **Certificates.** `GET`, `POST` and `DELETE` under `/api/v1/project/{id}/certificates`: upload a PEM chain and
+    its PEM key; read what the certificate says (names, dates, SHA-256 fingerprint, key kind, the load balancers
+    using it); delete one no listener names (`409` otherwise). The upload checks that the key belongs to the first
+    certificate, that the chain is in order (at most 5), that the key is RSA of 2048 to 8192 bits or ECDSA P-256 or
+    P-384 without a passphrase, and 16 KiB in all. An expired certificate is taken with a warning. There is no
+    update: a replacement is a new certificate, named on the listeners in the old one's place.
+  - **Which certificate a client gets.** The one whose names hold the server name it asks for (SNI); the first of
+    the listener's list for any other name and for none.
+  - **The TLS policy is fixed.** TLS 1.2 and 1.3; the three TLS 1.3 suites, and for TLS 1.2 six suites with ECDHE
+    and AES-GCM or ChaCha20-Poly1305, for RSA and for ECDSA certificates. No RSA key exchange, no CBC, no DHE.
+    Shown by real handshakes against the HAProxy of both appliance images (3.0 on Debian 13, 3.2 on Ubuntu 26.04):
+    TLS 1.1 and 1.0 refused, each suite of the policy accepted, the others refused.
+  - **HTTPS** offers HTTP/2 and HTTP/1.1, speaks HTTP/1.1 to the servers, and sets `X-Forwarded-For` and
+    `X-Forwarded-Proto: https`, replacing what a client sent in the second. TLS to the servers is not offered.
+  - **The private key.** Stored as one blob encrypted with the portal's encryption key (AES-256-GCM), bound to its
+    project and certificate id; no route returns it, and no log line or audit event holds it (the audit event of an
+    upload and of a delete holds the name and the fingerprint). On a portal whose encryption key is missing or
+    shorter than 32 characters an upload answers `503` and nothing is stored. Deleted with the project.
+  - **On the appliances.** Each certificate is one file in `/etc/haproxy/certs` (root, mode 0700; files 0600),
+    named by the SHA-256 of its chain. The directory is made private and checked before anything is written into
+    it, because the guest agent creates files readable by all. Files go before the config that names them, on the
+    standby first; a config HAProxy refuses leaves the certificate in use in place; files no config names are
+    removed after the new config is served. A key is never in cloud-init.
+  - **A change of certificate closes no connection**: it is one HAProxy reload. In the container test, over 300
+    handshakes made across three reloads with a changed certificate all succeeded, and a connection open since
+    before them still worked after.
+  - **Console.** A Certificates page (upload, what each certificate says, who uses it, delete) and, on a TLS or
+    HTTPS listener, the certificates it presents in order. Both warn from 30 days before a certificate expires.
+  - **Operators: where tenant keys now rest.** In the database, encrypted; **in `backups/`**, where
+    `proxcloud-up.sh backup` (run by every upgrade) writes the database dump and a copy of `.env` with
+    `ENCRYPTION_KEY` side by side, so whoever reads that directory reads every tenant's private key; and **in clear
+    on each appliance's disk**, so in any Proxmox backup, snapshot, clone or replica of an appliance VM. The
+    Compose README's Backup section, the cloud integration guide and the tenant guide say so.
+  - **No balancer is reloaded by this change**: a config without a TLS listener is the bytes it was.
+  - Not run on a lab by this change. A cluster's Services cannot ask for TLS yet: that is the controller's change.
 - **Load balancers: UDP listeners, on a load balancer with high availability** (`internal/cloud/pve/lblvs.go`,
   `internal/platform/project/cloud_lb_pair_pve.go`, the tenant console's load balancer page). A listener and its
   pool take `protocol: "udp"`; a TCP and a UDP listener may share a port number.

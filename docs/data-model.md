@@ -842,6 +842,7 @@ inferred from read/write usage.
 | `csiVolume` | yes | The CSI gateway's registry: which tenant cluster each disk belongs to (written before the disk) (`internal/cloud/csigw`). |
 | `csiGatewayCredential` | yes | A tenant cluster's CSI gateway credential (`csi@proxcloud!<clusterId>`). |
 | `csiTask` | yes | A PVE task the CSI gateway started for a cluster, so only that cluster may read its UPID. |
+| `lb_certificates` | yes | A project's TLS certificate for its load balancers' `tls` and `https` listeners: `{id, projectId → project, name, subject, issuer, dnsNames, notBefore, notAfter, fingerprint, keyType, chainLength, file, createdBy → users, keyId, sealed}`. `sealed` is the PEM chain and private key encrypted with the portal's encryption key and bound to `projectId` and `id`; no API returns it. Deleted with the project. |
 | `sandbox_api_keys` | yes | A project's E2B sandbox API key: `{id: sha256(key), projectId → project, sub (its creator) → users, name, hint, lastUsedAt}` (the key itself is shown once). |
 | `sandbox_templates` | yes | A project's custom sandbox template and its builds (the E2B template API), and its snapshots (`kind: snapshot`). |
 | `sandbox_paused` | yes | A paused sandbox: its saved custom resource and the snapshot it resumes from (E2B pause, autoPause, autoResume). |
