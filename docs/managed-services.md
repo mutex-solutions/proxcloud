@@ -2167,7 +2167,18 @@ Proxmox write; [ci-release.md](ci-release.md#release-candidates)).
 The BOM of the candidate `v0.11.0-rc.2` (`0.11.0-rc.2`) has the pins of 0.11.0-rc.1: from that BOM the
 plan has one row, the release, record only, phrase `upgrade <name> to 0.11.0-rc.2`; from every older
 BOM it has the rows and refusals of 0.11.0-rc.1 above. The candidate corrects the load balancer after
-the lab drill of `v0.11.0-rc.1`. No move to it has run on a lab.
+the lab drill of `v0.11.0-rc.1`. The move from 0.11.0-rc.1 ran on one lab (2026-11-22): one record-only
+row, 8.5 s, no VM restarted.
+
+The BOM of the release `v0.11.0` (`0.11.0`) has the pins of both candidates: from 0.11.0-rc.1 and
+0.11.0-rc.2 the plan has one row, the release, record only, phrase `upgrade <name> to 0.11.0`; from
+0.10.2 and 0.10.2-rc.1 two rows, the release and `tenantCharts.kubernetes` 0.1.16 to 0.1.17, both
+record only, with no part and no seed, machines or site row; from 0.10.1 and 0.10.1-rc.2 also the two
+cert-manager rows (four), from 0.10.1-rc.1 `pc-platform` 0.1.15 to 0.1.16 as well (five); from every
+BOM on Kubernetes 1.35.10 it is refused as above. The run writes chart 0.1.17 on the Kubernetes
+provider, so clusters created after it can get the load balancer controller
+([managed-k8s.md](managed-k8s.md)); it changes no existing cluster. No move to 0.11.0 itself has run on
+a lab: the two candidates' runs, with these pins, did.
 
 "Moves" means that the Application's target is the new chart version and ArgoCD has compared the
 cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is
@@ -3034,7 +3045,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1`, that of v0.10.2 is `0.10.2` (`main` carries a `-dev` one between releases, now `0.11.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1` and `v0.11.0-rc.2` carry `0.10.0-rc.1`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.2-rc.1`, `0.11.0-rc.1` and `0.11.0-rc.2`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well, v0.10.2 keeps that of v0.10.1 and that of the candidate `v0.10.2-rc.1` too, and `main` keeps that of v0.10.2 and those of the candidates `v0.11.0-rc.1` and `v0.11.0-rc.2` as well). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1`, that of v0.10.2 is `0.10.2`, that of v0.11.0 is `0.11.0` (`main` carries a `-dev` one between releases; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1` and `v0.11.0-rc.2` carry `0.10.0-rc.1`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.2-rc.1`, `0.11.0-rc.1` and `0.11.0-rc.2`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well, v0.10.2 keeps that of v0.10.1 and that of the candidate `v0.10.2-rc.1` too, and v0.11.0 keeps that of v0.10.2 and those of the candidates `v0.11.0-rc.1` and `v0.11.0-rc.2` as well). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;

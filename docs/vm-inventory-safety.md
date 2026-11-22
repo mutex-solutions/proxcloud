@@ -31,6 +31,9 @@ cases are not unknown, and were treated as if they were until v0.11.0-rc.1:
   configuration, and its row holds those, as it does after a stop through the portal. Before, a VM stopped by its own
   guest, by an operator or by a node's restart, whose row held one address the agent had reported (a container
   bridge, a second address), kept its project unproved at every sync until someone started it.
+  On a lab (v0.11.0-rc.2) this held for a stopped VM. A paused VM is still refused one step earlier: Proxmox lists it
+  with the status `paused`, which the inventory's VM page takes for an unknown state, so its project stays unproved
+  for as long as the pause lasts, also for a project the operator suspended. A known issue of v0.11.0.
 - **A load balancer's appliance** (tag `pc-lb-<id>`) is never asked for addresses: a pair's public addresses move
   between its two VMs and belong to the balancer. Its row is its configuration. A row that cached a balancer's address
   is rewritten by the next services sync, in whatever state the VM is.

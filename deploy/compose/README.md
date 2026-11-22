@@ -218,7 +218,7 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
 
   No release before v0.8.0 reads `PROXCLOUD_PLATFORM_ENABLED`. A platform was built from this stack
   on the published images of v0.8.0 once, on a lab (2026-11-18), and on those of the candidate
-  v0.9.0-rc.2 once (the same lab, 2026-11-19); not on those of v0.8.1, v0.8.2, v0.9.0, v0.9.1, v0.10.0, v0.10.1 or v0.10.2 (the other
+  v0.9.0-rc.2 once (the same lab, 2026-11-19); not on those of v0.8.1, v0.8.2, v0.9.0, v0.9.1, v0.10.0, v0.10.1, v0.10.2 or v0.11.0 (the other
   lab runs used `dev-<sha>` builds of main, [managed-services.md](../../docs/managed-services.md#not-verified-on-a-lab-yet)).
 
   **Testing ahead of a release.** `--version dev-<sha>` and `upgrade dev-<sha>` take a build of main
@@ -276,8 +276,8 @@ was down.
   clusters then trust. Keep that volume: a new certificate means a new gateway Secret for every
   cluster. Backups of the database do not hold it; `uninstall` keeps it, `--purge` deletes it.
   `--no-cluster-gateway` turns the listener off. It needs ProxCloud v0.11.0 or later (or a `dev-<sha>`
-  build): an older API cannot make the certificate. Run on one lab (v0.11.0-rc.1, six switches): on an
-  existing install the command takes about 14 s and recreates only the API container; nothing else
+  build): an older API cannot make the certificate. Run on one lab (v0.11.0-rc.1, six switches, and
+  v0.11.0-rc.2, two): on an existing install the command takes 14 to 19 s and recreates only the API container; nothing else
   listens on 8444 than `<address>:8444`; the certificate is ECDSA P-256 with the address as its SAN,
   valid ten years from one hour back, its key mode 600; a call without a credential or with a wrong one
   is answered 401 on the load balancer path and on the CSI paths; the platform cluster's nodes reached

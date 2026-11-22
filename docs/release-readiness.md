@@ -1,11 +1,11 @@
 # Current support boundaries and first-release readiness
 
-Status snapshot: **2026-11-21**, preparing the release `v0.10.2` on top of `v0.10.1`
+Status snapshot: **2026-11-22**, preparing the release `v0.11.0` on top of `v0.10.2`
 (tag 2026-11-21). This is an evidence summary, not a release announcement or a production SLA.
 `v0.4.0-rc.1` (tag 2026-11-11) was published as a non-latest prerelease, `v0.4.0` (tag 2026-11-12)
 as the first stable release, `v0.5.0` (tag 2026-11-13) as the second, the patches `v0.5.1` and `v0.5.2` and the
-stable `v0.6.0` (tags 2026-11-14), and `v0.7.0-rc.1` as a non-latest prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17), the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and `v0.9.0-rc.1` and `v0.9.0-rc.2` as non-latest prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19), and `v0.10.0-rc.1` as a non-latest prerelease, the stable `v0.10.0`, and `v0.10.1-rc.1` and `v0.10.1-rc.2` as non-latest prereleases (tags 2026-11-20), and the stable `v0.10.1` and `v0.10.2-rc.1` as a non-latest prerelease (tags 2026-11-21). Pushing the `v0.10.2` tag
-publishes the stable images, app chart and GitHub Release. `v0.5.1` to `v0.10.2` have no breaking API change against
+stable `v0.6.0` (tags 2026-11-14), and `v0.7.0-rc.1` as a non-latest prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17), the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and `v0.9.0-rc.1` and `v0.9.0-rc.2` as non-latest prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19), and `v0.10.0-rc.1` as a non-latest prerelease, the stable `v0.10.0`, and `v0.10.1-rc.1` and `v0.10.1-rc.2` as non-latest prereleases (tags 2026-11-20), and the stable `v0.10.1`, `v0.10.2-rc.1` as a non-latest prerelease, the stable `v0.10.2` and `v0.11.0-rc.1` as a non-latest prerelease (tags 2026-11-21), and `v0.11.0-rc.2` as a non-latest prerelease (tag 2026-11-22). Pushing the `v0.11.0` tag
+publishes the stable images, app chart and GitHub Release. `v0.5.1` to `v0.11.0` have no breaking API change against
 `v0.5.0` (`v0.6.0` changes the VM image size contract; `v0.7.0` stops serving the management port job triggers with
 only the scheduler on and refuses a new problem in a Proxmox provider's network block on save; `v0.8.0` ignores a
 node group's `imageId`, answers a VLAN-zone tenant network without DHCP and SNAT, and changes the Proxmox grant
@@ -13,19 +13,19 @@ that mints cluster tokens, which existing managed Kubernetes sites must migrate;
 group rule by `ruleId` only, refuses rule fields it cannot store and `enableDhcp: true` in a zone without a DHCP
 server; `v0.8.2` adds answers and takes none away; `v0.9.0` reserves security group names that start with `k8s-`,
 refuses `spec.sandbox` and a preset on an installed platform, and checks the worker repair and worker firewall
-settings of a Kubernetes provider on save; `v0.9.1` changes no answer of the API; `v0.10.0` adds answers and takes none away; `v0.10.1` refuses a network with host bits in a field that ends in Kubernetes and adds answers; `v0.10.2` adds answers and takes none away; see the changelog);
+settings of a Kubernetes provider on save; `v0.9.1` changes no answer of the API; `v0.10.0` adds answers and takes none away; `v0.10.1` refuses a network with host bits in a field that ends in Kubernetes and adds answers; `v0.10.2` adds answers and takes none away; `v0.11.0` adds answers and builds a new load balancer on two appliances unless the request says `ha: false`; see the changelog);
 `v0.5.0` contains breaking API changes against `v0.4.0`; see the [changelog](../CHANGELOG.md). This source change publishes
 nothing and performs no live acceptance; the [lab acceptance of Platform setup](#platform-setup-lab-acceptance)
 was run on `v0.7.0-rc.1`, and the [managed services lab rounds](#managed-services-lab-rounds) on builds of
-`main` before `v0.8.0`, for `v0.8.1` and `v0.8.2` on the released `v0.8.0` followed by a build of `main`, and for `v0.9.0` on a build of `main` and on its two release candidates; the fixes of `v0.9.1` were not run on a lab; `v0.10.0` on its release candidate `v0.10.0-rc.1`; `v0.10.1` on its two release candidates, without the fixes merged after the second; `v0.10.2` on its release candidate `v0.10.2-rc.1`. Check GitHub's Releases/Actions pages before choosing a deployment
+`main` before `v0.8.0`, for `v0.8.1` and `v0.8.2` on the released `v0.8.0` followed by a build of `main`, and for `v0.9.0` on a build of `main` and on its two release candidates; the fixes of `v0.9.1` were not run on a lab; `v0.10.0` on its release candidate `v0.10.0-rc.1`; `v0.10.1` on its two release candidates, without the fixes merged after the second; `v0.10.2` on its release candidate `v0.10.2-rc.1`; `v0.11.0` on its two release candidates. Check GitHub's Releases/Actions pages before choosing a deployment
 commit.
 
 ## What is available now
 
 - Source on `main`, public development container images on GHCR, the
-  `v0.4.0-rc.1`, `v0.7.0-rc.1`, `v0.9.0-rc.1`, `v0.9.0-rc.2`, `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2` and `v0.10.2-rc.1` prereleases and the stable releases `v0.4.0`, `v0.5.0`, `v0.5.1`, `v0.5.2`,
-  `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.8.1`, `v0.8.2`, `v0.9.0`, `v0.9.1`, `v0.10.0` and `v0.10.1` (images and app charts of the same versions). The
-  app chart `0.10.2`, appVersion and installer BOM `v0.10.2` and the platform BOM `0.10.2` name the current stable release; its tag publishes those artifacts.
+  `v0.4.0-rc.1`, `v0.7.0-rc.1`, `v0.9.0-rc.1`, `v0.9.0-rc.2`, `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1` and `v0.11.0-rc.2` prereleases and the stable releases `v0.4.0`, `v0.5.0`, `v0.5.1`, `v0.5.2`,
+  `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.8.1`, `v0.8.2`, `v0.9.0`, `v0.9.1`, `v0.10.0`, `v0.10.1` and `v0.10.2` (images and app charts of the same versions). The
+  app chart `0.11.0`, appVersion and installer BOM `v0.11.0` and the platform BOM `0.11.0` name the current stable release; its tag publishes those artifacts.
   Verify they are pullable before using `images.build: false`; a source pin is not proof that a registry artifact exists.
 - The installer defaults to `images.build: true`, building the API and two
   consoles plus app chart from the checkout. A source/local-registry installation
@@ -175,6 +175,22 @@ already cached, a failed `startupapicheck` and the Retry after it, a seed of mor
 the published artifacts of `v0.10.2` itself and any move to the BOM `0.10.2`. The full lists are in the
 [release notes of v0.10.2](releases/v0.10.2.md).
 
+For `v0.11.0` the lab ran two drills, each followed by a read-only audit: on the published images of
+`v0.11.0-rc.1` (2026-11-21) and of `v0.11.0-rc.2` (2026-11-22). One lab, every appliance on one Proxmox node, Ubuntu
+26.04 appliances, a public test range on a plain bridge, every step through the API. The first drill passed the
+pair, 15 failovers of 0.7 to 3.5 s, a cluster's controller, the refusals, billing rows and clean-up, and found two
+faults that blocked the release: Replace appliances left an address refusing connections for 458 s, and a stopped
+master appliance was started again in 1 of 6 tries. The second drill showed both corrected (three replaces under
+load with one switch of 0.7 to 0.8 s each; a stopped master started by the next sync three times of three), the
+upgrade between the candidates pushing no balancer that served, and a cluster's listeners following a Service's
+ports with no request lost on the other listener. It also measured what the release lists as known issues: requests
+lost for seconds when a worker is added or removed, and at each reload for a policy `Local` Service on a cluster
+with a node that has no endpoint. Not run on a lab: two nodes (VRRP across nodes, the loss of a node), the consoles,
+a production site, the default Debian 13 appliance image, a balancer made before `v0.11.0` across the upgrade, the
+scheduler, the installer path, the sandbox node fix, the published artifacts of `v0.11.0` itself and any move to the
+BOM `0.11.0`. UDP listeners and TLS termination are not in this release. The full lists are in the
+[release notes of v0.11.0](releases/v0.11.0.md).
+
 ## Intentional safety holds and operational defaults
 
 - **Managed sandbox saved lifecycle is held.** Pause, saved resume, paused
@@ -211,7 +227,7 @@ The owner decided on 2026-11-12 to release `v0.4.0` as stable, and on 2026-11-13
 that the next release is the stable `v0.5.0`, each with a narrowly scoped core and
 explicitly held features; neither need claim every managed service. Those decisions
 are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2` and `v0.6.0` (2026-11-14),
-`v0.7.0` (2026-11-15), `v0.8.0` (2026-11-17), `v0.8.1` and `v0.8.2` (2026-11-18), `v0.9.0` and `v0.9.1` (2026-11-19), `v0.10.0` (2026-11-20), `v0.10.1` (2026-11-21) and `v0.10.2` follow the same gate. For every release:
+`v0.7.0` (2026-11-15), `v0.8.0` (2026-11-17), `v0.8.1` and `v0.8.2` (2026-11-18), `v0.9.0` and `v0.9.1` (2026-11-19), `v0.10.0` (2026-11-20), `v0.10.1` and `v0.10.2` (2026-11-21) and `v0.11.0` follow the same gate. For every release:
 
 1. Review the exact release commit for the release and its supported core surface
    and explicit experimental/held features. The version is not published until
@@ -236,7 +252,7 @@ are not evidence of publication or installation. The releases `v0.5.1`, `v0.5.2`
    completion or a deployment. Keep the default `images.build: true` meanwhile.
 5. After publication, install the exact released chart/images with
    `images.build: false` on a clean evaluation site (not performed for `v0.4.0`,
-   and not yet performed for `v0.5.0` to `v0.10.2` when this was prepared; a portal-only Docker Compose
+   and not yet performed for `v0.5.0` to `v0.11.0` when this was prepared; a portal-only Docker Compose
    site is running `v0.5.2` on a homelab, and the [Platform setup lab acceptance](#platform-setup-lab-acceptance)
    used a Docker Compose install of `v0.7.0-rc.1`; neither is this acceptance). The installer
    accepts valid SemVer with **base version >= 0.4.0**, including prereleases; this local guard
