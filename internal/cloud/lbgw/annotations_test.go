@@ -169,12 +169,10 @@ func TestAnnotationsThatRefuseTheService(t *testing.T) {
 		s    *Service
 		want string
 	}{
-		"internal":                              {annotated(InternalAnnotation, "true"), ReasonInternalNotSupported},
-		"internal, as a bool":                   {annotated(InternalAnnotation, "True"), ReasonInternalNotSupported},
-		"forwarded-for and PROXY, own names":    {annotated(OwnPrefix+"x-forwarded-for", "true", OwnPrefix+"proxy-protocol", "true"), ReasonInvalidAnnotation},
-		"forwarded-for and PROXY, OCCM's names": {annotated(AliasPrefix+"x-forwarded-for", "true", AliasPrefix+"proxy-protocol", "v2"), ReasonInvalidAnnotation},
-		"affinity timeout":                      {&affinity, ReasonInvalid},
-		"affinity type":                         {&odd, ReasonInvalid},
+		"internal":            {annotated(InternalAnnotation, "true"), ReasonInternalNotSupported},
+		"internal, as a bool": {annotated(InternalAnnotation, "True"), ReasonInternalNotSupported},
+		"affinity timeout":    {&affinity, ReasonInvalid},
+		"affinity type":       {&odd, ReasonInvalid},
 	} {
 		if _, reason, msg := ServiceOptions(c.s); reason != c.want || msg == "" {
 			t.Errorf("%s: %q %q, want %s", name, reason, msg, c.want)
@@ -350,5 +348,54 @@ func TestAnnotationsThatCannotBeReadAreNotObeyed(t *testing.T) {
 	if w.Code != http.StatusRequestEntityTooLarge || r.portal.calls != 1 || !strings.Contains(w.Body.String(), ReasonTooLarge) ||
 		!strings.Contains(w.Body.String(), "the balancer stays as it is") {
 		t.Fatalf("over the body limit: %d %s, portal calls %d", w.Code, w.Body, r.portal.calls)
+	}
+}
+
+// The forwarded-for header asked for next to PROXY. OCCM fails such a Service's sync and leaves a balancer that exists
+// as it was (loadbalancer.go:1627-1631). A refusal here would take the Service out of the state and give its address
+// back, also of a Service that v0.11.0 served with its PROXY annotation while the other name lay on it unread. So the
+// Service is served, PROXY holds, the header is not added, and the one Event names the annotation.
+func TestForwardedForNextToProxyKeepsTheAddress(t *testing.T) {
+	leftover := annotated(OwnPrefix+KnobProxyProtocol, "true", AliasPrefix+"x-forwarded-for", "true")
+	leftover.ProxyProtocol = true // as v0.11.0's controller read it, and this one still sends it
+	for name, c := range map[string]struct {
+		s       *Service
+		version int
+		named   string
+	}{
+		"own names":                          {annotated(OwnPrefix+KnobXForwardedFor, "true", OwnPrefix+KnobProxyProtocol, "true"), 2, OwnPrefix + KnobXForwardedFor},
+		"OCCM's names":                       {annotated(AliasPrefix+"x-forwarded-for", "true", AliasPrefix+"proxy-protocol", "true"), 1, AliasPrefix + "x-forwarded-for"},
+		"v0.11.0's PROXY and a name left on": {leftover, 2, AliasPrefix + "x-forwarded-for"},
+		"PROXY off: the header is added":     {annotated(OwnPrefix+KnobXForwardedFor, "true", OwnPrefix+KnobProxyProtocol, "false"), 0, ""},
+		"the header off: nothing to be said": {annotated(OwnPrefix+KnobXForwardedFor, "false", OwnPrefix+KnobProxyProtocol, "v1"), 1, ""},
+		"the header alone, as it always was": {annotated(AliasPrefix+"x-forwarded-for", "true"), 0, ""},
+	} {
+		o, reason, msg := ServiceOptions(c.s)
+		if reason != "" {
+			t.Errorf("%s: refused, so its address goes back: %s %s", name, reason, msg)
+			continue
+		}
+		if o.ProxyVersion != c.version || o.XForwardedFor != (c.version == 0) {
+			t.Errorf("%s: PROXY %d, forwarded-for %v", name, o.ProxyVersion, o.XForwardedFor)
+		}
+		if c.named == "" {
+			if len(o.Events) != 0 {
+				t.Errorf("%s: %+v", name, o.Events)
+			}
+			continue
+		}
+		if len(o.Events) != 1 || o.Events[0].Reason != ReasonInvalidAnnotation || o.Events[0].Type != "Warning" ||
+			!strings.Contains(o.Events[0].Message, c.named+": the forwarded-for header is not added") {
+			t.Errorf("%s: %+v", name, o.Events)
+		}
+	}
+
+	// Through the gateway: the Service reaches the portal, so its address stays, and the answer says Proxy.
+	r := newRig()
+	r.protocol = "2"
+	w, ans := r.put(t, v2, Request{Services: []Service{*leftover}})
+	if w.Code != http.StatusOK || len(r.portal.got) != 1 || ans.Services[0].State == StateRefused || ans.Services[0].IPMode != "Proxy" ||
+		len(ans.Services[0].Events) != 1 {
+		t.Fatalf("gateway: %d %+v, the portal got %d", w.Code, ans, len(r.portal.got))
 	}
 }

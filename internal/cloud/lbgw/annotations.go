@@ -179,12 +179,13 @@ func (o Options) IPMode(s *Service) string {
 	return "VIP"
 }
 
-// ServiceOptions reads a Service's annotations and affinity. A reason refuses the Service: the internal annotation,
-// and the forwarded-for header together with PROXY (as OCCM refuses it, loadbalancer.go:1627-1631). An annotation
-// that cannot be read never does: a value that is too long (Read) or not understood is not obeyed and named in one
-// Event (InvalidAnnotation), and the Service is served with the default, since refusing it would give its address
-// back over a typing mistake, or over an annotation left on a Service that v0.11.0 served without reading it. The
-// number of annotations refuses nothing either: the ones the table does not know are named (AnnotationNotSupported).
+// ServiceOptions reads a Service's annotations and affinity. A reason refuses the Service, and of the annotations
+// the internal one alone gives one. An annotation that cannot be read never does: a value that is too long (Read) or
+// not understood is not obeyed and named in one Event (InvalidAnnotation), and the Service is served with the
+// default, since refusing it would give its address back over a typing mistake, or over an annotation left on a
+// Service that v0.11.0 served without reading it. The forwarded-for header asked for next to PROXY is not obeyed in
+// the same way. The number of annotations refuses nothing either: the ones the table does not know are named
+// (AnnotationNotSupported).
 func ServiceOptions(s *Service) (o Options, reason, message string) {
 	// Read before anything is left out: a Service that asks for an internal balancer never gets a public address.
 	if Internal(s.Annotations) {
@@ -260,9 +261,15 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 	o.TimeoutClientData = number(KnobTimeoutClientData, minTimeout, maxTimeout, ms)
 	o.TimeoutMemberConnect = number(KnobTimeoutMemberConnect, minTimeout, maxTimeout, ms)
 	o.TimeoutMemberData = number(KnobTimeoutMemberData, minTimeout, maxTimeout, ms)
-	o.XForwardedFor, _ = flag(KnobXForwardedFor)
-	if o.XForwardedFor && o.ProxyVersion != 0 {
-		return Options{}, ReasonInvalidAnnotation, "The forwarded-for header and the PROXY protocol both carry the client's address: set one of the two annotations, not both"
+	// The forwarded-for header and PROXY both carry the client's address, and OCCM takes a Service that asks for both
+	// as an error (loadbalancer.go:1627-1631): its sync fails and a balancer that exists stays as it was, address
+	// and all. A refusal here would give the address back instead, also of a Service that v0.11.0 served with its
+	// own PROXY annotation and the other name left on it. So PROXY holds, and the header is not added.
+	if on, _ := flag(KnobXForwardedFor); on && o.ProxyVersion != 0 {
+		_, name, _ := Annotation(ann, KnobXForwardedFor)
+		invalid = append(invalid, name+": the forwarded-for header is not added next to the PROXY header, which carries the client's address already; set one of the two")
+	} else {
+		o.XForwardedFor = on
 	}
 	if on, set := flag(KnobEnableHealthMonitor); set && !on {
 		if s.ExternalTrafficPolicy == "Local" {
