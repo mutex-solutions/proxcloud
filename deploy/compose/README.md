@@ -123,8 +123,11 @@ What the install leaves next to the script (all mode 600, none in git):
 | `backups/` | Written by `backup` |
 | `.env.dry-run` | Only after `--dry-run`: the preview, with the same secrets. Delete it when read |
 
-**Back up `.env` now, off this host.** `ENCRYPTION_KEY` decrypts the provider credentials stored in
-the database. It cannot be recovered or regenerated: without it, a database backup is not enough.
+**Back up `.env` now, off this host.** `ENCRYPTION_KEY` decrypts the provider credentials and the
+tenants' TLS private keys stored in the database. It cannot be recovered or regenerated: without it,
+a database backup is not enough. With another key the stored certificates no longer open: load
+balancers keep serving what they serve, but one with a TLS or HTTPS listener takes no change, and
+says so, until its certificates are uploaded again and named on its listeners.
 
 The install is idempotent. Run it again to resume after an error or to change a setting, for
 example `./proxcloud-up.sh install --admin-host ops.example.com` or `--tls acme-http --acme-email

@@ -64,7 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     named by the SHA-256 of its chain. The directory is made private and checked before anything is written into
     it, because the guest agent creates files readable by all. Files go before the config that names them, on the
     standby first; a config HAProxy refuses leaves the certificate in use in place; files no config names are
-    removed after the new config is served. A key is never in cloud-init.
+    removed after the new config is served. A key is never in cloud-init. The container test searches every
+    file of the guest for the key, on both images: it is in the certificate files in use and nowhere else, after
+    the first push, after three changes of certificate, and in no file once the last TLS listener is gone.
   - **A change of certificate closes no connection**: it is one HAProxy reload. In the container test, over 300
     handshakes made across three reloads with a changed certificate all succeeded, and a connection open since
     before them still worked after.

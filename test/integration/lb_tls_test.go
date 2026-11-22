@@ -171,6 +171,28 @@ func TestLBApplianceTLS(t *testing.T) {
 			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, lbSum(config)); err != nil || !ok {
 				t.Fatalf("serving: %v %q %v", ok, why, err)
 			}
+			// The key, searched for in every file of the guest by a line of its own text: it is in the certificate files
+			// and in nothing else (no temporary file, no journal, no state file, no copy of the config).
+			keyFiles := func() string {
+				t.Helper()
+				find := "grep -rlaF"
+				for _, f := range []pve.LBCertFile{fileA, fileB, fileA2} {
+					_, key, _ := strings.Cut(f.PEM, "-----BEGIN PRIVATE KEY-----\n")
+					find += " -e '" + strings.SplitN(key, "\n", 3)[1] + "'"
+				}
+				return g.run(ctx, find+" --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev / 2>/dev/null | sort")
+			}
+			inDir := func(files ...pve.LBCertFile) string {
+				paths := []string{}
+				for _, f := range files {
+					paths = append(paths, "/etc/haproxy/certs/"+f.Name+".pem")
+				}
+				slices.Sort(paths)
+				return strings.Join(paths, "\n")
+			}
+			if got := keyFiles(); got != inDir(fileA, fileB) {
+				t.Errorf("files of the guest that hold a key after the first push:\n%s\nwant\n%s", got, inDir(fileA, fileB))
+			}
 			// HAProxy has no word to say on the config, the policy lines among it; nor on the goldens with real files.
 			if out := g.run(ctx, "haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 || true"); strings.Contains(out, "WARNING") || strings.Contains(out, "ALERT") {
 				t.Errorf("haproxy -c on the pushed config:\n%s", out)
@@ -431,6 +453,11 @@ func TestLBApplianceTLS(t *testing.T) {
 				t.Errorf("a key was written through a link: %s files", got)
 			}
 			g.run(ctx, "rm /etc/haproxy/certs && mv /etc/haproxy/certs.real /etc/haproxy/certs")
+			// After three changes of certificate, two refused configs and a refused directory: the two certificates in
+			// use, and no key anywhere else.
+			if got := keyFiles(); got != inDir(fileA2, fileB) {
+				t.Errorf("files of the guest that hold a key after the changes:\n%s\nwant\n%s", got, inDir(fileA2, fileB))
+			}
 
 			// 8. The last listener that ends TLS goes: so do the certificate files, after the config without them is
 			// served.
@@ -440,6 +467,9 @@ func TestLBApplianceTLS(t *testing.T) {
 			}
 			if got := certDir(); got != holds() {
 				t.Errorf("after the last TLS listener went:\n%s", got)
+			}
+			if got := keyFiles(); got != "" {
+				t.Errorf("files of the guest that still hold a key after the last TLS listener went:\n%s", got)
 			}
 		})
 	}
