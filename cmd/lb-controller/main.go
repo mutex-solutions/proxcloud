@@ -99,12 +99,16 @@ type gateway struct {
 	peer     int
 }
 
-// protocol1 is req without what protocol 2 added.
+// protocol1 is req without what protocol 2 added, and without the Services that ask for an internal balancer: a
+// portal of protocol 1 reads no annotation, so it would give such a Service a public address.
 func protocol1(req *lbgw.Request) *lbgw.Request {
-	out := &lbgw.Request{Services: slices.Clone(req.Services), Nodes: req.Nodes}
-	for i := range out.Services {
-		s := &out.Services[i]
+	out := &lbgw.Request{Services: []lbgw.Service{}, Nodes: req.Nodes}
+	for _, s := range req.Services {
+		if lbgw.Internal(s.Annotations) {
+			continue
+		}
 		s.Annotations, s.SessionAffinity, s.SessionAffinityTimeout, s.Nodes = nil, "", 0, nil
+		out.Services = append(out.Services, s)
 	}
 	return out
 }
@@ -282,6 +286,14 @@ func (c *controller) turn(ctx context.Context) error {
 	for _, s := range owned {
 		st, ok := answered[s.uid]
 		if !ok {
+			// Not sent: an internal Service and a portal of protocol 1 (protocol1). It has no address there.
+			if lbgw.Internal(s.wire.Annotations) {
+				if len(s.ingress) > 0 {
+					c.setStatus(ctx, s, "")
+				}
+				c.report(ctx, s, "state", "Warning", lbgw.ReasonInternalNotSupported,
+					"The load balancer's addresses are public: for an address inside the cluster's network set loadBalancerClass proxcloud.io/internal and remove "+lbgw.InternalAnnotation)
+			}
 			continue
 		}
 		// The address goes into the Service's status when the portal says it is served, not when it is allocated:

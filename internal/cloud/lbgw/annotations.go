@@ -86,6 +86,13 @@ func SentAnnotation(key string) bool {
 	return strings.HasPrefix(key, OwnPrefix) || strings.HasPrefix(key, AliasPrefix) || key == InternalAnnotation
 }
 
+// Internal: the Service asks for a balancer without a public address (InternalAnnotation is a true boolean). The
+// gateway refuses it; the controller keeps it out of a request to a portal that reads no annotations.
+func Internal(ann map[string]string) bool {
+	on, err := strconv.ParseBool(strings.TrimSpace(ann[InternalAnnotation]))
+	return err == nil && on
+}
+
 // Annotation reads one knob: the own name, then OCCM's alias. name is the annotation that was read.
 func Annotation(ann map[string]string, knob string) (value, name string, ok bool) {
 	if v, ok := ann[OwnPrefix+knob]; ok {
@@ -154,7 +161,7 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 			return o, ReasonInvalidAnnotation, fmt.Sprintf("%.80s is not a load balancer annotation of at most %d characters", k, MaxAnnotationValue)
 		}
 	}
-	if on, err := strconv.ParseBool(strings.TrimSpace(ann[InternalAnnotation])); err == nil && on {
+	if Internal(ann) {
 		return o, ReasonInternalNotSupported, "The load balancer's addresses are public: for an address inside the cluster's network set loadBalancerClass proxcloud.io/internal and remove " + InternalAnnotation
 	}
 	var invalid []string

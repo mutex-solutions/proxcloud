@@ -59,7 +59,8 @@ and the portal carries more, in both directions, and the portal reads what a Ser
   as up.
 - *The controller steps down for an older portal.* The gateway decodes strictly, so a portal rolled back refuses
   protocol 2's fields with 400 for every Service of the cluster. The portal names its protocol on every answer; the
-  controller sends protocol 1's request from the next turn on.
+  controller sends protocol 1's request from the next turn on, without the Services that set the internal
+  annotation: that portal reads no annotation and would give them a public address.
 
 **Not in this change:** TLS from a Service's Secret, the watch (the controller still polls, `-interval`), keeping a
 Service's address (`lb-keep-address` is read and answered with an Event), a chart change, the consoles and the

@@ -1030,7 +1030,9 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
 - It sends `ProxCloud-LB-Protocol: 2` (v0.11.0's controller: 1); a portal that needs a newer controller answers
   `ControllerTooOld`, and a chart bump gives the cluster the portal's image. The portal says its own protocol on
   every answer: a controller that finds an older portal (a portal rolled back) sends it the request of protocol 1
-  from the next turn on, since that portal refuses a field it does not know. `-interval` is unchanged, so this
+  from the next turn on, since that portal refuses a field it does not know. A Service that asks for an internal
+  balancer (below) is left out of that request and gets the Event `InternalNotSupported` from the controller: a
+  portal of protocol 1 reads no annotation and would give it a public address. `-interval` is unchanged, so this
   release's image runs under chart 0.1.17.
 
 **Load balancers of a cluster's Services: UDP, affinity, annotations, and how it differs from OCCM.** OCCM is
@@ -1060,7 +1062,7 @@ served as before.
 - **The UDP check for policy Cluster** is keepalived's `UDP_CHECK` with a ping beside it. It sends a datagram of
   random bytes to the node port every 5 s, which kube-proxy hands to some pod of the Service: an application that
   cannot take junk bytes sets `proxcloud.io/lb-enable-health-monitor: "false"`. A closed port is not seen under
-  traffic (the node rate-limits its ICMP answers); a dead node is out in 10 to 12 s. A connection limit on a UDP port
+  traffic (the node rate-limits its ICMP answers); a dead node is out in 10 to 12 s (the lab spike of 2026-11-22). A connection limit on a UDP port
   holds per node, not for the listener.
 
 Annotations. The own name is `proxcloud.io/lb-<knob>`; `loadbalancer.openstack.org/<alias>` is obeyed where it means

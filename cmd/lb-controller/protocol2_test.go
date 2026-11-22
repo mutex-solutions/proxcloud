@@ -330,4 +330,14 @@ func TestGatewayPutFallsBackToProtocol1(t *testing.T) {
 	if req.Services[0].Annotations == nil || req.Services[0].Nodes == nil {
 		t.Fatal("the caller's request was changed")
 	}
+	// A Service that asks for an internal balancer is not sent to that portal at all: it reads no annotation and would
+	// give the Service a public address.
+	req.Services = append(req.Services, lbgw.Service{UID: "u-2", Ports: []lbgw.Port{{Protocol: "TCP", Port: 80, NodePort: 30081}},
+		Annotations: map[string]string{lbgw.InternalAnnotation: "true"}})
+	if _, err := g.put(context.Background(), req); err != nil || len(got) != 1 || got[0].UID != "u-1" {
+		t.Fatalf("an internal Service reached a portal of protocol 1: %+v %v", got, err)
+	}
+	if len(req.Services) != 2 {
+		t.Fatal("the caller's request was changed")
+	}
 }
