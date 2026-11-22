@@ -23,6 +23,9 @@ application:
             extraDeny:
               - 192.0.2.0/24
           mode: shared
+          prepull:
+            - registry.example/sandbox-base:test@sha256:0000000000000000000000000000000000000000000000000000000000000001
+            - registry.example/sandbox-code-interpreter:test@sha256:0000000000000000000000000000000000000000000000000000000000000002
           proxy:
             address: 192.0.2.245
             domain: sbx.example.org

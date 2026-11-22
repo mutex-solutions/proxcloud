@@ -69,6 +69,9 @@ func (h *Handler) checkSandboxGoLive(ctx context.Context, doc pgdoc.M) *httpx.HT
 	if doc["status"] == externalservice.StatusDisabled {
 		return nil
 	}
+	if herr := h.sandboxNeedsScheduler(doc); herr != nil {
+		return herr
+	}
 	if err := sandbox.GatesErr(h.sandboxGatesFor(ctx, es)); err != nil {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict,
 			"A sandbox provider cannot go live: "+err.Error()+". Store it with status DISABLED until they hold (docs/managed-sandbox.md §3).")

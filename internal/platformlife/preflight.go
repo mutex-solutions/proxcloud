@@ -69,6 +69,9 @@ const providerDisabled = "the provider is disabled, and a provider sync skips a 
 func SiteOf(es *externalservice.ExternalService) Site {
 	n := es.PVENetworkConfig()
 	site := Site{CIDRPool: n.CIDRPool, Blocked: n.BlockedCIDRs, Sandbox: n.SandboxCIDRs, PoolPrefix: es.PVEPoolPrefix()}
+	if sb, ok := es.PVESandboxConfig(); ok {
+		site.SandboxPool, site.SandboxOwner = sb.Pool, sb.Owner
+	}
 	for _, p := range n.PublicNetworks {
 		site.Public = append(site.Public, p.CIDR)
 	}
@@ -139,7 +142,11 @@ func (p Preflight) Run(ctx context.Context) []Check {
 	}
 	row("flags", flags, "Managed services and VM template updates are on, and a GitHub integration is saved.")
 	if p.SchedulerOff { // the operator's call (it starts charging), so never a failure
-		out = append(out, Check{ID: "scheduler", Status: CheckWarn, Message: SchedulerOffNote})
+		note := SchedulerOffNote
+		if in.Spec.sandboxMode() != "" {
+			note += SchedulerOffSandboxNote
+		}
+		out = append(out, Check{ID: "scheduler", Status: CheckWarn, Message: note})
 	}
 
 	var spec []string

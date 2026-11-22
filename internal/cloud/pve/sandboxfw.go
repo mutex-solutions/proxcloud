@@ -89,6 +89,14 @@ type SandboxFirewall struct {
 	Peers []string
 }
 
+// Validate reports whether the firewall can be written: what generation refuses (an address outside its range, a
+// proxy no load balancer address holds, peers without the platform bridge). Whoever writes a provider's sandbox
+// settings can ask before a sync does.
+func (f SandboxFirewall) Validate() error {
+	_, err := f.generation()
+	return err
+}
+
 // sandboxGen is one generation of the shared rules: the group and its two IP sets.
 type sandboxGen struct {
 	Group   string

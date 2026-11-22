@@ -3,6 +3,7 @@ package platformlife
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -34,6 +35,21 @@ func sandboxBOM(t *testing.T) Embedded {
 	cur.Components = slices.Clone(cur.Components)
 	addSandbox(cur.BOM)
 	return cur
+}
+
+// fixedSandboxPins replaces the pins of deploy/templates/images.yaml for a test that compares a render byte for byte:
+// the template workflow moves the real ones, and such a move must not need a golden update.
+func fixedSandboxPins(t *testing.T) {
+	t.Helper()
+	saved := sandboxPins
+	t.Cleanup(func() { sandboxPins = saved })
+	sandboxPins = func() (map[string]string, error) {
+		out := map[string]string{}
+		for i, name := range []string{"base", "code-interpreter", "python", "mcp-gateway"} {
+			out[name] = fmt.Sprintf("registry.example/sandbox-%s:test@sha256:%064d", name, i+1)
+		}
+		return out, nil
+	}
 }
 
 func addSandbox(b *BOM) {
@@ -559,6 +575,7 @@ func sandboxRender(sb *SandboxSpec) RenderInput {
 // chart in the BOM, an installation without the block renders exactly what the BOM without the chart renders.
 // `go test ./internal/platformlife -run TestSandboxRenderGolden -update` rewrites the files.
 func TestSandboxRenderGolden(t *testing.T) {
+	fixedSandboxPins(t)
 	plain := embedded(t)
 	b := embedded(t)
 	addSandbox(b)

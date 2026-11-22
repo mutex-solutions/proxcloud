@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -102,6 +103,15 @@ func (j *Job) fenceSandbox(ctx context.Context, ps *pve.Service, es *externalser
 
 // sandboxFirewall is the firewall the pass writes for a provider's sandbox pool (and the fence gate reads back).
 func sandboxFirewall(ctx context.Context, ps *pve.Service, netCfg externalservice.PVENetwork, cfg externalservice.PVESandbox, server string) (pve.SandboxFirewall, error) {
+	deny, err := sandboxDeny(ctx, ps, netCfg, cfg)
+	if err != nil {
+		return pve.SandboxFirewall{}, err
+	}
+	return sandboxFirewallOf(netCfg, cfg, server, deny)
+}
+
+// sandboxFirewallOf is the provider's settings as a firewall: deny is what the site adds (sandboxDeny).
+func sandboxFirewallOf(netCfg externalservice.PVENetwork, cfg externalservice.PVESandbox, server string, deny []string) (pve.SandboxFirewall, error) {
 	if len(netCfg.SandboxCIDRs) != 1 {
 		return pve.SandboxFirewall{}, fmt.Errorf("sandbox: network.sandboxCidrs must hold the sandbox subnet, has %d entries", len(netCfg.SandboxCIDRs))
 	}
@@ -109,13 +119,9 @@ func sandboxFirewall(ctx context.Context, ps *pve.Service, netCfg externalservic
 	if err != nil {
 		return pve.SandboxFirewall{}, err
 	}
-	deny, err := sandboxDeny(ctx, ps, netCfg, cfg)
-	if err != nil {
-		return pve.SandboxFirewall{}, err
-	}
 	return pve.SandboxFirewall{
 		Pool: cfg.Pool, Subnet: netCfg.SandboxCIDRs[0], Nodes: cfg.Nodes, LoadBalancers: cfg.LoadBalancers,
-		ControlPlane: host, APIPort: port, DNS: cfg.DNS, KubeletFrom: cfg.KubeletSources, Deny: deny,
+		ControlPlane: host, APIPort: port, DNS: cfg.DNS, KubeletFrom: cfg.KubeletSources, Deny: append(slices.Clone(deny), cfg.Deny...),
 		ProxyAddress: cfg.Proxy.Address, ProxyPort: cfg.Proxy.Port, EntryFrom: cfg.Proxy.EntryAddress,
 		RegistryAddress: cfg.Registry.Address, RegistryPort: cfg.Registry.Port,
 		BuildStorageAddress: cfg.BuildStorage.Address, BuildStoragePort: cfg.BuildStorage.Port,
@@ -141,7 +147,7 @@ func sandboxDeny(ctx context.Context, ps *pve.Service, netCfg externalservice.PV
 		// ponytail: a down node pauses the whole pass (new workers stay tainted); keep the last complete list if that hurts.
 		return nil, errors.New("sandbox: a PVE node did not report its networks; the workers keep their current firewall this pass")
 	}
-	deny := append(append(append(append(mgmt, hosts...), netCfg.BlockedCIDRs...), netCfg.CIDRPool), cfg.Deny...)
+	deny := append(append(append(mgmt, hosts...), netCfg.BlockedCIDRs...), netCfg.CIDRPool)
 	if ip := net.ParseIP(cfg.SNAT); ip != nil {
 		deny = append(deny, cfg.SNAT)
 	}

@@ -1847,6 +1847,9 @@ func (x *acq) register(ctx context.Context) error {
 		return err
 	}
 	var ids ProviderIDs
+	if p := x.in.Status.Providers; p != nil {
+		ids.Sandbox = p.Sandbox // kept while sandboxes are off: the row is adopted again when they come back
+	}
 	var items []StageItem
 	// A node image is offered only where it is published; a cluster that cannot be read offers none in this run. A
 	// version is offered once (status.kubernetesOffered): an apply does not add again one the operator removed.
@@ -1881,12 +1884,38 @@ func (x *acq) register(ctx context.Context) error {
 	// The attach choice is applied once, when it differs from the one applied last: an apply must not attach again
 	// projects the operator detached since, or turn a policy back on. It is recorded only when both providers took it:
 	// until then the next apply applies it to both again, the one that took it included.
+	// The sandbox provider after the two others: it needs the sandbox chart's identities, which may still be on their
+	// way, and a wait for them must not hold back the providers tenants already use.
+	if id, err := x.registerSandbox(ctx, wl); err != nil {
+		return err
+	} else if id != "" {
+		ids.Sandbox = id
+		items = append(items, StageItem{ID: "sandbox-provider", State: "done", Message: "The sandbox provider is registered DISABLED, or kept as it was. It goes live on its page under Cloud providers, " +
+			"once the provider sync has fenced the sandbox machines and the release gates hold."})
+	}
 	choice, applied := x.in.Spec.Tenants.AttachChoice(), x.in.Status.TenantsAttach
-	if x.r.Attach != nil && choice != (Tenants{Attach: applied}).AttachChoice() {
-		actor := x.run.RequestedBy
-		if actor == "" {
-			actor = templateupdates.PlatformRunActor + x.run.ID
+	actor := x.run.RequestedBy
+	if actor == "" {
+		actor = templateupdates.PlatformRunActor + x.run.ID
+	}
+	// The same choice for the sandbox provider, recorded apart (Status.SandboxAttach): it is disabled until the
+	// operator sets it live, so "every project" waits there, and that wait must not make the next apply attach the two
+	// other providers again.
+	sandboxApplied := x.in.Status.SandboxAttach
+	if x.r.Attach != nil && x.in.Spec.sandboxMode() != "" && ids.Sandbox != "" && choice != (Tenants{Attach: sandboxApplied}).AttachChoice() {
+		done, note, err := x.r.Attach(ctx, x.in.ID, ids.Sandbox, choice, actor)
+		if err != nil {
+			done, note = false, "The attach choice was not applied: "+clip(err.Error())+" The next apply tries again."
 		}
+		it := StageItem{ID: "attach:" + ids.Sandbox, State: "done", Message: note}
+		if done {
+			sandboxApplied = choice
+		} else {
+			it.State = "warn"
+		}
+		items = append(items, it)
+	}
+	if x.r.Attach != nil && choice != (Tenants{Attach: applied}).AttachChoice() {
 		all := true
 		for _, id := range []string{ids.Kubernetes, ids.Database} {
 			done, note, err := x.r.Attach(ctx, x.in.ID, id, choice, actor)
@@ -1907,7 +1936,7 @@ func (x *acq) register(ctx context.Context) error {
 		return err
 	}
 	return x.record(ctx, func(_ *Run, in *Installation, _ *Secrets) {
-		in.Status.Providers, in.Status.TenantsAttach = &ids, applied
+		in.Status.Providers, in.Status.TenantsAttach, in.Status.SandboxAttach = &ids, applied, sandboxApplied
 		if v := x.bom.Kubernetes.Version; offered && !slices.Contains(in.Status.KubernetesOffered, v) {
 			in.Status.KubernetesOffered = append(in.Status.KubernetesOffered, v)
 		}
@@ -1986,7 +2015,10 @@ func AdoptProvider(rows []map[string]any, body map[string]any) (map[string]any, 
 		return nil, nil
 	}
 	if was := str(found, "config", providerStatusBefore); was != "" { // disabled by a Remove, not by the operator
-		found["status"] = was
+		// A sandbox provider stays disabled: it goes live only through its release gates, never through a run.
+		if str(found, "config", "provider") != "sandbox" {
+			found["status"] = was
+		}
 		delete(found["config"].(map[string]any), providerStatusBefore)
 	}
 	for _, path := range providerOwned {

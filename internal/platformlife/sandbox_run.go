@@ -76,6 +76,9 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 	case want == "" && built == nil:
 		return nil
 	case want == "":
+		if err := x.sandboxOffAllowed(ctx); err != nil {
+			return err
+		}
 		return x.sandboxAppsGone(ctx, seed, built.Placement)
 	case built != nil && built.Placement != want:
 		return permanent(CodeSandboxRefused, "A run built sandboxes with placement %s and the settings say %s. Nothing was changed. Set spec.sandbox.placement off and apply, then set %s.", built.Placement, want, want)
@@ -105,6 +108,13 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 		if err := x.save(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Sandbox = &next }); err != nil {
 			return err
 		}
+	}
+	// The provider's sandbox network and pool before any sandbox machine exists: the next provider sync writes the
+	// isolation rules of the range, and fences each machine as soon as it is cloned. The identity its fence pass reads
+	// the Nodes with follows in stage register, once the sandbox chart has made it; until then every machine keeps
+	// its unsecured taint.
+	if err := x.sandboxSite(ctx, ""); err != nil {
+		return err
 	}
 	if want == SandboxShared {
 		// Written at every apply, so a row deleted by hand comes back.
@@ -219,6 +229,16 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 	if err := x.check(ctx); err != nil {
 		return err
 	}
+	// The provider stops naming the pool and the range first, so no sync fences on while the rest goes; then the
+	// firewall generations of the pool, which no pass would sweep any more.
+	if x.r.SandboxSite != nil {
+		if err := sandboxSiteErr(x.r.SandboxSite(ctx, x.in, &SandboxSite{Range: built.NodeRange})); err != nil {
+			return err
+		}
+	}
+	if err := (&pve.Service{C: x.portal}).RemoveSandboxFirewall(ctx, pve.SandboxPool); err != nil {
+		return classify(CodeSandboxAccessFailed, err)
+	}
 	if built.Placement == SandboxShared {
 		err = x.portal.SetSandboxPoolAccess(ctx, true)
 	} else {
@@ -241,10 +261,16 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 // certificate is in the status for clients to trust. An operator's certificate (tls.mode secret) has no route that
 // stores it yet: the save refuses it (SandboxProblems), and a record that names it all the same stops here.
 func (x *acq) sandboxCertificate(ctx context.Context, wl *kamajik8s.Client) error {
-	sb := x.in.Spec.Sandbox
 	if x.in.Spec.sandboxMode() != SandboxShared {
 		return nil
 	}
+	return x.applySandboxTLS(ctx, wl)
+}
+
+// applySandboxTLS makes or keeps the certificate and writes its Secret into the sandbox chart's namespace on target:
+// the platform cluster (shared) or pc-sandbox (separate, sandboxCluster).
+func (x *acq) applySandboxTLS(ctx context.Context, wl *kamajik8s.Client) error {
+	sb := x.in.Spec.Sandbox
 	if sb.TLS != nil && sb.TLS.Mode == TLSSecret {
 		return permanent(CodeSandboxRefused, "spec.sandbox.tls.mode is secret and no certificate of the operator's is stored: this release has no route that stores one. Set tls.mode selfsigned, then apply again.")
 	}
@@ -348,6 +374,15 @@ func (x *acq) sandboxCluster(ctx context.Context, seed, wl *kamajik8s.Client) er
 	}
 	if err := seed.ApplyApplication(ctx, app); err != nil {
 		return classify(CodeComponentUnhealthy, err)
+	}
+	// The proxy's certificate inside pc-sandbox, as soon as its control plane answers: the sandbox chart there mounts
+	// the Secret, and sandbox-proxy does not start without it.
+	sc, err := x.sandboxClusterClient(ctx, wl)
+	if err != nil {
+		return err
+	}
+	if err := x.applySandboxTLS(ctx, sc); err != nil {
+		return err
 	}
 	machines, err := wl.ListCRs(ctx, capiGroup, capiVersion, "machines", SandboxClusterName, "")
 	if err != nil {

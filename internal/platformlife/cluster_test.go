@@ -43,6 +43,11 @@ type platform struct {
 	registers []map[string]any
 	disabled  int
 	conflict  error
+	// sbx is the API of the separate sandbox cluster pc-sandbox (sandboxPlatform); sites are the writes of the run to
+	// the Proxmox provider's sandbox settings, in order, and siteErr what the next one answers.
+	sbx     *fakeSeed
+	sites   []*SandboxSite
+	siteErr error
 }
 
 func newPlatform(t *testing.T, kind string) *platform {
@@ -66,6 +71,13 @@ func newPlatform(t *testing.T, kind string) *platform {
 		return "svc-" + str(body, "config", "provider"), nil
 	}
 	p.r.Disable = func(context.Context, string) error { p.disabled++; return nil }
+	p.r.SandboxSite = func(_ context.Context, _ *Installation, s *SandboxSite) error {
+		if p.siteErr != nil {
+			return p.siteErr
+		}
+		p.sites = append(p.sites, s)
+		return nil
+	}
 
 	cur, _ := Current()
 	install := func(f *fakeSeed, want Providers) {

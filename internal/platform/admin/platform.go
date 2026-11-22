@@ -406,6 +406,9 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 			platformlife.KeepMachines(&old.Spec, &next.Spec)
 			platformlife.KeepSandbox(&old.Spec, &next.Spec)
 		}
+		if why := h.sandboxOffRefused(r.Context(), &old, &next); why != "" {
+			return nil, &invalidInstallation{status: http.StatusConflict, code: "sandbox_provider_live", msg: why, problems: []string{"spec.sandbox.placement"}}
+		}
 		if err := h.checked(r, &next, req.Preset, &old.Spec); err != nil {
 			return nil, err
 		}

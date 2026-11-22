@@ -123,3 +123,11 @@ const SchedulerOffNote = "The job scheduler is off. Until it is on, a tenant can
 	"servers is refreshed only when an operator runs a provider sync, and no usage is charged or billed. Turn it on where ProxCloud is " +
 	"installed: ./proxcloud-up.sh install --scheduler on a Compose install, PROXCLOUD_JOBS_SCHEDULER_ENABLED=true for the API elsewhere. " +
 	"It starts charging usage on a timer, so set the prices first."
+
+// SchedulerOffSandboxNote is what the same row adds while the settings ask for sandboxes. The jobs that keep sandboxes
+// safe run on the scheduler: the provider sync that fences a sandbox machine, takes its unsecured taint off and puts it
+// back on a machine that lost its fence, and the minutely read and abuse check. One operator sync fences once and
+// nothing watches afterwards, so a sandbox provider of a managed platform is refused "live" while the scheduler is off.
+const SchedulerOffSandboxNote = " Sandboxes need it: the provider sync fences each sandbox machine and keeps watching its firewall, and the minutely " +
+	"read ends sandboxes that are gone. While the scheduler is off the sandbox provider cannot be set live. The same switch starts charging " +
+	"sandbox minutes, and the price rule for sandboxes holds a placeholder rate until you set one (or 0)."

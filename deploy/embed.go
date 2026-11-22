@@ -26,3 +26,10 @@ var MgmtArgoCDHealth []byte
 
 //go:embed dbaas-cluster/argocd-health.yaml
 var DbaasArgoCDHealth []byte
+
+// SandboxImages are the built-in sandbox template images, each pinned by digest (templates/images.yaml). The installer
+// resolves a template's "pin:<name>" from the file itself; a managed platform's run has no installer, so it reads the
+// pins of its own release here (internal/platformlife). They move with a portal release and no other way.
+//
+//go:embed templates/images.yaml
+var SandboxImages []byte

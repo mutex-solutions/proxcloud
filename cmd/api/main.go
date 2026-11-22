@@ -1065,7 +1065,8 @@ func run() error {
 				Jobs: jobStore, State: platformStore, Log: log, Preflight: adminH.PlatformPreflight, SkipRolloutGate: cfg.Jobs.PlatformSkipRolloutGate,
 				Imports:  platformlife.TemplateUpdates{Service: tuSvc},
 				Register: adminH.PlatformRegister, Disable: adminH.PlatformDisable, Attach: adminH.PlatformAttach,
-				SDNLock: sdnLock,
+				SandboxSite: adminH.PlatformSandboxSite,
+				SDNLock:     sdnLock,
 				Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
 					es, err := esSvc.Get(ctx, id)
 					if errors.Is(err, externalservice.ErrNotFound) {

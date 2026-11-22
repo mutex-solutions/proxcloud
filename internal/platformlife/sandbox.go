@@ -296,6 +296,16 @@ func (in *Installation) sandboxSiteProblems(site Site) []string {
 		return nil
 	}
 	var out []string
+	// One provider fences one sandbox pool: the block of the installer's sandbox cluster, or of another installation,
+	// is not overwritten.
+	if site.SandboxPool != "" && site.SandboxOwner != in.ID {
+		whose := "the installer's sandbox cluster (docs/managed-sandbox.md)"
+		if site.SandboxOwner != "" {
+			whose = "installation " + site.SandboxOwner
+		}
+		out = append(out, fmt.Sprintf("the provider already fences a sandbox pool, %s (config.sandbox), which belongs to %s: one provider fences one sandbox pool. Remove that sandbox cluster and its config.sandbox first, or leave spec.sandbox out",
+			site.SandboxPool, whose))
+	}
 	for _, set := range []struct {
 		what string
 		nets []string
@@ -307,7 +317,7 @@ func (in *Installation) sandboxSiteProblems(site Site) []string {
 		}
 	}
 	for _, c := range site.Sandbox {
-		if p, err := netip.ParsePrefix(strings.TrimSpace(c)); err != nil || p.Masked() != own {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(c)); err != nil || !slices.Contains(in.ownSandboxRanges(), p.Masked()) {
 			out = append(out, fmt.Sprintf("the provider already names the sandbox network %s (config.network.sandboxCidrs): one provider fences one sandbox network. Remove that entry, or the sandbox cluster it belongs to, first",
 				strings.TrimSpace(c)))
 		}
@@ -522,7 +532,20 @@ func sandboxChartValues(in RenderInput) map[string]any {
 	return map[string]any{
 		"proxy":     map[string]any{"address": in.Sandbox.ProxyAddress, "domain": in.Sandbox.Domain},
 		"guardrail": map[string]any{"extraDeny": []any{in.Sandbox.PlatformPrefix}},
+		"prepull":   sandboxPrepullRefs(),
 	}
+}
+
+// sandboxPrepullRefs are the images of sandboxPrepull by digest, for the chart's prepull DaemonSet. A release whose
+// images.yaml lacks one pulls nothing ahead (TestSandboxTemplatesArePinned keeps that from shipping).
+func sandboxPrepullRefs() []any {
+	out := []any{}
+	for _, name := range sandboxPrepull {
+		if ref, err := sandboxPin(name); err == nil {
+			out = append(out, ref)
+		}
+	}
+	return out
 }
 
 // SandboxClusterValues are the proxmox-kamaji-cluster values of the separate sandbox cluster, after the installer's
@@ -696,6 +719,15 @@ func (p Preflight) sandboxCheck(ctx context.Context) *Check {
 	if strings.HasPrefix(pve.SandboxPool, p.Site.PoolPrefix) && p.Site.PoolPrefix != "" {
 		problems = append(problems, fmt.Sprintf("the provider's poolPrefix %q is the start of the sandbox pool's name %s: the provider sync would take the pool for a project's", p.Site.PoolPrefix, pve.SandboxPool))
 	}
+	// Proxmox enforces a VM firewall only while the datacenter firewall is on. With it off the sync still writes every
+	// sandbox machine's rules, none of them holds, and no machine is ever opened to sandboxes (pve.ErrSandboxUnenforced).
+	if on, err := p.Portal.C.DatacenterFirewallEnabled(ctx); err != nil {
+		problems = append(problems, "Could not read the datacenter firewall's options: "+err.Error())
+	} else if !on {
+		problems = append(problems, "The datacenter firewall is off (Datacenter, Firewall, Options, Firewall: No), so Proxmox enforces no VM firewall: the fence of a sandbox machine would hold nothing, "+
+			"its unsecured taint would never come off and the fence gate would never pass. Tenant security groups and the isolation rules need it on as well. Before switching it on, read what else it puts in force: the nodes' own input policy.")
+	}
+	problems = append(problems, p.proxyAddressTaken(ctx)...)
 	rows, err := p.Portal.C.ClusterResources(ctx, "vm")
 	if err != nil {
 		problems = append(problems, "Could not read the VMs of pool "+pve.SandboxPool+": "+err.Error())
@@ -717,5 +749,40 @@ func (p Preflight) sandboxCheck(ctx context.Context) *Check {
 		c.Message = strings.Join(problems, "\n")
 		return c
 	}
-	return &Check{ID: "sandbox", Status: CheckOK, Message: "The portal token can make pool " + pve.SandboxPool + " and open it for the sandbox machines, and the pool holds no VM of another's."}
+	return &Check{ID: "sandbox", Status: CheckOK, Message: "The portal token can make pool " + pve.SandboxPool + " and open it for the sandbox machines, the pool holds no VM of another's, " +
+		"the datacenter firewall is on, and no Service of the platform cluster holds the proxy address."}
+}
+
+// proxyAddressTaken names a LoadBalancer Service of the platform cluster that holds spec.sandbox.proxyAddress and is
+// not sandbox-proxy: MetalLB gives an address once, so sandbox-proxy would stay without one. Read only on a platform
+// that runs (the Workload client); before the install nothing can hold an address of its MetalLB range. With placement
+// separate the address is outside that range and this read finds nothing: what else on the platform network uses the
+// address (a router, a guest without an agent) no check can read.
+func (p Preflight) proxyAddressTaken(ctx context.Context) []string {
+	addr := p.Installation.Spec.Sandbox.ProxyAddress
+	if p.Workload == nil || addr == "" {
+		return nil
+	}
+	svcs, err := p.Workload.ListServicesAllNamespaces(ctx)
+	if err != nil {
+		return nil // rows nodes and certificates say that the cluster does not answer
+	}
+	var out []string
+	for _, s := range svcs {
+		ns, name := str(s, "metadata", "namespace"), str(s, "metadata", "name")
+		if ns == sandboxNamespace && name == "sandbox-proxy" {
+			continue
+		}
+		holds := str(s, "spec", "loadBalancerIP") == addr || slices.Contains(strings.Split(str(s, "metadata", "annotations", "metallb.io/loadBalancerIPs"), ","), addr)
+		ingress, _ := dig(s, "status", "loadBalancer", "ingress").([]any)
+		for _, i := range ingress {
+			if m, _ := i.(map[string]any); m["ip"] == addr {
+				holds = true
+			}
+		}
+		if holds {
+			out = append(out, fmt.Sprintf("spec.sandbox.proxyAddress %s is taken: Service %s/%s of the platform cluster holds it, so sandbox-proxy would get no address. Choose a free address of the MetalLB range", addr, ns, name))
+		}
+	}
+	return out
 }
