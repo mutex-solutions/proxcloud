@@ -375,15 +375,16 @@ Where an entry below says the BOM on `main` is `0.11.0-dev`, that was the state 
   every Gateway takes one, and the sixth waits with `QuotaExceeded` until the project's quota or the provider's
   default quota is raised.
 - **What backups hold.** A Proxmox backup or snapshot of an appliance holds its disk: the HAProxy config with the
-  listeners and the members' addresses, and the keepalived config; no key and no password in this release. Do not
-  restore an appliance from one: its config comes from the portal, and Replace appliances builds a fresh one. The
-  portal's `backup` writes the database dump and a copy of `.env` side by side: the dump holds every balancer's row
-  and a hash of each cluster's gateway secret, and `.env` holds the key that opens the provider credentials in the
-  dump. Whoever has both files has the portal's secrets. Neither holds the volume `gateway`.
+  listeners and the members' addresses, and the keepalived config. The platform writes no secret to an appliance in
+  this release, so such a backup holds none of the portal's. Restoring an appliance from one was not tested: its
+  config comes from the portal, and for a pair Replace appliances builds fresh ones. The portal's `backup` writes
+  the database dump and a copy of `.env` side by side: the dump holds every balancer's row and a hash of each
+  cluster's gateway secret, and `.env` holds the key that opens the provider credentials in the dump. Whoever has
+  both files has the portal's secrets. Neither holds the volume `gateway`.
 - **A cluster's first Service shows its address before it answers**: 3 minutes 12 seconds earlier on the lab. Tools
   that wait for the address (`helm --wait`, Argo CD health, external-dns) take the Service for ready too early; the
   Event stays `EnsuringLoadBalancer` until it serves. The first Service waits for the pair (6 minutes 37 seconds on
-  the lab until it answered, with packages from apt); later ones took about half a minute.
+  the lab until it answered, with packages from apt); a second Service of the same cluster answered after 32.
 - **Builds and replaces take minutes** (7 to 13.5 on the lab): a stock image runs its own first-boot upgrade and the
   platform waits for the package manager. A config change also waits while the package manager runs on an appliance;
   the other appliance takes it first and the row reads `DEGRADED` until both have it.
