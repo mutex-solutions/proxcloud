@@ -403,6 +403,81 @@ done`)
 			g.run(ctx, "systemd-run -q --unit=lb-udp-m1 ip netns exec m1 /usr/local/bin/lb-udp-echo m1")
 			t.Logf("a member whose port closed left the table after %s and was back %s after it opened", took, waitHealth("the port is open again", reply, "101 UP, 102 UP", 30*time.Second))
 
+			// 7b. A Kubernetes Service's UDP port as the portal makes it for externalTrafficPolicy Local and
+			// sessionAffinity ClientIP (project.lbClusterServiceSpec; its golden is lvs-k8s-services.conf): the listener
+			// is on the Service's own address, the members are nodes by address, and keepalived checks them over HTTP
+			// on the health check node port, where kube-proxy answers 200 on a node that holds a pod of the Service
+			// and 503 on one that holds none. Here m1 holds a pod and m2 none; then m2 gets one.
+			g.run(ctx, `cat > /usr/local/bin/lb-hc <<'HC'
+#!/bin/sh
+while IFS= read -r l; do [ "$l" = "$(printf '\r')" ] && break; done
+printf 'HTTP/1.1 %s kube-proxy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n' "$1"
+HC
+chmod 0755 /usr/local/bin/lb-hc
+systemd-run -q --unit=lb-hc-m1 ip netns exec m1 socat TCP4-LISTEN:32000,fork,reuseaddr SYSTEM:"/usr/local/bin/lb-hc 200"
+systemd-run -q --unit=lb-hc-m2 ip netns exec m2 socat TCP4-LISTEN:32000,fork,reuseaddr SYSTEM:"/usr/local/bin/lb-hc 503"`)
+			local := pve.LBSpec{
+				Listeners: []pve.LBListener{{Port: 5000, Protocol: "udp", Pool: "s0-5000-udp", VIP: vip}},
+				Pools: []pve.LBPool{{Name: "s0-5000-udp", Protocol: "udp", Algorithm: "roundrobin",
+					HealthCheck:        &pve.LBHealthCheck{Type: "http", Port: 32000, Path: "/"},
+					SessionPersistence: &pve.LBPersistence{Type: "source_ip", Timeout: 600},
+					Members:            []pve.LBMember{{Node: true, Address: "10.77.0.11", Port: 5000, Weight: 1}, {Node: true, Address: "10.77.0.12", Port: 5000, Weight: 1}}}},
+			}
+			nodes := func() string {
+				t.Helper()
+				hs, notLoaded, err := ps.LVSHealth(ctx, "n1", 100, local, vips)
+				if err != nil || len(notLoaded) != 0 {
+					t.Fatalf("UDP health of the Service: %q %v\n%s", notLoaded, err, diag())
+				}
+				var out []string
+				for _, m := range hs {
+					out = append(out, m.Address+" "+m.Status)
+				}
+				return strings.Join(out, ", ")
+			}
+			waitNodes := func(when, want string) time.Duration {
+				t.Helper()
+				start := time.Now()
+				for nodes() != want {
+					if time.Since(start) > 40*time.Second {
+						t.Fatalf("%s: nodes are %q after 40 s, want %q\n%s", when, nodes(), want, diag())
+					}
+					time.Sleep(500 * time.Millisecond)
+				}
+				return time.Since(start)
+			}
+			if err := ps.PushLVS(ctx, "n1", 100, pve.RenderLVS(local, vips), "ten0"); err != nil {
+				t.Fatalf("push the Service's UDP port: %v\n%s", err, diag())
+			}
+			took = waitNodes("policy Local, a pod on m1 only", "10.77.0.11 UP, 10.77.0.12 DOWN")
+			for i := range 4 {
+				if got := ask("198.51.100.7", vip+":5000"); got != "m1 10.77.0.5" {
+					t.Fatalf("policy Local, datagram %d: %q, want the node that holds the pod\n%s", i+1, got, diag())
+				}
+			}
+			g.run(ctx, "systemctl stop lb-hc-m2; systemd-run -q --unit=lb-hc-m2b ip netns exec m2 socat TCP4-LISTEN:32000,fork,reuseaddr SYSTEM:'/usr/local/bin/lb-hc 200'")
+			t.Logf("policy Local over UDP: the node with the pod alone was in the table after %s; the second node %s after its health check port answered 200",
+				took, waitNodes("a pod on both nodes", "10.77.0.11 UP, 10.77.0.12 UP"))
+			// The affinity: every datagram of one client address reaches one node, whatever port it comes from (step
+			// 4 shows the members taken in turn without it). The first client stays where it was sent before the
+			// second node came.
+			for _, client := range []string{"198.51.100.7", "203.0.113.1"} {
+				first := ask(client, vip+":5000")
+				if !strings.HasSuffix(first, " 10.77.0.5") || (client == "198.51.100.7" && first != "m1 10.77.0.5") {
+					t.Fatalf("affinity, client %s: first answer %q\n%s", client, first, diag())
+				}
+				for i := range 5 {
+					if got := ask(client, vip+":5000"); got != first {
+						t.Fatalf("affinity, client %s, datagram %d: %q, the first went to %q\n%s", client, i+2, got, first, diag())
+					}
+				}
+			}
+			g.run(ctx, "systemctl stop lb-hc-m1 lb-hc-m2b")
+			if err := ps.PushLVS(ctx, "n1", 100, pve.RenderLVS(reply, vips), "ten0"); err != nil {
+				t.Fatalf("push the reply check again: %v\n%s", err, diag())
+			}
+			waitHealth("back on the reply check", reply, "101 UP, 102 UP", 30*time.Second)
+
 			// 8. The appliance is no router. From the public side, a datagram and a TCP connection for a member's own
 			// address, handed to the appliance: dropped, counted, never seen by the member. The control, with the
 			// chain's policy set to accept, serves the datagram.

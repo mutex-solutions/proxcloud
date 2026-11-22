@@ -841,15 +841,19 @@ workers of that node; on a shared store (NFS, RBD) it follows the pod to any wor
 **Load balancers of a cluster's Services: the gateway side.** The same listener serves one more call, for a cluster's
 load balancer controller (below; chart 0.1.17, which the platform BOM pins for new tenant clusters from v0.11.0). `PUT /lb/v1/state` (`internal/cloud/lbgw`, `cmd/api` sends `/lb/v1/` there and every
 other path to the CSI gateway, unchanged) takes `Authorization: PVEAPIToken=lb@proxcloud!<clusterId>=<secret>`, the
-header `ProxCloud-LB-Protocol: 1` and a body of at most 64 KiB: the Services of type LoadBalancer the controller owns
-(uid, ports with protocol, port and node port, `externalTrafficPolicy`, `healthCheckNodePort`,
-`loadBalancerSourceRanges`, the PROXY annotation, the IP families) and the nodes' InternalIPs. Nothing in it names a
+header `ProxCloud-LB-Protocol` (1, or 2 from v0.11.1: below) and a body of at most 64 KiB: the Services of type
+LoadBalancer the controller owns (uid, ports with protocol, port and node port, `externalTrafficPolicy`,
+`healthCheckNodePort`, `loadBalancerSourceRanges`, the PROXY annotation, the IP families; with protocol 2 also the
+load balancer annotations, the session affinity and the nodes of a node selector) and the nodes' InternalIPs. Nothing in it names a
 project, network or VM. The credential (`lbGatewayCredential`, `_id` = the cluster id: project, compute and Kubernetes
 provider, the cluster's network; only the secret's SHA-256; last seen written at most once a minute) allows this one
 call for its own cluster, and minting it again rotates it.
 
-- Each Service is checked on its own, and a refused one gets a reason the controller turns into an Event: any port that
-  is not TCP refuses the whole Service (`UDPNotSupported`), IPv6 or dual stack (`IPFamilyNotSupported`), node port 0,
+- Each Service is checked on its own, and a refused one gets a reason the controller turns into an Event: a UDP port
+  from a controller that speaks protocol 1 refuses the whole Service (`UDPNotSupported`), a port that is neither TCP
+  nor UDP too (`ProtocolNotSupported`), the OpenStack annotation for an internal balancer (`InternalNotSupported`),
+  annotations that contradict each other or are too many (`InvalidAnnotation`), IPv6 or dual stack
+  (`IPFamilyNotSupported`), node port 0,
   a node port outside 30000-32767 or policy Local without a health port (`NoNodePort`), source ranges that do not fit
   one firewall rule of 512 characters (`TooManySourceRanges`; `0.0.0.0/0` means any), more than 50 Services or 20 ports
   (`TooLarge`). A node whose address is not one of the cluster's 16 worker addresses is answered `NotAWorker` and never
@@ -975,13 +979,20 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
 - Every 10 s it lists every Service and Node and PUTs the whole state: a poll, not a watch, so a PUT never comes from a
   half-filled cache (a watch when a cluster has hundreds of Services). It owns a Service of type LoadBalancer of class
   `proxcloud.io/lb`, and in default mode also one without a class; never `proxcloud.io/internal` or another class.
-  Nodes labelled `node.kubernetes.io/exclude-from-external-load-balancers` and nodes being deleted are left out. A
-  node is sent from its first turn Ready on, and then for as long as it exists: a member that goes NotReady stays,
-  and the balancer's health check decides whether it serves, as with Kubernetes' own service controller, which
-  hands a balancer every node that is not deleted, excluded or tainted for removal (`k8s.io/cloud-provider`
-  `controllers/service/controller.go`, `stableNodeSetPredicates`). It differs from that controller in waiting for
-  the first Ready, because HAProxy before 3.1 starts a member new to its config as up (v0.11.0 sent a node as soon as
-  its object existed; the lab's figures below say what that cost). What was sent is the process's memory: a
+  Which nodes are members is two rules, and both must hold. The first is Kubernetes' own service controller's
+  (`k8s.io/cloud-provider` `controllers/service/controller.go`, `stableNodeSetPredicates`: `nodeNotDeletedPredicate`,
+  `nodeIncludedPredicate`, `nodeUnTaintedPredicate`): a node is out while it is being deleted, while it carries the
+  label `node.kubernetes.io/exclude-from-external-load-balancers` with a value that is not a false boolean (`false`,
+  `0` and `f` keep the node in; `true`, an empty value and anything that is no boolean take it out; until v0.11.1
+  the label took a node out whatever its value), and while it carries the cluster autoscaler's taint
+  `ToBeDeletedByClusterAutoscaler` (new in v0.11.1). Ready is not part of that rule: a member that goes NotReady or
+  is cordoned stays, and the balancer's health check decides whether it serves. The second rule is this
+  controller's own, for a node the balancer does not have yet: it is sent from its first turn Ready on, because
+  HAProxy before 3.1 starts a member new to its config as up (v0.11.0 sent a node as soon as its object existed; the
+  lab's figures below say what that cost). Together: the first rule says who may be a member; a node that may be
+  one becomes one at its first Ready and then stays one, Ready or not, until the first rule takes it out; a node
+  taken out starts over and waits for Ready again. The controller sends the whole state at every turn, so a taint
+  takes a node out at the next turn, where Kubernetes' controller waits for another reason to sync. What was sent is the process's memory: a
   controller that starts takes every node it finds for a member, Ready or not, so a restart takes no member out of
   a balancer, and a node that joins in that very turn is sent before it is Ready. The oldest Service is sent first,
   so a full balancer refuses the newest.
@@ -992,8 +1003,9 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   appliance that holds the address serves the Service's listeners (v0.11.0 wrote it as soon as an address was
   allocated, minutes before a cluster's first Service answered; Kubernetes' own service controller also patches the
   status only with what a provider returns once its balancer is provisioned). An address already written stays while
-  a later change is building and goes when the portal names none. `ipMode: Proxy` with the annotation
-  `proxcloud.io/lb-proxy-protocol: "true"` and `VIP` otherwise. **With `VIP`, a client inside the cluster never
+  a later change is building and goes when the portal names none. `ipMode: Proxy` when the TCP ports' members get
+  the PROXY header (the annotation `proxcloud.io/lb-proxy-protocol` or OpenStack's name for it; the portal says
+  which mode, a portal of v0.11.0 leaves it to the own annotation's `"true"`) and `VIP` otherwise. **With `VIP`, a client inside the cluster never
   reaches the balancer**: kube-proxy treats an address with that mode as one of the Service's own and sends a pod's or
   a node's connection to it straight to an endpoint. Such a client does not see an outage of the pair or a switch
   between its appliances, never meets the appliance's firewall, which is what holds clients from outside to
@@ -1004,10 +1016,109 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   ClusterIP no longer works for that backend, which gets no header on the direct path.
 - The answers become Events on the Service, one per change: `EnsuringLoadBalancer`, `EnsuredLoadBalancer` with the
   address, and a Warning with the gateway's reason (`UDPNotSupported`, `NoNodePort`, `TooManySourceRanges`,
-  `IPFamilyNotSupported`, `QuotaExceeded`, `PublicNetworkUnavailable`, `TooLarge`; for the whole request
-  `ControllerTooOld`, `ProjectNotEnabled`). `spec.loadBalancerIP` is ignored with a Warning `LoadBalancerIPIgnored`.
-- It sends `ProxCloud-LB-Protocol: 1`; a portal that needs a newer controller answers `ControllerTooOld`, and a chart
-  bump gives the cluster the portal's image.
+  `IPFamilyNotSupported`, `QuotaExceeded`, `PublicNetworkUnavailable`, `TooLarge`, `ProtocolNotSupported`,
+  `InternalNotSupported`, `InvalidAnnotation`; for the whole request `ControllerTooOld`, `ProjectNotEnabled`).
+  `spec.loadBalancerIP` is ignored with a Warning `LoadBalancerIPIgnored`. From v0.11.1 it also says the Events of
+  Kubernetes' own service controller, with their texts (`controllers/service/controller.go`): `UpdatedLoadBalancer`
+  ("Updated load balancer with new hosts") each time the nodes behind a Service change, `UnAvailableLoadBalancer`
+  (Warning, "There are no available nodes for LoadBalancer") while a Service has no node, `SyncLoadBalancerFailed`
+  (Warning) while the portal's gateway cannot be reached, `DeletingLoadBalancer` and `DeletedLoadBalancer` around the
+  finalizer's removal ("deleted" is said when the portal holds a state without the Service; its address leaves the
+  appliances in the pass after). And the Events the portal's answer carries for the Service's annotations:
+  `AnnotationNotSupported`, `InvalidAnnotation`, `LoadBalancerLbMethodUnknown`, `KeepAddressNotServed`, each once
+  while it stands.
+- It sends `ProxCloud-LB-Protocol: 2` (v0.11.0's controller: 1); a portal that needs a newer controller answers
+  `ControllerTooOld`, and a chart bump gives the cluster the portal's image. The portal says its own protocol on
+  every answer: a controller that finds an older portal (a portal rolled back) sends it the request of protocol 1
+  from the next turn on, since that portal refuses a field it does not know. `-interval` is unchanged, so this
+  release's image runs under chart 0.1.17.
+
+**Load balancers of a cluster's Services: UDP, affinity, annotations, and how it differs from OpenStack.** From
+v0.11.1 the gateway speaks protocol 2, which only adds to protocol 1: per Service its annotations of the load
+balancer's names, its `sessionAffinity` with the timeout, and the nodes its node selector picks; in the answer the
+`ipMode` of the address and the Events to say on the Service. A controller of v0.11.0 sends none of this and is
+served as before.
+
+- **UDP needs a protocol 2 controller.** A Service with UDP ports, or with a TCP and a UDP port of one number (the
+  listener's key is protocol and port; Kubernetes gives both the same node port), is served by the pair's LVS
+  (`pve/lblvs.go`) on the Service's one address. It is served only for a controller that says protocol 2, which is
+  the controller of this release's image: a cluster made before v0.11.1 keeps `UDPNotSupported` (its message now ends
+  "For UDP, upgrade the cluster") until its owner moves it to the provider's chart version or the operator runs
+  "Enable load balancer controller" again. That is deliberate: a Service that stood pending would otherwise get a
+  public address, which is billed and counts in the quota, by the portal's upgrade alone. SCTP refuses the whole
+  Service (`ProtocolNotSupported`).
+- **`sessionAffinity: ClientIP`** keeps a client address on one node for
+  `sessionAffinityConfig.clientIP.timeoutSeconds` (Kubernetes' default, three hours): a stick table in HAProxy for
+  TCP ports, `persistence_timeout` in LVS for UDP ports. The table is each appliance's own: after a switch of the
+  pair, and after an HAProxy reload, a client is balanced afresh.
+- **`externalTrafficPolicy: Local`** checks every port's members, TCP and UDP, with an HTTP GET on
+  `healthCheckNodePort`, which kube-proxy answers 200 only on a node that holds a pod of the Service. It narrows the
+  members and keeps no client address: over UDP the node sees the appliance's tenant address, over TCP too unless
+  the PROXY header is on (real source preservation would need the nodes' return path through the appliance; Octavia's
+  amphora has the same limit).
+- **The UDP check for policy Cluster** is keepalived's `UDP_CHECK` with a ping beside it. It sends a datagram of
+  random bytes to the node port every 5 s, which kube-proxy hands to some pod of the Service: an application that
+  cannot take junk bytes sets `proxcloud.io/lb-enable-health-monitor: "false"`. A closed port is not seen under
+  traffic (the node rate-limits its ICMP answers); a dead node is out in 10 to 12 s. A connection limit on a UDP port
+  holds per node, not for the listener.
+
+Annotations. The own name is `proxcloud.io/lb-<knob>`; `loadbalancer.openstack.org/<alias>` is obeyed where it means
+the same as in the OpenStack cloud controller manager (cloud-provider-openstack v1.37.1,
+`pkg/openstack/loadbalancer.go`:61-107), so a chart or manifest moved from an OpenStack cluster behaves the same
+without an edit. With both set the own name wins. The portal reads them (`internal/cloud/lbgw/annotations.go`), so a
+new knob ships with the portal and needs no new controller; the node selector alone is read by the controller, which
+has the nodes' labels.
+
+| `proxcloud.io/lb-` | `loadbalancer.openstack.org/` | Values | Effect |
+|---|---|---|---|
+| `proxy-protocol` | `proxy-protocol` | own name: `true` or `v2` = version 2, `v1`; OpenStack's: `true` or `v1` = version 1, `v2`; `false` | PROXY header to the members of the TCP ports; `ipMode: Proxy` |
+| `method` | `lb-method` | `roundrobin`, `leastconn`, `source`, or `ROUND_ROBIN`, `LEAST_CONNECTIONS`, `SOURCE_IP` (either spelling under either name) | the algorithm; anything else (`SOURCE_IP_PORT`) raises `LoadBalancerLbMethodUnknown` and balances round robin |
+| `connection-limit` | `connection-limit` | 1 to 20000, `-1` = none | open connections per listener; per node on a UDP port |
+| `timeout-client-data`, `timeout-member-connect`, `timeout-member-data` | the same | 1000 to 86400000 ms | the three timeouts of the TCP ports; unset, the cluster balancer's hour of idle time holds |
+| `x-forwarded-for` | `x-forwarded-for` | `true` | the TCP ports become HTTP listeners that add `X-Forwarded-For`; refused together with the PROXY header (`InvalidAnnotation`), as OpenStack refuses it |
+| `enable-health-monitor` | `enable-health-monitor` | `true`, `false` | `false` = no health check; not obeyed, with an Event, for policy Local |
+| `health-monitor-delay`, `-timeout`, `-max-retries`, `-max-retries-down` | the same | 1 to 300 s, 1 to 300 s, 1 to 10, 1 to 10 | the check's interval, timeout, good checks to come up, bad checks to go down. A UDP port takes no "up" count (keepalived brings a node back at its first good check) and goes down after 2 bad checks at least |
+| `node-selector` | `node-selector` | `key=value, key` | only the nodes with every one of these labels are behind the Service; none = no member and `UnAvailableLoadBalancer` |
+| `keep-address` | `keep-floatingip` | `true` | read, and not served yet: the Event `KeepAddressNotServed` says that the address is given back with the Service |
+
+- A value that is not understood is not obeyed and named in a Warning Event `InvalidAnnotation`; the Service is
+  served with the default. Refusing it would give its address back over a typing mistake.
+- Every other annotation of the two prefixes is named in **one** Warning Event `AnnotationNotSupported`: the network,
+  subnet, port, class, flavor, availability zone, tag and hostname annotations, `load-balancer-id`,
+  `load-balancer-address`, `default-tls-container-ref`, `timeout-tcp-inspect` when it is not 0, and a
+  `proxcloud.io/lb-` name this portal does not know. A tenant's annotation never picks a network or a flavor: the
+  provider's `config.cluster.loadBalancer` does.
+- `service.beta.kubernetes.io/openstack-internal-load-balancer: "true"` **refuses** the Service
+  (`InternalNotSupported`), so it never gets a public address: every address of the pair is public. For an address of
+  the tenant network use `loadBalancerClass: proxcloud.io/internal` (MetalLB, default mode).
+- A Service sends at most 32 such annotations of at most 256 characters each; more refuses it (`InvalidAnnotation`).
+
+The thirteen places where a Service behaves differently than with the OpenStack cloud controller manager, on
+purpose:
+
+1. **One pair per cluster.** All Services of a cluster share one appliance pair; each still has an address of its
+   own, so a user sees what OpenStack shows, one external IP per Service.
+2. **No Octavia objects.** Names, ids, tags, flavors and zones of load balancers, listeners and pools do not exist,
+   so the annotations about them have nothing to act on.
+3. **Which Services are owned.** Class `proxcloud.io/lb`, and in default mode also no class; OpenStack owns only
+   Services without a class.
+4. **The health check is on by default**; OpenStack's is off (`create-monitor` false) unless asked for.
+5. **Other defaults.** A check every 3 s, 2 good checks up, 2 bad ones down, and an idle timeout of an hour;
+   OpenStack: 5 s, 3 s timeout, 1 up, 3 down, and 50 s. The annotations set OpenStack's figures.
+6. **TLS.** `default-tls-container-ref` names a Barbican container and is not obeyed. OpenStack turns every port of
+   such a Service, UDP too, into a listener that ends TLS; here TLS from a Service's `kubernetes.io/tls` Secret is
+   a change of its own, for TCP ports only. Until then a Service's TLS passes through a TCP port.
+7. **`proxcloud.io/lb-proxy-protocol: "true"` is version 2**, as v0.11.0 shipped it;
+   `loadbalancer.openstack.org/proxy-protocol: "true"` is version 1, as OpenStack reads it.
+8. **A port without a node port refuses the Service** (`NoNodePort`); OpenStack makes a pool without members.
+9. **`spec.loadBalancerIP` is not obeyed** (`LoadBalancerIPIgnored`); OpenStack takes any free floating IP of the
+   project.
+10. **No shared balancer**: `load-balancer-id` is not obeyed, each Service has its own address.
+11. **`SOURCE_IP_PORT` balances round robin**, with the Event OpenStack raises for a method it cannot set.
+12. **The finalizer is `proxcloud.io/load-balancer`**; `service.kubernetes.io/load-balancer-cleanup` belongs to a
+    cloud controller manager.
+13. **No operator defaults file** for the method or the check's figures (OpenStack's `cloud.conf`); the provider's
+    config can gain them later.
 
 Modes. A **new** cluster gets the controller in **default** mode when every gate holds: this portal has the gateway's
 store, a gateway URL (`PROXCLOUD_CSI_GATEWAY_URL`) and the controller image (`PROXCLOUD_LB_CONTROLLER_IMAGE`, the API's

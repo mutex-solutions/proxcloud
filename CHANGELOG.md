@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **UDP from a Kubernetes Service needs the controller of this release.** Upgrading the portal alone changes no
+  Service: a cluster made before v0.11.1 keeps answering a UDP Service `UDPNotSupported` (the message now ends "For
+  UDP, upgrade the cluster"), so no Service that stood pending gets a public address, which is billed and counts in
+  the floating IP quota, without its owner's action. The cluster gets UDP, the annotations' Events and the new node
+  rule when it is moved to the provider's chart version or given "Enable load balancer controller" again. A new
+  cluster has them from its creation. The annotations themselves are read by the portal, but a controller of
+  v0.11.0 sends none but `proxcloud.io/lb-proxy-protocol: "true"`.
 - **Every load balancer is reloaded once after the upgrade.** The HAProxy config the platform renders changed (see
   "No request is lost" under Fixed), for a single appliance too, whose config had not changed since its first release,
   and so did the pair's keepalived track script. The first services sync after the upgrade (and, for a cluster's
@@ -37,6 +44,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Kubernetes Services: UDP, session affinity and the layer 4 annotations on the cluster's load balancer**
+  (`internal/cloud/lbgw`, `cmd/lb-controller`, `internal/platform/project/cloud_lb_cluster_pve.go`; the full table
+  and the differences from OpenStack: [managed-k8s.md](docs/managed-k8s.md)). The gateway speaks protocol 2, which
+  only adds to protocol 1 (a Service's annotations, affinity and selected nodes in the request, its `ipMode` and
+  Events in the answer); a controller of v0.11.0 is served as before.
+  - A Service's UDP ports are served by the pair's LVS, and a TCP and a UDP port of one number share the Service's
+    address (the listener's key is protocol and port). SCTP refuses the Service with `ProtocolNotSupported`.
+  - `sessionAffinity: ClientIP` keeps a client on one node for the Service's timeout (TCP and UDP).
+  - `externalTrafficPolicy: Local` checks UDP ports too over HTTP on `healthCheckNodePort`.
+  - Annotations, read by the portal: `proxcloud.io/lb-proxy-protocol` (now also `v1`, `v2`), `lb-method`,
+    `lb-connection-limit`, `lb-timeout-client-data`, `lb-timeout-member-connect`, `lb-timeout-member-data`,
+    `lb-x-forwarded-for`, `lb-enable-health-monitor`, `lb-health-monitor-delay`, `-timeout`, `-max-retries`,
+    `-max-retries-down`, `lb-node-selector`. The `loadbalancer.openstack.org/` annotations of the same meaning are
+    obeyed as aliases, so a manifest from an OpenStack cluster needs no edit. Every other annotation of the two
+    prefixes is named in one Warning Event `AnnotationNotSupported`; a value that is not understood is named in
+    `InvalidAnnotation` and the default holds; `service.beta.kubernetes.io/openstack-internal-load-balancer: "true"`
+    refuses the Service (`InternalNotSupported`), so it never gets a public address. `lb-keep-address`
+    (`keep-floatingip`) is read and not served yet, and says so (`KeepAddressNotServed`).
+  - The controller says the Events of Kubernetes' own service controller: `UpdatedLoadBalancer`,
+    `UnAvailableLoadBalancer`, `SyncLoadBalancerFailed`, `DeletingLoadBalancer`, `DeletedLoadBalancer`.
 - **Load balancers: TLS and HTTPS listeners, and a project's certificates** (`internal/cloud/pve/lbtls.go`,
   `internal/platform/project/cloud_lb_certs.go`, the tenant console's Certificates page and load balancer page).
   A listener takes `protocol: "tls"` (TLS ends on the load balancer, TCP to the servers) or `"https"` (TLS ends on
@@ -212,6 +239,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Which nodes are behind a cluster's Services follows Kubernetes' own rule** (`cmd/lb-controller`, `readNodes`;
+  `k8s.io/cloud-provider` `stableNodeSetPredicates`). The label
+  `node.kubernetes.io/exclude-from-external-load-balancers` is read as a boolean: `false` (and `0`, `f`) now keeps
+  the node in, where any value took it out. A node with the cluster autoscaler's taint
+  `ToBeDeletedByClusterAutoscaler` is taken out. A node new to the balancer still waits for its first Ready, and a
+  member still stays through NotReady. Both changes need the controller of this release.
+- **A Service with an SCTP port is refused with `ProtocolNotSupported`** (it was `UDPNotSupported`).
 - **A load balancer's config files are compared with what was applied, at every pass.** The state read of an
   appliance now also answers what `haproxy.cfg`, `keepalived.conf` and the UDP files hash to; an appliance whose
   file is not the one the platform recorded (edited by hand, or lost) is pushed again, on a single appliance and on
