@@ -486,7 +486,12 @@ was minted and last used, and the cluster's balancer row (`balancerId`, and in `
 each Service's address and state; absent before the first Service). `data` is `null` when the cluster has no
 controller, or when it is a cluster of another Kubernetes provider. The tenant has the same as the cluster action
 `GET_LOAD_BALANCER` on `POST /api/v1/project/{pid}/cloud/{id}/action` (`{"result": ...}`, `null` without a
-controller). The cluster's mode is in the list: `loadBalancer` (`default`, `class-only`, absent without a controller)
+controller). `balancer.cluster.kept` lists the addresses the cluster keeps: the ones Services left behind with
+`proxcloud.io/lb-keep-address: "true"`, billed and in the floating IP quota, on no Service. The tenant gives one back
+with the cluster action `RELEASE_LOAD_BALANCER_ADDRESS` and `{"address": "203.0.113.30"}` as `data` on the same
+route: `{"result": "RELEASING"}`, and the address returns to the pool once no appliance holds it; `404` for an
+address the cluster does not keep (one a Service is on, another cluster's, any other) and `409` while the balancer
+is being changed. There is no operator route for it. The cluster's mode is in the list: `loadBalancer` (`default`, `class-only`, absent without a controller)
 per cluster of `GET /api/v1/admin/service/{id}/k8s-clusters`, and `load_balancer` in the tenant's cluster row.
 
 ```json

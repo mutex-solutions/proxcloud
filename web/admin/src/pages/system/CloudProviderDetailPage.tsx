@@ -498,7 +498,10 @@ type ClusterLBView = {
   balancer?: {
     status?: string; statusMessage?: string
     appliances?: { serverId: string; node?: string; role?: string; holdsVip?: boolean; state?: string }[]
-    cluster?: { services?: { uid: string; namespace?: string; name?: string; vip?: string; state: string; reason?: string; message?: string }[] }
+    cluster?: {
+      services?: { uid: string; namespace?: string; name?: string; vip?: string; state: string; reason?: string; message?: string }[]
+      kept?: string[] // addresses Services left behind with proxcloud.io/lb-keep-address: billed, on no Service
+    }
   }
 } | null
 
@@ -583,6 +586,12 @@ function ClusterLoadBalancerDialog({ serviceId, cluster, pin, onClose, onChanged
                     ))}
                   </TableBody>
                 </Table>
+                {(lb.cluster?.kept ?? []).length > 0 && (
+                  <div className="text-muted-foreground" data-testid="lb-kept">
+                    Kept addresses, billed and on no Service (the tenant releases them on the cluster's page):{" "}
+                    <span className="font-mono">{(lb.cluster?.kept ?? []).join(", ")}</span>
+                  </div>
+                )}
               </div>
             ) : v ? (
               <p className="text-muted-foreground">No balancer yet: the cluster's first Service with a public address builds it.</p>

@@ -56,7 +56,8 @@ export interface LB {
   publicIp?: string; privateIp?: string; listeners?: Listener[] | null; pools?: Pool[] | null
   ha?: boolean; appliances?: Appliance[] | null; replacing?: string
   // The balancer of a Kubernetes cluster's Services: made and changed by the cluster, deleted with it.
-  cluster?: { id: string; services?: ClusterService[] | null }
+  // kept: the addresses Services left behind with proxcloud.io/lb-keep-address; no Service is on one.
+  cluster?: { id: string; services?: ClusterService[] | null; kept?: string[] | null }
 }
 export interface Health { pool: string; serverId: string; address?: string; port: number; status: string }
 
