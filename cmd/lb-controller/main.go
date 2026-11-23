@@ -105,6 +105,10 @@ func main() {
 // anything changing in the cluster.
 //
 // Not watching: every interval.
+//
+// ponytail: every event of a Node is a turn, a kubelet's heartbeat too (one per node every five minutes), and a turn
+// lists every Node. With hundreds of nodes the heartbeats alone are a turn a second, which the debounce caps there.
+// If a cluster of that size shows it, wake only for what readNodes reads of a Node.
 func (c *controller) run(ctx context.Context) {
 	if c.watching {
 		c.wake, c.ctx = make(chan struct{}, 1), ctx
