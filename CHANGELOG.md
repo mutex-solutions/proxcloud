@@ -414,8 +414,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The second of two quick changes to a cluster's Services waited about 11 s for the controller's next send.** A
   pass over a cluster's balancer applies the state it read at its start; a state the controller stored while that
   pass was at work started no pass of its own and was applied only when the controller sent it again. The pass
-  that ran now looks at the stored state once more before it ends and applies it when it changed, so two changes
-  2 to 3 s apart are both live within the 15 s the layer 4 plan asks for. It looks once: a Service that keeps
+  that ran now looks at the stored state once more before it ends and applies it when it changed, so the second of
+  two changes 2 to 3 s apart no longer waits for that send. The layer 4 plan asks for 15 s; the time on a pair of
+  appliances is not measured yet and is a drill item. It looks once: a Service that keeps
   changing does not keep a pass running, and one pass at a time per cluster still holds. Found in the review of
   #439.
 - **The console took "Down after" 1 on a UDP pool, which the API refuses.** The save came back with the API's
