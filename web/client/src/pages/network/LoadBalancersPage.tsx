@@ -417,6 +417,9 @@ export function LoadBalancerDetailPage() {
     for (const k of ["port", "interval", "timeout", "rise", "fall", "payload", "requireReply"] as const) if (!next[k]) delete next[k]
     setPool(i, { healthCheck: next.type === own && Object.keys(next).length === 1 ? null : next })
   }
+  // The API's rule for a UDP pool: its member is down after 2 to 10 failed checks, never 1, since the load balancer
+  // tries a failed check again at least once. The form says so and does not send what would be refused.
+  const udpFallTooLow = (p: Pool) => p.protocol === "udp" && p.healthCheck?.fall === 1
   const setListener = (i: number, patch: Partial<Listener>) => edit(() => setListeners(listeners.map((x, j) => (j === i ? { ...x, ...patch } : x))))
   const protocolOf = (l: Listener) => l.protocol ?? pools.find((p) => p.name === l.pool)?.protocol ?? "http"
   // A pool speaks one protocol to its servers, the one its listeners need (plain TCP behind TLS, HTTP behind HTTPS):
@@ -618,7 +621,8 @@ export function LoadBalancerDetailPage() {
                     {(p.protocol === "udp" ? UDP_CHECK_FIGURES : CHECK_FIGURES).map(([key, label, own, most]) => (
                       <div key={key} className="grid gap-1">
                         <Label htmlFor={`check-${key}-${i}`}>{label}</Label>
-                        <Input id={`check-${key}-${i}`} className="w-24" type="number" min={1} max={most} placeholder={own} value={p.healthCheck?.[key] ?? ""} onChange={(e) => setCheck(i, { [key]: numberOf(e.target.value) })} />
+                        <Input id={`check-${key}-${i}`} className="w-24" type="number" min={p.protocol === "udp" && key === "fall" ? 2 : 1} max={most} placeholder={own} value={p.healthCheck?.[key] ?? ""}
+                          aria-invalid={(key === "fall" && udpFallTooLow(p)) || undefined} onChange={(e) => setCheck(i, { [key]: numberOf(e.target.value) })} />
                       </div>
                     ))}
                   </>}
@@ -644,6 +648,11 @@ export function LoadBalancerDetailPage() {
                       onChange={(e) => setPool(i, { timeoutMemberData: numberOf(e.target.value, 1000) })} />
                   </div></>}
                 </div>
+                {udpFallTooLow(p) && (
+                  <p className="text-xs text-destructive" role="alert" data-testid={`pool-fall-${i}`}>
+                    "Down after" must be 2 to 10 for a UDP pool: the load balancer tries a failed check again at least once before it takes a server out.
+                  </p>
+                )}
                 <p className="text-xs text-muted-foreground" data-testid={`pool-protocol-${i}`}>
                   Its servers are spoken to in {p.protocol === "udp" ? "UDP" : p.protocol === "tcp" ? "TCP" : "HTTP"}, as its listeners say (plain, also behind a TLS or HTTPS listener). An empty figure is the load balancer's own.
                 </p>
@@ -761,7 +770,7 @@ export function LoadBalancerDetailPage() {
         </Card>
 
         <div className="flex items-center gap-3">
-          <Button onClick={() => save.mutate()} disabled={!dirty || !ready || save.isPending}>
+          <Button onClick={() => save.mutate()} disabled={!dirty || !ready || save.isPending || pools.some(udpFallTooLow)}>
             {save.isPending ? "Saving…" : "Save configuration"}
           </Button>
           <p className="text-sm text-muted-foreground">Security groups of the servers behind it must let the load balancer in. The default group does.</p>

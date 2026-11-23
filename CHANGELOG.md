@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for every cluster whose controller runs this release's image, on any chart. The console's "the controller last
   reported" therefore reads up to a minute and a half.
 
+- **A Service whose `proxcloud.io/lb-internal` is neither true nor false loses its public address at the upgrade.**
+  `v0.11.0` did not read the annotation, so a Service that carries `proxcloud.io/lb-internal: "yes"` (or an empty
+  value) is served there on a public address. From this release only a false value or no annotation gives one: the
+  Service is refused with `InvalidAnnotation`, which names the value, and its address goes back. Before the
+  upgrade, set the annotation to `"false"` or remove it on the Services whose address must stay.
 - **A Service that ends TLS with a Secret loses its address if the portal is rolled back to v0.11.0.** That portal
   ends no TLS and would hand the port to the pods without it, so the cluster's controller does not send it such a
   Service: the address goes back, the Service says `TLSNotAvailable`, and it gets a new address when the portal is
@@ -393,6 +398,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`proxcloud.io/lb-internal` with a value that is no boolean gave the Service a public address.** A value such as
+  `"yes"` was named in `InvalidAnnotation` and the Service was served, so the one annotation that guards an address
+  failed open over a typing mistake. It fails closed now: a Service gets a public address only when the annotation
+  is absent or false (`false`, `0`, `f`). Every other value refuses it: `"true"` with `InternalNotSupported` as
+  before, a value that is no boolean (also an empty one, or one too long to read) with `InvalidAnnotation`, and the
+  Event names the value. The cluster's controller follows the same rule for a portal that reads no annotations (one
+  rolled back to `v0.11.0`): such a Service is not sent to it. Found in the review of #435.
+- **An empty `proxcloud.io/lb-tls-secret: ""` opened the Service's ports without TLS, and said nothing.** An
+  annotation that is there and empty, as a template that filled nothing in leaves it, was read as "no TLS". It
+  now asks for TLS like any other value and is held like a Secret that cannot be used: a Service that was never
+  served gets no address, one that is served stays exactly as it was, and one Warning Event `InvalidCertificate`
+  says that the annotation is empty. Removing the annotation is still the way to a plain port. The controller does
+  not send such a Service to a portal of protocol 1 either. Found in the review of #438.
+- **The second of two quick changes to a cluster's Services waited about 11 s for the controller's next send.** A
+  pass over a cluster's balancer applies the state it read at its start; a state the controller stored while that
+  pass was at work started no pass of its own and was applied only when the controller sent it again. The pass
+  that ran now looks at the stored state once more before it ends and applies it when it changed, so the second of
+  two changes 2 to 3 s apart no longer waits for that send. The layer 4 plan asks for 15 s; the time on a pair of
+  appliances is not measured yet and is a drill item. It looks once: a Service that keeps
+  changing does not keep a pass running, and one pass at a time per cluster still holds. Found in the review of
+  #439.
+- **The console took "Down after" 1 on a UDP pool, which the API refuses.** The save came back with the API's
+  reason. The load balancer page now holds the API's rule itself: for a UDP pool the field starts at 2, a 1 shows
+  why under the pool ("must be 2 to 10 for a UDP pool: the load balancer tries a failed check again at least
+  once"), and "Save configuration" waits until it is corrected. Found in the review of #433.
 - **Sandboxes worth less than half a cent each were invoiced 0.00.** Every sandbox is a bill item of its own, and a
   sent bill rounds each item to two decimals, so 10,000 one-minute sandboxes at 0.0002 accrued 2.00 and were
   invoiced nothing. At the send, what the sandbox items that round to 0.00 accrued is now summed per project and

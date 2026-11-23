@@ -120,6 +120,19 @@ func TestTLSAnnotations(t *testing.T) {
 	if plain := annotated(); WantsTLS(plain) || CertProblem(plain) != "" {
 		t.Error("a Service without the annotation asks for TLS")
 	}
+	// The annotation is there and empty, as a template that filled nothing in leaves it: the ports were meant for
+	// TLS, so the Service asks for it and is held back with the reason, with or without a word from the controller.
+	// It was a plain Service, with no Event.
+	for _, value := range []string{"", "  ", "\n"} {
+		empty := annotated(secret, value)
+		withRef := annotated(secret, value)
+		withRef.Certificates = []CertRef{{Problem: CertBadNames}}
+		for _, s := range []*Service{empty, withRef} {
+			if o, _, _ := ServiceOptions(s); !WantsTLS(s) || !strings.Contains(CertProblem(s), secret+" is empty") || len(o.Events) != 0 {
+				t.Errorf("an empty %s (%q): asks for TLS %v, problem %q, events %+v", secret, value, WantsTLS(s), CertProblem(s), o.Events)
+			}
+		}
+	}
 }
 
 // What a Service's owner reads for each reason a Secret cannot be used: the Secret by namespace and name, and

@@ -223,6 +223,11 @@ func TestTLSServiceAndAPortalOfProtocol1(t *testing.T) {
 	if len(old.Services) != 1 || old.Services[0].UID != "u-2" || old.CertificateData != nil {
 		t.Fatalf("the request of protocol 1: %+v", old)
 	}
+	// An annotation that is there and empty marks a port meant for TLS all the same: not sent either.
+	empty := lbgw.Service{UID: "u-3", Annotations: map[string]string{lbgw.OwnPrefix + lbgw.KnobTLSSecret: ""}}
+	if old := protocol1(&lbgw.Request{Services: []lbgw.Service{empty, {UID: "u-2"}}}); len(old.Services) != 1 || old.Services[0].UID != "u-2" {
+		t.Fatalf("an empty TLS annotation reached a portal of protocol 1: %+v", old.Services)
+	}
 
 	f := &fakeTenant{services: map[string]map[string]any{}, secrets: map[string]fakeSecret{"web/shop-tls": tlsSecret("CERT-A", "KEY-A")}}
 	f.add("web", "shop", "u-1", "2026-11-23T10:00:00Z", lbSpec(Class, tcp(443, 30443)))

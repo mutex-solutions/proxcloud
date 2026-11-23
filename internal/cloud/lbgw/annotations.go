@@ -25,7 +25,7 @@ import (
 const (
 	OwnPrefix = "proxcloud.io/lb-"
 	// InternalAnnotation asks for a balancer without a public address. The pair's addresses are public, so a Service
-	// that sets it to true is refused and never gets one (ReasonInternalNotSupported).
+	// that sets it to anything but a false boolean is refused and never gets one (Internal, InternalRefusal).
 	InternalAnnotation = OwnPrefix + KnobInternal
 
 	// MaxAnnotationValue: an annotation with a longer value is not read (Read). How many annotations a Service has
@@ -97,11 +97,30 @@ var methods = map[string]string{"roundrobin": "roundrobin", "leastconn": "leastc
 // SentAnnotation: the controller sends a Service's annotation of this name, and of no other.
 func SentAnnotation(key string) bool { return strings.HasPrefix(key, OwnPrefix) }
 
-// Internal: the Service asks for a balancer without a public address (InternalAnnotation is a true boolean). The
-// gateway refuses it; the controller keeps it out of a request to a portal that reads no annotations.
+// Internal: the Service gets no public address, because InternalAnnotation is there and is not a false boolean. The
+// annotation guards an address, so it fails closed: "true" asks for an internal balancer, and a value that is no
+// boolean ("yes", "", one too long to read) may have meant one. The gateway refuses such a Service; the controller
+// keeps it out of a request to a portal that reads no annotations.
 func Internal(ann map[string]string) bool {
-	on, err := strconv.ParseBool(strings.TrimSpace(ann[InternalAnnotation]))
-	return err == nil && on
+	v, set := ann[InternalAnnotation]
+	if !set {
+		return false
+	}
+	on, err := strconv.ParseBool(strings.TrimSpace(v))
+	return err != nil || on
+}
+
+// InternalRefusal is what a Service that is Internal is told, by the gateway and by the controller: that the balancer
+// has no internal address, or the value that is no boolean.
+func InternalRefusal(ann map[string]string) (reason, message string) {
+	v := strings.TrimSpace(ann[InternalAnnotation])
+	if _, err := strconv.ParseBool(v); err == nil {
+		return ReasonInternalNotSupported, InternalMessage
+	}
+	if len(v) > 64 {
+		v = v[:64] + "..."
+	}
+	return ReasonInvalidAnnotation, fmt.Sprintf("%s: %q is not true or false: the Service gets no public address until the annotation says false or is removed", InternalAnnotation, v)
 }
 
 // Read returns the annotations that are read at all: the load balancer's names (SentAnnotation) whose value has at
@@ -194,17 +213,18 @@ func (o Options) IPMode(s *Service) string {
 }
 
 // ServiceOptions reads a Service's annotations and affinity. A reason refuses the Service, and of the annotations
-// the internal one alone gives one. An annotation that cannot be read never does: a value that is too long (Read) or
-// not understood is not obeyed and named in one Event (InvalidAnnotation), and the Service is served with the
-// default, since refusing it would give its address back over a typing mistake, or over an annotation left on a
-// Service that v0.11.0 served without reading it. The forwarded-for header asked for next to PROXY is not obeyed in
-// the same way. The internal annotation with a value that is no boolean is named so too: the Service is not internal
-// then, and its owner is told. The number of annotations refuses nothing either: the ones the table does not know are named
-// (AnnotationNotSupported).
+// the internal one alone gives one: with any value that is not a false boolean, since a mistyped "true" must not
+// put the Service on a public address (Internal). Another annotation that cannot be read never refuses: a value that
+// is too long (Read) or not understood is not obeyed and named in one Event (InvalidAnnotation), and the Service is
+// served with the default, since refusing it would give its address back over a typing mistake, or over an
+// annotation left on a Service that v0.11.0 served without reading it. The forwarded-for header asked for next to
+// PROXY is not obeyed in the same way. The number of annotations refuses nothing either: the ones the table does not
+// know are named (AnnotationNotSupported).
 func ServiceOptions(s *Service) (o Options, reason, message string) {
 	// Read before anything is left out: a Service that asks for an internal balancer never gets a public address.
 	if Internal(s.Annotations) {
-		return o, ReasonInternalNotSupported, InternalMessage
+		reason, message = InternalRefusal(s.Annotations)
+		return o, reason, message
 	}
 	ann, long := Read(s.Annotations)
 	var invalid []string
@@ -292,7 +312,6 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 	o.HealthTimeout = number(KnobHealthTimeout, 1, 300, "1 to 300 seconds")
 	o.HealthRise = number(KnobHealthMaxRetries, 1, 10, "1 to 10 checks")
 	o.HealthFall = number(KnobHealthMaxRetriesDown, 1, 10, "1 to 10 checks")
-	flag(KnobInternal) // true never comes this far; a value that is no boolean is named
 	o.TLSPorts, o.TLSBackendTCP = tlsOptions(s, ann, bad)
 	o.KeepAddress, _ = flag(KnobKeepAddress)
 	// The address the Service asks for is kept as an IPv4 address or not at all: nothing else of it is stored, and

@@ -112,8 +112,6 @@ func TestAnnotationsThatAreNotObeyed(t *testing.T) {
 		OwnPrefix + "connection-limit": "0", OwnPrefix + "timeout-client-data": "999", OwnPrefix + "timeout-member-data": "fast",
 		OwnPrefix + "health-monitor-delay": "301", OwnPrefix + "health-monitor-max-retries": "11", OwnPrefix + "x-forwarded-for": "yes",
 		OwnPrefix + "proxy-protocol": "v3", OwnPrefix + "enable-health-monitor": "off",
-		// Not a boolean: the Service is not internal, it is served, and its owner is told.
-		InternalAnnotation: "yes",
 	} {
 		o, reason, _ := ServiceOptions(annotated(name, value))
 		if reason != "" || len(o.Events) != 1 || o.Events[0].Reason != ReasonInvalidAnnotation || !strings.Contains(o.Events[0].Message, name) ||
@@ -192,8 +190,28 @@ func TestAnnotationsThatRefuseTheService(t *testing.T) {
 	if _, _, msg := ServiceOptions(annotated(InternalAnnotation, "true")); !strings.Contains(msg, "remove proxcloud.io/lb-internal") {
 		t.Errorf("the refusal does not name the annotation to remove: %s", msg)
 	}
-	if _, reason, _ := ServiceOptions(annotated(InternalAnnotation, "false")); reason != "" {
-		t.Errorf("internal false: %s", reason)
+	// The annotation guards an address, so it fails closed: a value that is no boolean may have meant true, and the
+	// Service is refused and told the value. It was served on a public address with a Warning.
+	for _, value := range []string{"yes", "on", "", "  ", "tru", strings.Repeat("x", MaxAnnotationValue+1)} {
+		s := annotated(InternalAnnotation, value)
+		_, reason, msg := ServiceOptions(s)
+		said := strings.TrimSpace(value)
+		if len(said) > 64 {
+			said = said[:64]
+		}
+		if !Internal(s.Annotations) || reason != ReasonInvalidAnnotation || !strings.Contains(msg, InternalAnnotation+`: "`+said) ||
+			!strings.Contains(msg, "no public address") || len(msg) > 256 {
+			t.Errorf("internal %q is served: %q %q", value, reason, msg)
+		}
+	}
+	for _, value := range []string{"false", "False", "0", " f\n"} {
+		s := annotated(InternalAnnotation, value)
+		if o, reason, _ := ServiceOptions(s); Internal(s.Annotations) || reason != "" || len(o.Events) != 0 {
+			t.Errorf("internal %q: %s %+v", value, reason, o.Events)
+		}
+	}
+	if Internal(nil) || Internal(map[string]string{OwnPrefix + KnobMethod: "source"}) {
+		t.Error("a Service without the annotation is taken for internal")
 	}
 	ok := web("u")
 	ok.SessionAffinity = "ClientIP"

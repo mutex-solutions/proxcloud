@@ -384,6 +384,14 @@ func TestGatewayPutStepsDownForOneRequestOnly(t *testing.T) {
 	if len(req.Services) != 2 {
 		t.Fatal("the caller's request was changed")
 	}
+	// The same rule as the portal's: only a Service without the annotation, or with a false one, is sent. A value
+	// that is no boolean may have meant true.
+	for value, sent := range map[string]bool{"yes": false, "": false, strings.Repeat("x", 300): false, "false": true, " False ": true} {
+		one := protocol1(&lbgw.Request{Services: []lbgw.Service{{UID: "u", Annotations: map[string]string{lbgw.InternalAnnotation: value}}}})
+		if (len(one.Services) == 1) != sent {
+			t.Errorf("internal %q and a portal of protocol 1: sent %v, want %v", value, len(one.Services) == 1, sent)
+		}
+	}
 	// The old portal refuses the short request too: its refusal is the answer.
 	for i := range lbgw.MaxNodes + 1 {
 		req.Nodes = append(req.Nodes, lbgw.Node{Address: "10.0.1." + strconv.Itoa(i)})
@@ -518,6 +526,18 @@ func TestAnnotationsThatCannotBeReadKeepTheAddress(t *testing.T) {
 	if got, err := turn(); err != nil || !slices.Equal(got, []string{"shop:InternalNotSupported"}) || served() {
 		t.Fatalf("internal: %v %v, served %v", got, err, served())
 	}
+	// A value that is no boolean is refused too, and the Event names it: the Service had a public address with it.
+	annotate(f.svc("web", "shop"), lbgw.InternalAnnotation, "false")
+	if got, err := turn(); err != nil || !slices.Equal(got, []string{"shop:EnsuredLoadBalancer"}) || !served() {
+		t.Fatalf("internal false: %v %v, served %v", got, err, served())
+	}
+	annotate(f.svc("web", "shop"), lbgw.InternalAnnotation, "yes")
+	if got, err := turn(); err != nil || !slices.Equal(got, []string{"shop:InvalidAnnotation"}) || served() {
+		t.Fatalf("internal yes: %v %v, served %v", got, err, served())
+	}
+	if msg := f.events[0]["message"].(string); !strings.Contains(msg, `proxcloud.io/lb-internal: "yes" is not true or false`) {
+		t.Errorf("the Event does not name the value: %s", msg)
+	}
 	// The cut does not take the "true" off an internal annotation that came with spaces around it: the portal's
 	// reader drops them, so what is sent must still say true.
 	annotate(f.svc("web", "shop"), lbgw.InternalAnnotation, strings.Repeat(" ", 2*lbgw.MaxAnnotationValue)+"true\n")
@@ -592,5 +612,27 @@ func TestLoadBalancerIPOfProtocol2(t *testing.T) {
 	raw, err := json.Marshal(protocol1(g.last))
 	if err != nil || strings.Contains(string(raw), "loadBalancerIP") || len(protocol1(g.last).Services) != 3 {
 		t.Fatalf("protocol 1 request: %s, %v", raw, err)
+	}
+}
+
+// A portal of protocol 1 reads no annotation. A Service whose internal annotation is no boolean is kept out of its
+// request like one that says true, loses the address it had there, and is told the value.
+func TestInternalThatIsNoBooleanAndAPortalOfProtocol1(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTenant{services: map[string]map[string]any{}}
+	f.add("web", "shop", "u-1", "2026-11-23T10:00:00Z", lbSpec(Class, tcp(80, 30080)))
+	annotate(f.svc("web", "shop"), lbgw.InternalAnnotation, "yes")
+	f.svc("web", "shop")["status"] = map[string]any{"loadBalancer": map[string]any{"ingress": []any{map[string]any{"ip": "203.0.113.5", "ipMode": "VIP"}}}}
+	f.svc("web", "shop")["metadata"].(map[string]any)["finalizers"] = []any{Finalizer}
+	g := &gatewayFake{}
+	c := &controller{api: f, log: quiet(), put: func(_ context.Context, req *lbgw.Request) (*lbgw.Answer, error) {
+		return g.put(ctx, protocol1(req))
+	}}
+	if err := c.turn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.last.Services) != 0 || len(ingress(f.svc("web", "shop"))) != 0 || !slices.Equal(reasons(f.events), []string{"shop:" + lbgw.ReasonInvalidAnnotation}) ||
+		!strings.Contains(f.events[0]["message"].(string), `"yes" is not true or false`) {
+		t.Fatalf("sent %+v, ingress %v, events %v", g.last.Services, ingress(f.svc("web", "shop")), f.events)
 	}
 }

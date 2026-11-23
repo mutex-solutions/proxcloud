@@ -4,6 +4,34 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: four review findings of the layer 4 work closed
+
+**What changed:** four rules of the load balancer, each one an open finding of a review of #433 to #439. No new
+container, listener, credential or wire field, and no chart change.
+
+- `internal/cloud/lbgw/annotations.go`: `Internal` is true for every value of `proxcloud.io/lb-internal` that is not
+  a false boolean (it was: a true boolean), and `InternalRefusal` (new) gives the reason and the message:
+  `InternalNotSupported` for a true value, `InvalidAnnotation` with the value for one that is no boolean.
+  `ServiceOptions` refuses with it, and `cmd/lb-controller` (`protocol1`, the Event of a Service that was not
+  sent) follows through the same two functions.
+- `internal/cloud/lbgw/tls.go`: `WantsTLS` is true when `proxcloud.io/lb-tls-secret` is there, whatever it holds
+  (it was: when its value is not empty), and `CertProblem` answers an empty one first. `lbClusterTLS` therefore
+  holds such a Service as it holds one whose Secret cannot be used, and `protocol1` leaves it out.
+- `internal/platform/project/cloud_lb_cluster_pve.go`: `lbClusterConverge` runs `lbClusterPass` a second time, under
+  the same hold of `lbc-<clusterId>`, when the stored state's digest is not the one its pass applied (`lbPasses`).
+  Two passes at most per converge.
+- Tenant console, `web/client/src/pages/network/LoadBalancersPage.tsx`: "Down after" of a UDP pool's health check
+  enforces the API's rule (`pve.LBSpec.Validate`: fall 2 to 10, never 1) and says the reason; the configuration is
+  not sent while it is broken.
+
+**Why:** the annotation guards an address, and `"yes"` put a Service that was meant to be internal on a public one
+with only a Warning (review of #435, finding 1). An empty TLS annotation gave a plain port on a port meant for TLS,
+with no Event (review of #438, finding 4). A state stored during a pass waited for the controller's next send, about
+11 s, which left the second of two quick changes near the plan's 15 s target (review of #439, finding 1). The
+console sent a UDP pool's "Down after" 1 and showed the API's refusal afterwards (review of #433).
+
+**Diagrams:** none changed; `c4-code.md` (the load balancer gateway's rows) says the rule.
+
 ## 2026-11-23: a Service's address kept for its cluster, and spec.loadBalancerIP (#440)
 
 **What changed:** what happens to a Service's public address when the Service goes, and what a Service's
