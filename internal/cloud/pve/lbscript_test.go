@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve/lbguesttest"
 )
@@ -181,6 +183,75 @@ func TestServingScriptsSayWhatIsMissing(t *testing.T) {
 				if exit, out, stderr := g.Run(shell, c.script); exit != c.exit || out != c.out {
 					t.Errorf("%s: exit %d, said %q (stderr %q), want exit %d and %q", c.name, exit, out, stderr, c.exit, c.out)
 				}
+			}
+		})
+	}
+}
+
+// The track script keepalived runs every second, as the text the appliance gets, in dash and in bash. Drill Q1-o1 of
+// v0.11.1-rc.1: at a reload HAProxy's master execs itself and its socket refuses connections for a moment; the
+// script asked once, so a push that met that moment was one failed run on the master, and "fall 2" was all that
+// kept the addresses there. It asks again now: a master that answers at the second, third or fourth try is no
+// failed run, and one that never answers still is, within the second keepalived gives a run.
+func TestTrackScriptAsksAgainDuringAReload(t *testing.T) {
+	script := lbPairFiles("pub0")[lbCheckScript]
+	for _, shell := range lbguesttest.Shells() {
+		t.Run(shell, func(t *testing.T) {
+			t.Parallel()
+			g := lbguesttest.New(t)
+			holder(g)
+			run := func() (int, time.Duration) {
+				start := time.Now()
+				exit, _, _ := g.Run(shell, script)
+				return exit, time.Since(start)
+			}
+			if exit, _ := run(); exit != 0 {
+				t.Fatalf("HAProxy runs: exit %d", exit)
+			}
+			if asked, _ := os.ReadFile(g.Path("stub/socat-calls")); string(asked) != "x\n" {
+				t.Fatalf("HAProxy runs: its master was asked %d times, want once", strings.Count(string(asked), "\n"))
+			}
+			for refused := 1; refused < lbWorkerTries; refused++ {
+				g.Stub("socat-refuses", strconv.Itoa(refused))
+				if exit, took := run(); exit != 0 {
+					t.Fatalf("the master's socket refused %d connection(s), as during a reload: the run failed (exit %d after %s)", refused, exit, took)
+				}
+			}
+			// Gone for good: the run fails after its tries. Their pauses add up to less than the second keepalived
+			// gives a run (0.6 s: the real-guest test holds the time a stopped HAProxy costs; a loaded machine makes
+			// a wall clock bound here a flaky one).
+			g.Unstub("socat")
+			g.Unstub("socat-calls")
+			exit, took := run()
+			asked, _ := os.ReadFile(g.Path("stub/socat-calls"))
+			if exit != 1 || strings.Count(string(asked), "\n") != lbWorkerTries || took < 500*time.Millisecond {
+				t.Fatalf("HAProxy's master never answers: exit %d after %s and %d questions, want 1 after %d", exit, took, strings.Count(string(asked), "\n"), lbWorkerTries)
+			}
+			if pauses := time.Duration(lbWorkerTries-1) * 200 * time.Millisecond; !strings.Contains(script, "sleep 0.2\n") || pauses >= 800*time.Millisecond {
+				t.Fatalf("the tries pause for %s in all: a run must end well within keepalived's interval of 1 s", pauses)
+			}
+			holder(g)
+			g.Stub("socat", "7 master 0 [failed: 0] 0d00h01m00s 3.2.4\n")
+			if exit, _ := run(); exit != 1 {
+				t.Fatalf("a master without a worker: exit %d", exit)
+			}
+
+			// The listener part is as it was: not asked for while a config is ten seconds new, asked for after.
+			holder(g)
+			g.Listen("203.0.113.10:443")
+			if exit, _ := run(); exit != 0 {
+				t.Fatalf("a config put in place just now, its first listener not up yet: exit %d", exit)
+			}
+			old := time.Now().Add(-time.Minute)
+			if err := os.Chtimes(g.Path(haproxyConfig), old, old); err != nil {
+				t.Fatal(err)
+			}
+			if exit, _ := run(); exit != 1 {
+				t.Fatalf("HAProxy runs without the config's first listener: exit %d", exit)
+			}
+			g.Listen("203.0.113.10:80", "203.0.113.10:443")
+			if exit, _ := run(); exit != 0 {
+				t.Fatalf("HAProxy runs and listens: exit %d", exit)
 			}
 		})
 	}

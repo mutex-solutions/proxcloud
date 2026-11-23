@@ -619,6 +619,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its support files): the line means a hand edit or a lost file, and only that, and such a config is pushed again as
   before. A row of before this release needs nothing: its hash is filled in by its next pass. Log only: no push
   was added or left out. Found by the drill of v0.11.1-rc.1 (Q1-4).
+- **A reload of HAProxy could cost the appliance that holds the address a failed run of keepalived's track
+  script.** At a reload HAProxy's master replaces itself and its socket refuses connections for a moment (about
+  10 ms with HAProxy 3.2 and 70 ms with 3.0 on an idle config). The track script asked it once, so a push that met
+  that moment was one failed run on the master, and after two in a row keepalived gives the addresses up: one
+  more failed run would have moved them at a push. The script now asks up to four times, 0.2 s apart: a reload that
+  is over within 0.6 s is no failed run. An HAProxy that is really gone is seen at most 0.6 s later than before,
+  less than keepalived's interval of one second. Found by the drill of v0.11.1-rc.1 (Q1-o1). In a real guest of
+  both appliance images: 20 reloads in a row on the appliance that holds the address, with the script also run
+  without a pause meanwhile (over 1000 runs), no failed run and no state change, and a stopped HAProxy still gives
+  the address up. Not run on a lab.
 
 ## [0.11.1-rc.1] - 2026-11-23
 

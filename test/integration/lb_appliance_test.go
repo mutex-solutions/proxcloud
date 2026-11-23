@@ -311,6 +311,74 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 				}
 			}
 
+			// 3a. A reload on the appliance that holds the address is no failed run of keepalived's track script
+			// (drill Q1-o1 of v0.11.1-rc.1: one failed run at the reload of a push, on the master, with "fall 2" as
+			// the only thing between a second one and the addresses moving at every push). HAProxy's master execs
+			// itself at a reload and its socket refuses connections meanwhile; the script asks again. Twenty pushes
+			// in a row, each one reload. keepalived's own runs come once a second and may miss that moment, so the
+			// script file is also run without a pause for as long as the pushes last, which meets every reload: the
+			// script of rc.1 fails there dozens of times. Then HAProxy is stopped for good, and the address is
+			// given up as before, within today's two intervals and the script's tries.
+			journal := func(what string) string {
+				return g.run(ctx, "journalctl -u keepalived --no-pager | grep -c '"+what+"' || true")
+			}
+			failedBefore, enteredBefore := journal("now returning 1"), journal("Entering")
+			g.run(ctx, `cat > /root/track-probe <<'EOF'
+#!/bin/sh
+f=0; r=0
+trap 'echo "$r $f" > /root/track-probe.out; exit 0' TERM
+while :; do /usr/local/sbin/proxcloud-lb-check || f=$((f+1)); r=$((r+1)); done
+EOF
+chmod 0755 /root/track-probe && : > /root/track-probe.out && systemd-run -q --unit=lb-track-probe -p KillMode=process /root/track-probe`)
+			// (KillMode=process: the stop below ends the loop after the run under way, and does not kill that run.)
+			for i := range 20 {
+				cfg := pair
+				if i%2 == 0 { // a changed config and an unchanged one are the same reload
+					cfg = pve.RenderHAProxyOn(spec(80, 8082), []string{vip})
+				}
+				if err := ps.PushPairHAProxy(ctx, "n1", 100, cfg); err != nil {
+					t.Fatalf("reload %d on the master: %v", i+1, err)
+				}
+			}
+			g.run(ctx, "systemctl stop lb-track-probe; n=0; until [ -s /root/track-probe.out ]; do n=$((n+1)); [ $n -lt 50 ] || exit 1; sleep 0.1; done")
+			var runs, failed int
+			if _, err := fmt.Sscan(g.run(ctx, "cat /root/track-probe.out"), &runs, &failed); err != nil || runs < 100 || failed != 0 {
+				t.Fatalf("the track script, run without a pause over 20 reloads: %d runs, %d failed (%v): want hundreds of runs and none failed", runs, failed, err)
+			}
+			if f, e := journal("now returning 1"), journal("Entering"); f != failedBefore || e != enteredBefore {
+				t.Fatalf("over 20 reloads keepalived logged %s failed runs of its track script (%s before) and %s state changes (%s before)\n%s",
+					f, failedBefore, e, enteredBefore, g.run(ctx, "journalctl -u keepalived --no-pager | tail -20"))
+			}
+			if st := state(); st.State != "MASTER" || !st.HoldsVIP || !st.Serving {
+				t.Fatalf("after 20 reloads: %+v", st)
+			}
+			t.Logf("20 reloads on the master: %d runs of the track script, none failed", runs)
+			// HAProxy gone for good: the address is given up. Today's worst case is two runs a second apart; each
+			// run now takes up to 0.6 s more to fail, which delays the second one by that much.
+			out := g.run(ctx, `systemctl stop haproxy; t0=$(date +%s%N)
+until [ "$(cat /run/proxcloud-lb.state)" = FAULT ] && ! ip -o -4 addr show | grep -qF ' `+vip+`/'; do
+  [ $(( ($(date +%s%N) - t0) / 1000000 )) -lt 15000 ] || { echo never; exit 0; }
+  sleep 0.05
+done
+echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
+			if ms, err := strconv.Atoi(out); err != nil || ms > 4000 {
+				t.Fatalf("with HAProxy stopped the appliance gave the address up after %s ms, want within 4000 (two intervals, the tries of one run, and the stop itself)\n%s",
+					out, g.run(ctx, "journalctl -u keepalived --no-pager | tail -20"))
+			} else {
+				t.Logf("HAProxy stopped: the address was given up after %d ms", ms)
+			}
+			if err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
+				t.Fatalf("push with HAProxy stopped, after the reloads: %v", err)
+			}
+			for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+				if st := state(); st.State == "MASTER" && st.HoldsVIP && st.HAProxy && st.Serving {
+					break
+				} else if time.Now().After(deadline) {
+					t.Fatalf("keepalived did not take the address again after the reloads: %+v", st)
+				}
+			}
+			listens("after the reloads", vip+":80")
+
 			// 4. The proof fails: HAProxy answers the reload and does not run the pushed file (here it is started on
 			// another one). Not applied, said why, and the file in use before is back.
 			g.run(ctx, "cp /etc/haproxy/haproxy.cfg /etc/haproxy/other.cfg && echo CONFIG=/etc/haproxy/other.cfg >> /etc/default/haproxy && systemctl restart haproxy")

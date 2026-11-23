@@ -29,6 +29,10 @@ to a load balancer appliance, how a pass reads a pair, and how the tests run tha
   files). `lbApplyPair` compares the file's sum with it, not with the config it is about to push, and fills it in
   for a row of before the field whose keepalived is current. The field is in the row's JSON, as the other two
   hashes are.
+- *A reload is no failed run of the track script (Q1-o1).* `lbPairFiles`: the track script asks HAProxy's master up
+  to `lbWorkerTries` (4) times, 0.2 s apart, before a run fails; at a reload the master's socket refuses connections
+  for a moment. The script is one of keepalived's support files, so their digest changes and every pair gets one
+  keepalived push at the upgrade.
 
 **Why:** the drill's pair served and read `DEGRADED` for ever, and no Service made after its first UDP listener got
 its address in its status. Every test read `ACTIVE`, because every fake wrote the read's answer itself: the one
