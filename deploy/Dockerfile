@@ -8,7 +8,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 # Only the Go source the binary needs. deploy/seed is seed.go and the JSON it embeds (.dockerignore keeps the rest out);
-# deploy/embed.go embeds the platform BOM in deploy/platform and the two argocd-health.yaml files.
+# deploy/embed.go embeds the platform BOM in deploy/platform, the two argocd-health.yaml files and the pinned sandbox
+# template images.
 COPY cmd ./cmd
 COPY internal ./internal
 COPY pkg ./pkg
@@ -17,6 +18,7 @@ COPY deploy/embed.go ./deploy/
 COPY deploy/platform ./deploy/platform
 COPY deploy/mgmt-cluster/argocd-health.yaml ./deploy/mgmt-cluster/
 COPY deploy/dbaas-cluster/argocd-health.yaml ./deploy/dbaas-cluster/
+COPY deploy/templates/images.yaml ./deploy/templates/
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/proxcloud-api ./cmd/api
 # The load balancer controller of the managed clusters (cmd/lb-controller): a second binary of this image, so it has no
 # image, tag or workflow of its own and runs the portal's version. The cluster chart starts it by its command.

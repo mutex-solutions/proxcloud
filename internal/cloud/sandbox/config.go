@@ -115,8 +115,27 @@ var defaultLimits = Limits{
 	MaxConcurrentGPUs:     1,
 }
 
+// A shared cluster (config.sandbox.mode shared: a managed platform's node group, docs/managed-services.md) runs
+// sandboxes beside other workloads. LabelNodeGroup with NodeGroupSandbox is the label of its sandbox machines' Nodes:
+// Cluster API sets it and a kubelet cannot (NodeRestriction). It is the selector of the sandbox chart's RuntimeClass,
+// which tolerates TaintSandbox alone. SharedRole is the ClusterRole of the chart that holds every namespaced right of
+// the portal's identity there, SharedAccount that identity (deploy/charts/proxcloud-sandbox/templates/identities.yaml).
+const (
+	ModeShared       = "shared"
+	LabelNodeGroup   = "node-restriction.kubernetes.io/proxcloud-node-group"
+	NodeGroupSandbox = "sandbox"
+	TaintSandbox     = "proxcloud.io/sandbox"
+	SharedRole       = "proxcloud-sandbox-namespace"
+	SharedAccount    = "proxcloud-sandbox"
+	SharedAccountNS  = "sandbox-system"
+)
+
 // Config is one sandbox provider (one sandbox cluster).
 type Config struct {
+	// Shared: the cluster is a shared one (ModeShared). The portal's identity then holds its namespaced rights only
+	// where it bound them: each sb-<projectId> gets a RoleBinding of SharedRole when it is created, lists that span
+	// projects go namespace by namespace, and the network guard gate reads the sandbox machines alone.
+	Shared       bool
 	EgressMbps   int
 	Abuse        AbusePolicy
 	Rotation     RotationPolicy

@@ -268,6 +268,10 @@ type fakePVE struct {
 	tokens    []string
 	refuseACL bool
 	maxMem    int64 // every node's memory in bytes (0: the nodes report none)
+	// The sandbox fence's generations in the cluster firewall (security groups and IP sets by name, each with the
+	// sandbox comment), and the datacenter firewall's switch.
+	fwGroups, fwSets []string
+	dcOff            bool
 }
 
 // sdn answers the /cluster/sdn routes and the node's network lists; false when path is not one.
@@ -461,6 +465,30 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(path, "/nodes/pve1/storage/local-lvm/content/")
 		f.disks = slices.DeleteFunc(f.disks, func(n string) bool { return n == name })
 		data(f.upid("imgdel", 0))
+	case path == "/cluster/firewall/options":
+		if f.dcOff {
+			data(map[string]any{"enable": 0})
+		} else {
+			data(map[string]any{"enable": 1})
+		}
+	case path == "/cluster/firewall/groups" || path == "/cluster/firewall/ipset":
+		names, key := f.fwGroups, "group"
+		if path == "/cluster/firewall/ipset" {
+			names, key = f.fwSets, "name"
+		}
+		out := []map[string]any{}
+		for _, n := range names {
+			out = append(out, map[string]any{key: n, "comment": "proxcloud:sandbox"})
+		}
+		data(out)
+	case strings.HasPrefix(path, "/cluster/firewall/groups/") && r.Method == http.MethodGet:
+		data([]any{})
+	case strings.HasPrefix(path, "/cluster/firewall/groups/") && r.Method == http.MethodDelete:
+		f.fwGroups = slices.DeleteFunc(f.fwGroups, func(n string) bool { return n == strings.TrimPrefix(path, "/cluster/firewall/groups/") })
+		data(nil)
+	case strings.HasPrefix(path, "/cluster/firewall/ipset/") && r.Method == http.MethodDelete:
+		f.fwSets = slices.DeleteFunc(f.fwSets, func(n string) bool { return n == strings.TrimPrefix(path, "/cluster/firewall/ipset/") })
+		data(nil)
 	case path == "/cluster/firewall/rules" && r.Method == http.MethodGet:
 		for i := range f.clusterRules {
 			f.clusterRules[i].Pos, f.clusterRules[i].Digest = i, "d"

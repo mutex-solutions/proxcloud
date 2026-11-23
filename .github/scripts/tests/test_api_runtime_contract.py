@@ -56,11 +56,12 @@ class APIRuntimeContractTests(unittest.TestCase):
             ("COPY", "pkg ./pkg"),
             # seed.go and the default documents it embeds; .dockerignore drops the rest.
             ("COPY", "deploy/seed ./deploy/seed"),
-            # deploy/embed.go, the platform BOM and the two ArgoCD health files it embeds.
+            # deploy/embed.go, the platform BOM, the two ArgoCD health files and the sandbox image pins it embeds.
             ("COPY", "deploy/embed.go ./deploy/"),
             ("COPY", "deploy/platform ./deploy/platform"),
             ("COPY", "deploy/mgmt-cluster/argocd-health.yaml ./deploy/mgmt-cluster/"),
             ("COPY", "deploy/dbaas-cluster/argocd-health.yaml ./deploy/dbaas-cluster/"),
+            ("COPY", "deploy/templates/images.yaml ./deploy/templates/"),
             ("RUN", 'CGO_ENABLED=0 GOOS=linux go build -trimpath '
              '-ldflags="-s -w" -o /out/proxcloud-api ./cmd/api'),
             # The managed clusters' load balancer controller, the same way: a second binary, no image of its own.

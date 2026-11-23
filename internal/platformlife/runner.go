@@ -84,6 +84,10 @@ type Runner struct {
 	// provider rows DISABLED (Remove). The admin handler implements both.
 	Register func(ctx context.Context, body map[string]any) (string, error)
 	Disable  func(ctx context.Context, installationID string) error
+	// SandboxSite writes on the installation's Proxmox provider what makes its sync fence the sandbox machines
+	// (SandboxSite), or takes it away (a nil Config). ErrProviderConflict when the provider holds a sandbox pool or a
+	// sandbox network that is not this installation's. The admin handler implements it. Nil in tests: nothing is written.
+	SandboxSite func(ctx context.Context, in *Installation, site *SandboxSite) error
 	// Attach applies an attach choice (AttachAll, AttachNew, AttachNone) to one provider of the installation: the
 	// attach policy, and for AttachAll a bulk attach of every project. done=false with a note when it could not be
 	// applied yet (the provider is disabled); the register stage then tries again at the next apply. Nil: no choice is

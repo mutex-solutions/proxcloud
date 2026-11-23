@@ -460,7 +460,10 @@ The portal checks a site against the same tables (`internal/cloud/pve/access.go`
 With `spec.sandbox` ([managed-services.md](managed-services.md#presets-and-the-control-plane-count); no release
 offers it yet) the sandbox machines go to a pool of their own, `proxcloud-sbx`, in both placements. Not
 `proxcloud-system`: the provider sync writes the VM firewall of a sandbox machine with the portal token, which
-holds `NoAccess` there.
+holds `NoAccess` there. That sync, and the removal of the pool's firewall groups and IP sets when sandboxes are
+switched off, use the calls and rights of the installer's sandbox cluster
+([managed-sandbox.md](managed-sandbox.md), section 2): the VM's firewall through the platform role on `/pool`, the
+cluster firewall's groups and IP sets through the portal token's `Sys.Modify` on `/`. Nothing new.
 
 **No new role, no new privilege, and no row for root to add.** The portal token makes the pool and writes what
 opens it, with rights the two scripts above already grant it for tenant pools:

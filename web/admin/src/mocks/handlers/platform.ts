@@ -11,6 +11,8 @@
 // upgradek8s (the same, and the move names the next Kubernetes patch: the plan has two parts, the platform part blocked by node_image_missing until the seed part has run) |
 // replace (the same, with an unfinished upgrade toward the release of an earlier ProxCloud: the plan also offers the move to this one's in its place) |
 // onenode (nothing saved, and the provider has one node, pve1, with 32 GiB of which 24 are free: the presets on a small site) |
+// sandboxes (nothing saved, and this release's BOM has the sandbox chart: the settings offer sandboxes) |
+// sandboxready (ready, with a shared sandbox group a run built and its sandbox provider, disabled: the first check of its release gates finds the VM firewall gate open, the second finds every gate holding) |
 // onechart (nothing saved, and this release's cluster chart builds one control plane machine) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
 // (none: enabled, nothing saved).
 import { ApiError } from "@/lib/api"
@@ -67,7 +69,8 @@ const MACHINE: Shape = { node: true, nodes: true, replicas: true, cores: true, m
 const INSTALLATION: Shape = {
   name: true, preset: true, serviceId: true, provisionedBy: true, layout: true, rev: true,
   spec: {
-    sandbox: { placement: true },
+    sandbox: { placement: true, nodes: true, count: true, cores: true, memoryMiB: true, diskGiB: true, nodeRange: true, dns: true, proxyAddress: true, domain: true,
+      tls: { mode: true }, system: { nodes: true, count: true, cores: true, memoryMiB: true, diskGiB: true } },
     pveApiUrl: true, storage: { boot: true, iso: true, import: true },
     network: { mode: true, bridge: true, vlan: true, prefix: true, gateway: true, dns: true, mtu: true },
     seed: { mode: true, pool: true, node: true, address: true, cores: true, memoryMiB: true, diskGiB: true, sshKeys: true, apiSources: true },
@@ -114,6 +117,13 @@ const bomRef = { release: bom.release, sha256: bom.sha256 }
 const previous = { ...bom, release: "0.6.0", sha256: "1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d",
   components: bom.components.map((c) => (c.name === "pc-platform" ? { ...c, chart: { ...c.chart, version: "0.1.13" } } : c)) }
 if (preset === "onechart") bom.components = previous.components
+// A BOM that offers sandboxes: the sandbox chart as a feature component, before the cluster chart (platformlife.FeatureSandbox).
+const sandboxesOffered = ["sandboxes", "sandboxready"].includes(preset)
+if (sandboxesOffered) {
+  bom.components.splice(bom.components.length - 1, 0, { name: "sandbox", cluster: "workload", wave: 3, group: "", feature: "sandbox", chart: { version: "0.1.0", digest: "sha256:8899aabbccddeeff0011223344556677889900aabb1122cc33dd44ee55ff6677" } } as any)
+}
+const SANDBOX_PROVIDER = "svc-sandbox-01"
+const SANDBOX_SPEC = { placement: "shared", nodes: ["pve1"], count: 1, cores: 2, memoryMiB: 4096, diskGiB: 40, nodeRange: "10.90.0.64/28", proxyAddress: "10.90.0.140", domain: "sbx.example.org", tls: { mode: "selfsigned" } }
 if (preset === "onenode") db.proxmoxAuthResult.nodes = [{ node: "pve1", status: "online", maxmem: 32 * 2 ** 30, mem: 8 * 2 ** 30 }]
 
 const SCHEDULER_NOTE = "The job scheduler is off. Until it is on, a tenant cannot delete a project, the state of clusters, databases and servers is refreshed only when an operator runs a provider sync, and no usage is charged or billed. Turn it on where ProxCloud is installed: ./proxcloud-up.sh install --scheduler on a Compose install, PROXCLOUD_JOBS_SCHEDULER_ENABLED=true for the API elsewhere. It starts charging usage on a timer, so set the prices first."
@@ -335,7 +345,8 @@ function refuse(name: string, spec: Doc, serviceId: string) {
   const cp = spec?.clusters?.[0]?.controlPlane ?? {}
   if (![undefined, 0, 1, 3].includes(cp.replicas)) problems.push(`spec.clusters[0].controlPlane.replicas ${cp.replicas}: 1 or 3 (etcd needs an odd number of members, and this release builds no more than 3)`)
   if (cp.nodes?.length && JSON.stringify(cp.nodes) !== JSON.stringify([cp.node])) problems.push("spec.clusters[0].controlPlane.nodes: every control plane machine goes to one Proxmox node, controlPlane.node. Machines on several nodes need the node image template and the control plane disks on shared storage (CAPMOX v0.9.2 clones one template, and Proxmox moves a clone to another node only from and to shared storage), and this release does not build that: leave controlPlane.nodes out")
-  if (spec?.sandbox) problems.push("spec.sandbox: the sandbox service on the platform comes in a later release; leave spec.sandbox out")
+  // SandboxProblems: a BOM without the sandbox chart builds no sandboxes.
+  if (spec?.sandbox && spec.sandbox.placement !== "off" && !sandboxesOffered) problems.push(`spec.sandbox: the platform's BOM (release ${bom.release}) has no sandbox chart, so this release builds no sandboxes on the platform: leave spec.sandbox out, or set placement off`)
   if (String(spec?.network?.prefix ?? "").startsWith("10.100.")) problems.push(`the platform network ${spec.network.prefix} overlaps cidrPool 10.100.0.0/16`)
   if (problems.length) throw fail(400, "invalid_installation", "The installation is not valid", { problems })
 }
@@ -348,7 +359,7 @@ function create(name: string, spec: Doc): Doc {
   return in_
 }
 
-if (preset && !["disabled", "onenode", "onechart"].includes(preset)) {
+if (preset && !["disabled", "onenode", "onechart", "sandboxes"].includes(preset)) {
   const in_ = create("lab", mockSpec)
   if (preset !== "draft") mockPlatform.secrets[in_.id] = { capi: true, csi: true }
   if (preset === "running") { mockPlatform.applies = 1; newRun(in_, "apply", Date.now() - 7.5 * STAGE_MS) }
@@ -366,7 +377,33 @@ if (preset && !["disabled", "onenode", "onechart"].includes(preset)) {
     if (preset === "replace") in_.status.targetBom = { release: "0.6.5", sha256: "5".repeat(64) }
     if (preset === "removing") newRun(in_, "remove", Date.now() - 0.5 * STAGE_MS)
   }
+  if (preset === "sandboxready") {
+    mockPlatform.applies = 1
+    in_.spec.sandbox = structuredClone(SANDBOX_SPEC)
+    tick(newRun(in_, "apply", Date.now() - 3_600_000))
+    // What the run built and registered: the group, the self-signed certificate, the provider, disabled.
+    in_.status.sandbox = { placement: "shared", nodeRange: SANDBOX_SPEC.nodeRange, proxyAddress: SANDBOX_SPEC.proxyAddress, count: 1, nodes: ["pve1"], builtAt: now(),
+      certificate: "-----BEGIN CERTIFICATE-----\nMIIBmockSandboxProxyCertificate\n-----END CERTIFICATE-----\n" }
+    in_.status.providers.sandbox = SANDBOX_PROVIDER
+    db.services.push({ id: SANDBOX_PROVIDER, name: "lab Sandboxes", type: "CLOUD", status: "DISABLED",
+      config: { provider: "sandbox", platformInstallationId: in_.id, attachToNewProjects: false, sandbox: { mode: "shared", domain: SANDBOX_SPEC.domain, envd: true } } } as any)
+  }
 }
+
+// The release gates of the platform's sandbox provider (internal/cloud/syncjob/sandboxgate.go), read-only. The first
+// check finds the sandbox machine still tainted (no sync has fenced it); every later one finds all four holding.
+let gateChecks = 0
+on("POST /admin/service/:id/sandbox/release-check", ({ params }) => {
+  if (params.id !== SANDBOX_PROVIDER) throw new ApiError(400, 400, "This provider is not a sandbox provider")
+  const fenced = gateChecks++ > 0
+  return { data: [
+    { name: "noderestriction", ok: true, detail: "a node identity is refused a node-restriction.kubernetes.io/ label on its own Node" },
+    { name: "isolation", ok: true, detail: "the cluster firewall drops 10.90.0.64/28 to and from the tenant pool and the blocked networks" },
+    fenced ? { name: "fence", ok: true, detail: "1 worker(s) open to sandboxes, each with the VM firewall of pool proxcloud-sbx pinned to its address" }
+      : { name: "fence", ok: false, detail: "pve sandbox: no worker is open to sandboxes yet (every Node still has the unsecured taint)" },
+    { name: "network-guard", ok: true, detail: "host CNI guard installed on every schedulable node" },
+  ] }
+})
 
 on("GET /admin/platform/bom", ({ query }) => {
   const sha = query.get("sha256")
@@ -436,7 +473,20 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
       next.endpoint !== old.endpoint && "spec.clusters[0].endpoint",
       !same((next.nodeGroups ?? []).map((g: Doc) => g.name), old.nodeGroups.map((g: Doc) => g.name)) && "spec.clusters[0].nodeGroups",
     ].filter(Boolean) as string[]
+    // sandboxFixed: what a run built changes only to off, and its range and proxy address stay.
+    const [built, sb] = [in_.status.sandbox, b.spec.sandbox]
+    if (built && sb && sb.placement !== "off") {
+      if (sb.placement !== built.placement) fixed.push("spec.sandbox.placement")
+      if (sb.nodeRange !== built.nodeRange) fixed.push("spec.sandbox.nodeRange")
+      if (sb.proxyAddress !== built.proxyAddress) fixed.push("spec.sandbox.proxyAddress")
+    }
     if (fixed.length) throw fail(409, "fixed_fields", `These fields cannot change once the platform was installed (serviceId never): ${fixed.join(", ")}`, { problems: fixed })
+    // KeepSandbox: a spec without the block keeps the stored one. Off is refused while the sandbox provider is live.
+    if (!sb && in_.spec.sandbox) b.spec.sandbox = in_.spec.sandbox
+    const provider = db.services.find((s) => s.id === in_.status.providers?.sandbox)
+    if (built && sb?.placement === "off" && provider && provider.status !== "DISABLED") {
+      throw fail(409, "sandbox_provider_live", `The sandbox provider "${provider.name}" is ${provider.status}: switching sandboxes off deletes every sandbox machine and with it every running sandbox. Set the provider DISABLED under Cloud providers and let its sandboxes end, then set spec.sandbox.placement off.`, { problems: ["spec.sandbox.placement"] })
+    }
   }
   { // ControlPlaneShrink in internal/platformlife/installation.go: against what a run built, not the stored spec
     const [had, wants] = [in_.status.clusters?.[0]?.controlPlaneReplicas || 1, b.spec.clusters?.[0]?.controlPlane?.replicas || 1]

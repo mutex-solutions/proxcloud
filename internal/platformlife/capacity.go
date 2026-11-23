@@ -113,6 +113,11 @@ func (p Preflight) capacity(ctx context.Context) Check {
 	const how = " The count is the one made before each clone: the configured memory of every VM and container on the node, running or not, as " + pve.CAPITokenID +
 		" lists them; a VM that token cannot see is not counted. The row fails on each machine of the settings and the one more a rolling update of the control plane makes; " +
 		"the one more of each group on each of its nodes is counted too and only warns."
+	// Memory inside a machine is not what this row counts, with one exception worth a line: the control plane of a
+	// separate sandbox cluster is pods on the kamaji group, beside every tenant's control plane.
+	if note := in.sandboxControlPlaneNote(); note != "" {
+		tight = append(tight, note)
+	}
 	if len(short) == 0 && len(tight)+len(unknown) > 0 {
 		return warn(strings.Join(append(tight, unknown...), "\n") + how)
 	}
@@ -125,6 +130,25 @@ func (p Preflight) capacity(ctx context.Context) Check {
 		return warn(msg)
 	}
 	return Check{ID: "capacity", Status: CheckFail, Message: msg}
+}
+
+// sandboxControlPlaneNote warns, until the separate sandbox cluster is built, when the machines of the kamaji group
+// are small against what its control plane takes there (sandboxControlPlaneMiB, not a request: a Kamaji control plane
+// asks for nothing, so the scheduler places it anywhere and the machine runs out of memory later). "" otherwise.
+// ponytail: a fixed share of the machine, not a read of what the group's pods use; read the nodes' metrics if this
+// warns where there is room.
+func (in *Installation) sandboxControlPlaneNote() string {
+	if in.Spec.sandboxMode() != SandboxSeparate || len(in.Spec.Clusters) == 0 || (in.Status.Sandbox != nil && in.Status.Sandbox.BuiltAt != nil) {
+		return ""
+	}
+	for _, g := range in.Spec.Clusters[0].NodeGroups {
+		if g.Name == "kamaji" && g.MemoryMiB < 8*sandboxControlPlaneMiB {
+			return fmt.Sprintf("The control plane of %s runs as pods on the kamaji group and takes about %s of a machine there, beside every tenant cluster's control plane (each about as much). "+
+				"The group's machines have %s each. This row counts the memory of machines on a node, not of pods in a machine: give the kamaji group more memory if it already holds several control planes.",
+				SandboxClusterName, gib(sandboxControlPlaneMiB), gib(g.MemoryMiB))
+		}
+	}
+	return ""
 }
 
 // nodeMemory is one node's memory in bytes as CAPMOX counts it before a clone: the node's total, what the VMs and

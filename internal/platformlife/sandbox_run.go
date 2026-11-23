@@ -10,7 +10,11 @@ package platformlife
 // built, or, when the settings switched sandboxes off, the row or token and the empty pool are deleted.
 //
 // Stage workload-platform: the proxy's certificate before the sandbox chart's wave (sandboxCertificate, shared), and
-// after the last wave the separate cluster (sandboxCluster), which needs Kamaji and the tenants' Cluster API there.
+// after the last wave the separate cluster (sandboxCluster), which needs Kamaji and the tenants' Cluster API there,
+// with the same certificate written inside it.
+//
+// What the portal needs to run sandboxes on them (the provider's sandbox network and pool in stage cluster, the two
+// identities' kubeconfigs and the sandbox provider in stage register, their removal) is sandbox_provider.go.
 //
 // Remove deletes the separate cluster before the platform cluster, then what was written on Proxmox (remove.go).
 
@@ -22,6 +26,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"reflect"
 	"slices"
@@ -76,6 +81,9 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 	case want == "" && built == nil:
 		return nil
 	case want == "":
+		if err := x.sandboxOffAllowed(ctx); err != nil {
+			return err
+		}
 		return x.sandboxAppsGone(ctx, seed, built.Placement)
 	case built != nil && built.Placement != want:
 		return permanent(CodeSandboxRefused, "A run built sandboxes with placement %s and the settings say %s. Nothing was changed. Set spec.sandbox.placement off and apply, then set %s.", built.Placement, want, want)
@@ -105,6 +113,14 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 		if err := x.save(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Sandbox = &next }); err != nil {
 			return err
 		}
+	}
+	// The provider's sandbox network and pool before any sandbox machine exists: the next provider sync writes the
+	// isolation rules of the range. The fence pass itself starts once stage register has stored the identity it
+	// reads the Nodes with (the sandbox chart makes it); until then the sync writes no VM firewall and every machine
+	// keeps its unsecured taint, so no sandbox runs on one. On a later apply the identity is stored already, and a
+	// new machine is fenced by the next sync after its clone.
+	if err := x.sandboxSite(ctx, ""); err != nil {
+		return err
 	}
 	if want == SandboxShared {
 		// Written at every apply, so a row deleted by hand comes back.
@@ -219,6 +235,16 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 	if err := x.check(ctx); err != nil {
 		return err
 	}
+	// The provider stops naming the pool and the range first, so no sync fences on while the rest goes; then the
+	// firewall generations of the pool, which no pass would sweep any more.
+	if x.r.SandboxSite != nil {
+		if err := sandboxSiteErr(x.r.SandboxSite(ctx, x.in, &SandboxSite{Range: built.NodeRange})); err != nil {
+			return err
+		}
+	}
+	if err := (&pve.Service{C: x.portal}).RemoveSandboxFirewall(ctx, pve.SandboxPool); err != nil {
+		return classify(CodeSandboxAccessFailed, err)
+	}
 	if built.Placement == SandboxShared {
 		err = x.portal.SetSandboxPoolAccess(ctx, true)
 	} else {
@@ -236,15 +262,22 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 }
 
 // sandboxCertificate writes, with placement shared, the Secret sandbox-proxy reads its wildcard certificate from,
-// before the wave of the sandbox chart: the chart mounts it, and its Deployment never becomes available without. The
-// run makes a self-signed one (and a new one for another domain or 30 days before it ends); its key is sealed, the
-// certificate is in the status for clients to trust. An operator's certificate (tls.mode secret) has no route that
-// stores it yet: the save refuses it (SandboxProblems), and a record that names it all the same stops here.
+// before the wave of the sandbox chart: the chart mounts it, and its Deployment never becomes available without
+// (separate: sandboxCluster writes it inside pc-sandbox). The run makes a self-signed one (and a new one for another
+// domain or 30 days before it ends); its key is sealed, the certificate is in the status for clients to trust. An
+// operator's certificate (tls.mode secret) has no route that stores it yet: the save refuses it (SandboxProblems),
+// and a record that names it all the same stops in applySandboxTLS.
 func (x *acq) sandboxCertificate(ctx context.Context, wl *kamajik8s.Client) error {
-	sb := x.in.Spec.Sandbox
 	if x.in.Spec.sandboxMode() != SandboxShared {
 		return nil
 	}
+	return x.applySandboxTLS(ctx, wl)
+}
+
+// applySandboxTLS makes or keeps the certificate and writes its Secret into the sandbox chart's namespace on target:
+// the platform cluster (shared) or pc-sandbox (separate, sandboxCluster).
+func (x *acq) applySandboxTLS(ctx context.Context, wl *kamajik8s.Client) error {
+	sb := x.in.Spec.Sandbox
 	if sb.TLS != nil && sb.TLS.Mode == TLSSecret {
 		return permanent(CodeSandboxRefused, "spec.sandbox.tls.mode is secret and no certificate of the operator's is stored: this release has no route that stores one. Set tls.mode selfsigned, then apply again.")
 	}
@@ -349,6 +382,15 @@ func (x *acq) sandboxCluster(ctx context.Context, seed, wl *kamajik8s.Client) er
 	if err := seed.ApplyApplication(ctx, app); err != nil {
 		return classify(CodeComponentUnhealthy, err)
 	}
+	// The proxy's certificate inside pc-sandbox, as soon as its control plane answers: the sandbox chart there mounts
+	// the Secret, and sandbox-proxy does not start without it.
+	sc, err := x.sandboxClusterClient(ctx, wl)
+	if err != nil {
+		return err
+	}
+	if err := x.applySandboxTLS(ctx, sc); err != nil {
+		return sandboxStarting(err)
+	}
 	machines, err := wl.ListCRs(ctx, capiGroup, capiVersion, "machines", SandboxClusterName, "")
 	if err != nil {
 		return classify(CodeWorkloadUnreachable, err)
@@ -367,9 +409,24 @@ func (x *acq) sandboxCluster(ctx context.Context, seed, wl *kamajik8s.Client) er
 	}
 	if st := x.in.Status.Sandbox; st != nil && st.BuiltAt == nil {
 		now := time.Now().UTC()
-		return x.save(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Sandbox.BuiltAt = &now })
+		if err := x.save(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Sandbox.BuiltAt = &now }); err != nil {
+			return err
+		}
 	}
-	return nil
+	// The sandbox chart is installed inside the cluster once its machines run; stage register reads the two
+	// identities it makes. Waited for here, where the deadline is the long one.
+	_, _, err = x.sandboxKubeconfigs(ctx, wl)
+	return sandboxStarting(err)
+}
+
+// sandboxStarting makes a failed call to the API of pc-sandbox a wait: its control plane was made minutes ago, and
+// an API that does not answer yet is no reason to spend the stage's retries. The stage's deadline still ends it.
+func sandboxStarting(err error) error {
+	var se *stageErr
+	if errors.As(err, &se) && (se.kind == kindRetry || se.kind == kindRefused) {
+		return waiting(CodeControlPlaneTimeout, "The control plane of %s does not answer yet: %s", SandboxClusterName, se.msg)
+	}
+	return err
 }
 
 // removeSandboxCluster is the first deletion of a Remove on a platform with a separate sandbox cluster: its

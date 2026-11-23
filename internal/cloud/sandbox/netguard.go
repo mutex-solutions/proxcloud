@@ -15,6 +15,10 @@ import (
 // CheckNetworkGuard requires, on every schedulable node, that Cilium leaves the CNI config to
 // netguard (cluster-wide, or by a CiliumNodeConfig selecting the node) and a fresh host-installed
 // chain heartbeat. Old installations fail closed until stage 55 is reapplied. Read-only.
+//
+// On a shared cluster (Config.Shared) the nodes asked are the sandbox machines alone, by the label a
+// kubelet cannot set: the platform's other machines run no sandbox (the fence gate checks the
+// RuntimeClass that keeps sandboxes off them) and keep Cilium's own CNI config.
 func (s *Service) CheckNetworkGuard(ctx context.Context) error {
 	cm, ce := s.api.GetCore(ctx, "configmaps", "kube-system", "cilium-config")
 	if ce != nil {
@@ -51,7 +55,7 @@ func (s *Service) CheckNetworkGuard(ctx context.Context) error {
 	}
 	count := 0
 	for _, n := range nodes {
-		if dig(n, "spec", "unschedulable") == true {
+		if dig(n, "spec", "unschedulable") == true || (s.cfg.Shared && digStr(n, "metadata", "labels", LabelNodeGroup) != NodeGroupSandbox) {
 			continue
 		}
 		name := digStr(n, "metadata", "name")
@@ -65,6 +69,9 @@ func (s *Service) CheckNetworkGuard(ctx context.Context) error {
 			return fmt.Errorf("Cilium still owns the CNI config on node %s", name)
 		}
 		if !fresh[name] {
+			if s.cfg.Shared {
+				return fmt.Errorf("sandbox host CNI guard missing or stale on node %s: its node-setup pod is not Ready", name)
+			}
 			return fmt.Errorf("sandbox host CNI guard missing/stale; reapply installer stage 55 before enabling provider")
 		}
 		count++

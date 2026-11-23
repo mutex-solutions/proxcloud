@@ -142,7 +142,7 @@ func (s *Service) poolFor(ctx context.Context, models []string) ([]GPUPool, erro
 	if err != nil {
 		return nil, err
 	}
-	pods, err := s.api.ListPodsAllNamespaces(ctx, "")
+	pods, err := s.listPodsAll(ctx, "")
 	if err != nil {
 		return nil, err
 	}

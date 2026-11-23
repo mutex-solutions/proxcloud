@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
@@ -23,8 +24,32 @@ func sandboxPlatform(t *testing.T, kind string, sb *SandboxSpec) *platform {
 	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Spec.Sandbox = sb })
 	if sb != nil && sb.Placement == SandboxShared {
 		p.sandboxMachine()
+		p.sandboxIdentities(p.wl)
+	}
+	if sb != nil && sb.Placement == SandboxSeparate {
+		// pc-sandbox answers at an API of its own; Kamaji keeps its admin kubeconfig beside the control plane.
+		p.sbx = newFakeSeed(t, staticCA(t), func() string { return "" })
+		p.sbx.sa = "sbx-admin-0123456789"
+		kc, err := kamajik8s.BuildKubeconfig(SandboxClusterName, p.sbx.url, []byte(p.sbx.caPEM()), p.sbx.sa)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.wl.put(seedNS+"pc-sandbox/secrets/pc-sandbox-kamaji-cp-admin-kubeconfig", map[string]any{"data": map[string]any{"admin.conf": b64(kc)}})
+		p.sandboxIdentities(p.sbx)
 	}
 	return p
+}
+
+const (
+	sandboxPortalSecret   = "sbx-portal-token-0123456789"
+	sandboxFirewallSecret = "sbx-firewall-token-0123456789"
+)
+
+// sandboxIdentities are the token Secrets the sandbox chart's two identities get from the cluster that runs it.
+func (p *platform) sandboxIdentities(on *fakeSeed) {
+	for name, token := range map[string]string{sandboxPortalToken: sandboxPortalSecret, sandboxFirewallToken: sandboxFirewallSecret} {
+		on.put(seedNS+"sandbox-system/secrets/"+name, map[string]any{"data": map[string]any{"token": b64(token), "ca.crt": b64(on.caPEM())}})
+	}
 }
 
 func (p *platform) sandboxMachine() {
@@ -162,6 +187,11 @@ func TestApplyWithoutSandboxWritesNothingOfIt(t *testing.T) {
 	if len(p.pve.pools)+len(p.pve.acl)+len(p.pve.tokens) != 0 || p.seed.obj(sandboxApp) != nil || in.Status.Sandbox != nil ||
 		p.wl.obj(seedNS+"sandbox-system/secrets/sandbox-proxy-tls") != nil || len(in.Status.Components) != len(in2bom(t).Components)-1 {
 		t.Fatalf("pools %v, acl %v, status %+v, %d components", p.pve.pools, p.pve.acl, in.Status.Sandbox, len(in.Status.Components))
+	}
+	// The provider side as well: no sandbox settings on the Proxmox provider, the two tenant providers and no third,
+	// and no record of a sandbox provider or of an attach choice applied to one.
+	if len(p.sites) != 0 || len(p.registers) != 2 || in.Status.Providers == nil || in.Status.Providers.Sandbox != "" || in.Status.SandboxAttach != "" {
+		t.Fatalf("%d writes of sandbox settings, %d providers registered, providers %+v, sandbox attach %q", len(p.sites), len(p.registers), in.Status.Providers, in.Status.SandboxAttach)
 	}
 }
 
@@ -401,6 +431,7 @@ func TestUpgradeGateLetsTheNewSandboxGroupThrough(t *testing.T) {
 				in.Spec.Sandbox, in.Status.Sandbox = sharedSandbox(), c.built
 			})
 			p.sandboxMachine()
+			p.sandboxIdentities(p.wl)
 			p.start(t, to.SHA256, "upgrade lab to 0.9.0")
 			p.seed.resources[ClusterName] = c.resources
 			end := p.until(30)

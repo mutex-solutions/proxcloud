@@ -20,6 +20,15 @@ export type Spec = {
   // Optional: the address the platform cluster's ArgoCD answers at over HTTPS, and the networks let in. May be set,
   // changed and cleared on an installed platform; the next apply makes it so.
   access?: { argocd?: { address: string; sources: string[] } }
+  // Optional: where sandboxes run (internal/platformlife/sandbox.go). A spec without it keeps what is stored; "off"
+  // switches them off. Offered only by a release whose BOM has the sandbox chart (bomOffersSandboxes).
+  sandbox?: SandboxSpec
+}
+export type SandboxMachines = { nodes: string[]; count: number; cores: number; memoryMiB: number; diskGiB: number }
+export type SandboxSpec = Partial<SandboxMachines> & {
+  placement: "shared" | "separate" | "off"
+  nodeRange?: string; dns?: string[]; proxyAddress?: string; domain?: string; tls?: { mode: string }
+  system?: SandboxMachines // separate only: sandbox-proxy and the sandbox controller
 }
 export type Attach = "all" | "new" | "none"
 export const ATTACH_LABEL: Record<Attach, string> = {
@@ -43,7 +52,9 @@ export type Installation = {
     // controlPlaneReplicas: the count above one a run handed to the cluster; absent means one
     clusters?: { name: string; endpoint?: string; kubernetesVersion?: string; argocdTokenExpiresAt?: string; controlPlaneReplicas?: number }[]
     components?: { name: string; cluster: string; version: string }[]
-    providers?: { kubernetes?: string; database?: string }
+    providers?: { kubernetes?: string; database?: string; sandbox?: string }
+    // What a run built for spec.sandbox; certificate is sandbox-proxy's self-signed one (PEM), for clients to trust.
+    sandbox?: { placement: string; nodeRange: string; proxyAddress: string; count: number; certificate?: string; builtAt?: string }
     tenantsAttach?: Attach // the choice the last run applied
     argocdUrl?: string // where the platform cluster's ArgoCD answers, once a run saw its Service hold the address
     argocdSources?: string[] // the networks let in there, as the last run applied them (not the saved settings)
@@ -81,8 +92,12 @@ export type BOM = {
   release: string; sha256: string
   kubernetes: { version: string; nodeImage: { package: string; tag: string; digest: string } }
   seed: { image: { package: string; tag: string; digest: string } }
-  components: { name: string; cluster: string; group?: string; chart: { version: string; digest?: string } }[]
+  components: { name: string; cluster: string; group?: string; feature?: string; chart: { version: string; digest?: string } }[]
 }
+// Whether the release an install runs with can build sandboxes: its BOM has the sandbox chart.
+export const bomOffersSandboxes = (bom?: BOM) => !!bom?.components.some((c) => c.feature === "sandbox")
+// One gate of POST /admin/service/{id}/sandbox/release-check.
+export type SandboxGate = { name: string; ok: boolean; detail: string }
 export type Plan = {
   installed?: { release: string; sha256: string } | null
   target: { release: string; sha256: string } // what an apply runs with
@@ -147,6 +162,14 @@ export type Form = {
   groups: Record<string, GroupForm>
   attach: Attach | "" // "": not chosen yet; the settings step shows the default for the site
   argoAddress: string; argoSources: string // both empty: the platform cluster's ArgoCD gets no address
+  sandbox: SandboxForm
+}
+// placement "": the spec holds no sandbox block and the form sends none (shown as Off). accept: the tick under the
+// shared mode's text; it is not part of the spec, and a stored shared block counts as ticked.
+export type SandboxForm = {
+  placement: "" | "off" | "shared" | "separate"
+  machines: GroupForm; system: GroupForm
+  nodeRange: string; proxyAddress: string; domain: string; dns: string; accept: boolean
 }
 
 const group = (cores: string, mem: string): GroupForm => ({ nodes: [], count: "1", cores, memoryGiB: mem, diskGiB: "40" })
@@ -158,6 +181,10 @@ export const emptyForm: Form = {
   cpNode: "", cpReplicas: "1", cp: { cores: "2", memoryGiB: "4", diskGiB: "30" },
   groups: { system: group("4", "8"), kamaji: group("4", "8"), dbaas: group("4", "8") },
   attach: "", argoAddress: "", argoSources: "",
+  sandbox: {
+    placement: "", machines: { ...group("4", "8"), diskGiB: "40" }, system: { ...group("2", "4"), diskGiB: "30" },
+    nodeRange: "", proxyAddress: "", domain: "", dns: "", accept: false,
+  },
 }
 
 // ── Presets (internal/platformlife/preset.go holds the same figures for the API's "preset") ────────────────────────
@@ -218,6 +245,18 @@ export function applyPreset(preset: Preset, f: Form, site: Site): { form: Form; 
   }
   // One node and no bridge named yet: the network the node routes (the tenant path on one node).
   if (home && names.length === 1 && !f.bridge.trim()) form = { ...form, networkMode: "routed", bridge: "pcplat0", vlan: "" }
+  // Sandboxes stay off unless they were switched on; then the preset sets the placement and the machines (preset.go).
+  const sb = f.sandbox
+  if (sb.placement === "shared" || sb.placement === "separate") {
+    form = { ...form, sandbox: {
+      ...sb, placement: home ? "shared" : "separate", accept: false,
+      machines: { ...sb.machines, nodes: [seedNode].filter(Boolean), count: home ? "1" : "2", cores: home ? "2" : "4", memoryGiB: home ? "4" : "8", diskGiB: "40" },
+      system: { ...sb.system, nodes: [seedNode].filter(Boolean), count: "1", cores: "2", memoryGiB: "4", diskGiB: "30" },
+    } }
+    notes.push(home
+      ? "Sandboxes: a shared node group of one machine with 2 cores, which holds ONE sandbox of one vCPU. Read what shared gives up below, and take 4 cores for several."
+      : "Sandboxes: a separate cluster with two sandbox machines and one system machine.")
+  }
   return { form, notes }
 }
 
@@ -235,9 +274,15 @@ export function plannedMemory(f: Form): Record<string, { cores: number; run: num
   }
   add(f.seedNode, 1, f.seed)
   add(f.cpNode, num(f.cpReplicas) || 1, f.cp, true)
-  for (const g of GROUPS) {
-    const gf = f.groups[g], count = num(gf.count) || 0
+  const spread = (gf: GroupForm) => {
+    const count = num(gf.count) || 0
     gf.nodes.forEach((n, i) => add(n, Math.floor(count / gf.nodes.length) + (i < count % gf.nodes.length ? 1 : 0), gf, false, true))
+  }
+  for (const g of GROUPS) spread(f.groups[g])
+  // The sandbox machines are placed like a group's (Spec.machineGroups).
+  if (f.sandbox.placement === "shared" || f.sandbox.placement === "separate") {
+    spread(f.sandbox.machines)
+    if (f.sandbox.placement === "separate") spread(f.sandbox.system)
   }
   return out
 }
@@ -274,6 +319,21 @@ export function formToSpec(f: Form, prev?: Spec): Spec {
     ...(f.attach && (f.attach !== "none" || prev?.tenants) ? { tenants: { attach: f.attach } } : {}),
     // Both empty clears the block (JSON drops the key), also one a stored spec had.
     access: f.argoAddress.trim() || words(f.argoSources).length ? { argocd: { address: f.argoAddress.trim(), sources: words(f.argoSources) } } : undefined,
+    sandbox: sandboxSpec(f.sandbox),
+  }
+}
+
+// "" sends no block (the API keeps the stored one, and there is none); off is sent as the one word.
+function sandboxSpec(sb: SandboxForm): SandboxSpec | undefined {
+  if (sb.placement === "") return undefined
+  if (sb.placement === "off") return { placement: "off" }
+  const machines = (g: GroupForm): SandboxMachines => ({ nodes: g.nodes, count: num(g.count), ...machine(g) })
+  const dns = words(sb.dns)
+  return {
+    placement: sb.placement, ...machines(sb.machines),
+    nodeRange: sb.nodeRange.trim(), proxyAddress: sb.proxyAddress.trim(), domain: sb.domain.trim().toLowerCase(), tls: { mode: "selfsigned" },
+    ...(dns.length ? { dns } : {}),
+    ...(sb.placement === "separate" ? { system: machines(sb.system) } : {}),
   }
 }
 
@@ -294,6 +354,19 @@ export function specToForm(name: string, s: Spec): Form {
     groups,
     attach: s.tenants?.attach ?? "none",
     argoAddress: s.access?.argocd?.address ?? "", argoSources: (s.access?.argocd?.sources ?? []).join(", "),
+    sandbox: sandboxForm(s.sandbox),
+  }
+}
+
+function sandboxForm(sb?: SandboxSpec): SandboxForm {
+  const e = emptyForm.sandbox
+  if (!sb) return e
+  if (sb.placement === "off") return { ...e, placement: "off" }
+  const g = (m: Partial<SandboxMachines> | undefined, d: GroupForm): GroupForm =>
+    m?.cores ? { ...machineForm(m as SandboxMachines), nodes: m.nodes ?? [], count: String(m.count ?? 1) } : d
+  return {
+    placement: sb.placement, machines: g(sb, e.machines), system: g(sb.system, e.system),
+    nodeRange: sb.nodeRange ?? "", proxyAddress: sb.proxyAddress ?? "", domain: sb.domain ?? "", dns: (sb.dns ?? []).join(", "), accept: true,
   }
 }
 
@@ -304,6 +377,7 @@ const NODE = /^[A-Za-z0-9]([-A-Za-z0-9]{0,61}[A-Za-z0-9])?$/
 const STORAGE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/
 const BRIDGE = /^[A-Za-z][A-Za-z0-9_.-]{0,14}$/
 const VNET = /^[a-z][a-z0-9]{0,7}$/ // a Proxmox SDN vnet id
+const DOMAIN = /^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.)+[a-z]([-a-z0-9]{0,61}[a-z0-9])?$/
 export const TOKEN_SECRET = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
 // The line the root command of step 2 prints: PC-ENROLL: plus base64 of "1:<installation>:<unix time>:<capi secret>:<csi secret>"
@@ -442,7 +516,69 @@ export function validate(f: Form): Problem[] {
       bad("argoSources", "Operator networks: 1 to 16 IPv4 networks such as 192.0.2.0/24, never 0.0.0.0/0, or empty together with the address.")
     }
   }
+
+  // Sandboxes (Spec.validateSandbox in internal/platformlife/sandbox.go).
+  const sb = f.sandbox
+  if (sb.placement === "shared" || sb.placement === "separate") {
+    let need = 0
+    const sbGroup = (id: string, label: string, g: GroupForm) => {
+      const count = num(g.count)
+      if (g.nodes.length < 1 || g.nodes.length > 16 || g.nodes.some((n) => !NODE.test(n)) || new Set(g.nodes).size !== g.nodes.length) bad(`${id}-nodes`, `${label}: choose 1 to 16 nodes, each once.`)
+      if (!(count >= Math.max(1, g.nodes.length) && count <= 64)) bad(`${id}-count`, `${label}: at least one machine per chosen node, at most 64.`)
+      machineOK(`${id}-cores`, label, g)
+      need += (count || 0) + g.nodes.length
+    }
+    sbGroup("sbx", "Sandbox machines", sb.machines)
+    if (sb.placement === "separate") sbGroup("sbxsys", "Sandbox system machines", sb.system)
+    const r = cidr4(sb.nodeRange, true)
+    if (!r || r.bits <= net.bits || r.bits > 30 || r.first < net.first || r.last > net.last) {
+      bad("sbxRange", `Sandbox range: one network inside ${f.prefix.trim()}, from /${net.bits + 1} to /30, written as a CIDR such as 10.90.0.64/28 (not first-last).`)
+    } else {
+      if (r.first === net.first || r.last === net.last) bad("sbxRange", "Sandbox range: it holds the network or the broadcast address of the platform network.")
+      for (const p of points) if (p.a >= r.first && p.a <= r.last) bad("sbxRange", `Sandbox range: the ${p.label.toLowerCase()} is inside it.`)
+      for (const x of ranges) if (x.r && x.r.first <= r.last && r.first <= x.r.last) bad("sbxRange", `Sandbox range: it overlaps the ${x.label.toLowerCase()}. Sandbox machines take addresses no platform machine uses.`)
+      if (r.last - r.first + 1 < need) bad("sbxRange", `Sandbox range: it holds ${r.last - r.first + 1} addresses; the sandbox machines and one spare per node need ${need}.`)
+    }
+    const proxy = ip4(sb.proxyAddress)
+    if (Number.isNaN(proxy)) bad("sbxProxy", "Proxy address: an IPv4 address.")
+    else if (sb.placement === "shared") {
+      if (lbs && (proxy < lbs.first || proxy > lbs.last)) bad("sbxProxy", "Proxy address: with a shared node group, a free address inside the load balancer range.")
+      if (f.argoAddress.trim() && ip4(f.argoAddress) === proxy) bad("sbxProxy", "Proxy address: the ArgoCD address is taken; each needs its own.")
+    } else {
+      const inRange = (x?: { first: number; last: number }) => !!x && proxy >= x.first && proxy <= x.last
+      if (proxy <= net.first || proxy >= net.last || points.some((p) => p.a === proxy) || inRange(nodes) || inRange(lbs) || (r && inRange(r))) {
+        bad("sbxProxy", `Proxy address: with a separate cluster, a free host address of ${f.prefix.trim()} outside the node range, the load balancer range and the sandbox range.`)
+      }
+    }
+    if (!DOMAIN.test(sb.domain.trim().toLowerCase()) || sb.domain.trim().length > 200) bad("sbxDomain", "Sandbox domain: a DNS name such as sbx.example.org; sandboxes answer at <port>-<id>.<domain>.")
+    const sdns = words(sb.dns)
+    if (sdns.length > 3 || sdns.some((d) => Number.isNaN(ip4(d)))) bad("sbxDns", "Sandbox DNS servers: at most three IPv4 addresses, or empty for the platform network's.")
+    if (sb.placement === "shared" && !sb.accept) bad("sbxAccept", "Tick the box under the text on what a shared node group gives up, or choose a separate cluster.")
+  }
   return out
+}
+
+// ── Sandboxes ─────────────────────────────────────────────────────────────────
+
+// What a shared node group gives up, in the words of docs/managed-services.md ("Sandboxes"): shown in full before the
+// tick, never shortened to a tooltip.
+export const SHARED_GIVES_UP: string[] = [
+  "Code that escapes a sandbox (a gVisor escape) is root on a machine of the platform cluster: the cluster that runs kamaji-etcd (the datastore of every tenant's Kubernetes control plane), every tenant's API server, CloudNativePG and every tenant database, and ArgoCD.",
+  "The pod network is open to that machine. It is a Cilium peer and can send packets with any source to any pod; network policies do not stop it. What protects the targets then is their own authentication: client certificates on kamaji-etcd, passwords on the databases, tokens on the API servers.",
+  "The Cilium agent's credential on that machine can create and change CiliumNode objects. A forged one pulls another node's pod traffic to the escaped machine: traffic between pods that is not encrypted with both ends authenticated can be read and forged.",
+  "The machine also holds the kubelet's credential (its own Node and the Secrets of the pods on it), the network guard's (it reads every pod's spec) and kube-proxy's.",
+  "Sandboxes have no address of their own to the internet: abuse from a sandbox leaves under your site's public address.",
+  "What still holds: the machine's VM firewall keeps the Proxmox API, the seed, the management networks, tenant networks and every address of the platform network that is not a machine of the cluster closed to it. Of the cluster's own machines it reaches the pod tunnel, the health port, ICMP and the Kubernetes API port, nothing else, and it cannot take another machine's address.",
+  "A separate cluster limits the same escape to the sandbox cluster: other tenants' sandboxes on it, its own control plane's API and the internet. It costs a control plane (about 0.6 GiB on the kamaji group) and a system machine.",
+]
+// By CPU a sandbox machine of n cores holds n-1 sandboxes of one vCPU: the node's own pods ask for about one core.
+export const sandboxRoom = (cores: string) => {
+  const c = num(cores)
+  if (!(c >= 2)) return ""
+  return c === 2 ? "A machine of 2 cores holds ONE sandbox of one vCPU: take 4 cores or more for several." : `By CPU each machine holds about ${c - 1} sandboxes of one vCPU.`
+}
+export const GATE_LABEL: Record<string, string> = {
+  noderestriction: "NodeRestriction", isolation: "Isolation rules", fence: "VM firewall of the sandbox machines", "network-guard": "Network guard", checker: "Gate checker", config: "Provider settings",
 }
 
 // ── What the operator does ────────────────────────────────────────────────────
