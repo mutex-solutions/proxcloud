@@ -169,7 +169,7 @@ images use the raw tag and Docker tags cannot contain `+`.
 
 Managed charts use their own metadata versions and reject a mismatching tag.
 `database-cluster` `0.5.2` (no disruption budget for a database of one instance),
-`proxmox-kamaji-cluster` `0.1.17` for new tenant clusters (the load balancer controller) and `0.1.16` for the
+`proxmox-kamaji-cluster` `0.1.19` for new tenant clusters (the load balancer controller, which watches from this version) and `0.1.16` for the
 platform cluster (the node deletion timeout of the control plane's and the node groups' machines) and
 `proxcloud-platform` `0.1.3` (replacing a Machine), all published from their own tags
 and pinned by digest in the platform BOM, need separate

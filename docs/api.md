@@ -482,8 +482,14 @@ answers `404`.
 ```
 
 `GET` on the same path (`admin:service:read`) reads the cluster's load balancer: when its controller's credential
-was minted and last used, and the cluster's balancer row (`balancerId`, and in `balancer` its status, appliances and
-each Service's address and state; absent before the first Service). `data` is `null` when the cluster has no
+was minted and last used, the protocol of the gateway its controller named at that call (`controllerProtocol`, absent
+before its first call) next to the portal's own (`protocol`), and the cluster's balancer row (`balancerId`, and in
+`balancer` its status, appliances, each Service's address and state, and the listeners with their protocol; absent
+before the first Service). A `controllerProtocol` below `protocol` is the controller of an earlier release: it gets
+no UDP port served and none of its annotations but `proxcloud.io/lb-proxy-protocol` read, until the cluster is moved
+to the provider's chart. `certificates` (absent without one) are the certificates the cluster's Services end TLS
+with: `id` is what a listener's `certificates` names, `secret` the Secret as `namespace/name`, then `subject`,
+`dnsNames`, `notBefore`, `notAfter` and the public `fingerprint`; never a key. `data` is `null` when the cluster has no
 controller, or when it is a cluster of another Kubernetes provider. The tenant has the same as the cluster action
 `GET_LOAD_BALANCER` on `POST /api/v1/project/{pid}/cloud/{id}/action` (`{"result": ...}`, `null` without a
 controller). `balancer.cluster.kept` lists the addresses the cluster keeps: the ones Services left behind with
@@ -495,7 +501,10 @@ is being changed. There is no operator route for it. The cluster's mode is in th
 per cluster of `GET /api/v1/admin/service/{id}/k8s-clusters`, and `load_balancer` in the tenant's cluster row.
 
 ```json
-{"controllerSince": "2026-11-20T08:00:00Z", "controllerLastSeen": "2026-11-21T09:41:00Z", "balancerId": "6a5f…",
+{"controllerSince": "2026-11-20T08:00:00Z", "controllerLastSeen": "2026-11-21T09:41:00Z", "controllerProtocol": 2, "protocol": 2,
+ "balancerId": "6a5f…",
+ "certificates": [{"id": "3c1e…", "secret": "shop/shop-tls", "subject": "CN=shop.example.com", "dnsNames": ["shop.example.com"],
+  "notBefore": "2026-09-01T00:00:00Z", "notAfter": "2027-03-02T00:00:00Z", "fingerprint": "9f2a…"}],
  "balancer": {"status": "ACTIVE", "ha": true, "appliances": [{"serverId": "311", "node": "pve2", "holdsVip": true, "state": "up"}],
   "cluster": {"id": "pc-c-0a1b2c3d", "services": [{"uid": "…", "namespace": "shop", "name": "web", "vip": "203.0.113.21", "state": "ready"}]}}}
 ```

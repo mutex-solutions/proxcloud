@@ -961,7 +961,7 @@ type LBClusterView struct {
 // LBClusterCertView is one certificate of a cluster's Services as the consoles show it.
 type LBClusterCertView struct {
 	ID          string    `json:"id"`
-	Secret      string    `json:"secret"` // the Secret's name; its namespace is the Service's
+	Secret      string    `json:"secret"` // the Secret it came from, as namespace/name
 	Subject     string    `json:"subject"`
 	DNSNames    []string  `json:"dnsNames"`
 	NotBefore   time.Time `json:"notBefore"`

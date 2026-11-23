@@ -82,7 +82,99 @@ A Service of type `LoadBalancer` gets an address. Which kind depends on the clus
 
 What a public address costs: the cluster's first Service with one builds its load balancer, two small VMs billed as servers with their disks, kept until the cluster is deleted. Each Service then takes one public address, billed and counted in your quota. With **NGINX Gateway Fabric** on a cluster with public addresses, each Gateway makes its own Service, so each Gateway takes a public address.
 
-The cluster page shows the load balancer once it exists: its two VMs and which one holds the addresses, each Service with its address, its ports, how many workers answer it and its state, and when the cluster last reported to the platform. **Open the load balancer** shows the same on the load balancer's own page, which you cannot edit or delete: the cluster's Services make it.
+The cluster page shows the load balancer once it exists: its two VMs and which one holds the addresses, and each Service with its address, its ports and their protocol (`443/HTTPS`, `53/UDP`), how many workers answer it and its state. A port that ends TLS names the Secret its certificate came from and when that certificate expires, with a warning from 30 days before. The page also says when the cluster last reported to the platform, and lists the addresses the cluster keeps. **Open the load balancer** shows the Services on the load balancer's own page, which you cannot edit or delete: the cluster's Services make it.
 
-The address shows in `kubectl get service` once it is ready, and `kubectl describe service` lists Events: a Service the platform refuses says why there, for example `UDPNotSupported` (only TCP ports are balanced), `QuotaExceeded` (no public address left in your quota) or `TooManySourceRanges`. Idle connections are closed after an hour. A Service deleted gives its address back at once.
+The address shows in `kubectl get service` once it is ready, and `kubectl describe service` lists Events: a Service the platform refuses says why there, for example `QuotaExceeded` (no public address left in your quota), `ProtocolNotSupported` (an SCTP port), `NoNodePort` or `TooManySourceRanges`. Idle connections are closed after an hour unless you set a timeout. A Service deleted gives its address back at once, unless it asks to keep it.
+
+### A cluster made before v0.11.1
+
+UDP ports, TLS from a Secret and the annotations below need the cluster on chart 0.1.19 or later. A cluster made earlier still runs the load balancer controller it was made with: a Service with a UDP port is refused there with `UDPNotSupported` ("For UDP, upgrade the cluster"), and no annotation but `proxcloud.io/lb-proxy-protocol` is read. The cluster page says so under **Load balancer**. Apply the **Platform update** offered on the cluster page: it moves the cluster to the current chart and with it to the current controller. Your Kubernetes version, your workloads and the Services that are served today do not change. A Service that was refused for its UDP port then gets a public address, which is billed and counted in your quota: delete the Services you do not want served first.
+
+### TCP and UDP ports
+
+A Service may have TCP and UDP ports, also both on one port number (DNS on 53). SCTP is not served. UDP differs from TCP in four ways:
+
+- **Your pods see the load balancer's address, not the client's.** There is no PROXY header for UDP.
+- **The health check is a datagram of random bytes** to the node port every 5 seconds, next to a ping of the worker. Kubernetes hands that datagram to one of your pods: a service that cannot ignore junk bytes sets `proxcloud.io/lb-enable-health-monitor: "false"`.
+- **A worker that is down or unreachable leaves in about 10 seconds. A closed port is often not seen while there is traffic**: the only sign is the "port unreachable" message a worker sends back, and a worker under traffic sends only a few of those per second. With `externalTrafficPolicy: Local` the check is an HTTP request to the Service's health port instead, for UDP ports too, and only workers that run a pod of the Service get traffic.
+- A **connection limit** on a UDP port counts per worker, not for the port as a whole, and a UDP port has no idle timeout.
+
+`sessionAffinity: ClientIP` keeps a client address on one worker for the time the Service sets (three hours by default), for TCP and UDP. The load balancer forgets these choices when its other VM takes over, and clients are then spread afresh.
+
+### Options
+
+A Service sets its options with annotations named `proxcloud.io/lb-<option>`. No other name is read. An option the platform does not know raises the Event `AnnotationNotSupported`, a value it cannot read `InvalidAnnotation`; the Service is served without that option.
+
+| `proxcloud.io/lb-` | Values | What it does |
+|---|---|---|
+| `proxy-protocol` | `true` or `v2`, `v1`, `false` | Your pods get the client's address in a PROXY header (TCP ports only). `true` is version 2. |
+| `method` | `roundrobin`, `leastconn`, `source` | How traffic is spread over the workers. |
+| `connection-limit` | 1 to 20000, `-1` for none | Open connections per port; per worker on a UDP port. |
+| `timeout-client-data`, `timeout-member-connect`, `timeout-member-data` | 1000 to 86400000 (milliseconds) | The idle time of a client, how long a worker may take to accept a connection, and the idle time of a worker. TCP ports only. |
+| `x-forwarded-for` | `true` | The TCP ports speak HTTP and add `X-Forwarded-For`. Not together with the PROXY header: the PROXY header then holds. |
+| `enable-health-monitor` | `true`, `false` | `false` turns the health check off. Not obeyed with `externalTrafficPolicy: Local`. |
+| `health-monitor-delay`, `health-monitor-timeout`, `health-monitor-max-retries`, `health-monitor-max-retries-down` | 1 to 300 s, 1 to 300 s, 1 to 10, 1 to 10 | How often a worker is checked, how long it may take, and how many good checks bring it back or bad ones take it out. The default is every 3 s, back after 2, out after 2. A UDP port is back at its first good check and out after 2 bad ones at least. |
+| `node-selector` | `key=value, key` | Only workers with all of these labels get the Service's traffic. |
+| `tls-secret` | one to four Secret names, between commas | The load balancer ends TLS with these certificates (next section). |
+| `tls-ports` | TCP ports of the Service, between commas | Only these ports end TLS. Without it every TCP port does. |
+| `backend-protocol` | `http`, `tcp` | What your pods are spoken to in behind a port that ends TLS. |
+| `keep-address` | `true`, `false` | The Service's address stays with the cluster when the Service goes. |
+| `internal` | `true`, `false` | `true` refuses the Service: it never gets a public address. |
+
+### TLS from a Secret
+
+```yaml
+metadata:
+  annotations:
+    proxcloud.io/lb-tls-secret: shop-tls
+```
+
+The load balancer then ends TLS on the Service's TCP ports with the certificate of that Secret and speaks plain HTTP to your pods, adding `X-Forwarded-For` and `X-Forwarded-Proto: https`. With `proxcloud.io/lb-backend-protocol: tcp` it passes the bytes on as TCP instead. Nothing is encrypted again between the load balancer and your workers. It accepts TLS 1.2 and 1.3.
+
+- The Secret is of type `kubernetes.io/tls`, in the Service's own namespace, with the certificate chain (your server's certificate first) and a key without a passphrase: RSA of 2048 bits or more, or ECDSA P-256 or P-384. At most 4 Secrets a Service and 16 different ones a cluster.
+- With several Secrets, a client gets the certificate that holds the name it asks for; the first Secret answers every other client.
+- **Whoever may create or change a Service in a namespace can have any TLS Secret of that namespace served on a public address**, as with an Ingress. Give the right to write Services in a namespace only to those who may use its certificates.
+- **A renewed Secret is picked up by itself**, within seconds, and no connection is dropped. cert-manager works as it is.
+- **A Secret that is missing, of another type or refused never opens the port without TLS.** A Service that is served stays exactly as it was, with the certificate it had, and the Event `InvalidCertificate` names the Secret and the reason. A Service that was never served gets no address. An expired certificate is served, with the Event `CertificateExpired`.
+- The certificates of a cluster's Services are not on the **Certificates** page: that page holds the ones you upload for load balancers you make yourself. The cluster page shows each Secret in use and when its certificate expires.
+
+**Where the private key is kept.** The platform reads the Secret from your cluster and stores it encrypted in its database, for this cluster's load balancer only. It is written to the load balancer's two VMs, in a file only the system administrator of that VM can read; you cannot log in to those VMs, snapshot them or back them up. Your provider's operators can reach the key: a backup of the platform holds the encrypted key and, next to it, the key that decrypts it, and a backup or snapshot of a load balancer VM made on the virtualisation host holds the file itself. This is the same trust you place in the provider for the disks of your workers. When no Service names a Secret any more, its certificate leaves the VMs and the database within minutes; copies in backups made before stay until those backups are deleted.
+
+### Keeping an address
+
+With `proxcloud.io/lb-keep-address: "true"`, a Service's public address stays with the cluster when the Service is deleted. The cluster page lists it under **Kept addresses**. A kept address is **still billed and counted in your quota**. A new Service of the same cluster gets it by naming it in `spec.loadBalancerIP`. A cluster keeps 5 addresses at most; **Release** on the cluster page gives one back, and all go with the cluster. Any other `spec.loadBalancerIP` is not obeyed: the Service gets an address of the pool and the Event `LoadBalancerIPIgnored`.
+
+### If your manifests were written for another cloud's controller
+
+Charts for load balancer Services on a private cloud are mostly written for the upstream cloud controller manager, called OCCM below. A Service behaves here as it does there, with these differences, all of them on purpose:
+
+1. **One load balancer per cluster.** All Services share its two VMs; each still has an address of its own.
+2. **No load balancer objects to name.** There are no ids, flavors or zones of load balancers, listeners and pools, so no annotation about them.
+3. **Which Services are served.** Class `proxcloud.io/lb`, and on a cluster with public addresses by default also a Service without a class. OCCM serves only Services without a class.
+4. **The health check is on** unless you turn it off. OCCM's is off unless asked for.
+5. **Other defaults.** A check every 3 s, back after 2 good checks, out after 2 bad ones, and an idle timeout of an hour. OCCM: 5 s, a 3 s timeout, 1 and 3, and 50 s.
+6. **TLS comes from a Secret** of the Service's namespace, not from a secret store of the cloud, and only TCP ports end TLS.
+7. **`proxy-protocol: "true"` is version 2.** OCCM's is version 1: write `v1` to keep it.
+8. **A port without a node port refuses the Service** (`NoNodePort`). OCCM makes a pool without members.
+9. **`spec.loadBalancerIP` is obeyed only for an address the cluster keeps.** OCCM takes any free address of the project.
+10. **No load balancer shared between Services** by an id.
+11. **The method `SOURCE_IP_PORT` balances round robin**, with an Event.
+12. **The finalizer** on a Service is `proxcloud.io/load-balancer`.
+13. **No site-wide defaults** for the method or the check's figures.
+14. **A node selector written `key = value`** selects the workers labelled `key=value`; the spaces are dropped.
+15. **The forwarded-for header asked for next to the PROXY header does not stop the Service.** It is served with the PROXY header alone and a Warning Event.
+16. **The annotations have this platform's names.** OCCM's annotations are not read: on a Service here they do nothing and raise no Event.
+17. **OCCM's annotation for an internal load balancer is not recognised.** A Service that carries only that one gets a **public** address here. Write `proxcloud.io/lb-internal: "true"`, which refuses the Service, or use class `proxcloud.io/internal` for a private address.
+
+To rename a manifest: take the part of OCCM's annotation name after the `/` and put `proxcloud.io/lb-` in front of it. Four names differ:
+
+| OCCM's name ends in | Write |
+|---|---|
+| `/lb-method` | `proxcloud.io/lb-method` |
+| `/keep-floatingip` | `proxcloud.io/lb-keep-address` |
+| `/default-tls-container-ref` | `proxcloud.io/lb-tls-secret`, with the name of a Secret instead of a reference into the cloud's secret store |
+| the internal load balancer annotation | `proxcloud.io/lb-internal` (difference 17) |
+
+An annotation about TCP inspection, or about the id, address, network, subnet, port, flavor, zone, tags or host name of a load balancer, has no counterpart: leave it out. Written under `proxcloud.io/lb-` all the same, it raises `AnnotationNotSupported`.
+
 

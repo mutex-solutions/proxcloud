@@ -4,6 +4,35 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: chart 0.1.19 offered to new tenant clusters, and the consoles' layer 4 view
+
+**What changed:** no new component, container, listener or relation. The platform BOM pins cluster chart 0.1.19
+for tenant clusters; the gateway's credential row gains one field and the consoles' read of a cluster's load
+balancer three.
+
+- `deploy/platform/platform-bom.yaml`: `tenantCharts.kubernetes` is `proxmox-kamaji-cluster` 0.1.19 (it was
+  0.1.17). `pc-platform` stays on 0.1.16, and no component has `feature: sandbox`. Record only in every upgrade
+  plan: the run writes the version on the Kubernetes provider.
+- `internal/cloud/lbgw`: `Credential.Protocol`, the protocol a controller named at its last authenticated call.
+  `Registry.Seen` takes it; `Handler.ServeHTTP` writes it with the last-seen time, and at once when it differs
+  from the row's (a cluster that was bumped). `MintCredential` clears it.
+- `internal/platform/project/cloud_lb_cluster_pve.go`: `LBClusterView` gains `ControllerProtocol`, `Protocol`
+  (`lbgw.Protocol`) and `Certificates` (`LBClusterCertView`: the rows of `lbClusterCertRowsOf` that hold a
+  certificate, by the id a listener names; public fields only).
+- Tenant console: `ClusterServices` (`LoadBalancersPage.tsx`) shows each listener's protocol, the certificates of
+  a port that ends TLS and the limit of a UDP check; `ClusterLoadBalancer` (`KubernetesPage.tsx`) names a
+  controller below the portal's protocol. Operator console: `ClusterLoadBalancerDialog` names the protocol and the
+  bump.
+
+**Why:** v0.11.1 offers UDP, TLS from a Secret, the annotations and the watch, and all of it reaches a cluster
+only through its controller. New clusters must get the chart that starts the watch, and an operator or a tenant
+must be able to see that an older cluster still runs the controller of v0.11.0, instead of reading
+`UDPNotSupported` on a Service after an upgrade that announced UDP. The certificates of a cluster's Services are
+in no project's list, so the cluster's page is the one place that can show their expiry.
+
+**Diagrams:** none changed; `c4-code.md` (the rows of the gateway's store and of what the consoles show) says the
+fields.
+
 ## 2026-11-23: four review findings of the layer 4 work closed
 
 **What changed:** four rules of the load balancer, each one an open finding of a review of #433 to #439. No new
