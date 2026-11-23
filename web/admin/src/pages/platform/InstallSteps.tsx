@@ -18,8 +18,8 @@ import { useAdminList } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 import { CheckRows, CopyBlock, ErrorNote, LINK, StepCard, errMsg, fetchText, useClusterInfo } from "@/pages/setup/common"
 import {
-  CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, PRESETS, TOKEN_SECRET, applyPreset, attachDefault, bomBuildsThree, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, gib, isConflict, plannedMemory, specToForm, validate,
-  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Preset, type Problem, type SiteNode, type TenantProbe, type Upgrade, type UpgradePart,
+  CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, PRESETS, SHARED_GIVES_UP, TOKEN_SECRET, applyPreset, attachDefault, bomBuildsThree, bomOffersSandboxes, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, gib, isConflict, plannedMemory, sandboxRoom, specToForm, validate,
+  type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Preset, type Problem, type SandboxForm, type SiteNode, type TenantProbe, type Upgrade, type UpgradePart,
 } from "./model"
 import { AttachChoice } from "./Tenants"
 
@@ -109,6 +109,99 @@ function useSiteNodes(serviceId: string): SiteNode[] {
 }
 
 const H3 = ({ children }: { children: React.ReactNode }) => <h3 className="border-b pb-1 text-sm font-semibold">{children}</h3>
+
+// The Sandboxes block of the settings: off, a node group of the platform cluster, or a cluster of its own. built is
+// what a run made (status.sandbox): from then on the placement only goes to Off, and the range and the proxy address
+// stay. Shown only for a release whose BOM has the sandbox chart, or when the stored settings already hold a block.
+function SandboxSettings({ value, onChange, nodes, problems, canManage, built, schedulerOff }: {
+  value: SandboxForm; onChange: (v: SandboxForm) => void; nodes: string[]; problems: Problem[]; canManage: boolean
+  built?: NonNullable<Installation["status"]["sandbox"]>; schedulerOff: boolean
+}) {
+  const on = value.placement === "shared" || value.placement === "separate"
+  const set = (next: Partial<SandboxForm>) => onChange({ ...value, ...next })
+  const text = (k: "nodeRange" | "proxyAddress" | "domain" | "dns") => (e: React.ChangeEvent<HTMLInputElement>) => set({ [k]: e.target.value })
+  const choice = (placement: SandboxForm["placement"], title: string, body: string) => (
+    <label className="flex items-start gap-2 text-sm">
+      <input type="radio" name="pf-sandbox-placement" className="mt-1" disabled={!canManage || (!!built && placement !== "off" && placement !== built.placement)}
+        checked={value.placement === placement || (placement === "off" && value.placement === "")} onChange={() => set({ placement, accept: false })} />
+      <span><span className="font-medium">{title}.</span> {body}</span>
+    </label>
+  )
+  const machines = (id: string, group: string, key: "machines" | "system") => {
+    const g = value[key]
+    const setGroup = (next: Partial<typeof g>) => set({ [key]: { ...g, ...next } })
+    return (
+      <div className="grid gap-3 rounded-lg border p-3" role="group" aria-label={`Group ${group}`}>
+        <p className="text-sm">
+          <span className="font-mono font-medium">{group}</span>{" "}
+          <span className="text-muted-foreground">{key === "machines" ? "runs the sandboxes, and nothing else" : "runs sandbox-proxy and the sandbox controller, never on a machine that runs a sandbox"}</span>
+        </p>
+        <NodePicker id={`${id}-nodes`} group={group} nodes={nodes} value={g.nodes} onChange={(v) => setGroup({ nodes: v })} problems={problems} disabled={!canManage} />
+        <div className="grid gap-3 sm:grid-cols-[8rem_1fr]">
+          <Field id={`${id}-count`} label="Machines" aria-label={`Group ${group}: machines`} inputMode="numeric" value={g.count} onChange={(e) => setGroup({ count: e.target.value })} disabled={!canManage} problems={problems} />
+          <Sizes id={id} what={`Group ${group}`} value={g} onChange={(m) => setGroup(m)} problems={problems} disabled={!canManage} />
+        </div>
+        {key === "machines" && sandboxRoom(g.cores) ? <p className="text-xs text-muted-foreground">{sandboxRoom(g.cores)}</p> : null}
+      </div>
+    )
+  }
+  const acceptProblem = problems.find((p) => p.field === "sbxAccept")
+  return (
+    <>
+      <H3>Sandboxes</H3>
+      <p className="text-sm text-muted-foreground">
+        Optional. Short-lived, isolated environments for tenants (gVisor), with the E2B-compatible API. The install builds the machines and registers a sandbox
+        provider that stays disabled: you set it live on its page under Cloud providers once its release gates hold.
+      </p>
+      <fieldset className="grid content-start gap-1.5">
+        <legend className="mb-1.5 text-sm font-medium">Where sandboxes run</legend>
+        {choice("off", "Off", built ? "The next apply deletes the sandbox machines and with them every running sandbox. Disable the sandbox provider first: the save is refused while it is live." : "No sandbox machine is built.")}
+        {choice("shared", "Shared node group", "A node group of the platform cluster, beside every tenant's control plane and database. For a site with one operator and no outside tenants, or too little memory for a second control plane. Read what it gives up below.")}
+        {choice("separate", "Separate sandbox cluster", "A cluster of its own, pc-sandbox: its control plane runs as pods on the kamaji group (about 0.6 GiB), with a system machine for sandbox-proxy. An upgrade that replaces machines is refused while it exists: switch sandboxes off, upgrade, then on again.")}
+      </fieldset>
+      {built ? <p className="text-xs text-muted-foreground">A run built placement {built.placement}: it changes only to Off, and the range and the proxy address stay as they are.</p> : null}
+      {on ? (
+        <>
+          {machines("sbx", "sandbox", "machines")}
+          {value.placement === "separate" ? machines("sbxsys", "sandbox-system", "system") : null}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field id="sbxRange" label="Sandbox range" value={value.nodeRange} onChange={text("nodeRange")} disabled={!canManage || !!built} problems={problems} placeholder="10.90.0.64/28"
+              hint="Addresses of the sandbox machines: one network inside the platform network, as a CIDR, apart from the node range and the load balancer range. Each sandbox machine's firewall pins it to its address here." />
+            <Field id="sbxProxy" label="Proxy address" value={value.proxyAddress} onChange={text("proxyAddress")} disabled={!canManage || !!built} problems={problems} placeholder={value.placement === "shared" ? "10.90.0.151" : "10.90.0.90"}
+              hint={value.placement === "shared" ? "Where sandbox-proxy answers: one free address of the load balancer range." : "Where sandbox-proxy answers: a free address of the platform network outside every range; the sandbox cluster announces it."} />
+            <Field id="sbxDomain" label="Sandbox domain" value={value.domain} onChange={text("domain")} disabled={!canManage} problems={problems} placeholder="sbx.example.org"
+              hint="A sandbox answers at https://<port>-<id>.<domain>: point *.<domain> at the proxy address in your DNS." />
+            <Field id="sbxDns" label="DNS servers of the sandbox machines (optional)" value={value.dns} onChange={text("dns")} disabled={!canManage} problems={problems}
+              hint="Empty: the platform network's. Up to three." />
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Certificate: the install makes a self-signed certificate for *.{value.domain.trim() || "<domain>"} and keeps its key sealed. Clients add the certificate to their trust store; it is offered for download once the platform is ready.
+            A certificate of your own is not stored by this release.
+          </p>
+          <p className="text-sm text-muted-foreground" aria-label="Sandboxes and the job scheduler">
+            Sandboxes need the job scheduler: it fences each sandbox machine, keeps watching its firewall and ends sandboxes that are gone, and the provider cannot be set live without it.
+            Switching the scheduler on also starts charging usage, and the price rule for sandbox minutes holds a placeholder rate until you set one (or 0).
+            {schedulerOff ? " The scheduler is off on this ProxCloud now." : ""}
+          </p>
+        </>
+      ) : null}
+      {value.placement === "shared" ? (
+        <Alert role="note" aria-label="What a shared node group gives up">
+          <AlertTitle>What a shared node group gives up</AlertTitle>
+          <AlertDescription>
+            <ul className="list-disc pl-5">{SHARED_GIVES_UP.map((line) => <li key={line}>{line}</li>)}</ul>
+            <span className="mt-3 flex items-start gap-2">
+              <Checkbox id="sbxAccept" className="mt-0.5" checked={value.accept} disabled={!canManage} aria-invalid={acceptProblem ? true : undefined}
+                aria-describedby={acceptProblem ? "sbxAccept-error" : undefined} onCheckedChange={(v) => set({ accept: v === true })} />
+              <Label htmlFor="sbxAccept" className="font-normal">I have read this, and sandboxes on this site may run on a shared node group.</Label>
+            </span>
+            {acceptProblem ? <p id="sbxAccept-error" className="mt-1 text-xs text-destructive">{acceptProblem.message}</p> : null}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+    </>
+  )
+}
 
 // The page mounts this form anew (by key) when the stored settings changed, so it always starts from what is stored.
 // locked: a run that ended without being settled still holds the installation, and the API refuses a save until then.
@@ -340,6 +433,11 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
           </p>
         </div>
       </div>
+
+      {bomOffersSandboxes(bom.data) || form.sandbox.placement !== "" ? (
+        <SandboxSettings value={form.sandbox} onChange={(sandbox) => setForm({ ...form, sandbox })} nodes={nodes} problems={problems} canManage={canManage}
+          built={installation?.status.sandbox} schedulerOff={!!installation?.schedulerNote} />
+      ) : null}
 
       <H3>Storage</H3>
       <div className="grid gap-4 sm:grid-cols-3">

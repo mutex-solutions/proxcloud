@@ -119,7 +119,7 @@ func (s *Service) rotationInspect(ctx context.Context, allowCordoned bool) (Rota
 			}
 		}
 	}
-	pods, err := s.api.ListPodsAllNamespaces(ctx, "")
+	pods, err := s.listPodsAll(ctx, "")
 	if err != nil {
 		return r, err
 	}
@@ -148,7 +148,7 @@ func (s *Service) rotationInspect(ctx context.Context, allowCordoned bool) (Rota
 	}
 	// Pending CRs could schedule as soon as a replacement joins. Block the whole
 	// provider, not just Running pods, so none can be killed by an old-gen deletion.
-	crs, err := s.api.ListCRsAllNamespaces(ctx, CRGroup, CRVersion, CRPlural, "")
+	crs, err := s.listCRsAll(ctx, CRGroup, CRVersion, CRPlural, "")
 	if err != nil {
 		return r, err
 	}

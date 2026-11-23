@@ -165,7 +165,7 @@ Rounding is deliberate and centralized in `pricing/mathctx.go`:
 |---|---|---|
 | `divDecimal128` | 34 significant digits, HALF_EVEN (banker's) | month-proration per-hour division; percentage modifier `÷100` |
 | `percentFraction` / `divMathCtx2` | 2 significant digits, HALF_UP | tax percentage `÷100`; savings-discount fractions |
-| `scaleHalfUp` | scale 2, HALF_UP | final amounts, applied-credit sub-docs, unpaid total |
+| `scaleHalfUp` | scale 2, HALF_UP | final amounts, applied-credit sub-docs, unpaid total. At the send every item is rounded by itself, with one addition: what the `sandbox` items that round to 0.00 accrued is summed per project and added as one item, rounded once (`ScaleUpItems`), so many short sandboxes are not invoiced nothing |
 | `scaleTotal` | scale 4, HALF_UP | balance / due totals |
 | `round16` | scale 16, HALF_UP | the running bill-item accrual |
 

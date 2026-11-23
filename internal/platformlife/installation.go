@@ -174,6 +174,10 @@ type Status struct {
 	// TenantsAttach is the spec.tenants.attach the register stage applied last ("" = none was): a run acts on the
 	// choice only when it differs, so an apply never undoes what the operator changed on a provider since.
 	TenantsAttach string `json:"tenantsAttach,omitempty"`
+	// SandboxAttach is the same record for the sandbox provider alone. It is kept apart: that provider is registered
+	// disabled, so an attach of every project waits for the operator, and the two other providers must not be attached
+	// again at every apply until then.
+	SandboxAttach string `json:"sandboxAttach,omitempty"`
 	// KubernetesOffered are the Kubernetes versions a run or POST …/kubernetes-version offered on the Kubernetes
 	// provider (or found there). A run offers a version once: one the operator removed from the provider since is not
 	// added again by an apply, only by the route.
@@ -261,6 +265,9 @@ type Volume struct {
 type ProviderIDs struct {
 	Kubernetes string `json:"kubernetes,omitempty"`
 	Database   string `json:"database,omitempty"`
+	// Sandbox is the sandbox provider a run registered for spec.sandbox. It stays after sandboxes were switched off:
+	// the row is disabled by then and is adopted again when they come back.
+	Sandbox string `json:"sandbox,omitempty"`
 }
 
 // Phases, modes and the fixed names of M1.
@@ -662,6 +669,9 @@ type Site struct {
 	CIDRPool string
 	Blocked  []string // config.network.blockedCidrs
 	Sandbox  []string
+	// SandboxPool and SandboxOwner are the pool of the provider's config.sandbox ("" = none) and the installation
+	// that block belongs to ("" = the installer's sandbox cluster).
+	SandboxPool, SandboxOwner string
 	// PoolPrefix is the start of every project pool's name (config.poolPrefix).
 	PoolPrefix string
 	Public     []string // the public networks' CIDRs
@@ -687,14 +697,14 @@ func (in *Installation) SiteProblems(site Site) []string {
 	if err != nil {
 		return []string{"spec.network.prefix is not valid"}
 	}
-	own := in.Spec.sandboxRange()
+	own := in.ownSandboxRanges()
 	out = append(out, in.sandboxSiteProblems(site)...)
 	tenant := map[string][]string{"cidrPool": {site.CIDRPool}, "sandboxCidrs": site.Sandbox, "public networks": site.Public}
 	for _, what := range []string{"cidrPool", "sandboxCidrs", "public networks"} {
 		for _, c := range tenant[what] {
 			p, err := netip.ParsePrefix(strings.TrimSpace(c))
 			// The installation's own sandbox range is a part of the platform network by design (sandboxSiteProblems).
-			if err != nil || (what == "sandboxCidrs" && own.IsValid() && p == own) {
+			if err != nil || (what == "sandboxCidrs" && slices.Contains(own, p.Masked())) {
 				continue
 			}
 			if p.Overlaps(prefix) {

@@ -23,7 +23,7 @@ import { hasPermission } from "@/lib/permissions"
 import { cn } from "@/lib/utils"
 import { CopyBlock, ErrorNote, LINK, errMsg, setupStatusQuery } from "@/pages/setup/common"
 import { CheckStep, IdentitiesStep, ReviewStep, SettingsStep } from "./InstallSteps"
-import { ATTACH_LABEL, PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, rolling, runActive, stageNumbers, type Installation, type Run, type Stage } from "./model"
+import { ATTACH_LABEL, GATE_LABEL, PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, rolling, runActive, stageNumbers, type Installation, type Run, type SandboxGate, type Stage } from "./model"
 import { KubernetesVersion } from "./Tenants"
 
 const POLL_MS = 3000
@@ -330,7 +330,62 @@ const argoPassword = (file: string) =>
 const argoCommands = (file: string, port: number, tls = false) =>
   `${argoPassword(file)}\nkubectl -n argocd port-forward svc/argocd-server ${port}:${tls ? 443 : 80}`
 
-type ProviderRow = { id: string; name: string; config?: Record<string, any> }
+type ProviderRow = { id: string; name: string; status?: string; config?: Record<string, any> }
+
+// The sandbox provider of the installation: whether it is live, each release gate's answer as the API checks it now
+// (read-only, POST …/sandbox/release-check), the self-signed certificate for clients, and where it is set live. The
+// page never sets it live: that is a save on the provider's own page, which runs the same gates.
+function SandboxProviderItem({ id, label, row, installation, canManage }: { id: string; label: string; row?: ProviderRow; installation: Installation; canManage: boolean }) {
+  const to = `/system/cloud-providers/${id}`
+  const gates = useMutation({ mutationFn: () => apiFetch<SandboxGate[]>(`/admin/service/${id}/sandbox/release-check`, { method: "POST" }) })
+  const sb = installation.status.sandbox
+  const live = !!row?.status && row.status !== "DISABLED"
+  const failed = (gates.data ?? []).filter((g) => !g.ok)
+  const saveCert = () => {
+    const url = URL.createObjectURL(new Blob([sb?.certificate ?? ""], { type: "application/x-pem-file" }))
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `${installation.name}-sandbox-ca.crt`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+  return (
+    <li className="grid gap-1" aria-label="Sandbox provider">
+      <Link to={to} className="underline underline-offset-4">{label}</Link>
+      {row ? (
+        <span>
+          <State state={live ? "ok" : "warn"} className="mr-2" />
+          {live ? `Live (${row.status}): tenants with this provider can start sandboxes.` : "Disabled: no tenant can start a sandbox yet. A run never sets it live."}
+          {sb?.placement === "shared" ? " Reduced isolation: sandboxes run on a shared node group of the platform cluster." : ""}
+        </span>
+      ) : null}
+      {installation.schedulerNote ? <span><State state="warn" className="mr-2" />The job scheduler is off, so this provider cannot be set live: no sync would fence a new sandbox machine or watch its firewall.</span> : null}
+      <span className="flex flex-wrap items-center gap-2">
+        <Button variant="outline" size="sm" disabled={!canManage || gates.isPending} onClick={() => gates.mutate()}>{gates.isPending ? "Checking the gates…" : "Check the release gates"}</Button>
+        {sb?.certificate ? <Button variant="outline" size="sm" onClick={saveCert}>Download the certificate</Button> : null}
+      </span>
+      <ErrorNote title="The gates could not be checked" error={gates.error} />
+      {gates.data ? (
+        <ul aria-label="Release gates" className="grid gap-1">
+          {gates.data.map((g) => (
+            <li key={g.name} className="flex flex-col sm:flex-row sm:gap-3">
+              <span className="sm:w-64"><State state={g.ok ? "ok" : "fail"} className="mr-2" />{GATE_LABEL[g.name] ?? g.name}</span>
+              <span className="min-w-0 flex-1 text-muted-foreground">{g.detail}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {gates.data ? (
+        <span role="status">
+          {failed.length
+            ? `${failed.length} of ${gates.data.length} gates do not hold. A new sandbox machine passes the VM firewall gate about 20 minutes after it joined, once a provider sync has fenced it.`
+            : <>Every gate holds. Set the provider live on <Link to={to} className="underline underline-offset-4">its page</Link>: choose a status other than Disabled and save.</>}
+        </span>
+      ) : null}
+      {sb?.certificate ? <span className="text-muted-foreground">The certificate is self-signed for the sandbox domain: a client that calls a sandbox adds it to its trust store (SSL_CERT_FILE, or NODE_EXTRA_CA_CERTS for the JavaScript SDK).</span> : null}
+    </li>
+  )
+}
 
 // One registered provider with what a tenant still cannot use of it. row is the provider as /admin/service lists it;
 // without one (the list is being read, or the row is gone) only the link is shown.
@@ -458,6 +513,7 @@ function Ready({ installation, live, loading, error, canManage, providers }: {
         <ul aria-label="Providers" className="grid list-disc gap-3 pl-5">
           {p?.kubernetes ? <ProviderItem id={p.kubernetes} label={`${installation.name} Kubernetes`} kind="kubernetes" row={providers.find((s) => s.id === p.kubernetes)} installation={installation} canManage={canManage} /> : null}
           {p?.database ? <ProviderItem id={p.database} label={`${installation.name} Databases`} kind="database" row={providers.find((s) => s.id === p.database)} installation={installation} canManage={canManage} /> : null}
+          {p?.sandbox && installation.status.sandbox ? <SandboxProviderItem id={p.sandbox} label={`${installation.name} Sandboxes`} row={providers.find((s) => s.id === p.sandbox)} installation={installation} canManage={canManage} /> : null}
           {!p?.kubernetes && !p?.database ? <li>No provider is recorded for this installation.</li> : null}
         </ul>
         {installation.schedulerNote ? <p aria-label="Job scheduler"><State state="warn" className="mr-2" />{installation.schedulerNote}</p> : null}

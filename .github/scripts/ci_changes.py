@@ -60,12 +60,13 @@ RULES = (
     # fails when a Dockerfile copies a path that does not select its image) and the Dockerfile itself,
     # with a <Dockerfile>.dockerignore next to it.
     ("deploy", r"deploy/", TESTS),
-    ("deploy", r"deploy/(seed/|platform/|embed\.go$|(mgmt|dbaas)-cluster/argocd-health\.yaml$|Dockerfile[^/]*$)", ("api",)),
+    ("deploy", r"deploy/(seed/|platform/|embed\.go$|(mgmt|dbaas)-cluster/argocd-health\.yaml$|templates/images\.yaml$|Dockerfile[^/]*$)", ("api",)),
     ("deploy", r"deploy/sandbox-proxy\.Dockerfile[^/]*$", ("sandbox-proxy",)),
     ("deploy", r"deploy/sandbox-runtime\.Dockerfile[^/]*$", ("sandbox-runtime",)),
     ("deploy", r"deploy/sandbox-import\.Dockerfile[^/]*$", ("sandbox-import",)),
     # The eleven sandbox templates (about 15 minutes). The gateway template compiles cmd/mcp-gateway with
-    # the root go.mod. images.yaml holds the published digests: it changes no local build.
+    # the root go.mod. images.yaml holds the published digests: it changes no template build (the API embeds it:
+    # the api row above).
     ("templates", TEMPLATES + r"|cmd/mcp-gateway/|go\.(mod|sum)$", ("template_images",)),
     ("templates", TEMPLATES, ("controlled-base-prototype",)),
     # The upstream bases are the FROM lines of these files, and images.yaml names the external Python image.

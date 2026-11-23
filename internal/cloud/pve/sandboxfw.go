@@ -73,6 +73,28 @@ type SandboxFirewall struct {
 	// address is one the private ranges drop. Unset: none (a public address needs no rule).
 	PortalAddress string
 	PortalPort    int
+	// On a managed platform (docs/managed-services.md, Sandboxes) the workers have no vnet of their own: they sit on
+	// the platform network. Bridge is the bridge or vnet their NIC is on and VLAN its tag (0: untagged), Subnet the
+	// range of that network the sandbox machines take their addresses from. No vnet is looked up then, the load
+	// balancer addresses are addresses of the same network outside Subnet, and with no EntryFrom the proxy address
+	// takes any source (there is no entry appliance: the clients reach sandbox-proxy themselves).
+	Bridge string
+	VLAN   int
+	// Peers: the workers are a node group of a cluster they share with other machines (placement shared), and these
+	// are those machines' addresses. The rules are then the shared set: Cilium's tunnel, health and ICMP both ways
+	// with the peers and the other workers, the API on APIPort at ControlPlane and at every peer (kube-proxy turns
+	// the kubernetes Service into a control plane machine's own address before the VM firewall sees the packet), the
+	// kubelet from KubeletFrom alone. No konnectivity, no MetalLB memberlist and no proxy entry: no worker runs a
+	// speaker or answers for a load balancer address there.
+	Peers []string
+}
+
+// Validate reports whether the firewall can be written: what generation refuses (an address outside its range, a
+// proxy no load balancer address holds, peers without the platform bridge). Whoever writes a provider's sandbox
+// settings can ask before a sync does.
+func (f SandboxFirewall) Validate() error {
+	_, err := f.generation()
+	return err
 }
 
 // sandboxGen is one generation of the shared rules: the group and its two IP sets.
@@ -220,14 +242,23 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 	if err != nil {
 		return g, err
 	}
+	peers, err := toCIDRs(f.Peers)
+	if err != nil {
+		return g, err
+	}
+	shared := len(peers) > 0
 	sub := []netip.Prefix{subnet.Masked()}
 	switch {
 	case len(nodes) == 0:
 		return g, errors.New("pve sandbox: no worker addresses")
-	case !within(sub, nodes) || !within(sub, lbs):
+	case !within(sub, nodes) || (f.Bridge == "" && !within(sub, lbs)):
 		return g, fmt.Errorf("pve sandbox: worker and load balancer addresses must be inside %s", subnet)
 	case overlap(nodes, lbs):
 		return g, errors.New("pve sandbox: worker and load balancer addresses overlap")
+	case shared && (f.Bridge == "" || overlap(sub, peers)):
+		return g, fmt.Errorf("pve sandbox: peers are the other machines of a shared cluster on the platform network, outside %s", subnet)
+	case shared && (len(lbs) > 0 || f.ProxyAddress != "" || f.EntryFrom != ""):
+		return g, errors.New("pve sandbox: a shared cluster's sandbox workers answer for no load balancer or proxy address")
 	}
 	cp, err := netip.ParseAddr(strings.TrimSpace(f.ControlPlane))
 	if err != nil || !cp.Is4() || subnet.Contains(cp) {
@@ -245,14 +276,17 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 	if err != nil {
 		return g, err
 	}
-	denyIn := append(append(slices.Clone(sandboxPrivate), f.Deny...), subnet.String(), cp.String()+"/32")
+	denyIn := append(append(append(slices.Clone(sandboxPrivate), f.Deny...), f.Peers...), subnet.String(), cp.String()+"/32")
 	deny, err := toCIDRs(denyIn)
 	if err != nil {
 		return g, err
 	}
 
-	g.Nodes = make([]IPSet, 0, len(nodes))
-	for _, n := range nodes {
+	// The node set of the rules: the workers, and with a shared cluster its other machines. The filter of a worker's
+	// NIC is made from the workers' own range alone (SandboxPass.nodes).
+	members := collapse(append(slices.Clone(nodes), peers...))
+	g.Nodes = make([]IPSet, 0, len(members))
+	for _, n := range members {
 		g.Nodes = append(g.Nodes, IPSet{CIDR: pveCIDR(n)})
 	}
 	g.Out = []IPSet{{CIDR: "0.0.0.0/1"}, {CIDR: "128.0.0.0/1"}}
@@ -273,6 +307,15 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 		// its control plane: API and konnectivity (exec and logs ride konnectivity, so nothing comes in for them)
 		rule("out", "tcp", "", cp.String(), strconv.Itoa(apiPort)+","+strconv.Itoa(sandboxKonnectivityPort)),
 	}
+	if shared {
+		// The endpoint, and the control plane machines themselves: the Cilium agent, kube-proxy and the network guard
+		// reach the API through the kubernetes Service, which kube-proxy rewrites inside the VM to a machine's own
+		// address. Which peers are control plane machines changes with every roll, so the rule names them all.
+		rules = []FirewallRule{
+			rule("out", "tcp", "", cp.String(), strconv.Itoa(apiPort)),
+			rule("out", "tcp", "", strings.Join(cidrList(peers), ","), strconv.Itoa(apiPort)),
+		}
+	}
 	if len(dns) > 0 {
 		d := strings.Join(cidrList(dns), ",")
 		rules = append(rules, rule("out", "udp", "", d, "53"), rule("out", "tcp", "", d, "53"))
@@ -285,10 +328,14 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 			rule(dir, "udp", nodeRef, nodeRef, "8472"),
 			rule(dir, "tcp", nodeRef, nodeRef, "4240"),
 			rule(dir, "icmp", nodeRef, nodeRef, ""),
-			rule(dir, "tcp", nodeRef, nodeRef, "7946"),
-			rule(dir, "udp", nodeRef, nodeRef, "7946"),
-			rule(dir, "tcp", nodeRef, nodeRef, "10250"),
 		)
+		if !shared { // a shared cluster's API server reaches the kubelet itself (KubeletFrom), and no worker runs MetalLB
+			rules = append(rules,
+				rule(dir, "tcp", nodeRef, nodeRef, "7946"),
+				rule(dir, "udp", nodeRef, nodeRef, "7946"),
+				rule(dir, "tcp", nodeRef, nodeRef, "10250"),
+			)
+		}
 	}
 	if len(kubelet) > 0 {
 		rules = append(rules, rule("in", "tcp", strings.Join(cidrList(kubelet), ","), "", "10250"))
@@ -345,10 +392,13 @@ func (f SandboxFirewall) entryRule(subnet netip.Prefix, nodes, lbs []netip.Prefi
 	switch {
 	case err1 != nil || !proxy.Is4() || !within(lbs, host(proxy)):
 		return FirewallRule{}, fmt.Errorf("pve sandbox: proxy address %q must be one of the load balancer addresses", f.ProxyAddress)
-	case err2 != nil || !from.Is4() || !subnet.Contains(from) || overlap(host(from), nodes) || overlap(host(from), lbs):
-		return FirewallRule{}, fmt.Errorf("pve sandbox: entry address %q must be inside %s, off the worker and load balancer addresses", f.EntryFrom, subnet)
 	case port < 1 || port > 65535:
 		return FirewallRule{}, fmt.Errorf("pve sandbox: invalid proxy port %d", port)
+	case f.Bridge != "" && f.EntryFrom == "":
+		// On the platform network nothing stands in front of sandbox-proxy: a client's own address arrives.
+		return FirewallRule{Type: "in", Action: "ACCEPT", Proto: "tcp", Dest: proxy.String(), DPort: strconv.Itoa(port), Enable: 1, Comment: sandboxComment}, nil
+	case err2 != nil || !from.Is4() || !subnet.Contains(from) || overlap(host(from), nodes) || overlap(host(from), lbs):
+		return FirewallRule{}, fmt.Errorf("pve sandbox: entry address %q must be inside %s, off the worker and load balancer addresses", f.EntryFrom, subnet)
 	}
 	return FirewallRule{Type: "in", Action: "ACCEPT", Proto: "tcp", Source: from.String(), Dest: proxy.String(),
 		DPort: strconv.Itoa(port), Enable: 1, Comment: sandboxComment}, nil
@@ -374,7 +424,9 @@ type SandboxWorker struct {
 type SandboxPass struct {
 	s       *Service
 	g       sandboxGen
-	vnet    string
+	vnet    string // the vnet of the sandbox subnet, or the platform network's bridge (SandboxFirewall.Bridge)
+	tagged  bool   // on the platform network: a worker's NIC is the sandbox one only with the tag vlan (0: none)
+	vlan    int
 	nodes   []netip.Prefix
 	lbs     []netip.Prefix
 	on      bool // the datacenter firewall is on
@@ -415,7 +467,9 @@ func (s *Service) newSandboxPass(ctx context.Context, f SandboxFirewall) (*Sandb
 	}
 	p.nodes, _ = toCIDRs(f.Nodes)
 	p.lbs, _ = toCIDRs(f.LoadBalancers)
-	if p.vnet, err = s.vnetOfSubnet(ctx, f.Subnet); err != nil {
+	if f.Bridge != "" {
+		p.vnet, p.tagged, p.vlan = f.Bridge, true, f.VLAN
+	} else if p.vnet, err = s.vnetOfSubnet(ctx, f.Subnet); err != nil {
 		return nil, err
 	}
 	vms, err := s.C.ClusterResources(ctx, "vm")
@@ -694,7 +748,7 @@ func (p *SandboxPass) secure(ctx context.Context, w SandboxWorker, nodeAddr stri
 			}
 		}
 		var want []string // a NIC off the sandbox vnet gets an empty set: PVE then drops every IPv4 frame it sends
-		if nicBridge(cfg.Str(nic)) == p.vnet {
+		if p.sandboxNIC(cfg.Str(nic)) {
 			want, st.Pinned = p.ipfilterFor(have, nodeAddr)
 		}
 		wantSet := make([]IPSet, 0, len(want))
@@ -786,6 +840,23 @@ func (p *SandboxPass) secure(ctx context.Context, w SandboxWorker, nodeAddr stri
 	return st, changed, nil
 }
 
+// sandboxNIC reports a NIC on the sandbox network: on its vnet, or on the platform network's bridge with its tag.
+func (p *SandboxPass) sandboxNIC(val string) bool {
+	if nicBridge(val) != p.vnet {
+		return false
+	}
+	if !p.tagged {
+		return true
+	}
+	tag := 0
+	for _, kv := range strings.Split(val, ",") {
+		if v, ok := strings.CutPrefix(kv, "tag="); ok {
+			tag, _ = strconv.Atoi(v)
+		}
+	}
+	return tag == p.vlan
+}
+
 // ipfilterFor is the filter of a worker's sandbox NIC. The Node object is the kubelet's to write, so its address is
 // trusted once, before the worker takes tenant pods (the caller passes it only while the unsecured taint is on), and
 // then pinned: a host address inside the worker range that the set already holds stays, whatever the Node says later. Before that the whole worker range is
@@ -820,6 +891,26 @@ func (p *SandboxPass) ipfilterFor(have []IPSet, nodeAddr string) (want []string,
 		want = append(want, cidrList(p.nodes)...)
 	}
 	return append(want, cidrList(p.lbs)...), pinned
+}
+
+// RemoveSandboxFirewall deletes every generation of a pool whose sandbox machines are gone for good (sandboxes
+// switched off on a managed platform): a pass that no longer runs sweeps nothing. A generation a VM of the pool still
+// references stays.
+func (s *Service) RemoveSandboxFirewall(ctx context.Context, pool string) error {
+	p := &SandboxPass{s: s, g: sandboxGen{Group: sandboxPrefix(pool)}}
+	vms, err := s.C.ClusterResources(ctx, "vm")
+	if err != nil {
+		return err
+	}
+	for _, vm := range vms {
+		if vm.Pool == pool && vm.Template == 0 && vm.Type == "qemu" {
+			if vm.NodeDown {
+				return fmt.Errorf("pve sandbox: VM %d of pool %s is on a node that does not answer; its firewall generation stays", vm.VMID, pool)
+			}
+			p.Workers = append(p.Workers, SandboxWorker{Node: vm.Node, VMID: vm.VMID, Name: vm.Name})
+		}
+	}
+	return p.Sweep(ctx)
 }
 
 // Sweep removes the older generations of this pool once no worker references them.

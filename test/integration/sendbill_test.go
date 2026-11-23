@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -192,5 +193,73 @@ func TestHasOverdueBillsFollowsDueDate(t *testing.T) {
 		"sentAt": now.AddDate(0, 0, -8), "dueAt": now.Add(-time.Hour)})
 	if overdue, err := repo.HasOverdueBills(ctx, "bp-1"); err != nil || !overdue {
 		t.Fatalf("due an hour ago: overdue=%v err=%v, want true", overdue, err)
+	}
+}
+
+// TestSendBillInvoicesShortSandboxes: an OPEN bill as the charge builds it, one item per sandbox, each
+// under half a cent, next to an instance. Sent, the sandboxes' sum is one added line; every item
+// that was on the bill is what the per-item rounding always made of it; and a second send finds
+// no OPEN bill, so nothing is added twice.
+func TestSendBillInvoicesShortSandboxes(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	mustInsert(t, db, "billingConfiguration", pgdoc.M{"baseCurrency": "USD", "defaultConfiguration": true})
+	svc := billing.NewBillSendService(billing.NewRepo(db), pricing.NewRepo(db))
+	mails := &billMailCapture{}
+	svc.SetNotifier(mails)
+
+	now := time.Date(2026, 12, 1, 0, 0, 30, 0, time.UTC)
+	start := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	item := func(typ, id, net string) pgdoc.M {
+		return pgdoc.M{"name": id, "resourceId": id, "resourceType": typ, "projectId": "proj-a", "currency": "USD",
+			"netAmount": decimalOf(t, net), "timeUnits": pgdoc.M{"minute": 2, "hour": 0, "month": 0},
+			"appliedPricePlanRules": []any{pgdoc.M{"pricePlanRuleId": "rule", "appliedAmounts": []any{pgdoc.M{"attributeName": "vcpus", "netAmount": decimalOf(t, net)}}}}}
+	}
+	items := []any{item("instance", "vm-1", "10.004"), item("sandbox", "sbx-long", "1.006")}
+	for i := 0; i < 30; i++ {
+		items = append(items, item("sandbox", fmt.Sprintf("sbx-%d", i), "0.004"))
+	}
+	billID := mustInsertID(t, db, "bill", pgdoc.M{"billingProfileId": "bp-1", "status": "OPEN", "invoiceCurrency": "USD",
+		"billingCycle": pgdoc.M{"startDate": start, "endDate": time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)}, "items": items})
+	profile := &billing.BillingProfile{ID: "bp-1", Currency: "USD", Email: "ann@acme.sg", Status: billing.StatusActive}
+
+	if ok, err := svc.SendBillForProfile(ctx, profile, now); err != nil || !ok {
+		t.Fatalf("send: ok=%v err=%v", ok, err)
+	}
+	var b pricing.Bill
+	if found, _ := db.C("bill").Get(ctx, billID, &b); !found || b.Status != pricing.BillStatusSent {
+		t.Fatalf("bill after send: found=%v status=%s", found, b.Status)
+	}
+	if len(b.Items) != 33 {
+		t.Fatalf("%d items, want the 32 that were there and one line", len(b.Items))
+	}
+	for i, want := range []string{"10", "1.01"} {
+		if !b.Items[i].NetAmount.Equal(decimalOf(t, want)) {
+			t.Errorf("item %d (%s) sent as %s, want %s", i, b.Items[i].ResourceID, b.Items[i].NetAmount, want)
+		}
+	}
+	for i := 2; i < 32; i++ {
+		it := b.Items[i]
+		if !it.NetAmount.IsZero() || it.ResourceID != fmt.Sprintf("sbx-%d", i-2) || *it.TimeUnits.Minute != 2 ||
+			!it.AppliedPricePlanRules[0].AppliedAmounts[0].NetAmount.Equal(decimalOf(t, "0.004")) {
+			t.Fatalf("item %d = %+v, want the sandbox as it was, at 0.00", i, it)
+		}
+	}
+	if line := b.Items[32]; !line.NetAmount.Equal(decimalOf(t, "0.12")) || line.Name != "Sandbox runs below 0.005 each (30)" ||
+		line.ResourceType != "sandbox" || line.ProjectID != "proj-a" || line.Currency != "USD" {
+		t.Fatalf("line = %+v, want 0.12 for 30 sandboxes", line)
+	}
+	// 10.00 + 1.01 + 0.12; it was 11.01.
+	if len(mails.sent) != 1 || mails.sent[0].vars["amountDue"] != "11.13" {
+		t.Fatalf("mails: %+v", mails.sent)
+	}
+
+	if ok, _ := svc.SendBillForProfile(ctx, profile, now); ok {
+		t.Fatal("re-send must be a no-op for an already-sent bill")
+	}
+	var again pricing.Bill
+	_, _ = db.C("bill").Get(ctx, billID, &again)
+	if len(again.Items) != 33 || !again.CalculateTotalAmount().Equal(decimalOf(t, "11.13")) || len(mails.sent) != 1 {
+		t.Fatalf("after a second send: %d items, total %s, %d mails", len(again.Items), again.CalculateTotalAmount(), len(mails.sent))
 	}
 }

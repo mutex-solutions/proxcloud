@@ -990,22 +990,176 @@ block out until the upgrade is done), and **while `separate` exists or is asked 
 upgrades `pc-sandbox` in place. Set `placement: off` and apply, make the upgrade, then set
 `separate` again: the cluster is built new. Its cluster chart stays the version it was built with.
 
-**What `shared` gives up.** Code that escapes gVisor there is root on a machine of the cluster
-that runs kamaji-etcd, every tenant's API server and every tenant database. The machine is a peer
-of the cluster's pod network and holds a Cilium agent's and a kubelet's credential; what protects
-the other workloads then is their own authentication. `separate` limits the same escape to the
-sandbox cluster. The same holds for a stolen portal token: it holds its platform role on the
-sandbox pool, so with `shared` it reaches one node of the platform cluster (through that
-machine's console, guest agent or disks), where on `proxcloud-system` it holds `NoAccess`.
-`shared` is the homelab choice: one operator, no outside tenants.
+**What `shared` gives up.** Said in full, because it is the one choice here that changes what a
+tenant's own workloads are exposed to. The install page prints the same list and saves `shared`
+only with a tick under it.
 
-**Not in this release's code yet:** the sandbox provider's registration, the VM firewall of the
-sandbox machines on the platform network and its gates, `config.network.sandboxCidrs` for the
-range, the proxy's Secret inside `pc-sandbox`, the operator's own certificate, the Check rows for
-the datacenter firewall, a `config.sandbox` of another owner and a taken `proxyAddress`, the
-refusal of `off` while the sandbox provider is enabled or holds a sandbox, and the console's form.
-Until they exist a sandbox machine keeps its `unsecured` taint and runs no sandbox, and with
-`separate` sandbox-proxy does not start (it has no certificate).
+Code that escapes gVisor in `shared` is root on a machine of the cluster that runs kamaji-etcd
+(the datastore of every tenant's Kubernetes control plane), every tenant's API server,
+CloudNativePG and every tenant database, ArgoCD and the tenants' Cluster API controllers. From
+there:
+
+- **The pod network is open to it.** The machine is a Cilium peer: it must exchange VXLAN with
+  every platform machine, and it can send frames with any source identity to any pod. Cilium's
+  network policies do not stop that. What protects the targets is their own authentication: client
+  certificates on kamaji-etcd, passwords on the databases, tokens on the API servers.
+- **The Cilium agent's credential on that machine** may list and watch pods, services, endpoints,
+  nodes and every network policy of the cluster, and create and update CiliumIdentity and
+  CiliumNode objects. Peers build their tunnel map from CiliumNode objects, so a forged one for
+  another node pulls that node's pod traffic to the escaped machine: traffic between pods that is
+  not encrypted with both ends authenticated can be read and forged, not only disturbed. By default
+  the credential reads Secrets in `cilium-secrets` only.
+- **The other credentials on the machine:** the kubelet's (held to its own Node and the Secrets of
+  the pods bound there by NodeRestriction), the network guard's service account (it may read every
+  pod's spec and every node's stats) and kube-proxy's.
+- **No egress address of its own.** Sandboxes leave under the site's public address: abuse from a
+  sandbox is abuse from your address.
+- **What still holds:** the VM firewall of the machine (below) keeps the Proxmox API, the seed, the
+  management networks, tenant networks and every address of the platform network that is not a
+  machine of the cluster closed to it, and pins it to its own address. Of the cluster's own
+  machines it reaches the pod tunnel, the health port, ICMP and the Kubernetes API port, nothing
+  else. The portal's two identities on the cluster are narrowed by admission policies (below).
+- **The portal token.** It holds its platform role on the sandbox pool, so a stolen portal token
+  reaches a node of the platform cluster through a sandbox machine's console, guest agent or disks,
+  where on `proxcloud-system` it holds `NoAccess`.
+
+`separate` limits the same escape to the sandbox cluster: other tenants' sandboxes on it, its own
+control plane's API and the internet. `shared` is the homelab choice: one operator, no outside
+tenants, too little memory for a second control plane and a system machine. For a site with
+outside tenants it is allowed, with this text read, the provider shown as "reduced isolation" on
+the Ready card, and the release gates still required.
+
+#### The sandbox provider
+
+**What a run writes on the Proxmox provider.** In stage `cluster`, before a sandbox machine
+exists, the run writes on the installation's Proxmox provider, in one write:
+
+- `config.network.sandboxCidrs`: the one entry `nodeRange`. The next provider sync writes the
+  isolation rules for it (tenant networks to and from the range, the range to the blocked and
+  management networks).
+- `config.sandbox`: `pool` (`proxcloud-sbx`), `nodes` (`[nodeRange]`), `dns`,
+  `unsecuredMinAgeMinutes` (20), and what the platform network adds: `platformInstallationId` (the
+  owner), `mode`, `bridge` and `vlan` (where the machines' NIC is: no vnet is looked up), and
+  `deny` (the platform prefix, so that a platform network that is not RFC 1918 is as closed to a
+  sandbox machine as one that is). `shared` adds `peers` and `kubeletSources`, both the cluster's
+  `nodeRange`. `separate` adds `loadBalancers` and `proxy` (the proxy address, port 443).
+
+In stage `register` it adds `secret.sandboxKubeconfig` (sealed): the identity
+`proxcloud-sandbox-firewall` of the sandbox chart, which may read and patch Nodes, read the
+RuntimeClass and ask the API server one dry-run question as a node identity (the NodeRestriction
+gate), and nothing else. Until then the sync writes no VM firewall and logs that the kubeconfig is
+missing, and every sandbox machine keeps its `unsecured` taint.
+
+One provider fences one sandbox pool and one sandbox network. A `config.sandbox` that is not this
+installation's (the installer's sandbox cluster has no owner key) is never overwritten: the save
+and the Check's `network` row say so, and a run stops at `sandbox_refused` before it makes a
+machine. Remove that sandbox cluster and its settings first.
+
+**The VM firewall of a sandbox machine (layer 1).** The provider sync fences every VM of pool
+`proxcloud-sbx`, and no other: a machine of the platform cluster is never selected, whatever its
+bridge or tag. Both policies are DROP and every rule is an ACCEPT, so a missing rule closes more.
+
+| | `shared` | `separate` |
+|---|---|---|
+| Cilium tunnel (UDP 8472), health (TCP 4240), ICMP | both ways with the sandbox range and the platform cluster's `nodeRange` | both ways inside the sandbox range |
+| Kubernetes API | TCP 6443 to the API address, and to every address of the cluster's `nodeRange` | TCP 6443 and 8132 (konnectivity) to the control plane's address of `pc-sandbox` |
+| Kubelet (TCP 10250) | from the cluster's `nodeRange` | inside the sandbox range |
+| MetalLB memberlist (7946) | none | inside the sandbox range |
+| sandbox-proxy | none: it runs on the `system` group | TCP 443 to the proxy address, from any source |
+| DNS | UDP and TCP 53 to `dns` | the same |
+| Internet | everything outside the private, CGNAT and link-local ranges, the platform prefix, the nodes' own addresses, the management and blocked networks and the tenant pool | the same |
+
+- TCP 6443 to the whole `nodeRange` in `shared`: the Cilium agent, kube-proxy and the network
+  guard reach the API through the `kubernetes` Service, which kube-proxy rewrites inside the VM to
+  a control plane machine's own address before the VM firewall sees the packet. Which addresses
+  are control plane machines changes with every roll.
+- The proxy address takes any source in `separate`: there is no entry appliance on a managed
+  platform, so a client's own address arrives. The address must not be reachable from a network
+  you do not want sandboxes served to; that is your router's rule.
+- The IP filter of each machine admits its own address once its Node has reported it (and in
+  `separate` the proxy address, which any machine of the sandbox cluster may announce). A sandbox
+  machine cannot answer for the API address, a platform machine or a MetalLB address.
+- A NIC that is not on the platform bridge with the platform's VLAN tag gets an empty filter.
+
+**The portal's identities on the cluster.** The sandbox chart makes two service accounts and the
+run stores a kubeconfig for each: `proxcloud-sandbox` on the sandbox provider and
+`proxcloud-sandbox-firewall` on the Proxmox provider. Both name the same API server (the gates
+refuse otherwise): the platform cluster's API address with `shared`, the control plane of
+`pc-sandbox` with `separate`, whose admin kubeconfig the run reads once from the Secret Kamaji
+keeps and stores nowhere.
+
+With `shared` the portal's identity holds, cluster-wide, only namespaces, RoleBindings, the right
+to bind one ClusterRole (`proxcloud-sandbox-namespace`) and a read of Nodes. Everything else (pod
+reads, logs, exec, Sandbox objects, network policies, quota) it holds only in a project namespace
+`sb-<projectId>` where it has bound that role, which it does when it creates the namespace.
+Admission policies of the chart hold it to `sb-*` namespaces labelled as a tenant's, to that one
+role and to itself, hold the firewall identity to Nodes of the sandbox group, and hold every pod
+of a tenant namespace to the gVisor RuntimeClass with no host access. The portal lists across
+projects namespace by namespace there. A stolen token then reads, execs and writes inside `sb-*`
+namespaces only. With `separate` the identities are the installer's cluster-wide ones: that
+cluster runs sandboxes alone.
+
+**The provider.** Stage `register` creates "\<name> Sandboxes" after the two tenant providers,
+**DISABLED**: envd on with `domain`, the templates `base`, `code-interpreter-v1`, `python` and
+`mcp-gateway`, each with the image this ProxCloud release pins by digest
+(`deploy/templates/images.yaml`), the portal's default limits, an egress cap of 100 Mbit/s, the
+abuse check in `alert` mode, rotation off, no sandbox registry, `mode` and
+`proxmoxServiceId`. `spec.tenants.attach` is applied to it as to the two others, and recorded
+apart (`status.sandboxAttach`): "all projects" waits while the provider is disabled, and that wait
+does not make the next apply attach the two others again. A later apply adopts the row and keeps
+what you changed (name, status, templates, limits); it writes the kubeconfig, `mode` and `domain`
+again, which follow the settings. The pinned
+images move with a ProxCloud release and no other way: the template update job of the installer
+path does not run here. The sandbox machines pull `base` and `code-interpreter` ahead; a first
+start of another template waits for its pull.
+
+**Going live.** A run never sets the provider live. On its page under **Cloud providers**, choose
+a status other than Disabled and save: the save runs the release gates and is refused while one
+does not hold. The Ready card reads the same gates without changing anything (**Check the release
+gates**).
+
+| Gate | Holds when | On a `shared` cluster |
+|---|---|---|
+| `noderestriction` | the API server refuses a node identity a `node-restriction.kubernetes.io/` label on its own Node | the same |
+| `isolation` | the cluster firewall holds the isolation rules for `nodeRange` | the same; with a bridged platform network those rules see routed traffic only, and the VM firewall is what holds inside the network |
+| `fence` | every Node that may take a sandbox is a VM of the sandbox pool whose firewall reads back as written, pinned to the Node's address | first the RuntimeClass `gvisor` must select exactly the sandbox group (`node-restriction.kubernetes.io/proxcloud-node-group: sandbox`) and tolerate `proxcloud.io/sandbox` alone; then only that group's Nodes are asked. A class changed by hand fails the gate |
+| `network-guard` | Cilium leaves the CNI config to the network guard and its heartbeat is fresh, on every schedulable node | on the sandbox group's Nodes alone, by the label a kubelet cannot set |
+
+A new sandbox machine passes `fence` about 20 minutes after it joined (the join token on its disk
+lives 15), once a provider sync has fenced it and taken its `unsecured` taint off. The gates are
+checked again, cached for a minute, before every sandbox create.
+
+**The job scheduler.** The sync that fences a sandbox machine, takes its taint off and puts it
+back on a machine that lost its fence runs on the scheduler
+(`PROXCLOUD_JOBS_SCHEDULER_ENABLED`), as do the minutely sandbox read and the abuse check. One
+operator sync (`POST /api/v1/admin/job/external-service/sync`) fences once, and nothing watches
+afterwards. So a platform's sandbox provider is refused "live" while the scheduler is off
+(`409`), the Check's `scheduler` row says so while the settings ask for sandboxes, and the Ready
+card repeats it. The same switch starts charging usage: the price rule for sandbox minutes holds a
+placeholder rate until you set one (or 0). The installer's sandbox providers are not asked for
+the scheduler.
+
+**Switching sandboxes off.** The save of `placement: off` is refused (`409
+sandbox_provider_live`) while the sandbox provider is not disabled, and so is the run: every
+running sandbox would end without notice. Disable the provider, let its sandboxes end, then save
+and apply. Once the machines are gone and the pool is empty, the run takes `config.sandbox`, the
+`sandboxCidrs` entry and `secret.sandboxKubeconfig` off the Proxmox provider, deletes the pool's
+firewall groups and IP sets from the cluster firewall, then the ACL row or the token and the
+pool. The sandbox provider row stays, disabled, and is adopted when sandboxes come back; a Remove
+disables it with the two others, and a new install does not give it its status back.
+
+**The certificate.** With `separate` the run writes `sandbox-system/sandbox-proxy-tls` inside
+`pc-sandbox` as soon as its control plane answers. The certificate is self-signed for
+`*.<domain>`; the Ready card offers it for download, and a client adds it to its trust store
+(`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` for the JavaScript SDK). `*.<domain>` must resolve to the
+proxy address where clients are: a DNS zone, a resolver entry on a workstation, or a wildcard
+service that maps a name to the address it contains.
+
+**Not in this release's code:** an operator's own certificate (`tls.mode secret` is refused at the
+save); waking a paused sandbox through sandbox-proxy (no wake URL is set); a sandbox registry,
+custom template builds and template updates on the managed platform; a Check that an address of
+the platform network outside the MetalLB range is free (the `sandbox` row reads the platform
+cluster's Services only); the scheduler split into sandbox jobs and charging.
 
 **Lab tests owed** (nothing of this section was run on a lab):
 
@@ -1053,7 +1207,7 @@ line (`PC-ENROLL:…`) into the page and press **Store the secrets**
 | `tenant-network` | Never. It reads the provider's default zone in Proxmox and **warns** when the zone has DHCP, when it does not exist yet and is configured as a `simple` zone without `"dhcp": false` (ProxCloud then creates it with DHCP), or when the zones could not be read: a tenant Kubernetes cluster create on a network of such a zone is refused with a `400` (not on a Kubernetes provider with shared workers, `cluster.shared`, which uses no tenant network). The row is `ok` for a zone without DHCP and absent when the provider names no zone | Nothing for the install or for databases. Before tenants create clusters: give the provider an EVPN or a VLAN zone as its default zone, or a `simple` zone without DHCP (Cloud providers, `config.network.zones` and `defaultZone`; [Prerequisites](#2-prerequisites)) |
 | `tenant-path` | Never, and absent when the provider names no zone. It reads the layout and **warns** when a node that translates tenant traffic (a `simple` default zone: the node of the tenant's VM; an EVPN default zone: its exit nodes) also hosts a platform machine and does not route the platform network itself, or when Proxmox could not be read: a tenant's TCP connection to the platform network is then dropped on that node, tenant Kubernetes workers never join and tenants cannot reach managed databases. It opens no connection: `ok` is not proof, and a leg added on a node by hand is not seen. It is `ok` for a platform network of mode `routed`. **Test the tenant path** below the rows opens the path on an installed platform. For a VLAN default zone that test is refused (`409 vlan_zone`), so the row names what to do instead: `curl -k -m 5 https://<a tenant cluster's API address>:6443/healthz` from a tenant's server | Nothing for the install. Before tenants create clusters or databases: one of the two layouts of [The path from tenants to the platform](#the-path-from-tenants-to-the-platform) |
 | `csi-vmid` | Never. It **warns** when a guest of the cluster has VM id 9999, the id proxmox-csi names its volumes after, or when that could not be read | Nothing for the install. Never destroy VM 9999 with "Destroy unreferenced disks owned by guest" ([VM id 9999 and the CSI volumes](#vm-id-9999-and-the-csi-volumes)) |
-| `sandbox` | Present while the settings ask for sandboxes. The portal token lacks, on `/pool/proxcloud-sbx`, `Pool.Allocate` or a privilege of `ProxCloudCAPI` (it holds them through its platform role on `/pool`), or with `separate` the mint role on the platform's boot or ISO store, `/nodes` or the platform network's zone or vnet; the provider's `poolPrefix` is the start of the pool's name; or the pool holds a VM without this installation's tag. A warning when the ACL row of a built `shared` group is gone | Run the managed-services script again as root on a node (it names no sandbox pool: it restores the rows of the portal token that these rights come from); move the foreign VM to another pool; an apply writes a lost row again |
+| `sandbox` | Present while the settings ask for sandboxes. The portal token lacks, on `/pool/proxcloud-sbx`, `Pool.Allocate` or a privilege of `ProxCloudCAPI` (it holds them through its platform role on `/pool`), or with `separate` the mint role on the platform's boot or ISO store, `/nodes` or the platform network's zone or vnet; the provider's `poolPrefix` is the start of the pool's name; or the pool holds a VM without this installation's tag. The datacenter firewall is off (Proxmox then enforces no VM firewall, so no sandbox machine is ever opened to sandboxes); a LoadBalancer Service of the platform cluster other than `sandbox-system/sandbox-proxy` holds `proxyAddress`. A warning when the ACL row of a built `shared` group is gone. A sandbox pool or sandbox network of another owner on the provider fails the `network` row, and the `capacity` row warns for small `kamaji` machines while a `separate` cluster is not built (its control plane takes about 0.6 GiB there) | Run the managed-services script again as root on a node (it names no sandbox pool: it restores the rows of the portal token that these rights come from); move the foreign VM to another pool; an apply writes a lost row again; switch the datacenter firewall on (Datacenter, Firewall, Options), after reading what else it puts in force; choose a free address |
 | `capacity` | Before the first install, when a node has less memory than the settings place on it; absent while the CAPI token is not stored. It reads the nodes and their VMs with the CAPI token and counts as CAPMOX counts before each clone: the node's memory less the configured memory of every VM that is not a template and every container on it, running or not (this installation's own machines are part of the plan and are not counted twice). Against that it puts the seed, the control plane machines plus one, and each group's machines on the node: the one more is what a rolling update of the control plane makes before it removes an old machine. A node that holds those and not one more machine of each group on it as well **warns** and does not stop the install. On an installed platform a finding about what a run already placed **warns**, and so does a node whose memory could not be read; the row **fails** there only when the settings ask for more control plane machines than a run built and their node has no room for them (the message names both counts). A VM the CAPI token cannot see is not counted, so `ok` is the scheduler's answer, not a promise that the node has the memory free | Smaller or fewer machines, one control plane machine in place of three, other nodes, or free memory on the node (a stopped VM counts with its configured memory). Then save and check again |
 | `credentials` | A token secret is not stored | Run the root command of step 2 on a node and paste the `PC-ENROLL` line it prints |
 | `machines` | Never, and absent while the installation has no VM. It reads the installation's VMs with the CAPI token and **warns** with one line per VM that is stopped or that does not start when its node boots (`onboot` off) or that the token could not read (the others are still listed, and an apply still sets `onboot` on them), or when the pools could not be read | A stopped VM: start it in Proxmox, or `qm start <vmid>` as root on its node ([After a Proxmox node reboots](#after-a-proxmox-node-reboots)). `onboot` off: **Apply this release** sets it at the end of stage 7, or `qm set <vmid> --onboot 1` |
@@ -3223,10 +3377,9 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   the `platform` Application keeps the ClusterRole of chart 0.1.1 (self-heal), so re-applying
   `deploy/mgmt-cluster/rbac.yaml` there does not last.
 - **`layout: separate`** (one cluster for Kubernetes, one for databases) is refused by the API.
-- **`spec.sandbox`** is refused by the API. It is the place where a later release takes the
-  placement of the sandbox service, `shared` or `separate`
-  ([Presets and the control plane count](#presets-and-the-control-plane-count)); no release builds
-  either yet.
+- **`spec.sandbox`** is refused by the API of every release so far: no BOM names the sandbox chart
+  yet. The code that builds either placement and registers its provider is in this release
+  ([The sandbox provider](#the-sandbox-provider)); the release whose BOM pins the chart offers it.
 - **No IPv6** on the platform network, and one platform network per installation. A VLAN tag needs
   a BOM that names cluster chart 0.1.14 or newer, as this build's does, and the network is fixed after the
   first install: a platform installed without a tag never gets one
@@ -3241,14 +3394,10 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 - **kube-vip's lease values are those of one machine** (60, 40 and 5 seconds) also with three.
   They are chart values (`controlPlane.kubeadm.vipLease`); what suits three members on one store
   was not measured.
-- **No sandbox node group**, and no sandbox cluster made by the install. Both layouts of a later
-  release fit the saved settings without a change of format. Separate: one more entry in
-  `spec.clusters[]`; the API rule's sources, the blocked networks and the boot-store nodes are
-  already computed over every cluster. Shared (a node group on the platform cluster): the group
-  gets an optional address range of its own, because sandbox nodes must not reach the Proxmox API;
-  that range is then left out of the API rule's sources and fenced as a sandbox network. Until
-  then the rule's source is the whole node range, which is right while every machine in it is a
-  platform machine.
+- **No sandbox node group**, and no sandbox cluster, on a platform of a released BOM (see
+  `spec.sandbox` above). The sandbox machines have a range of their own (`spec.sandbox.nodeRange`),
+  because they must not reach the Proxmox API: the range is left out of the API rule's sources and
+  fenced as a sandbox network.
 - **One installation on the page.** The API keeps one per Proxmox provider; the page shows the first.
 - **No route deletes a draft or an installation record.**
 - **No block volumes for tenant clusters and no database backups** on Compose
@@ -3267,6 +3416,43 @@ on an installed platform with no other machine replaced; the sandbox chart Healt
 run's certificate; `pc-sandbox` built on the kamaji group and the memory its control plane takes
 there; `off` taking all of it away, and Remove in the order it promises; a roll with a `shared`
 group as its last unit; the mint on a platform network that is an SDN vnet.
+
+**The sandbox provider and the fence on the platform network** were run against fakes only: a fake
+Proxmox for the VM firewall (it stores rules and does not filter a packet), fake clusters for the
+gates and the registration, and a model of the shared identity's RBAC for the portal's calls. A lab
+must still show, for each placement:
+
+1. After stage `cluster`: the provider row holds `config.sandbox` and the one `sandboxCidrs` entry,
+   a provider sync writes the isolation rules for the range, and a tenant network create still
+   works.
+2. After stage `register`: the provider "… Sandboxes" exists DISABLED, a provider sync fences each
+   sandbox VM (both policies DROP, the generation's group as its only rule, the IP filter pinned to
+   its address) and takes the `unsecured` taint off after 20 minutes, and **no VM outside pool
+   `proxcloud-sbx` changed** (compare `pvesh get /nodes/<n>/qemu/<id>/firewall/options` of a
+   platform machine before and after).
+3. `shared`, from a sandbox machine with its firewall in force: the Cilium agent stays Ready across
+   a restart (the API through the `kubernetes` Service, which is TCP 6443 to a control plane
+   machine), a pod on it reaches a pod on a `system` machine and back, `kubectl logs` and `exec`
+   work (TCP 10250 from the control plane), image pulls and the runsc download work, and from the
+   machine itself the Proxmox API, the seed, a MetalLB address other than through the pod network,
+   and a management address do not answer.
+4. `separate`: the same from a machine of `pc-sandbox`, plus a client outside the range reaching
+   `https://<port>-<id>.<domain>` at the proxy address, and `sandbox-proxy` starting with the run's
+   certificate.
+5. The four gates on the Ready card: failing before the sync, holding after; then set the provider
+   live, start `base` with the E2B SDK (`sudo` works, egress to the internet works, a private
+   address and TCP 25 do not), and read the usage row.
+6. `shared`: with the portal identity's kubeconfig, `kubectl get pods -A` and a read of a pod in
+   `kube-system` are refused, a Sandbox with a privileged, runc or hostPath pod is refused, and a
+   second project gets its own `sb-` namespace and RoleBinding.
+7. Edit the RuntimeClass by hand (drop its `scheduling`): the `fence` gate fails and a sandbox
+   create is refused within a minute.
+8. With the scheduler off: "live" is refused with the message about the scheduler; one operator
+   sync fences and untaints once.
+9. `placement: off` with the provider live is refused; disabled, the apply removes the machines,
+   the provider's sandbox settings, the firewall groups and IP sets (`pvesh get
+   /cluster/firewall/groups` names none of `sbx…`), the access and the pool.
+10. The datacenter firewall off: the Check's `sandbox` row fails.
 
 **The address of the platform cluster's ArgoCD** (`spec.access.argocd`) was run once on a lab
 (2026-11-20, v0.10.0-rc.1; bridge mode, a VLAN tenant zone, no SNAT): set on an installed platform

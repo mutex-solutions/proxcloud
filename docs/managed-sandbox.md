@@ -27,6 +27,11 @@ accepted at a current site. Read the current boundaries below before following h
 > each server's keys from the tenant only. Not yet: GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
 > and decisions: the sandbox plan (owner document, not in this repository).
 
+> **On a managed-services platform** (no installer) the sandbox machines are a node group of the platform cluster or
+> a platform-owned cluster, both on the platform network, and a platform run registers the provider. What differs
+> from this document (the VM firewall's rule set, the gates on a shared cluster, the portal's identity) is in
+> [managed-services.md](managed-services.md#the-sandbox-provider). No release offers it yet.
+
 ## Current saved-lifecycle admission boundary
 
 **Managed pause/resume/fork is currently unavailable.** A fixed provider-wide saved-lifecycle capability is false: manual/native-abuse/automatic pause, paused CONNECT/wake, fork, and new AutoPause/AutoResume create promises fail closed before their lifecycle effects. There is no enable flag or test exception. The historical SB7 descriptions below document the earlier algorithm, not currently reachable restore-success behavior.

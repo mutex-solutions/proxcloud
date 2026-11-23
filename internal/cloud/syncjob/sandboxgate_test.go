@@ -7,6 +7,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 )
 
 // fakeProber answers the two dry runs: plain (the Node authorizer) and labelled (NodeRestriction).
@@ -48,7 +49,17 @@ func TestProbeNodeRestriction(t *testing.T) {
 	}
 }
 
-type fakeNodes struct{ nodes []map[string]any }
+type fakeNodes struct {
+	nodes []map[string]any
+	class map[string]any // RuntimeClass gvisor; nil = not there
+}
+
+func (f fakeNodes) GetClusterScoped(_ context.Context, group, _, plural, name string) (map[string]any, error) {
+	if group != "node.k8s.io" || plural != "runtimeclasses" || name != "gvisor" || f.class == nil {
+		return nil, &kamajik8s.APIError{Status: 404, Message: plural + " " + name + " not found"}
+	}
+	return f.class, nil
+}
 
 func (f fakeNodes) ListNodes(context.Context) ([]map[string]any, error) { return f.nodes, nil }
 func (f fakeNodes) SetNodeTaints(context.Context, string, string, []any) error {
@@ -65,8 +76,53 @@ func TestOpenWorkers(t *testing.T) {
 		node("w1", "10.110.0.10"),
 		node("w2", "10.110.0.11", map[string]any{"key": pve.SandboxUnsecuredTaint, "effect": "NoSchedule"}),
 		node("w3", "10.110.0.12", map[string]any{"key": "other", "effect": "NoSchedule"}),
-	}})
+	}}, false)
 	if err != nil || len(open) != 2 || open["w1"] != "10.110.0.10" || open["w3"] != "10.110.0.12" {
 		t.Fatalf("open = %v %v: every Node without the unsecured taint", open, err)
+	}
+}
+
+// A shared cluster: the platform's own machines carry no unsecured taint and are no sandbox machines. The gate asks
+// for the sandbox group's Nodes alone, and only while the RuntimeClass still keeps every sandbox on that group.
+func TestOpenWorkersOnASharedCluster(t *testing.T) {
+	node := func(name, group, ip string, taints ...any) map[string]any {
+		return map[string]any{"metadata": map[string]any{"name": name, "labels": map[string]any{sandbox.LabelNodeGroup: group, "proxcloud.io/node-group": "sandbox"}},
+			"spec": map[string]any{"taints": taints}, "status": map[string]any{"addresses": []any{map[string]any{"type": "InternalIP", "address": ip}}}}
+	}
+	taint := func(key string) map[string]any {
+		return map[string]any{"key": key, "value": "true", "effect": "NoSchedule"}
+	}
+	class := func(sel map[string]any, tolerate ...any) map[string]any {
+		return map[string]any{"handler": "gvisor", "scheduling": map[string]any{"nodeSelector": sel, "tolerations": tolerate}}
+	}
+	group := map[string]any{sandbox.LabelNodeGroup: "sandbox"}
+	good := class(group, map[string]any{"key": "proxcloud.io/sandbox", "operator": "Exists", "effect": "NoSchedule"})
+	nodes := []map[string]any{
+		// Every platform machine claims the kubelet label of the sandbox group: that label is not what the gate reads.
+		node("pc-platform-cp-a", "", "192.168.140.20"), node("pc-platform-system-a", "system", "192.168.140.21"), node("pc-platform-kamaji-a", "kamaji", "192.168.140.22"),
+		node("pc-platform-sandbox-a", "sandbox", "192.168.140.66", taint("proxcloud.io/sandbox")),
+		node("pc-platform-sandbox-b", "sandbox", "192.168.140.67", taint("proxcloud.io/sandbox"), taint(pve.SandboxUnsecuredTaint)),
+	}
+	open, err := openWorkers(context.Background(), fakeNodes{nodes: nodes, class: good}, true)
+	if err != nil || len(open) != 1 || open["pc-platform-sandbox-a"] != "192.168.140.66" {
+		t.Fatalf("open = %v %v: the fenced sandbox machine and no platform machine", open, err)
+	}
+	// Read as the installer's cluster, the same Nodes fail the fence gate: every platform machine would be asked for.
+	if open, _ := openWorkers(context.Background(), fakeNodes{nodes: nodes}, false); len(open) != 4 {
+		t.Fatalf("without the mode every untainted Node is open: %v", open)
+	}
+	for name, rc := range map[string]map[string]any{
+		"no class":                      nil,
+		"no scheduling":                 {"handler": "gvisor"},
+		"an empty selector":             class(map[string]any{}),
+		"the kubelet's label":           class(map[string]any{"proxcloud.io/node-group": "sandbox"}),
+		"another group":                 class(map[string]any{sandbox.LabelNodeGroup: "kamaji"}),
+		"a second selector key":         class(map[string]any{sandbox.LabelNodeGroup: "sandbox", "kubernetes.io/os": "linux"}),
+		"tolerates the unsecured taint": class(group, map[string]any{"key": "proxcloud.io/sandbox"}, map[string]any{"key": pve.SandboxUnsecuredTaint}),
+		"tolerates every taint":         class(group, map[string]any{"operator": "Exists"}),
+	} {
+		if open, err := openWorkers(context.Background(), fakeNodes{nodes: nodes, class: rc}, true); err == nil {
+			t.Errorf("%s: the gate went on with %v", name, open)
+		}
 	}
 }

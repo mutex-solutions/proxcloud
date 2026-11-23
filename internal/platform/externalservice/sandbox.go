@@ -156,6 +156,7 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 			AccessKey: str(e.secretMap()["buildStorageAccessKey"]), SecretKey: str(e.secretMap()["buildStorageSecretKey"]),
 		},
 		Kubeconfig:       str(e.secretMap()["kubeconfig"]),
+		Shared:           str(sb["mode"]) == sandbox.ModeShared,
 		Region:           e.SandboxRegion(),
 		RuntimeClass:     str(sb["runtimeClass"]),
 		Templates:        templates,
