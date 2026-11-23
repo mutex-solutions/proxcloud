@@ -1,9 +1,11 @@
 package project
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http/httptest"
 	"slices"
@@ -68,7 +70,7 @@ func TestLBPairRecordsOnlyWhatIsServed(t *testing.T) {
 		t.Fatalf("while dpkg configures: %s, %+v, files %d, log %v", lb.Status, lb.Appliances, len(f.files), f.log)
 	}
 	// dpkg is done on both; on 302 the apply cannot prove that HAProxy runs the file: not applied, not recorded.
-	f.set("301", func(g *lbGuest) { g.packages = "installed" })
+	f.set("301", func(g *lbGuest) { g.packages, g.role = "installed", "BACKUP" })
 	f.set("302", func(g *lbGuest) {
 		g.packages, g.role, g.holds, g.applyFails = "installed", "MASTER", true, "HAProxy does not listen on 203.0.113.10:80"
 	})
@@ -482,5 +484,115 @@ func TestLBHealthOfAStoppedHAProxy(t *testing.T) {
 	f.set("301", func(g *lbGuest) { g.agentDown = true })
 	if _, _, err := ps.LBHealth(ctx, "n1", 301, lb.LBSpec); err == nil || errors.Is(err, pve.ErrLBNoHAProxy) {
 		t.Fatalf("the VM does not answer: %v", err)
+	}
+}
+
+// Drill Q0b-1 of v0.11.1: the first appliance of a pair got no keepalived until the second existed, so nothing let
+// its HAProxy bind the address: it refused its config, the row read ERROR, and an address that was shown answered
+// nobody for as long as the second appliance took (9 min 14 s on the lab). One appliance in the row is a state the
+// product makes itself: a cluster's pair is built one appliance at a time, and a replace whose new clone fails leaves
+// a tenant's pair with one. Here it is the second: a guest fresh from its image, alone, with a TCP and a UDP
+// listener. It serves; a push it refuses is logged without the guest's words; and when the peer comes it is told of
+// it first, keeps the address, and the peer starts as its standby. The fake's guest refuses a bind without
+// keepalived's files and elects as keepalived does (cloud_lb_wire_test.go).
+func TestLBFirstApplianceServes(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	var logs bytes.Buffer
+	before := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(before)
+	apply := func() {
+		t.Helper()
+		if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lb.Appliances = lb.Appliances[:1]
+	delete(f.guests, "302")
+	*f.guests["301"] = lbGuest{packages: "installed", haproxy: true}
+	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 53, Protocol: "udp", Pool: "dns"})
+	lb.Pools = append(lb.Pools, pve.LBPool{Name: "dns", Protocol: "udp", Algorithm: "roundrobin",
+		Members: []pve.LBMember{{Node: true, Port: 53, Weight: 1, Address: "10.0.0.11"}}})
+
+	apply()
+	a := &lb.Appliances[0]
+	if lb.Status != lbStatusDegraded || !strings.Contains(lb.StatusMessage, "One appliance carries the traffic, with no standby") ||
+		a.State != lbAppUp || a.Role != "MASTER" || !a.HoldsVIP || !f.guests["301"].serving() || !f.guests["301"].lvs {
+		t.Fatalf("one appliance alone: %s %q, %+v\n%s", lb.Status, lb.StatusMessage, *a, strings.Join(f.log, "\n"))
+	}
+	if a.KeepalivedHash == "" || a.HAProxyHash != lbHash(lbRender(lb)) || a.LVSHash != pve.LVSHash(pve.RenderLVS(lb.LBSpec, lb.VIPs), "ens18") ||
+		lb.AppliedHash != lbAppliedHash(lb) || !lb.settled {
+		t.Fatalf("what the row records of it: %+v, applied %q, settled %v", *a, lb.AppliedHash, lb.settled)
+	}
+	if conf := f.guests["301"].disk[lbGuestKeepalived]; !strings.Contains(conf, "unicast_peer {\n    127.0.0.1\n") || !strings.Contains(conf, "203.0.113.10/24 dev ens19") {
+		t.Fatalf("keepalived of an appliance with no peer:\n%s", conf)
+	}
+	if slices.ContainsFunc(f.rules["301"], func(r pve.FirewallRule) bool { return r.Proto == "vrrp" }) {
+		t.Fatalf("an appliance with no peer lets VRRP in: %+v", f.rules["301"])
+	}
+	if k, hp, u := f.first("301 keepalived reload"), f.first("301 haproxy reload"), f.first("301 lvs reload"); k < 0 || k > hp || hp > u {
+		t.Fatalf("keepalived, then HAProxy, then the UDP service:\n%s", strings.Join(f.log, "\n"))
+	}
+	if strings.Contains(logs.String(), "did not take a push") {
+		t.Fatalf("a push was refused:\n%s", logs.String())
+	}
+	writes := len(f.log)
+	if apply(); len(f.log) != writes || lb.Status != lbStatusDegraded {
+		t.Fatalf("a quiet pass on one appliance: %s, wrote %v", lb.Status, f.log[writes:])
+	}
+
+	// A config its HAProxy refuses: the row says why, in the guest's words; the log names the balancer and the
+	// appliance and holds none of those words, which may be a line of the config.
+	tcp := slices.Clone(lb.Listeners)
+	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 81, Pool: "web"})
+	f.set("301", func(g *lbGuest) {
+		g.applyFails = "[ALERT] parsing [/etc/haproxy/haproxy.cfg:23] : a-line-of-the-config"
+	})
+	apply()
+	if lb.Status != lbStatusError || !strings.Contains(lb.StatusMessage, "a-line-of-the-config") {
+		t.Fatalf("a refused config: %s %q", lb.Status, lb.StatusMessage)
+	}
+	if out := logs.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "did not take a push") || !strings.Contains(out, "lb=abc vm=301 push=haproxy") ||
+		strings.Contains(out, "a-line-of-the-config") || strings.Contains(out, "bind ") {
+		t.Fatalf("the log of a refused push:\n%s", out)
+	}
+	f.set("301", func(g *lbGuest) { g.applyFails = "" })
+	lb.Listeners = tcp
+	if apply(); lb.Status != lbStatusDegraded || a.State != lbAppUp {
+		t.Fatalf("after the refused config was taken back: %s %q", lb.Status, lb.StatusMessage)
+	}
+
+	// The second appliance, as a build puts it into the row.
+	f.mu.Lock()
+	f.guests["302"] = &lbGuest{packages: "installed", haproxy: true}
+	f.mu.Unlock()
+	lbPutIn(lb, lbAppliance{ServerID: "302", PrivateIP: "10.0.0.32"})
+	a = &lb.Appliances[0]
+	reloads, told := f.count("301 haproxy reload"), len(f.log)
+	apply()
+	b := &lb.Appliances[1]
+	if lb.Status != lbStatusActive || a.Role != "MASTER" || !a.HoldsVIP || a.State != lbAppUp || b.Role != "BACKUP" || b.HoldsVIP || b.State != lbAppUp {
+		t.Fatalf("with its peer: %s %q, %+v %+v\n%s", lb.Status, lb.StatusMessage, *a, *b, strings.Join(f.log[told:], "\n"))
+	}
+	if first, second := slices.Index(f.log[told:], "301 keepalived reload"), slices.Index(f.log[told:], "302 keepalived reload"); first < 0 || first > second {
+		t.Fatalf("the appliance that served alone learns of its peer before the peer's keepalived starts:\n%s", strings.Join(f.log[told:], "\n"))
+	}
+	if f.count("301 haproxy reload") != reloads {
+		t.Fatalf("the peer's arrival reloaded HAProxy on the appliance that serves:\n%s", strings.Join(f.log[told:], "\n"))
+	}
+	// The pair is now what a pair built at once is: the same keepalived config and hash on each, VRRP let in from
+	// the peer alone.
+	for i, peer := range []string{"10.0.0.32", "10.0.0.31"} {
+		app := lb.Appliances[i]
+		conf, err := pve.RenderKeepalived(pve.LBKeepalived{RouterID: lbRouterID(lb.ID), Self: app.PrivateIP, Peer: peer, TenantIface: "ens18", PublicIface: "ens19",
+			VIPs: lb.VIPs, Prefix: 24, Gateway: "203.0.113.1"})
+		if err != nil || f.guests[app.ServerID].disk[lbGuestKeepalived] != conf || app.KeepalivedHash != lbHash(conf+pve.LBPairFilesDigest("ens19")) {
+			t.Errorf("appliance %s: keepalived is not the pair's (%v):\n%s", app.ServerID, err, f.guests[app.ServerID].disk[lbGuestKeepalived])
+		}
+		if !slices.ContainsFunc(f.rules[app.ServerID], func(r pve.FirewallRule) bool { return r.Proto == "vrrp" && r.Source == peer }) {
+			t.Errorf("appliance %s: no VRRP rule from %s: %+v", app.ServerID, peer, f.rules[app.ServerID])
+		}
 	}
 }

@@ -1204,7 +1204,11 @@ The seventeen places where a Service behaves differently than with OCCM, on
 purpose:
 
 1. **One pair per cluster.** All Services of a cluster share one appliance pair; each still has an address of its
-   own, so a user sees what OCCM shows, one external IP per Service.
+   own, so a user sees what OCCM shows, one external IP per Service. The pair is built one appliance at a time, and
+   the first one serves as soon as it is ready: an address a Service shows answers, also while the second appliance
+   is still being built or could not be built yet (the platform tries again every five minutes; the balancer reads
+   `DEGRADED` meanwhile, with no standby). See "One appliance of a pair" in
+   [cloud-integration.md](cloud-integration.md).
 2. **No objects of OCCM's load balancer.** Names, ids, tags, flavors and zones of load balancers, listeners and pools do not exist,
    so there is no annotation about them.
 3. **Which Services are owned.** Class `proxcloud.io/lb`, and in default mode also no class; OCCM owns only

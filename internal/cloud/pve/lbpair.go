@@ -20,7 +20,7 @@ import (
 // LBKeepalived is one appliance's side of the pair.
 type LBKeepalived struct {
 	RouterID    int    // virtual_router_id, 1 to 255
-	Self, Peer  string // the two appliances' tenant addresses
+	Self, Peer  string // the two appliances' tenant addresses; no Peer: the appliance is alone (lbNoPeer)
 	TenantIface string // net0 in the guest
 	PublicIface string // net1 in the guest
 	VIPs        []string
@@ -38,6 +38,16 @@ const (
 	// lbPlaceholderVIP stands in when a pair serves no address: keepalived refuses an instance without one in
 	// virtual_ipaddress (2.3.3 and 2.3.4: "No VIP specified", spike S1). On loopback it answers nobody.
 	lbPlaceholderVIP = "192.0.2.1/32 dev lo"
+	// lbNoPeer is the unicast peer of an appliance that has none: the first of a pair until the second is built,
+	// or the one a replace left. It hears no advert, so it becomes master and holds the addresses, and its own
+	// adverts reach nobody: the kernel finds no neighbour for a loopback address on the tenant NIC, and no VRRP
+	// packet leaves the appliance (what does is the ARP request for it, which every host drops: the same one a
+	// second a pair sends for a peer that is down). Leaving unicast_peer out is not the way: keepalived 2.3 then
+	// falls back to multicast (and -t refuses the file), and multicast adverts meet every VRRP instance of the
+	// network with the same router id, a tenant's own among them (lbRouterID is one of 255). When the peer comes
+	// the config names it and keepalived reloads, which keeps its state and the addresses
+	// (test/integration/lb_lone_test.go).
+	lbNoPeer = "127.0.0.1"
 )
 
 var lbIfaceRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
@@ -45,6 +55,9 @@ var lbIfaceRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 // RenderKeepalived renders keepalived.conf for one appliance. Every value is checked here, since it comes from a
 // stored row and from the guest: an address must parse, an interface name must be a plain name.
 func RenderKeepalived(k LBKeepalived) (string, error) {
+	if k.Peer == "" {
+		k.Peer = lbNoPeer
+	}
 	self, err1 := netip.ParseAddr(k.Self)
 	peer, err2 := netip.ParseAddr(k.Peer)
 	switch {

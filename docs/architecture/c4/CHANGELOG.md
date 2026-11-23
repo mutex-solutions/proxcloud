@@ -4,6 +4,30 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: the first appliance of a pair serves
+
+**What changed:** no new component, container, listener or relation. One appliance of a pair now runs keepalived
+without a peer.
+
+- `internal/cloud/pve/lbpair.go`: `RenderKeepalived` takes no `Peer` and renders `lbNoPeer` (`127.0.0.1`) in
+  `unicast_peer`: the appliance is its own master and puts no advert on the wire. A config with a peer is byte for
+  byte what it was. `ReadVRRPState` runs the two "serving" checks in a subshell: the UDP check's loop variable was
+  the one that held "holds the address".
+- `internal/platform/project/cloud_lb_pair_pve.go`: `lbApplyPair` pushes keepalived to every running appliance,
+  with its peer or none, and HAProxy only where keepalived is; a refused push is logged at WARN (balancer,
+  appliance, which push; never the guest's words). `lbPushOrder`: an appliance keepalived never ran on comes after
+  one it runs on.
+- `internal/platform/project/cloud_lb_cluster_pve.go`: `lbClusterApply` states, for a cluster's pair with one
+  appliance, that the platform builds the second one.
+
+**Why:** drill Q0b of v0.11.1-rc.1. A cluster's pair is built one appliance per attempt, and the first one could
+not serve until the second existed: keepalived was pushed only with a peer, and keepalived's files are what let
+HAProxy bind an address. The Services showed an address that answered nobody for as long as the second appliance
+took (9 min 14 s on the lab, without end where a node has no room).
+
+**Diagrams updated:** none (no element or relation changed); `c4-code.md`, rows `lbApplyPair` and
+`RenderKeepalived`.
+
 ## 2026-11-23: chart 0.1.19 offered to new tenant clusters, and the consoles' layer 4 view
 
 **What changed:** no new component, container, listener or relation. The platform BOM pins cluster chart 0.1.19

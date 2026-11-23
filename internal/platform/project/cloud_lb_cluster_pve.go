@@ -549,6 +549,11 @@ func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.Extern
 	} else {
 		lb.settled = true // no appliance has ever held an address
 	}
+	// The first appliance of a cluster's pair serves alone until the second is built, and that one the platform
+	// builds itself (lbClusterBuild): the row says so, where a tenant's own pair is told to replace its appliances.
+	if err == nil && len(lb.Appliances) == 1 && lb.Status == lbStatusDegraded && !lbReplacing(lb, time.Now().UTC()) {
+		lb.StatusMessage = "One appliance carries the traffic, with no standby yet. The platform builds the second one itself; after a build that failed it tries again in a few minutes."
+	}
 	if err == nil && lb.settled && len(lb.Cluster.Releasing) > 0 {
 		err = h.lbReleaseVIPs(ctx, es, proj, lb)
 	}
