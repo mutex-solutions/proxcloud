@@ -1,10 +1,12 @@
 // Command lb-controller is the load balancer controller of one managed Kubernetes cluster. It runs on the platform
 // cluster next to the cluster's control plane (chart proxmox-kamaji-cluster, templates/lb-controller.yaml), reads the
-// tenant API through the Kamaji admin kubeconfig, and every ten seconds PUTs the cluster's whole load balancer state
-// to the portal's gateway (internal/cloud/lbgw) with the cluster's own credential. It owns the Services of type
+// tenant API through the Kamaji admin kubeconfig, and PUTs the cluster's whole load balancer state to the portal's
+// gateway (internal/cloud/lbgw) with the cluster's own credential. It owns the Services of type
 // LoadBalancer of class proxcloud.io/lb, and those without a class when started with -default; it holds them with the
 // finalizer proxcloud.io/load-balancer, writes their status.loadBalancer and turns the portal's answers into Events.
-// A poll, not a watch: a full list each turn means a PUT never comes from a half-filled cache. See docs/managed-k8s.md.
+// Every turn lists everything: a PUT never comes from a half-filled cache. With -watch (chart 0.1.19) a watch of the
+// Services, the Nodes and the Secrets the Services name says when to take a turn, and says nothing else (run);
+// without it a turn comes every -interval, as under charts 0.1.17 and 0.1.18. See docs/managed-k8s.md.
 //
 // What a Service's annotations mean is the portal's to say (internal/cloud/lbgw/annotations.go): the controller sends
 // the ones of the prefix proxcloud.io/lb-, and no other, as they are and says the Events the answer carries. The two
@@ -23,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/netip"
 	"os"
@@ -51,7 +54,12 @@ const (
 	toBeDeletedTaint = "ToBeDeletedByClusterAutoscaler"
 	// sentEvery is the least time between two sends of one Secret to the portal.
 	sentEvery = time.Minute
-	component = "proxcloud-lb-controller"
+	// resyncEvery is the longest a state that did not change goes unsent: the portal hears from a controller that
+	// is there, and what a turn could not see as a change is put right. debounce is how long a turn waits after a
+	// change, for the changes that come with it.
+	resyncEvery = 30 * time.Second
+	debounce    = time.Second
+	component   = "proxcloud-lb-controller"
 )
 
 func main() {
@@ -59,7 +67,8 @@ func main() {
 	gatewayURL := flag.String("gateway-url", "", "https://<host>:<port> of the portal's gateway listener")
 	gatewayDir := flag.String("gateway-dir", "/etc/lb-gateway", "the gateway Secret: token (lb@proxcloud!<id>=<secret>) and ca.crt")
 	defaultClass := flag.Bool("default", false, "also own the Services of type LoadBalancer without a class")
-	interval := flag.Duration("interval", 10*time.Second, "time between two turns")
+	interval := flag.Duration("interval", 10*time.Second, "time between two turns; with -watch, between two turns while the portal is still building or a turn failed")
+	watch := flag.Bool("watch", false, "watch the cluster's Services, Nodes and the TLS Secrets its Services name, and take a turn within a second of a change")
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	if !strings.HasPrefix(*gatewayURL, "https://") {
@@ -77,19 +86,115 @@ func main() {
 		os.Exit(1)
 	}
 	gw := &gateway{url: *gatewayURL, dir: *gatewayDir}
-	c := &controller{api: api, put: gw.put, defaultClass: *defaultClass, log: log}
+	c := &controller{api: api, put: gw.put, defaultClass: *defaultClass, log: log,
+		watching: *watch, interval: *interval, resync: resyncEvery, debounce: debounce}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	log.Info("lb-controller: started", "gateway", *gatewayURL, "default", *defaultClass, "protocol", lbgw.Protocol)
+	log.Info("lb-controller: started", "gateway", *gatewayURL, "default", *defaultClass, "protocol", lbgw.Protocol, "watch", *watch)
+	c.run(ctx)
+}
+
+// run takes turn after turn until ctx ends. A turn is always the whole of it: list everything, send the whole state.
+// What differs is when the next one comes.
+//
+// Watching: within debounce of a change of a Service, a Node or a Secret a Service names, and at the latest when the
+// state last sent is due again (turn: resync after a state the portal had, interval after one it had not). The
+// watches say only that something changed (kamajik8s.WatchServices): an event
+// that is lost, a stream that is down or an API server that forbids the watch costs time, never a wrong state.
+// While a turn left something open (the portal is building, a certificate is asked for, a write failed), and after
+// a turn that failed, the next one comes after interval as without a watch: the portal's answer changes without
+// anything changing in the cluster.
+//
+// Not watching: every interval.
+//
+// ponytail: every event of a Node is a turn, a kubelet's heartbeat too (one per node every five minutes), and a turn
+// lists every Node. With hundreds of nodes the heartbeats alone are a turn a second, which the debounce caps there.
+// If a cluster of that size shows it, wake only for what readNodes reads of a Node.
+func (c *controller) run(ctx context.Context) {
+	if c.watching {
+		c.wake, c.ctx = make(chan struct{}, 1), ctx
+		go c.api.WatchServices(ctx, c.changed("services"))
+		go c.api.WatchNodes(ctx, c.changed("nodes"))
+	}
 	for {
-		if err := c.turn(ctx); err != nil && ctx.Err() == nil {
-			log.Warn("lb-controller: turn", "err", err)
+		err := c.turn(ctx)
+		if err != nil && ctx.Err() == nil {
+			c.log.Warn("lb-controller: turn", "err", err)
+		}
+		wait := c.interval
+		if c.watching && err == nil && !c.open {
+			wait = max(time.Until(c.again), 0)
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(*interval):
+		case <-time.After(wait):
+		case <-c.wake:
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(c.debounce):
+			}
+			select { // what came meanwhile is in the turn that starts now
+			case <-c.wake:
+			default:
+			}
 		}
+	}
+}
+
+// changed is what one watch calls: it asks for a turn. A watch that fails is said once per failure, not at each of
+// its attempts.
+func (c *controller) changed(what string) func(error) {
+	last := ""
+	return func(err error) {
+		msg := ""
+		if err != nil {
+			msg = err.Error()
+		}
+		if msg != "" && msg != last {
+			c.log.Warn("lb-controller: watch", "of", what, "err", msg)
+		}
+		last = msg
+		select {
+		case c.wake <- struct{}{}:
+		default: // a turn is asked for already
+		}
+	}
+}
+
+// follow keeps a watch on each Secret the Services of this turn name, and on no other: one watch per name, in the
+// Service's namespace, ended when no Service names the Secret any more. A cluster's balancer holds at most
+// lbgw.MaxClusterCerts certificates, so no more Secrets than that are watched; one beyond is read at the resync.
+func (c *controller) follow(req *lbgw.Request) {
+	if !c.watching {
+		return
+	}
+	named := map[string]bool{}
+	for _, s := range req.Services {
+		for _, ref := range s.Certificates {
+			if ref.Secret != "" {
+				named[s.Namespace+"/"+ref.Secret] = true
+			}
+		}
+	}
+	for key, stop := range c.secrets {
+		if !named[key] {
+			stop()
+			delete(c.secrets, key)
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(named)) {
+		if c.secrets[key] != nil || len(c.secrets) >= lbgw.MaxClusterCerts {
+			continue
+		}
+		if c.secrets == nil {
+			c.secrets = map[string]context.CancelFunc{}
+		}
+		ctx, stop := context.WithCancel(c.ctx)
+		c.secrets[key] = stop
+		ns, name, _ := strings.Cut(key, "/")
+		go c.api.WatchSecret(ctx, ns, name, c.changed("secret "+key))
 	}
 }
 
@@ -204,6 +309,11 @@ type tenantAPI interface {
 	CreateCore(ctx context.Context, plural string, obj map[string]any) error
 	// GetSecret is the controller's one read of a Secret: one name in one namespace (certificates).
 	GetSecret(ctx context.Context, ns, name string) (typ string, data map[string][]byte, found bool, err error)
+	// The watches, each until ctx ends: changed is called when something changed, and with the error when a
+	// stream failed. WatchSecret is of one name in one namespace (follow): there is no watch of all Secrets.
+	WatchServices(ctx context.Context, changed func(error))
+	WatchNodes(ctx context.Context, changed func(error))
+	WatchSecret(ctx context.Context, ns, name string, changed func(error))
 }
 
 type controller struct {
@@ -224,6 +334,20 @@ type controller struct {
 	// sent is when the Secret of each hash was last sent to the portal (turn).
 	// ponytail: per process; a controller that starts may send a Secret the portal asks for once more.
 	sent map[string]time.Time
+
+	// When a turn comes (run). The zero values are a controller that sends at every turn.
+	watching                   bool
+	interval, resync, debounce time.Duration
+	ctx                        context.Context               // run's, for the watches
+	wake                       chan struct{}                 // a watch asks for a turn
+	secrets                    map[string]context.CancelFunc // the watches of Secrets, by namespace/name (follow)
+	// lastReq is the state the portal last answered, as it was sent without certificate data, and lastAns its
+	// answer: an equal state is not sent again before again, the answer stands for it until then (turn).
+	lastReq []byte
+	lastAns *lbgw.Answer
+	again   time.Time
+	// open: the last turn left something for the next one, which is therefore sent whatever its state.
+	open bool
 }
 
 // service is what a turn reads of one Service.
@@ -245,6 +369,8 @@ func (c *controller) turn(ctx context.Context) error {
 	if c.events == nil {
 		c.events, c.hosts = map[string]string{}, map[string]string{}
 	}
+	wasOpen := c.open
+	c.open = false
 	items, err := c.api.ListServicesAllNamespaces(ctx)
 	if err != nil {
 		return fmt.Errorf("list services: %w", err)
@@ -275,6 +401,7 @@ func (c *controller) turn(ctx context.Context) error {
 			// Without the finalizer a delete would not wait for the portal: such a Service is sent from the next turn.
 			if err := c.setFinalizers(ctx, s, append(slices.Clone(s.finalizers), Finalizer)); err != nil {
 				c.log.Warn("lb-controller: add finalizer", "service", s.ns+"/"+s.name, "err", err)
+				c.open = true
 				continue
 			}
 		}
@@ -288,7 +415,29 @@ func (c *controller) turn(ctx context.Context) error {
 		req.Services = append(req.Services, s.wire)
 		owned = append(owned, s)
 	}
-	ans, err := c.put(ctx, req)
+	c.follow(req)
+	// A state equal to the one the portal last answered is not sent again before the resync: a Node's heartbeat
+	// is a list and no request. The last answer then stands for it, and the rest of the turn runs as after a send,
+	// so a status or an Event that could not be written is written now. A turn the last one left open is sent.
+	//
+	// A state the portal did not have is answered before the portal's pass over the appliances, which starts
+	// with the request (project.LBClusterState): the answer says each Service as the balancer served it until
+	// then, a refused Service that was put right still refused, and a pass that was running leaves the new state
+	// to the next request. So a state that changed is sent once more after interval, as every state was before
+	// there was a watch, and the answer to that one stands until the resync.
+	state, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	ans := c.lastAns
+	changed := !bytes.Equal(state, c.lastReq)
+	if now := time.Now(); ans == nil || wasOpen || changed || !now.Before(c.again) {
+		c.lastAns, c.again = nil, now.Add(c.resync)
+		if changed {
+			c.again = now.Add(min(c.interval, c.resync))
+		}
+		ans, err = c.put(ctx, req)
+	}
 	if err == nil && len(ans.NeedCertificates) > 0 {
 		// The portal holds no certificate for these hashes: a new Secret, or one that changed. Their Secrets are
 		// sent now, once, and only the ones a Service of this turn names: the portal cannot ask for another.
@@ -308,8 +457,13 @@ func (c *controller) turn(ctx context.Context) error {
 			}
 		}
 		if len(req.CertificateData) > 0 {
+			c.lastAns = nil
 			ans, err = c.put(ctx, req)
 		}
+	}
+	if err == nil {
+		c.lastReq, c.lastAns = state, ans
+		c.open = c.open || len(ans.NeedCertificates) > 0
 	}
 	if err != nil {
 		var rf *lbgw.Refusal
@@ -377,6 +531,7 @@ func (c *controller) turn(ctx context.Context) error {
 				msg = "The portal is building the cluster's load balancer"
 			}
 			c.report(ctx, s, "state", "Normal", "EnsuringLoadBalancer", msg)
+			c.open = true // the portal says ready in an answer to come
 		}
 		if s.loadBalancerIP != "" {
 			c.report(ctx, s, "ip", "Warning", "LoadBalancerIPIgnored",
@@ -429,6 +584,7 @@ func (c *controller) turn(ctx context.Context) error {
 		c.report(ctx, s, "delete", "Normal", "DeletingLoadBalancer", "Deleting load balancer")
 		if err := c.setFinalizers(ctx, s, slices.DeleteFunc(slices.Clone(s.finalizers), func(f string) bool { return f == Finalizer })); err != nil {
 			c.log.Warn("lb-controller: remove finalizer", "service", s.ns+"/"+s.name, "err", err)
+			c.open = true
 			continue
 		}
 		c.report(ctx, s, "deleted", "Normal", "DeletedLoadBalancer", "Deleted load balancer")
@@ -447,7 +603,8 @@ func (c *controller) turn(ctx context.Context) error {
 // asks for the hash, and dropped with the turn.
 //
 // What the controller may read of the tenant's Secrets is decided here, since its kubeconfig could read them all:
-// only a Secret an owned Service names, by a GET of that name (it never lists or watches Secrets), only in the
+// only a Secret an owned Service names, by a GET of that name (it never lists Secrets, and the one watch it has is
+// of that name and reads nothing: follow), only in the
 // Service's own namespace (a name with a namespace in it is no name: lbgw.TLSSecretNames), and only one of type
 // kubernetes.io/tls: a Secret of another type is not hashed, not kept and not sent. Nothing of a Secret is logged.
 //
@@ -728,6 +885,7 @@ func (c *controller) setStatus(ctx context.Context, s *service, address string) 
 	}
 	if err := c.api.PatchServiceStatus(ctx, s.ns, s.name, map[string]any{"status": map[string]any{"loadBalancer": map[string]any{"ingress": ingress}}}); err != nil {
 		c.log.Warn("lb-controller: status", "service", s.ns+"/"+s.name, "err", err)
+		c.open = true
 		return
 	}
 	s.ingress = want

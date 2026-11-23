@@ -229,7 +229,7 @@ spec:
           image: "ghcr.io/mutex-solutions/proxcloud-api:v0.11.0"
           command: ["/usr/local/bin/lb-controller"]
           args: ["--gateway-url=https://192.0.2.7:8444", "--default=true",
-                 "--kubeconfig=/etc/tenant/kubeconfig", "--gateway-dir=/etc/lb-gateway"]
+                 "--kubeconfig=/etc/tenant/kubeconfig", "--gateway-dir=/etc/lb-gateway", "--watch=true"]
           securityContext: {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"seccompProfile":{"type":"RuntimeDefault"}}
           resources: {requests: {cpu: 10m, memory: 32Mi}}
           volumeMounts:

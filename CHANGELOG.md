@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Chart 0.1.19 of a Kubernetes cluster needs the controller image of this release.** The chart starts the
+  cluster's load balancer controller with `--watch=true`, which the image of v0.11.0 does not know and exits at.
+  Moving a cluster to the chart sets the controller's image to the portal's, so an upgrade is safe. The one way
+  into the wrong pair is a portal rolled back to v0.11.0 that is then asked to "Enable load balancer controller"
+  again, or to set the chart version, on a cluster that is on 0.1.19: do neither while the portal is rolled back.
+  The Services of such a cluster stay as they were last served until the controller runs again.
+- **A cluster's unchanged load balancer state reaches the portal every 30 s, where it was every 10 s.** This holds
+  for every cluster whose controller runs this release's image, on any chart. The console's "the controller last
+  reported" therefore reads up to a minute and a half.
+
 - **A Service that ends TLS with a Secret loses its address if the portal is rolled back to v0.11.0.** That portal
   ends no TLS and would hand the port to the pods without it, so the cluster's controller does not send it such a
   Service: the address goes back, the Service says `TLSNotAvailable`, and it gets a new address when the portal is
@@ -47,6 +57,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   UID>-<node port>`, in the row and in `GET_HEALTH`. Nothing reads them but people.
 
 ### Added
+
+- **The load balancer controller watches the cluster: a change of a Service or a node is at the portal within 2
+  seconds** (`cmd/lb-controller`, `internal/cloud/kamajik8s/watch.go`, cluster chart `proxmox-kamaji-cluster` 0.1.19;
+  "The controller" in [managed-k8s.md](docs/managed-k8s.md)). Until now the controller listed the cluster every 10 s
+  and sent its whole state each time. With chart 0.1.19 it watches the Services, the Nodes and the TLS Secrets its
+  Services name, and takes its turn one second after a change.
+  - **The watch is only a trigger.** A turn is what it was: list everything, send the whole state. An event that is
+    lost or a stream that is down costs time, never a wrong state, and a state that did not change is still sent
+    every 30 s.
+  - **Fewer requests.** A state equal to the one the portal last answered is not sent again before those 30 s: a
+    kubelet's heartbeat is a list on the cluster and nothing at the portal. While the portal is building, the
+    controller asks every 10 s as before, and a state that changed is sent once more 10 s later: the portal
+    answers a new state before its pass over the appliances, so the second request brings what the pass made of
+    it (the address of a Service that was refused and put right) and starts the pass a running one skipped. This
+    part also holds for clusters on charts 0.1.17 and 0.1.18, which keep polling every 10 s.
+  - **No library.** A raw watch over HTTP on the product's own cluster client: streams of 5 minutes that go on
+    from the last resourceVersion, a new start after `410 Gone`, a wait that grows to 30 s while the API server is
+    down.
+  - **Secrets.** A Secret is watched by its name, only while a Service names it, at most 16 per cluster; the
+    controller still never lists Secrets and reads one only with a GET of its name. A renewed certificate is on the
+    balancer seconds after cert-manager wrote it.
+  - **The chart.** 0.1.19 adds the argument `--watch=true` to the controller and nothing else: no value, no RBAC,
+    no NetworkPolicy rule. It is in the source and not offered yet: the provider's chart version follows in this
+    release.
+  - Not run on a lab. Tested against an API server over HTTP that streams as kube-apiserver does (events for the
+    controller's own writes, bookmarks, `410 Gone`, streams cut off), not against a real one.
 
 - **Kubernetes Services: TLS ends on the cluster's load balancer, with the certificate of a Secret**
   (`internal/cloud/lbgw/tls.go`, `cmd/lb-controller`, `internal/platform/project/cloud_lb_cluster_tls.go`;

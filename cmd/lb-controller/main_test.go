@@ -38,8 +38,14 @@ type fakeSecret struct {
 	data map[string][]byte
 }
 
-// GetSecret answers as the API server does for a GET of one Secret: there is no other way to a Secret here, so a
-// controller that listed or watched them would not compile against the fake.
+// The fake has no watch: its tests take their turns themselves. The controller with its watches runs against an API
+// server over HTTP in watch_test.go.
+func (f *fakeTenant) WatchServices(context.Context, func(error))               { panic("watch") }
+func (f *fakeTenant) WatchNodes(context.Context, func(error))                  { panic("watch") }
+func (f *fakeTenant) WatchSecret(context.Context, string, string, func(error)) { panic("watch") }
+
+// GetSecret answers as the API server does for a GET of one Secret: there is no other read of a Secret here, so a
+// controller that listed them, or watched more than one name (WatchSecret), would not compile against the fake.
 func (f *fakeTenant) GetSecret(_ context.Context, ns, name string) (string, map[string][]byte, bool, error) {
 	f.reads = append(f.reads, ns+"/"+name)
 	if f.forbidden {

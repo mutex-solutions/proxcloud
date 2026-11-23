@@ -148,7 +148,7 @@ class ReleaseContractTests(unittest.TestCase):
 
     def test_managed_chart_versions_stay_independent(self):
         self.assertEqual(read_yaml("deploy/charts/database-cluster/Chart.yaml")["version"], "0.5.2")
-        self.assertEqual(read_yaml("deploy/charts/proxmox-kamaji-cluster/Chart.yaml")["version"], "0.1.18")
+        self.assertEqual(read_yaml("deploy/charts/proxmox-kamaji-cluster/Chart.yaml")["version"], "0.1.19")
         self.assertEqual(read_yaml("deploy/charts/proxcloud-sandbox/Chart.yaml")["version"], "0.1.0")
 
     def test_chart_goldens_render_with_the_helm_that_made_them(self):

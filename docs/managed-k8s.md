@@ -865,7 +865,8 @@ call for its own cluster, and minting it again rotates it.
   annotation of a Service is in the body, and a value over 256 characters is sent cut (below).
 - The answer is the state as it is: per Service `ready` with its address, `building`, or `refused`. Nothing is built in
   the request: the state is stored (`lbGatewayState`) and a converge starts when there is something to converge. The
-  controller sends its state every 10 s whether it changed or not, and a pass over the pair costs about 16 Proxmox
+  controller sends its state when it changes and, unchanged, every 30 s (a controller of v0.11.0 every 10 s, whether
+  it changed or not), and a pass over the pair costs about 16 Proxmox
   calls, so a PUT starts one only when the state is not the one the last pass applied, when that pass left the
   balancer unsettled (building, `DEGRADED`, an address still to give back), or when the last look at a settled
   balancer is a minute old (`lbPassDue`; kept per API process, so the first PUT after a restart always starts one).
@@ -981,8 +982,36 @@ of its namespace on 6443 and the gateway's address and port (any address when th
 else: it reads objects the tenant writes from inside the cluster that also holds kamaji-etcd. The binary is the
 second one of the `proxcloud-api` image: no image, tag or workflow of its own.
 
-- Every 10 s it lists every Service and Node and PUTs the whole state: a poll, not a watch, so a PUT never comes from a
-  half-filled cache (a watch when a cluster has hundreds of Services). It owns a Service of type LoadBalancer of class
+- A turn lists every Service and Node and PUTs the whole state, so a PUT never comes from a half-filled cache. When a
+  turn comes depends on the cluster's chart.
+  - **From chart 0.1.19 (`--watch`)** the controller watches the Services, the Nodes and the TLS Secrets its Services
+    name, and a turn comes one second after a change: a new Service, a changed port or annotation, a node that joins
+    or leaves, a Service that is deleted is at the portal within 2 seconds. The watch is a trigger and nothing more:
+    it says that something changed, the turn lists everything and decides from the list. An event that is lost, a
+    stream that is down or an API server that refuses the watch therefore costs time and never gives a wrong state.
+  - **A state that did not change is sent every 30 s** and not in between: a kubelet's heartbeat is a list and no
+    request, and so are the controller's own writes when they come back to it as events. The portal's last answer
+    stands for the state until then. While that answer leaves something open (the portal is still building, it asked
+    for a certificate, a status or a finalizer could not be written), and after a turn that failed, the controller
+    asks again every 10 s (`-interval`), since the portal's answer changes without anything changing in the cluster.
+  - **A state that changed is sent twice:** at once, and once more 10 s later (`-interval`). The portal answers a
+    state it did not have before its pass over the appliances, which starts with the request: the first answer says
+    each Service as the balancer served it until then (a refused Service that was put right is still answered
+    refused), and a pass that was running leaves the new state to the next request. The second request brings the
+    answer of the pass, and that one stands until the 30 s. Under an older chart the turn after a change does the
+    same.
+  - **A watch is a plain HTTP request** on the controller's own client, no informer and no cache
+    (`internal/cloud/kamajik8s/watch.go`): the API server is asked to keep a stream for 5 minutes, and the next one
+    starts at the resourceVersion the last one reached (events and bookmarks carry it), so nothing happens unseen
+    between two streams. After `410 Gone` the next stream starts without one and the API server sends every object
+    again. Every end of a stream, whatever ended it, is a turn. Between two streams there is 1 s; after a stream in
+    which the API server said nothing the wait doubles, up to 30 s, so an API server that is down, or one that
+    answers and hangs up, is asked twice a minute and not in a loop. A connection that died silently is given up 30 s
+    after the time the stream should have ended. All the while the 30 s resync goes on.
+  - **Under charts 0.1.17 and 0.1.18** the same image runs without `--watch`: a turn every 10 s (`-interval`), as
+    before, and of those turns the ones whose state did not change are sent every 30 s.
+
+  It owns a Service of type LoadBalancer of class
   `proxcloud.io/lb`, and in default mode also one without a class; never `proxcloud.io/internal` or another class.
   Which nodes are members is two rules, and both must hold. The first is Kubernetes' own service controller's
   (`k8s.io/cloud-provider` `controllers/service/controller.go`, `stableNodeSetPredicates`: `nodeNotDeletedPredicate`,
@@ -1041,8 +1070,8 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   price is paid only while the portal is rolled back: a turn of a cluster whose Services use protocol 2 is two
   requests, and the old portal logs and audits the refused one each turn. A Service that asks for an internal
   balancer (below) is left out of that request and gets the Event `InternalNotSupported` from the controller: a
-  portal of protocol 1 reads no annotation and would give it a public address. `-interval` is unchanged, so this
-  release's image runs under chart 0.1.17.
+  portal of protocol 1 reads no annotation and would give it a public address. `-interval` is unchanged and the
+  watch is off unless the chart asks for it, so this release's image runs under charts 0.1.17 and 0.1.18.
 
 **Load balancers of a cluster's Services: UDP, affinity, annotations, and how it differs from OCCM.** OCCM is
 the upstream cloud controller manager that tenants' charts for load balancer Services on a private cloud are mostly
@@ -1237,13 +1266,18 @@ spec:
   cluster's admin kubeconfig, so the tenant API would let it read every Secret; nothing in the tenant cluster's
   RBAC is changed or added for this. The limit is in its code and its tests: it reads a Secret only with a GET of
   one name (`GET /api/v1/namespaces/<the Service's namespace>/secrets/<name>`), only a name an owned Service's
-  annotation gives, each turn; it never lists or watches Secrets; a Secret of another type is read and dropped,
-  neither hashed nor sent. Its whole use of the tenant API is: list Services and Nodes, patch a Service (the
-  finalizer) and its status, create Events, get these Secrets. An identity of its own with exactly those rights
-  (`services` get, list, watch, patch; `services/status` patch; `nodes` get, list, watch; `events` create, patch;
-  `secrets` get) is a later hardening together with the CSI controller's; a controller given such an identity
-  without `secrets get` serves every other Service and says `InvalidCertificate` ("may not be read by the
-  cluster's load balancer controller") on the ones that name a Secret.
+  annotation gives, each turn; it never lists Secrets; a Secret of another type is read and dropped,
+  neither hashed nor sent. From chart 0.1.19 it also watches each of these Secrets, to learn that it changed: one
+  watch per name (`GET /api/v1/namespaces/<the Service's namespace>/secrets?watch=1&fieldSelector=metadata.name=<name>`),
+  never a watch of a namespace's Secrets, at most 16 at a time (what a cluster's balancer holds), ended when no
+  Service names the Secret any more. Nothing is read from that stream but an event's type and resourceVersion; the
+  GET stays the one read. Its whole use of the tenant API is: list and watch Services and Nodes, patch a Service
+  (the finalizer) and its status, create Events, get and watch these Secrets. An identity of its own with exactly
+  those rights (`services` get, list, watch, patch; `services/status` patch; `nodes` get, list, watch; `events`
+  create, patch; `secrets` get, watch) is a later hardening together with the CSI controller's; a controller given
+  such an identity without `secrets get` serves every other Service and says `InvalidCertificate` ("may not be read
+  by the cluster's load balancer controller") on the ones that name a Secret, and one without `secrets watch` sees
+  a renewed Secret at the next resync, within 30 s.
 - **What crosses to the portal.** Each turn, per Service, the Secrets' names and a SHA-256 of each one's
   certificate and key. The portal answers with the hashes it holds no certificate for, and the controller sends
   those Secrets once, in a second request of the same turn. A Secret that did not change is never sent again, and
@@ -1260,7 +1294,8 @@ spec:
   [cloud-integration.md](cloud-integration.md) says of project certificates: the sealed row, the appliances' disks, and
   with them the portal's backups and a node-level backup of an appliance. A portal without an encryption key
   takes no certificate (`TLSNotAvailable`).
-- **A Secret that changes.** The controller reads the Secret every turn (10 s), so a renewed certificate (by
+- **A Secret that changes.** The controller reads the Secret every turn, and a turn comes a second after the Secret
+  changed (chart 0.1.19; within 30 s if its watch is down, every 10 s under an older chart), so a renewed certificate (by
   cert-manager, say) is a new hash: one upload, a new file on both appliances, one reload that drops no
   connection. The old file leaves the appliances after the new config is served, the old row a few minutes later.
 - **A Secret that is deleted, or cannot be used.** A Service is never served without the TLS it asks for, and a
@@ -1278,8 +1313,9 @@ spec:
   upgraded again. Take the annotation off first if the address matters more than the TLS.
 - A cluster made before v0.11.1 gets all of this when it is moved to the provider's chart version or given "Enable
   load balancer controller" again: the controller is the portal image's. No chart value and no tenant RBAC is new.
+  The watch is what chart 0.1.19 adds: on 0.1.17 and 0.1.18 the same controller polls.
 
-Not run on a lab: UDP from a Service, the affinity, the annotations, TLS from a Secret, the Events and the
+Not run on a lab: the watch, UDP from a Service, the affinity, the annotations, TLS from a Secret, the Events and the
 step-down for an older portal are tested on fakes of the tenant cluster and of Proxmox, and against the HAProxy and
 keepalived of both appliance images in containers. The one lab figure in this section is the spike's, where it is
 named.
