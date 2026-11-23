@@ -4,6 +4,32 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-24: the applied-state read proves the certificate files (#448)
+
+**What changed:** no new component, container, listener or relation. The state read of a load balancer appliance
+answers one thing more, and a push writes fewer files.
+
+- `internal/cloud/pve/lbtls.go`: `lbCertStateFn` defines `certstate`, three commands that print the mode and owner
+  of the certificate directory and of each file in it and each file's SHA-256. `lbCertFaults` holds that against
+  the files a config names and answers which are missing, other bytes than the portal would write, or not root's
+  alone, with a text that names a file by the start of its name.
+- `internal/cloud/pve/lb.go` (`HAProxyServing`) and `lbpair.go` (`ReadVRRPState`, `VRRPState.CertFiles`) take the
+  certificate files of the config and run `certstate` in the command they already send. Without a certificate
+  the command is the one of before, to the byte.
+- `internal/platform/project/cloud_lb_pve.go` (`lbApplyLocked`) and `cloud_lb_pair_pve.go` (`lbApplyPair`): a
+  balancer in line whose certificate files are not as a push leaves them takes the existing branch that pushes
+  again; on a pair only the appliance concerned, the standby first.
+
+**Why:** drill Q3 of v0.11.1-rc.1 (Q3-1). HAProxy serves a certificate from memory, so a file truncated on the
+appliance changed nothing: the row read `ACTIVE`, nothing pushed, and `haproxy -c` on the config in use answered 1.
+HAProxy refuses the whole config at its next start, so a reboot would have taken every listener of the balancer
+down, the plain ones too, until the next services sync. The config's hash covers the files' names, not their
+bytes. The digest was chosen over `haproxy -c` because a file's name is the hash of the chain and not of the file,
+the portal holds the bytes to compare with, and the same read says which file to write again, where a mode is
+wrong and whether a valid file was exchanged for another; no digest is in a command line or a log.
+
+**Diagrams updated:** none (c4-code.md: the rows of `lbtls.go`, `lb.go` and `lbpair.go`).
+
 ## 2026-11-23: the public addresses in use, in the quota read (#446)
 
 **What changed:** no new component, container, listener or relation; no architecture impact. One read gains a

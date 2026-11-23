@@ -85,11 +85,12 @@ func TestLBPairRecordsOnlyWhatIsServed(t *testing.T) {
 	if lb.Status != lbStatusActive || app("302").HAProxyHash == "" || f.count("302 haproxy reload") != 2 || f.count("301 haproxy reload") != 1 {
 		t.Fatalf("the pass after: %s %q, %+v, log %v", lb.Status, lb.StatusMessage, lb.Appliances, f.log)
 	}
-	// Nothing changed: nothing written, one state read per appliance.
-	writes, reads := len(f.log), f.reads
+	// Nothing changed: nothing written, one state read per appliance, and that read is the pass's only command in
+	// a guest. A balancer without a TLS listener is not asked for certificate files (the check of v0.11.1-rc.2).
+	writes, reads, execs := len(f.log), f.reads, f.execs
 	apply()
-	if lb.Status != lbStatusActive || len(f.log) != writes || f.reads != reads+2 {
-		t.Fatalf("a quiet pass: %s, wrote %v, %d state reads", lb.Status, f.log[writes:], f.reads-reads)
+	if lb.Status != lbStatusActive || len(f.log) != writes || f.reads != reads+2 || f.execs != execs+2 || f.certReads != 0 {
+		t.Fatalf("a quiet pass: %s, wrote %v, %d state reads, %d commands, %d of them asked for certificate files", lb.Status, f.log[writes:], f.reads-reads, f.execs-execs, f.certReads)
 	}
 
 	// The drill's appliance: the hash is recorded, HAProxy's master has a worker, and it runs the package's config.
@@ -191,11 +192,12 @@ func TestLBSingleRecordsOnlyWhatIsServed(t *testing.T) {
 	if lb.Status != lbStatusActive || hash == "" || hash != lbHash(pve.RenderHAProxy(lb.LBSpec)) {
 		t.Fatalf("applied: %s %q", lb.Status, hash)
 	}
-	// In line: asked once, nothing written.
-	writes, reads := len(f.log), f.reads
+	// In line: asked once, nothing written. That one read is the pass's only command in the guest, and without a
+	// TLS listener it does not ask for certificate files (the check of v0.11.1-rc.2 costs such a balancer nothing).
+	writes, reads, execs := len(f.log), f.reads, f.execs
 	apply()
-	if lb.Status != lbStatusActive || len(f.log) != writes || f.reads != reads+1 || lb.AppliedHash != hash {
-		t.Fatalf("a quiet pass: %s, wrote %v, %d reads", lb.Status, f.log[writes:], f.reads-reads)
+	if lb.Status != lbStatusActive || len(f.log) != writes || f.reads != reads+1 || f.execs != execs+1 || f.certReads != 0 || lb.AppliedHash != hash {
+		t.Fatalf("a quiet pass: %s, wrote %v, %d reads, %d commands, %d of them asked for certificate files", lb.Status, f.log[writes:], f.reads-reads, f.execs-execs, f.certReads)
 	}
 	// The agent does not answer: nothing new is known, nothing changes.
 	f.set("301", func(g *lbGuest) { g.agentDown = true })

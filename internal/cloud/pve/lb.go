@@ -842,19 +842,28 @@ func (s *Service) swapHAProxy(ctx context.Context, node string, vmid int, config
 
 // HAProxyServing asks a single appliance whether HAProxy runs and listens on every bind of its config, and what is
 // missing when it does not. With hash, the sha256 of the config that was applied, the file on the appliance must be
-// that one too: listeners alone say nothing of a file edited by hand (spike of v0.11.1, SP-2).
-func (s *Service) HAProxyServing(ctx context.Context, node string, vmid int, hash string) (serving bool, why string, err error) {
-	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbServingFn+"serving && echo ok $(sha256sum < "+haproxyConfig+" | cut -c1-64)")
+// that one too: listeners alone say nothing of a file edited by hand (spike of v0.11.1, SP-2). With certs, the
+// certificate files that config names, each must be on the appliance as a push leaves it (lbCertFaults): HAProxy
+// serves from memory while a file is damaged or gone, and refuses its whole config at its next start (drill Q3-1 of
+// v0.11.1-rc.1). The files are asked for in the same command; without certs the command is the one of before.
+func (s *Service) HAProxyServing(ctx context.Context, node string, vmid int, hash string, certs ...LBCertFile) (serving bool, why string, err error) {
+	script := lbServingFn + "serving && echo ok $(sha256sum < " + haproxyConfig + " | cut -c1-64)"
+	if len(certs) > 0 {
+		script = lbCertStateFn + script + " && certstate"
+	}
+	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", script)
 	if err != nil {
 		return false, "", err
 	}
 	out = strings.TrimSpace(out)
-	sum, ok := strings.CutPrefix(out, "ok")
+	line, files, _ := strings.Cut(out, "\n")
+	sum, ok := strings.CutPrefix(line, "ok")
 	switch sum = strings.TrimSpace(sum); {
 	case exit == 0 && ok && sum != "" && hash != "" && sum != hash:
 		return false, "HAProxy's configuration file is not the one that was applied", nil
 	case exit == 0 && ok:
-		return true, "", nil
+		_, why := lbCertFaults(files, certs)
+		return why == "", why, nil
 	case out == "":
 		return false, "", fmt.Errorf("haproxy state: exit %d %s", exit, strings.TrimSpace(stderr))
 	}

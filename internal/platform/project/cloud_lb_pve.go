@@ -574,8 +574,10 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 	if hash == lb.AppliedHash {
 		// The recorded hash is the product's word that the appliance serves this config, so ask it. One that does
 		// not (HAProxy stopped, or running the package's own config) is pushed again below, which starts HAProxy
-		// with the config: it is the product's own service. No answer says nothing new.
-		serving, why, err := ps.HAProxyServing(ctx, vm.Node, vm.VMID, hash)
+		// with the config: it is the product's own service. No answer says nothing new. The same question covers
+		// the certificate files the config names: HAProxy serves from memory while one is damaged or gone and would
+		// not start again, so the push below writes it again while nothing is down yet.
+		serving, why, err := ps.HAProxyServing(ctx, vm.Node, vm.VMID, hash, certs...)
 		switch {
 		case err != nil:
 			slog.Warn("load balancer: state", "project", proj.ID, "lb", lb.ID, "err", err)

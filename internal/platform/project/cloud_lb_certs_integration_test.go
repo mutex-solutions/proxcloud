@@ -292,6 +292,92 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 		t.Errorf("the first certificate is not the new one:\n%s", last)
 	}
 
+	// A certificate file damaged on an appliance while HAProxy serves from memory (drill Q3-1 of v0.11.1-rc.1: the
+	// row read ACTIVE, nothing pushed, and HAProxy would have refused its whole config at its next start). The state
+	// read of the pass asks for the files of the config in the command it already sent; the appliance whose files
+	// are not as a push leaves them is pushed again, the other is not, and with both the standby comes first. HAProxy
+	// is never stopped for it: what a heal costs is the one reload of a push.
+	file1, err := h.lbCertOpen(c1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file2, err := h.lbCertOpen(c2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath := func(file string) string { return lbGuestCertDir + "/" + file + ".pem" }
+	pushOf := func(vm string, files ...string) []string {
+		out := []string{vm + " certificate directory"}
+		for _, file := range files {
+			out = append(out, vm+" write "+certPath(file)+".new")
+		}
+		return append(out, vm+" certificate install", vm+" write config", vm+" reload")
+	}
+	for _, c := range []struct {
+		what   string
+		damage map[string]func(g *lbGuest)
+		want   []string
+		logged string
+	}{
+		{"a file truncated on the appliance that holds the address", map[string]func(g *lbGuest){"302": func(g *lbGuest) { g.disk[certPath(c1.File)] = "" }},
+			pushOf("302", c2.File, c1.File), "Certificate file " + c1.File[:12] + " is not the file that was written"},
+		{"a file deleted on the standby", map[string]func(g *lbGuest){"301": func(g *lbGuest) { delete(g.disk, certPath(c2.File)) }},
+			pushOf("301", c2.File, c1.File), "Certificate file " + c2.File[:12] + " is missing"},
+		{"a file anybody reads on one, a file gone on the other", map[string]func(g *lbGuest){
+			"301": func(g *lbGuest) { g.certMode = map[string]string{certPath(c1.File): "644:root:root"} },
+			"302": func(g *lbGuest) { delete(g.disk, certPath(c1.File)) }},
+			append(pushOf("301", c2.File, c1.File), pushOf("302", c2.File, c1.File)...), "Certificate file " + c1.File[:12] + " is not root's alone"},
+		{"a directory anybody enters", map[string]func(g *lbGuest){"301": func(g *lbGuest) { g.certMode = map[string]string{lbGuestCertDir: "755:root:root:directory"} }},
+			pushOf("301", c2.File, c1.File), "The certificate directory is missing or is not root's alone"},
+	} {
+		for vm, change := range c.damage {
+			f.set(vm, change)
+		}
+		reloads := f.count("301 haproxy reload") + f.count("302 haproxy reload")
+		mark = len(wire)
+		status, err := h.pveLBApply(ctx, es, proj, "lb-abc")
+		if got := saved(); err != nil || status != lbStatusActive || got.StatusMessage != "" || !slices.Equal(events(mark), c.want) ||
+			f.count("301 haproxy reload")+f.count("302 haproxy reload") != reloads+len(c.damage) {
+			t.Fatalf("%s: %s %v %q, wrote\n%s\nwant\n%s", c.what, status, err, got.StatusMessage, strings.Join(events(mark), "\n"), strings.Join(c.want, "\n"))
+		}
+		for _, vm := range []string{"301", "302"} {
+			f.set(vm, func(g *lbGuest) {
+				if g.disk[certPath(c1.File)] != file1.PEM || g.disk[certPath(c2.File)] != file2.PEM || len(g.certMode) != 0 || len(g.certFiles()) != 2 || !g.serving() {
+					t.Errorf("%s: appliance %s after the pass: files %v, modes %v, serving %v", c.what, vm, g.certFiles(), g.certMode, g.serving())
+				}
+			})
+		}
+		logMu.Lock()
+		if !strings.Contains(logs.String(), c.logged) {
+			t.Errorf("%s: no log line says %q", c.what, c.logged)
+		}
+		logMu.Unlock()
+		// The pass after: one state read per appliance, each asked for its files, and nothing written.
+		mark = len(wire)
+		f.mu.Lock()
+		execs, asked := f.execs, f.certReads
+		f.mu.Unlock()
+		if status, err := h.pveLBApply(ctx, es, proj, "lb-abc"); err != nil || status != lbStatusActive || len(events(mark)) != 0 {
+			t.Fatalf("%s: the pass after: %s %v, wrote %v", c.what, status, err, events(mark))
+		}
+		f.mu.Lock()
+		if f.execs != execs+2 || f.certReads != asked+2 {
+			t.Errorf("%s: the pass after sent %d commands, %d of them asked for the certificate files; want 2 and 2", c.what, f.execs-execs, f.certReads-asked)
+		}
+		f.mu.Unlock()
+	}
+	// What the portal compares is a file's digest: it is in no log line and not in the row either.
+	logMu.Lock()
+	for _, file := range []pve.LBCertFile{file1, file2} {
+		if strings.Contains(logs.String(), lbHash(file.PEM)) {
+			t.Error("a log line holds the digest of a certificate file")
+		}
+	}
+	logMu.Unlock()
+	if raw, _ := json.Marshal(saved()); strings.Contains(string(raw), lbHash(file1.PEM)) || strings.Contains(string(raw), lbHash(file2.PEM)) {
+		t.Error("the balancer's row holds the digest of a certificate file")
+	}
+
 	// A certificate gone from under a listener (the race a delete can lose): the appliances keep what they serve,
 	// and the row says why.
 	if _, err := db.C("lb_certificates").DeleteByID(ctx, c1.ID); err != nil {
@@ -369,6 +455,86 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 	if status, err := h2.pveLBApply(ctx, es2, proj, "lb-abc"); err != nil || status != lbStatusActive || !slices.Equal(events(mark), steps("302", c3.File)) {
 		t.Fatalf("the second appliance with a certificate: %s %v, wrote\n%s", status, err, strings.Join(events(mark), "\n"))
 	}
+
+	// A balancer on one VM, on a third Proxmox of its own (the balancer of drill Q3 of v0.11.1-rc.1): the same
+	// rule. Its one state read asks for the files too, a damaged or missing file is written again in the pass that
+	// sees it, and the row never leaves ACTIVE over it.
+	one1 := newPairWire(t, "")
+	delete(one1.guests, "302")
+	*one1.guests["301"] = lbGuest{packages: "installed", haproxy: true}
+	srv3 := httptest.NewServer(record(one1))
+	defer srv3.Close()
+	ps3, err := pve.NewService(pve.Config{APIURL: srv3.URL, TokenID: "t", Secret: "s"}, "svc3", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3 := &Handler{cloud: h.cloud, sdnLock: h.sdnLock, publicIPs: h.publicIPs, pveFor: func(*externalservice.ExternalService) (*pve.Service, error) { return ps3, nil }}
+	h3.SetLBCertificates(db.C("lb_certificates"), keys)
+	es3 := &externalservice.ExternalService{ID: "svc3", Config: es.Config}
+	row3 := &cloud.CloudResource{ExternalID: "lb-abc", ServiceID: "svc3", ProjectID: "p1", Type: cloud.TypeLoadBalancer}
+	if err := setLBRow(row3, &loadBalancer{ID: "abc", Name: "one", Status: lbStatusBuild, NetworkID: "v1", PublicNetworkID: "vmbr1",
+		ServerID: "301", PrivateIP: "10.0.0.31", PrivatePrefix: 24, PublicIP: "203.0.113.12"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h3.cloud.Insert(ctx, row3); err != nil {
+		t.Fatal(err)
+	}
+	if err := h3.pveLBUpdateConfig(ctx, es3, proj, row3, map[string]any{
+		"listeners": []any{map[string]any{"port": 443, "protocol": "https", "pool": "web", "certificates": []string{c3.ID}}, map[string]any{"port": 80, "protocol": "http", "pool": "web"}},
+		"pools":     []any{map[string]any{"name": "web", "protocol": "http"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mark = len(wire)
+	if status, err := h3.pveLBApply(ctx, es3, proj, "lb-abc"); err != nil || status != lbStatusActive || !slices.Equal(events(mark), steps("301", c3.File)) {
+		t.Fatalf("one VM with a certificate: %s %v, wrote\n%s", status, err, strings.Join(events(mark), "\n"))
+	}
+	file3, err := h.lbCertOpen(c3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quiet := func(what string) {
+		t.Helper()
+		mark := len(wire)
+		one1.mu.Lock()
+		execs, asked := one1.execs, one1.certReads
+		one1.mu.Unlock()
+		if status, err := h3.pveLBApply(ctx, es3, proj, "lb-abc"); err != nil || status != lbStatusActive || len(events(mark)) != 0 {
+			t.Fatalf("one VM, %s: %s %v, wrote %v", what, status, err, events(mark))
+		}
+		one1.mu.Lock()
+		defer one1.mu.Unlock()
+		if one1.execs != execs+1 || one1.certReads != asked+1 {
+			t.Errorf("one VM, %s: %d commands, %d of them asked for the certificate files; want 1 and 1", what, one1.execs-execs, one1.certReads-asked)
+		}
+	}
+	quiet("a quiet pass")
+	for what, damage := range map[string]func(g *lbGuest){
+		"a truncated file":     func(g *lbGuest) { g.disk[certPath(c3.File)] = "" },
+		"a deleted file":       func(g *lbGuest) { delete(g.disk, certPath(c3.File)) },
+		"a file anybody reads": func(g *lbGuest) { g.certMode = map[string]string{certPath(c3.File): "644:root:root"} },
+	} {
+		one1.set("301", damage)
+		reloads := one1.count("301 haproxy reload")
+		mark = len(wire)
+		status, err := h3.pveLBApply(ctx, es3, proj, "lb-abc")
+		cr3, _ := h3.cloud.FindByServiceIDAndExternalID(ctx, "svc3", "lb-abc")
+		got, _ := lbOfRow(cr3)
+		if err != nil || status != lbStatusActive || got.StatusMessage != "" || !slices.Equal(events(mark), steps("301", c3.File)) || one1.count("301 haproxy reload") != reloads+1 {
+			t.Fatalf("one VM, %s: %s %v %q, wrote\n%s", what, status, err, got.StatusMessage, strings.Join(events(mark), "\n"))
+		}
+		one1.set("301", func(g *lbGuest) {
+			if g.disk[certPath(c3.File)] != file3.PEM || len(g.certMode) != 0 || !g.serving() {
+				t.Errorf("one VM, %s: the file after the pass is not the certificate's, or not root's alone", what)
+			}
+		})
+		quiet("the pass after " + what)
+	}
+	logMu.Lock()
+	if strings.Contains(logs.String(), lbHash(file3.PEM)) {
+		t.Error("a log line holds the digest of a certificate file")
+	}
+	logMu.Unlock()
 
 	// Where the key went: into certificate files on the two appliances, and nowhere else on the wire.
 	wireMu.Lock()

@@ -481,6 +481,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pushed because of this. Found by the drill of v0.11.1-rc.1 (Q0b-1). In a real guest of both appliance images
   and in the wire fake; not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "One appliance of a
   pair").
+- **A damaged certificate file on a load balancer went unnoticed until HAProxy's next start, which then took every
+  listener down.** HAProxy reads a certificate file when it starts or reloads and serves from memory after that.
+  A file truncated or deleted on an appliance therefore changed nothing that the platform asked about: the row
+  read `ACTIVE`, the same request sent again and a services sync pushed nothing. HAProxy refuses its whole config
+  when one file of it cannot be loaded, so the next reboot or restart of the appliance would have left the plain
+  listeners down with the TLS ones, for up to the 15 minutes of the next services sync. Now the state read of
+  every pass also asks for the certificate files the config names: each must be there, hold the bytes the portal
+  would write, and be root's alone (mode 0600 in a directory of mode 0700). One that is not is written again in
+  that pass, while HAProxy still serves from memory, at the cost of one reload and no connection; a mode or an
+  owner that is wrong is put right the same way, and the pass logs at WARN which file and what was wrong. On a
+  pair only the appliance concerned is pushed, the standby first. The read is the command the pass already sent:
+  a balancer without a TLS listener runs the command of before and is asked nothing more. What the appliance
+  answers of a file is its SHA-256, which the portal compares; nothing of a certificate or a key, and not that
+  digest either, is in a command line, a log line, an error or a status text. Found by the drill of v0.11.1-rc.1
+  (Q3-1). In a real guest of both appliance images (a file truncated, deleted and opened to all, then a restart
+  of HAProxy) and in the wire fake; not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "The
+  files are proven on every pass").
 - **A project could not see which public addresses its quota counts.** The `floatingIps` quota counts every
   public address of a project: a server's public NIC, a load balancer's address, each Service address of a
   Kubernetes cluster and each address a cluster keeps. `GET /api/v1/project/{id}/quota-usage` gave the limit with

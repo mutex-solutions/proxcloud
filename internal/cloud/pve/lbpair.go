@@ -289,11 +289,16 @@ type VRRPState struct {
 	// (spike of v0.11.1, SP-2: a config edited by hand stayed, since only "listeners are served" was asked).
 	HAProxySum, KeepalivedSum, LVSSum string
 	LVS                               bool // the UDP service runs its config (lvsServingFn)
+	// CertFiles says what is wrong with the certificate files the read was asked about (lbCertFaults), "" when
+	// nothing is or nothing was asked.
+	CertFiles string
 }
 
 // ReadVRRPState asks an appliance for its VRRP state, whether HAProxy runs, whether it holds the first VIP, whether
 // HAProxy serves the config on disk, what its config files hash to, and whether its UDP service serves its config.
-func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip string) (VRRPState, error) {
+// With certs, the certificate files HAProxy's config names, the same command says whether each is on the appliance
+// as a push leaves it (HAProxyServing has why); without, the command is the one of before.
+func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip string, certs ...LBCertFile) (VRRPState, error) {
 	holds := "v=0"
 	if a, err := netip.ParseAddr(vip); err == nil && a.Is4() {
 		holds = "ip -o -4 addr show | grep -qF ' " + a.String() + "/' && v=1 || v=0"
@@ -304,6 +309,9 @@ func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip 
 		// which is the answer to "holds the address" here (with a UDP listener the holder read as holding nothing).
 		"worker && h=1 || h=0; " + holds + "; (serving) >/dev/null 2>&1 && c=1 || c=0; (lvsserving) >/dev/null 2>&1 && l=1 || l=0; " +
 		"echo \"${s:-UNKNOWN} $h $v $c $(sum " + haproxyConfig + ") $(sum /etc/keepalived/keepalived.conf) $(lvssum) $l\""
+	if len(certs) > 0 {
+		script = lbCertStateFn + script + "; certstate"
+	}
 	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", script)
 	if err != nil {
 		return VRRPState{}, err
@@ -311,7 +319,10 @@ func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip 
 	if exit != 0 {
 		return VRRPState{}, fmt.Errorf("vrrp state: %s", strings.TrimSpace(stderr))
 	}
-	return ParseVRRPState(out), nil
+	line, files, _ := strings.Cut(strings.TrimSpace(out), "\n")
+	st := ParseVRRPState(line)
+	_, st.CertFiles = lbCertFaults(files, certs)
+	return st, nil
 }
 
 // ParseVRRPState reads the line ReadVRRPState's script prints.
