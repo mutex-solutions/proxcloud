@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for every cluster whose controller runs this release's image, on any chart. The console's "the controller last
   reported" therefore reads up to a minute and a half.
 
+- **A Service whose `proxcloud.io/lb-internal` is neither true nor false loses its public address at the upgrade.**
+  `v0.11.0` did not read the annotation, so a Service that carries `proxcloud.io/lb-internal: "yes"` (or an empty
+  value) is served there on a public address. From this release only a false value or no annotation gives one: the
+  Service is refused with `InvalidAnnotation`, which names the value, and its address goes back. Before the
+  upgrade, set the annotation to `"false"` or remove it on the Services whose address must stay.
 - **A Service that ends TLS with a Secret loses its address if the portal is rolled back to v0.11.0.** That portal
   ends no TLS and would hand the port to the pods without it, so the cluster's controller does not send it such a
   Service: the address goes back, the Service says `TLSNotAvailable`, and it gets a new address when the portal is
@@ -393,6 +398,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`proxcloud.io/lb-internal` with a value that is no boolean gave the Service a public address.** A value such as
+  `"yes"` was named in `InvalidAnnotation` and the Service was served, so the one annotation that guards an address
+  failed open over a typing mistake. It fails closed now: a Service gets a public address only when the annotation
+  is absent or false (`false`, `0`, `f`). Every other value refuses it: `"true"` with `InternalNotSupported` as
+  before, a value that is no boolean (also an empty one, or one too long to read) with `InvalidAnnotation`, and the
+  Event names the value. The cluster's controller follows the same rule for a portal that reads no annotations (one
+  rolled back to `v0.11.0`): such a Service is not sent to it. Found in the review of #435.
 - **Sandboxes worth less than half a cent each were invoiced 0.00.** Every sandbox is a bill item of its own, and a
   sent bill rounds each item to two decimals, so 10,000 one-minute sandboxes at 0.0002 accrued 2.00 and were
   invoiced nothing. At the send, what the sandbox items that round to 0.00 accrued is now summed per project and

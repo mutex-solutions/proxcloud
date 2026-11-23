@@ -851,7 +851,8 @@ call for its own cluster, and minting it again rotates it.
 
 - Each Service is checked on its own, and a refused one gets a reason the controller turns into an Event: a UDP port
   from a controller that speaks protocol 1 refuses the whole Service (`UDPNotSupported`), a port that is neither TCP
-  nor UDP too (`ProtocolNotSupported`), the annotation `proxcloud.io/lb-internal: "true"` (`InternalNotSupported`),
+  nor UDP too (`ProtocolNotSupported`), the annotation `proxcloud.io/lb-internal` with any value but a false one (`InternalNotSupported`, or
+  `InvalidAnnotation` for a value that is no boolean),
   IPv6 or dual stack
   (`IPFamilyNotSupported`), node port 0,
   a node port outside 30000-32767 or policy Local without a health port (`NoNodePort`), source ranges that do not fit
@@ -1175,14 +1176,17 @@ project that nothing uses; where it differs is difference 9 below.
   written for OCCM too: they are not obeyed and nothing says so.
 - `proxcloud.io/lb-internal: "true"` **refuses** the Service (`InternalNotSupported`), so it never gets a public
   address: every address of the pair is public. For an address of the tenant network use
-  `loadBalancerClass: proxcloud.io/internal` (MetalLB, default mode). A value that is neither true nor false is
-  named in `InvalidAnnotation` and the Service is served.
+  `loadBalancerClass: proxcloud.io/internal` (MetalLB, default mode). The annotation guards an address, so **only
+  a false value (`false`, `0`, `f`) or no annotation gives a public address**: a value that is neither true nor
+  false (`"yes"`, an empty one, one of more than 256 characters) refuses the Service too, with `InvalidAnnotation`
+  and the value in the Event. A Service that is served gives its address back when such a value is put on it.
 - **A request for an internal balancer written for OCCM gets a PUBLIC address here.** OCCM's own annotation for it
   (the C4 change log of 2026-11-23 has its name in full) is an annotation of another prefix: it is not read, not
   refused and not spoken of, and a Service that carries only that one is served like any other, on a public
   address. Rename it to `proxcloud.io/lb-internal: "true"`, or set `loadBalancerClass: proxcloud.io/internal`,
   **before** the manifest is applied to a cluster here.
-- **An annotation that cannot be read never costs a Service its address.** A value of more than 256 characters is
+- **An annotation that cannot be read never costs a Service its address**, with the one exception above
+  (`proxcloud.io/lb-internal`). A value of more than 256 characters is
   as if the annotation were not set, and the same Warning Event `InvalidAnnotation` names it. The controller sends
   such a value cut to 257 characters and does not obey a node selector that long either. The number of annotations
   is no limit: the ones the table knows are obeyed however many others there are, and `AnnotationNotSupported` names

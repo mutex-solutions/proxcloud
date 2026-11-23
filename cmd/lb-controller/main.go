@@ -498,7 +498,8 @@ func (c *controller) turn(ctx context.Context) error {
 				if len(s.ingress) > 0 {
 					c.setStatus(ctx, s, "")
 				}
-				c.report(ctx, s, "state", "Warning", lbgw.ReasonInternalNotSupported, lbgw.InternalMessage)
+				reason, message := lbgw.InternalRefusal(s.wire.Annotations)
+				c.report(ctx, s, "state", "Warning", reason, message)
 			case lbgw.WantsTLS(&s.wire):
 				if len(s.ingress) > 0 {
 					c.setStatus(ctx, s, "")
