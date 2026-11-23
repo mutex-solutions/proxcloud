@@ -1052,15 +1052,17 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   address, and a Warning with the gateway's reason (`UDPNotSupported`, `NoNodePort`, `TooManySourceRanges`,
   `IPFamilyNotSupported`, `QuotaExceeded`, `PublicNetworkUnavailable`, `TooLarge`, `ProtocolNotSupported`,
   `InternalNotSupported`, `InvalidAnnotation`; for the whole request `ControllerTooOld`, `ProjectNotEnabled`).
-  `spec.loadBalancerIP` is ignored with a Warning `LoadBalancerIPIgnored`. From v0.11.1 it also says the Events of
+  `spec.loadBalancerIP` was ignored in v0.11.0 with a Warning `LoadBalancerIPIgnored`; from v0.11.1 the portal
+  reads it, gives the Service that address when the cluster keeps it, and raises the same Warning when it does not
+  ("Keeping a Service's address" below). From v0.11.1 it also says the Events of
   Kubernetes' own service controller, with their texts (`controllers/service/controller.go`): `UpdatedLoadBalancer`
   ("Updated load balancer with new hosts") each time the nodes behind a Service change, `UnAvailableLoadBalancer`
   (Warning, "There are no available nodes for LoadBalancer") while a Service has no node, `SyncLoadBalancerFailed`
   (Warning) while the portal's gateway cannot be reached, `DeletingLoadBalancer` and `DeletedLoadBalancer` around the
   finalizer's removal ("deleted" is said when the portal holds a state without the Service; its address leaves the
   appliances in the pass after). And the Events the portal's answer carries for the Service's annotations:
-  `AnnotationNotSupported`, `InvalidAnnotation`, `LoadBalancerLbMethodUnknown`, `KeepAddressNotServed`, each once
-  while it stands.
+  `AnnotationNotSupported`, `InvalidAnnotation`, `LoadBalancerLbMethodUnknown`, `LoadBalancerIPIgnored`,
+  `KeepAddressLimit`, each once while it stands.
 - It sends `ProxCloud-LB-Protocol: 2` (v0.11.0's controller: 1); a portal that needs a newer controller answers
   `ControllerTooOld`, and a chart bump gives the cluster the portal's image. The portal says its own protocol on
   every answer. A portal older than the controller (a portal rolled back) refuses a field it does not know with
@@ -1124,11 +1126,44 @@ read by the controller, because they need the tenant's API: the node selector (t
 | `enable-health-monitor` | `true`, `false` | `false` = no health check; not obeyed, with an Event, for policy Local |
 | `health-monitor-delay`, `-timeout`, `-max-retries`, `-max-retries-down` | 1 to 300 s, 1 to 300 s, 1 to 10, 1 to 10 | the check's interval, timeout, good checks to come up, bad checks to go down. A UDP port takes no "up" count (keepalived brings a node back at its first good check) and goes down after 2 bad checks at least |
 | `node-selector` | `key=value, key` | only the nodes with every one of these labels are behind the Service; none = no member and `UnAvailableLoadBalancer`. Spaces around a term and around `=` are dropped |
-| `keep-address` | `true` | read, and not served yet: the Event `KeepAddressNotServed` says that the address is given back with the Service |
+| `keep-address` | `true`, `false` | `true`: when the Service goes, its address stays the cluster's, for a Service that names it in `spec.loadBalancerIP` ("Keeping a Service's address" below). A cluster keeps 5 addresses at most; with 5 kept, `KeepAddressLimit` says that this one will be given back |
 | `internal` | `true`, `false` | `true` **refuses** the Service (`InternalNotSupported`): it never gets a public address |
 | `tls-secret` | one to four names of Secrets, between commas | TLS ends on the balancer with the certificates of these `kubernetes.io/tls` Secrets of the Service's namespace; the first one answers a client that asks for no name |
 | `tls-ports` | TCP ports of the Service, between commas | only these ports end TLS; unset, every TCP port does. A list that cannot be read is not obeyed (`InvalidAnnotation`) and every TCP port ends TLS |
 | `backend-protocol` | `http`, `tcp` | what the nodes are spoken to in behind a port that ends TLS: HTTP with `X-Forwarded-For` and `X-Forwarded-Proto: https` (the default), or plain TCP |
+
+**Keeping a Service's address.** A Service's public address goes back to the pool when the Service goes. With
+`proxcloud.io/lb-keep-address: "true"` it stays the cluster's instead:
+
+```yaml
+metadata:
+  annotations:
+    proxcloud.io/lb-keep-address: "true"
+```
+
+- **When the Service goes** (it is deleted, stops being of type LoadBalancer, or is refused: a refused Service
+  has no address), its address leaves both appliances and their firewall and is listed under "Kept addresses" on
+  the cluster's page. A refused Service that is put right gets a kept address back only by naming it. It
+  is still a public address of the project: **billed, and counted in the floating IP quota**, like the address of
+  a Service. The annotation is read as the Service's last state had it, so `kubectl annotate` followed at once by
+  `kubectl delete` keeps the address. A Service that goes before it ever had an address keeps none.
+- **A cluster keeps 5 addresses at most.** With 5 kept, a Service that carries the annotation gets the Warning
+  `KeepAddressLimit` while it stands, and its address is given back when it goes. Release one first.
+- **A Service gets a kept address by naming it**: `spec.loadBalancerIP: 203.0.113.30`. It is taken when the
+  Service gets its address, without a new address being allocated and without the quota being asked (the address
+  is in it already). Without the annotation on that Service, the address goes back to the pool when it goes.
+- **Any other `spec.loadBalancerIP` is not obeyed**: an address this cluster does not keep (another cluster's,
+  another project's, a free one of the pool, one a Service of this cluster is on) or a text that is no IPv4
+  address. The Service gets an address of the pool and one Warning `LoadBalancerIPIgnored`, in the same words
+  whichever of these it was: the answer does not say whose an address is. A Service that already has an address
+  keeps it whatever it names afterwards; to move it onto a kept address, delete it and create it again.
+- **A kept address is released** on the cluster's page (button "Release", the cluster action
+  `RELEASE_LOAD_BALANCER_ADDRESS` with `{"address": "..."}`), or with the cluster. It returns to the pool, and its
+  billing stops, once no appliance holds it, as a Service's address does. A released address cannot be asked for
+  again.
+
+This is what OCCM does with `keep-floatingip` and with a `loadBalancerIP` that names a floating address of the
+project that nothing uses; where it differs is difference 9 below.
 
 - A value that is not understood is not obeyed and named in a Warning Event `InvalidAnnotation`; the Service is
   served with the default. Refusing it would give its address back over a typing mistake.
@@ -1181,8 +1216,12 @@ purpose:
 7. **`proxy-protocol: "true"` is version 2**, as v0.11.0 shipped it; OCCM's `"true"` is version 1. A manifest that
    is renamed says `v1` to keep version 1.
 8. **A port without a node port refuses the Service** (`NoNodePort`); OCCM makes a pool without members.
-9. **`spec.loadBalancerIP` is not obeyed** (`LoadBalancerIPIgnored`); OCCM takes any free floating IP of the
-   project.
+9. **`spec.loadBalancerIP` is obeyed for an address the cluster keeps, and for no other.** OCCM takes any free
+   floating IP of the project, creates the address when none exists and the cloud allows it, and fails the
+   Service's sync when the address is in use. Here an address that is not kept by the same cluster is answered
+   with `LoadBalancerIPIgnored` and the Service is served on an address of the pool. A kept address belongs to its
+   cluster, not to the project: another cluster of the project cannot name it. And a kept address counts against a
+   limit of 5 a cluster, which OCCM does not have.
 10. **No shared balancer**: OCCM's `load-balancer-id` has no counterpart, each Service has its own address.
 11. **`SOURCE_IP_PORT` balances round robin**, with the Event OCCM raises for a method it cannot set.
 12. **The finalizer is `proxcloud.io/load-balancer`**; `service.kubernetes.io/load-balancer-cleanup` belongs to a
@@ -1222,11 +1261,11 @@ otherwise.
 | `health-monitor-max-retries` | `proxcloud.io/lb-health-monitor-max-retries` | |
 | `health-monitor-max-retries-down` | `proxcloud.io/lb-health-monitor-max-retries-down` | |
 | `node-selector` | `proxcloud.io/lb-node-selector` | |
-| `keep-floatingip` | `proxcloud.io/lb-keep-address` | read, not served yet |
+| `keep-floatingip` | `proxcloud.io/lb-keep-address` | at most 5 kept addresses a cluster; each is billed until it is released |
 | the internal-load-balancer annotation | `proxcloud.io/lb-internal` | `"true"` refuses the Service; left under OCCM's name the Service gets a public address |
 | `timeout-tcp-inspect` | none | nothing of a TCP stream is inspected here: leave it out |
 | `default-tls-container-ref` | none; `proxcloud.io/lb-tls-secret` does its work | the value is not a container reference but the name of a `kubernetes.io/tls` Secret in the Service's namespace: put the certificate there (difference 6) |
-| `load-balancer-id`, `load-balancer-address` | none | no shared balancer; `spec.loadBalancerIP` is not obeyed either |
+| `load-balancer-id`, `load-balancer-address` | none | no shared balancer; `spec.loadBalancerIP` is obeyed for an address the cluster keeps only (difference 9) |
 | the network, subnet, port, floating network and subnet, member subnet, class, flavor, availability zone, tag and hostname keys | none | the provider's `config.cluster.loadBalancer` decides these; leave them out |
 
 A key with "none" written under the product's prefix all the same is named in `AnnotationNotSupported`.
@@ -1356,7 +1395,10 @@ address, what the pair and each address cost, and in default mode that NGINX Gat
 Gateway (the add-on dialog says so too); its cluster action `GET_LOAD_BALANCER` and the operator's
 `GET /admin/service/{id}/k8s-clusters/{clusterId}/load-balancer` (`admin:service:read`) answer when the controller's
 credential was minted and last used (`lastSeenAt`, written at most once a minute) and the cluster's balancer row
-(status, appliances, each Service's address and state; none before the first Service), `null` without a controller.
+(status, appliances, each Service's address and state, and the addresses the cluster keeps in `cluster.kept`;
+none before the first Service), `null` without a controller. The tenant's page lists the kept addresses with a
+"Release" button each (the cluster action `RELEASE_LOAD_BALANCER_ADDRESS`, after a confirmation); the operator's
+dialog shows them and releases none.
 No token is in it. The tenant's page reads the balancer's member health as the load balancer page does. On the load
 balancer pages the cluster's balancer is read-only: no listener, pool or **Delete**, a link to its cluster, and
 **Replace appliances**. The operator's **Load balancer** dialog on the provider's clusters card runs the enable action

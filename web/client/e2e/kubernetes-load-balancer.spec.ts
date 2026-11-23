@@ -36,6 +36,29 @@ test("the cluster page says which Services get a public address, what it costs, 
   await expect(page.getByTestId("k8s-lb")).toBeVisible()
 })
 
+test("the cluster page lists the addresses the cluster keeps and releases one after a confirmation", async ({ page }) => {
+  await page.goto(`${SITE}/kubernetes/res-pc-c-healthy`)
+  const kept = page.getByTestId("k8s-lb-kept")
+  await expect(kept).toContainText("still billed and counted in your quota")
+  await expect(kept).toContainText("spec.loadBalancerIP")
+  await expect(kept.getByText("203.0.113.30")).toBeVisible()
+  await expect(kept.getByText("203.0.113.31")).toBeVisible()
+  // No Service is on a kept address: it is in no row of the Services.
+  await expect(page.getByTestId("k8s-lb").getByRole("row").filter({ hasText: "203.0.113.30" })).toHaveCount(0)
+
+  // Cancel changes nothing.
+  await kept.getByRole("button", { name: "Release 203.0.113.30" }).click()
+  await expect(page.getByRole("dialog")).toContainText("goes back to the pool and stops being billed")
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click()
+  await expect(kept.getByText("203.0.113.30")).toBeVisible()
+
+  await kept.getByRole("button", { name: "Release 203.0.113.30" }).click()
+  await page.getByRole("dialog").getByRole("button", { name: "Release address" }).click()
+  await expect(page.getByText("203.0.113.30 is being released")).toBeVisible()
+  await expect(kept.getByText("203.0.113.30")).toHaveCount(0)
+  await expect(kept.getByText("203.0.113.31")).toBeVisible()
+})
+
 test("the load balancer list names the cluster a balancer belongs to", async ({ page }) => {
   await page.goto(`${SITE}/load-balancers`)
   await expect(page.getByRole("row", { name: /k8s-5e1f0a2b3c4d/ })).toContainText("Kubernetes cluster pc-c-healthy")

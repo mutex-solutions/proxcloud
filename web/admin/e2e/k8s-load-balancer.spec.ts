@@ -23,7 +23,7 @@ const view = {
   balancer: {
     status: "ACTIVE",
     appliances: [{ serverId: "311", node: "pve2", role: "MASTER", holdsVip: true, state: "up" }, { serverId: "312", node: "pve3", role: "BACKUP", state: "up" }],
-    cluster: { services: [{ uid: "u1", namespace: "shop", name: "web", vip: "203.0.113.21", state: "ready" }] },
+    cluster: { services: [{ uid: "u1", namespace: "shop", name: "web", vip: "203.0.113.21", state: "ready" }], kept: ["203.0.113.30"] },
   },
 }
 const lbPath = (id: string) => `/admin/service/svc-k8s-01/k8s-clusters/${id}/load-balancer`
@@ -70,6 +70,9 @@ test("a cluster with a controller shows its mode, last call and balancer; Run ag
   await expect(dialog.getByTestId("lb-controller-seen")).toContainText("last called the gateway")
   await expect(dialog).toContainText("holds the addresses")
   await expect(dialog.getByRole("row").filter({ hasText: "shop/web" })).toContainText("203.0.113.21")
+  // An address a Service left behind: shown, with no action here (the tenant releases it).
+  await expect(dialog.getByTestId("lb-kept")).toContainText("203.0.113.30")
+  await expect(dialog.getByTestId("lb-kept")).toContainText("billed")
   await dialog.getByRole("button", { name: "Rotate the controller's credential" }).click()
   await expect.poll(() => calls(page, "POST", lbPath("pc-c-new"))).toHaveLength(1)
   await expect(page.getByText("A new credential was minted")).toBeVisible()

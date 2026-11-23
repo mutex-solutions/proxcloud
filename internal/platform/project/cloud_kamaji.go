@@ -144,6 +144,7 @@ func (h *Handler) kamajiDelete(ctx context.Context, es *externalservice.External
 //   - REPLACE_MACHINE {machine, confirm} → deletes one worker Machine; Cluster API makes a new one. confirm is
 //     needed for the last Ready node of a group
 //   - GET_LOAD_BALANCER → the cluster's load balancer (LBClusterView); null when the cluster has no controller
+//   - RELEASE_LOAD_BALANCER_ADDRESS {address} → gives back one address the cluster keeps (lbClusterReleaseKept)
 func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if !es.IsKamaji() || cr.Type != cloud.TypeKubernetesCluster {
 		return false
@@ -324,6 +325,16 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			v = nil
 		}
 		httpx.OK(w, map[string]any{"result": v})
+		return true
+
+	case "RELEASE_LOAD_BALANCER_ADDRESS":
+		// An address a Service left behind with proxcloud.io/lb-keep-address: it is billed and in the quota until
+		// it is released here, taken by a Service that names it, or the cluster goes.
+		if err := h.lbClusterReleaseKept(r.Context(), proj, cr.ExternalID, strAny(data["address"])); err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": "RELEASING"})
 		return true
 
 	case "APPLY_PLATFORM_UPDATE":

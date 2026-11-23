@@ -4,6 +4,82 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: a Service's address kept for its cluster, and spec.loadBalancerIP (#440)
+
+**What changed:** what happens to a Service's public address when the Service goes, and what a Service's
+`spec.loadBalancerIP` does. No new container, listener or credential, and no chart change. Gateway protocol 2 gains
+one optional field; a tenant cluster action is new.
+
+- `internal/cloud/lbgw`: `Service.LoadBalancerIP` (protocol 2, optional; cleared for a controller of protocol 1).
+  `ServiceOptions` keeps it as an IPv4 address or drops it with the Event `LoadBalancerIPIgnored`, which does not
+  repeat the text. `KeepsAddress` reads `proxcloud.io/lb-keep-address`; the Event `KeepAddressNotServed` is gone.
+  `State.KeepGone`: the UIDs of Services that left the state while they asked to keep their address.
+  `MaxKeptAddresses` = 5.
+- `internal/platform/project/cloud_lb_cluster_pve.go`: `lbCluster.Kept`, the addresses the cluster keeps.
+  `LBClusterState` writes `State.KeepGone` (`lbClusterKeepGone`: the last state's Services that asked to keep, and
+  its `KeepGone`, that are not in the new state and still hold an address in the row) and answers the Events
+  `LoadBalancerIPIgnored` and `KeepAddressLimit` (`lbClusterAddressEvents`). `lbClusterDesired` moves the address
+  of a Service that went to `Kept` when its UID is in `KeepGone` and fewer than five are kept, to `Releasing`
+  otherwise; a Service without an address whose `LoadBalancerIP` is in `Kept` gets that address, with no
+  allocation and no quota check. `lbClusterReleaseKept` moves one address from `Kept` to `Releasing` and starts a
+  pass.
+- `internal/platform/project/cloud_kamaji.go`: cluster action `RELEASE_LOAD_BALANCER_ADDRESS {address}` on
+  `POST /api/v1/project/{pid}/cloud/{id}/action`.
+- `cmd/lb-controller`: `readService` sends `spec.loadBalancerIP`; `protocol1` leaves it out; the controller's own
+  `LoadBalancerIPIgnored` is said only to a portal that did not read the field (an answer without `ipMode`).
+- Consoles: the tenant's cluster page lists the kept addresses with "Release" (a confirmation first); the
+  operator's cluster dialog shows them.
+- Diagrams: none (no element and no flow between elements changed). `c4-code.md`: the `LBClusterState` row and the
+  consoles row.
+
+**Why:**
+
+- *The behaviour is upstream's, the names are the product's.* OpenStack's cloud controller manager
+  (kubernetes/cloud-provider-openstack v1.37.1, `pkg/openstack/loadbalancer.go`): the annotation
+  `loadbalancer.openstack.org/keep-floatingip` (:69) keeps the floating IP when the Service's balancer is deleted
+  (`ensureLoadBalancerDeleted`, :2207-2221: the floating IP is deleted only when the annotation is not true and
+  the controller created it, `deleteFIPIfCreatedByProvider` :2059-2075); `ensureFloatingIP` (:686-755) uses the
+  floating IP the balancer has when it has one, and only otherwise reads `spec.loadBalancerIP`: a floating IP of
+  that address with no port is attached (:747-751), one with a port fails the sync ("floating IP %s is not
+  available", :753), and when none exists it tries to create one with that address (:758-802), which the network
+  service allows to administrators by default. Per the owner's decision of 2026-11-23 no upstream name is read:
+  the annotation is `proxcloud.io/lb-keep-address` only.
+- *Where it differs, on purpose.* (1) A kept address belongs to the cluster that kept it, not to the project:
+  `Kept` is a field of the cluster's own balancer row, and nothing else is looked up when a Service names an
+  address. So a Service can never take an address of another cluster or project, nor a free one it picks, and
+  there is no lookup whose answer could differ with whose the address is. Upstream attaches any free floating IP
+  of the project. (2) A name that cannot be obeyed does not fail the Service: it is served on an address of the
+  pool and told so, which is what v0.11.0 did for every `loadBalancerIP`. (3) Five kept addresses a cluster: each
+  is billed and in the quota with no Service to show for it, so the number a forgotten annotation can cost is
+  bounded.
+- *Billed and in the quota without new code.* A kept address stays a row of `pvePublicIp` owned by the balancer
+  (`LBAddressOwner`). The quota counts those rows (`PublicIPRepo.CountForProject`), the meter makes a
+  `FLOATING_IP` row of each (`syncjob/pve_meter.go`), and the balancer's delete releases every row of the owner
+  (`lbDestroy`), so the cluster's release gives the kept addresses back with the rest.
+- *The wish is carried in the state, not read off the row.* The request that drops a Service is the last one the
+  portal gets about it: the controller removes its finalizer after that answer. A pass does not run for every
+  request (one is skipped while another runs), so "the row's Service had the annotation at the last pass" would
+  lose an address when the annotation is set and the Service deleted between two passes. `LBClusterState`
+  therefore reads the annotation off the state it replaces and carries the UID until the row no longer lists the
+  Service.
+- *The release goes through `Releasing`.* The pass that kept an address may not have reached both appliances; an
+  address returns to the pool only when no appliance holds it (`loadBalancer.settled`), as a Service's does.
+- *No chart change, protocol still 2.* The field is optional and additive; protocol 2 was not released before this
+  change. A controller of v0.11.0 (protocol 1) sends neither the field nor annotations: its Services keep nothing
+  and name nothing, as before.
+
+**Security:** the new tenant action changes one row of the caller's own project: the cluster's credential row
+names the project, and an address that is not in that cluster's `Kept` is answered 404 whatever it is. The Events'
+texts carry the address the Service named only once it parsed as IPv4.
+
+**Files:** `internal/cloud/lbgw/gateway.go`, `annotations.go`, `store.go`, `annotations_test.go`;
+`internal/platform/project/cloud_lb_cluster_pve.go`, `cloud_kamaji.go`, `cloud_lb_cluster_integration_test.go`,
+`cloud_lb_cluster_keep_integration_test.go`; `cmd/lb-controller/main.go`, `protocol2_test.go`;
+`web/client/src/pages/platform/KubernetesPage.tsx`, `web/client/src/pages/network/LoadBalancersPage.tsx`,
+`web/client/src/mocks`, `web/client/e2e/kubernetes-load-balancer.spec.ts`;
+`web/admin/src/pages/system/CloudProviderDetailPage.tsx`, `web/admin/e2e/k8s-load-balancer.spec.ts`;
+`docs/managed-k8s.md`, `docs/api.md`, `docs/architecture/c4/c4-code.md`, `CHANGELOG.md`.
+
 ## 2026-11-23: the load balancer controller watches Services, Nodes and the Secrets Services name
 
 **What changed:** when a cluster's load balancer controller takes a turn. No new container, listener, credential or

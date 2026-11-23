@@ -16,6 +16,7 @@ package lbgw
 
 import (
 	"fmt"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -53,9 +54,15 @@ const (
 	ReasonInvalidAnnotation      = "InvalidAnnotation"
 	// OCCM's name for a refused lb-method (events.go:26).
 	ReasonLbMethodUnknown = "LoadBalancerLbMethodUnknown"
-	// ReasonKeepAddressNotServed: lb-keep-address is read and not acted on yet.
-	ReasonKeepAddressNotServed = "KeepAddressNotServed"
+	// ReasonKeepAddressLimit: lb-keep-address on a Service of a cluster that keeps MaxKeptAddresses already.
+	ReasonKeepAddressLimit = "KeepAddressLimit"
+	// ReasonLoadBalancerIPIgnored: spec.loadBalancerIP names an address the Service does not get.
+	ReasonLoadBalancerIPIgnored = "LoadBalancerIPIgnored"
 )
+
+// MaxKeptAddresses is how many addresses a cluster keeps without a Service on them. Each one is a public address of
+// the project: billed, and counted in its quota.
+const MaxKeptAddresses = 5
 
 // The knobs, by their name after proxcloud.io/lb-.
 const (
@@ -130,6 +137,17 @@ func Annotation(ann map[string]string, knob string) (value, name string, ok bool
 	return strings.TrimSpace(v), OwnPrefix + knob, ok
 }
 
+// KeepsAddress: the Service asks that its address outlive it (proxcloud.io/lb-keep-address is a true boolean), as
+// ServiceOptions reads it. When such a Service goes, its address leaves the appliances and stays the cluster's, for
+// a Service of the same cluster that names it in spec.loadBalancerIP: what OCCM does with keep-floatingip
+// (loadbalancer.go:2207-2208) and with a loadBalancerIP that names a floating address nothing uses (:734-755).
+func KeepsAddress(s *Service) bool {
+	ann, _ := Read(s.Annotations)
+	v, _, _ := Annotation(ann, KnobKeepAddress)
+	on, err := strconv.ParseBool(v)
+	return err == nil && on
+}
+
 // Event is something the controller says on the Service, in the answer's order.
 type Event struct {
 	Type    string `json:"type"` // Normal | Warning
@@ -156,7 +174,7 @@ type Options struct {
 	HealthDelay, HealthTimeout, HealthRise, HealthFall int
 	// AffinityTimeout over 0: a client stays on its member for that many seconds without a new connection.
 	AffinityTimeout int
-	// KeepAddress: the Service's address is to outlive it. Read here, served by a later change.
+	// KeepAddress: the Service's address outlives it, kept for the cluster (KeepsAddress).
 	KeepAddress bool
 	// TLSPorts are the TCP ports that end TLS when the Service came with certificates (EndsTLS); nil: every TCP
 	// port. TLSBackendTCP: their members are spoken plain TCP, not HTTP.
@@ -276,10 +294,17 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 	o.HealthFall = number(KnobHealthMaxRetriesDown, 1, 10, "1 to 10 checks")
 	flag(KnobInternal) // true never comes this far; a value that is no boolean is named
 	o.TLSPorts, o.TLSBackendTCP = tlsOptions(s, ann, bad)
-	if o.KeepAddress, _ = flag(KnobKeepAddress); o.KeepAddress {
-		_, name, _ := Annotation(ann, KnobKeepAddress)
-		o.Events = append(o.Events, Event{Type: "Warning", Reason: ReasonKeepAddressNotServed,
-			Message: name + " is not served yet: the Service's address is given back when the Service goes"})
+	o.KeepAddress, _ = flag(KnobKeepAddress)
+	// The address the Service asks for is kept as an IPv4 address or not at all: nothing else of it is stored, and
+	// nothing of it is said back.
+	if s.LoadBalancerIP != "" {
+		if a, err := netip.ParseAddr(s.LoadBalancerIP); err == nil && a.Is4() {
+			s.LoadBalancerIP = a.String()
+		} else {
+			s.LoadBalancerIP = ""
+			o.Events = append(o.Events, Event{Type: "Warning", Reason: ReasonLoadBalancerIPIgnored,
+				Message: "spec.loadBalancerIP is not an IPv4 address: the Service gets an address of the pool"})
+		}
 	}
 	switch s.SessionAffinity {
 	case "", "None":

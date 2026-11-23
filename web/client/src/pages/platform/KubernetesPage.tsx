@@ -4,7 +4,7 @@
 // service and mirrors CreateServerPage's flavor gating:
 // quota + region GPU capacity + no ephemeral/swap flavors + the admin's kubernetesFlavorIds
 // allowlist. Actions map to Go cloud_kamaji.go: create/delete + GET_KUBECONFIG / UPGRADE /
-// SET_NODE_GROUPS / SET_OIDC / GET_LOAD_BALANCER.
+// SET_NODE_GROUPS / SET_OIDC / GET_LOAD_BALANCER / RELEASE_LOAD_BALANCER_ADDRESS.
 import { useCallback, useMemo, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -842,10 +842,24 @@ type ClusterLBView = { controllerSince?: string; controllerLastSeen?: string; ba
 // ClusterLoadBalancer — which Services of type LoadBalancer get a public address (the cluster's mode, read off its
 // values), what that costs, and the cluster's load balancer once a Service built it. The balancer is a row of the
 // project's compute service, so its health is read in that scope, as on the load balancer page.
-function ClusterLoadBalancer({ pid, mode, gatewayFabric, view, resourceId }: {
-  pid: string; mode: string; gatewayFabric: boolean; view: () => Promise<{ result?: any }>; resourceId: string
+function ClusterLoadBalancer({ pid, mode, gatewayFabric, view, release, resourceId }: {
+  pid: string; mode: string; gatewayFabric: boolean; view: () => Promise<{ result?: any }>
+  release: (address: string) => Promise<unknown>; resourceId: string
 }) {
   const navigate = useNavigate()
+  // The kept address the user is about to give back, and the ones already given back: the balancer lists one until
+  // its next pass.
+  const [toRelease, setToRelease] = useState("")
+  const [released, setReleased] = useState<string[]>([])
+  const giveBack = useMutation({
+    mutationFn: (address: string) => release(address),
+    onSuccess: (_r, address) => {
+      toast.success(`${address} is being released`)
+      setReleased((r) => [...r, address])
+      setToRelease("")
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
   const computeScope = useCloudScope(pid)
   const q = useQuery({
     queryKey: ["k8s-lb", pid, resourceId],
@@ -855,6 +869,7 @@ function ClusterLoadBalancer({ pid, mode, gatewayFabric, view, resourceId }: {
   })
   const v = q.data
   const lb = v?.balancer
+  const kept = (lb?.cluster?.kept ?? []).filter((ip) => !released.includes(ip))
   const health = useQuery({
     queryKey: ["lb-health", pid, v?.balancerId],
     queryFn: async () =>
@@ -900,6 +915,39 @@ function ClusterLoadBalancer({ pid, mode, gatewayFabric, view, resourceId }: {
           </div>
           <ApplianceList appliances={lb.appliances ?? []} />
           <ClusterServices lb={lb} health={health.data} />
+          {kept.length > 0 && (
+            <div className="grid gap-2" data-testid="k8s-lb-kept">
+              <div className="font-medium">Kept addresses</div>
+              <p className="text-muted-foreground">
+                Left by Services that were deleted with the annotation <code>proxcloud.io/lb-keep-address: "true"</code>. No
+                Service is on them, and each is still billed and counted in your quota. A Service of this cluster gets one
+                by naming it in <code>spec.loadBalancerIP</code>. A cluster keeps 5 at most; they are released with the cluster.
+              </p>
+              {kept.map((ip) => (
+                <div key={ip} className="flex flex-wrap items-center gap-3">
+                  <span className="font-mono">{ip}</span>
+                  <Button size="sm" variant="outline" aria-label={`Release ${ip}`} onClick={() => setToRelease(ip)}>Release</Button>
+                </div>
+              ))}
+            </div>
+          )}
+          <Dialog open={!!toRelease} onOpenChange={(o) => !o && setToRelease("")}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Release {toRelease}</DialogTitle>
+                <DialogDescription>
+                  The address goes back to the pool and stops being billed. It cannot be asked for again: another project may
+                  get it, and a Service that names it afterwards gets another address.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setToRelease("")}>Cancel</Button>
+                <Button variant="destructive" onClick={() => giveBack.mutate(toRelease)} disabled={giveBack.isPending}>
+                  {giveBack.isPending ? "Releasing…" : "Release address"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </>
       ) : mode && v !== undefined ? (
         <p className="text-muted-foreground">No Service has asked for a public address yet: the load balancer is built with the first one.</p>
@@ -1697,6 +1745,7 @@ function ClusterDetail({
             mode={(c.load_balancer as string) || ""}
             gatewayFabric={addonStates?.nginxGatewayFabric === true}
             view={() => act("GET_LOAD_BALANCER")}
+            release={(address) => act("RELEASE_LOAD_BALANCER_ADDRESS", { address })}
             resourceId={resource.id}
           />
 

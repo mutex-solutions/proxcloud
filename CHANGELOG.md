@@ -58,6 +58,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A Service can leave its public address to its cluster, and a Service can ask for a kept address**
+  (`internal/cloud/lbgw`, `internal/platform/project/cloud_lb_cluster_pve.go`, `cmd/lb-controller`; "Keeping a
+  Service's address" in [managed-k8s.md](docs/managed-k8s.md)). What OCCM does with `keep-floatingip` and
+  `spec.loadBalancerIP`, under the product's own name.
+  - `proxcloud.io/lb-keep-address: "true"`: when the Service goes, its address leaves the appliances and stays the
+    cluster's. **A kept address is billed and counts in the floating IP quota** like any public address, until it
+    is released. A cluster keeps 5 at most; with 5 kept, the Service is told `KeepAddressLimit` and its address is
+    given back when it goes.
+  - `spec.loadBalancerIP` that names an address the Service's own cluster keeps: the Service gets it, with no new
+    address and no quota asked. Any other value (another cluster's or project's address, a free one, one in use,
+    no IPv4 address) is not obeyed: the Service gets an address of the pool and the Warning `LoadBalancerIPIgnored`,
+    in the same words whichever it was. A Service that has an address keeps it.
+  - The cluster's page lists the kept addresses with a "Release" button each (cluster action
+    `RELEASE_LOAD_BALANCER_ADDRESS`); the operator's cluster dialog shows them. They are released with the cluster
+    too.
+  - Gateway protocol 2 gains one optional field, `loadBalancerIP` on a Service. It needs the controller of this
+    release: a cluster on v0.11.0's controller is served as before, and its `spec.loadBalancerIP` is still ignored
+    with the Event. No chart change.
 - **The load balancer controller watches the cluster: a change of a Service or a node is at the portal within 2
   seconds** (`cmd/lb-controller`, `internal/cloud/kamajik8s/watch.go`, cluster chart `proxmox-kamaji-cluster` 0.1.19;
   "The controller" in [managed-k8s.md](docs/managed-k8s.md)). Until now the controller listed the cluster every 10 s
@@ -124,7 +142,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `-max-retries-down`, `lb-node-selector`. Every other annotation of the prefix `proxcloud.io/lb-` is named in
     one Warning Event `AnnotationNotSupported`; a value that is not understood is named in `InvalidAnnotation` and
     the default holds; `proxcloud.io/lb-internal: "true"` refuses the Service (`InternalNotSupported`), so it never
-    gets a public address. `lb-keep-address` is read and not served yet, and says so (`KeepAddressNotServed`).
+    gets a public address. `lb-keep-address` keeps the Service's address for the cluster (its own entry above).
   - **Only `proxcloud.io/lb-*` is read: the product defines its own annotation names.** What a knob does follows
     OCCM, but OCCM's annotation names are not aliases: on a Service here they do nothing, are not sent to the portal
     and raise no Event. A manifest written for OCCM is renamed first; the guide has the table by OCCM's short key.

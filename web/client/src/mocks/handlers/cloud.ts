@@ -216,6 +216,14 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     })
   }
 
+  // A kept address of the cluster's balancer is given back: one that is not kept is not found.
+  if (r?.type === "KUBERNETES_CLUSTER" && action === "RELEASE_LOAD_BALANCER_ADDRESS") {
+    const cluster = db.cloud.find((x) => x.type === "LOAD_BALANCER" && x.data?.loadbalancer?.cluster?.id === r.externalId)?.data?.loadbalancer?.cluster
+    if (!cluster?.kept?.includes(data?.address)) throw new ApiError(404, 404, "Not an address this cluster keeps")
+    cluster.kept = cluster.kept.filter((ip: string) => ip !== data?.address)
+    return ok("RELEASING")
+  }
+
   switch (action) {
     // Compute lifecycle
     case "START": setServerStatus("ACTIVE"); return ok()

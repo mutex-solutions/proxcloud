@@ -304,3 +304,49 @@ func TestKamajiLBGate(t *testing.T) {
 		}
 	}
 }
+
+// A Service the balancer refuses while it stands gives up its address like one that went: kept for the cluster when
+// the Service asks so and the cluster has room, given back otherwise. Here the Service's config outgrew the
+// balancer (20 ports to 64 nodes), which is the one refusal a Service that has an address can get from the row.
+func TestLBClusterRefusedServiceKeepsItsAddress(t *testing.T) {
+	big := lbgw.Service{UID: "big", Namespace: "web", Name: "big", ExternalTrafficPolicy: "Cluster"}
+	for i := range lbgw.MaxPorts {
+		big.Ports = append(big.Ports, lbgw.Port{Protocol: "TCP", Port: 8000 + i, NodePort: 30000 + i})
+	}
+	var nodes []string
+	for i := range lbgw.MaxNodes {
+		nodes = append(nodes, "10.0.1."+strconv.Itoa(i+1))
+	}
+	const vip = "203.0.113.9"
+	run := func(keep string, kept int) *lbCluster {
+		t.Helper()
+		s := big
+		if keep != "" {
+			s.Annotations = map[string]string{lbgw.OwnPrefix + lbgw.KnobKeepAddress: keep}
+		}
+		lb := &loadBalancer{ID: "x", PublicNetworkID: "vmbr1", Cluster: &lbCluster{ID: "c1", Services: []lbClusterSvc{{UID: "big", VIP: vip, State: lbgw.StateReady}}}}
+		for i := range kept {
+			lb.Cluster.Kept = append(lb.Cluster.Kept, "203.0.113."+strconv.Itoa(100+i))
+		}
+		st := &lbgw.State{ID: "c1", Services: []lbgw.Service{s}, Nodes: nodes}
+		if err := (&Handler{}).lbClusterDesired(t.Context(), &externalservice.ExternalService{}, &Project{ID: "p1"}, lb, st); err != nil {
+			t.Fatal(err)
+		}
+		if got := lb.Cluster.Services[0]; got.State != lbgw.StateRefused || got.Reason != lbgw.ReasonTooLarge || got.VIP != "" || len(lb.VIPs) != 0 {
+			t.Fatalf("keep %q: the Service is %+v, addresses %v", keep, got, lb.VIPs)
+		}
+		return lb.Cluster
+	}
+	if c := run("true", 0); !slices.Equal(c.Kept, []string{vip}) || len(c.Releasing) != 0 {
+		t.Errorf("asked to keep: kept %v, given back %v", c.Kept, c.Releasing)
+	}
+	if c := run("", 0); len(c.Kept) != 0 || !slices.Equal(c.Releasing, []string{vip}) {
+		t.Errorf("not asked: kept %v, given back %v", c.Kept, c.Releasing)
+	}
+	if c := run("false", 0); len(c.Kept) != 0 || !slices.Equal(c.Releasing, []string{vip}) {
+		t.Errorf("asked not to: kept %v, given back %v", c.Kept, c.Releasing)
+	}
+	if c := run("true", lbgw.MaxKeptAddresses); len(c.Kept) != lbgw.MaxKeptAddresses || slices.Contains(c.Kept, vip) || !slices.Equal(c.Releasing, []string{vip}) {
+		t.Errorf("the cluster keeps %d already: kept %v, given back %v", lbgw.MaxKeptAddresses, c.Kept, c.Releasing)
+	}
+}

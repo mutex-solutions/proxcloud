@@ -97,6 +97,12 @@ type lbCluster struct {
 	// Releasing are the addresses of Services gone from the state. They are held until no appliance serves them any
 	// more (loadBalancer.settled), so the pool never hands out an address a keepalived may still announce.
 	Releasing []string `json:"releasing,omitempty"`
+	// Kept are the addresses of Services that went while they asked to keep theirs (proxcloud.io/lb-keep-address), at
+	// most lbgw.MaxKeptAddresses. No appliance serves one, and it stays the balancer's (LBAddressOwner): allocated,
+	// so in the project's floatingIps quota and billed as any public address, and no other cluster or project can
+	// be given it. It leaves the list for a Service of this cluster that names it in spec.loadBalancerIP
+	// (lbClusterDesired), by the tenant's release (lbClusterReleaseKept), or with the cluster (lbDestroy).
+	Kept []string `json:"kept,omitempty"`
 	// BuildFailedAt is when an appliance build last failed, RFC 3339; the next one waits lbClusterBuildRetry.
 	BuildFailedAt string `json:"buildFailedAt,omitempty"`
 }
@@ -259,6 +265,9 @@ func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, ser
 		return nil, err
 	}
 	st := &lbgw.State{ID: cred.ID, Services: stored, Nodes: accepted, CertHashes: keep}
+	if st.KeepGone, err = h.lbClusterKeepGone(ctx, cred.ID, lb, stored); err != nil {
+		return nil, err
+	}
 	if err := h.lbGW.PutState(ctx, st); err != nil {
 		return nil, err
 	}
@@ -266,16 +275,86 @@ func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, ser
 		go h.lbClusterConverge(context.WithoutCancel(ctx), cred.ID, false)
 	}
 	ans.NeedCertificates = need
-	for _, s := range services {
+	var kept []string // the addresses the cluster keeps, and the ones the next pass keeps for it
+	if lb != nil && lb.Cluster != nil {
+		kept = slices.Clone(lb.Cluster.Kept)
+		for _, c := range lb.Cluster.Services {
+			if c.VIP != "" && slices.Contains(st.KeepGone, c.UID) {
+				kept = append(kept, c.VIP)
+			}
+		}
+	}
+	for i := range services {
+		s := &services[i]
 		status := lbClusterStatus(lb, s.UID)
 		if said, ok := held[s.UID]; ok && said.State != "" {
 			status = said // not in the state: refused, or waiting for its certificate
 		} else if ok {
 			status.Events = said.Events
 		}
+		status.Events = append(status.Events, lbClusterAddressEvents(kept, s, status)...)
 		ans.Services = append(ans.Services, status)
 	}
 	return ans, nil
+}
+
+// lbClusterKeepGone is the new state's KeepGone: the Services that asked to keep their address in the last state, or
+// were carried in its KeepGone, that are not in stored and whose address the balancer lb still holds for them. A
+// Service the converge has let go of (its address is kept or given back, and the row lists it no more) leaves the
+// list with the next PUT, and one that went before the balancer had an address for it keeps none.
+func (h *Handler) lbClusterKeepGone(ctx context.Context, clusterID string, lb *loadBalancer, stored []lbgw.Service) ([]string, error) {
+	if lb == nil || lb.Cluster == nil {
+		return nil, nil // no balancer, no address
+	}
+	last, err := h.lbGW.State(ctx, clusterID)
+	if err != nil || last == nil {
+		return nil, err
+	}
+	asked := slices.Clone(last.KeepGone)
+	for i := range last.Services {
+		if lbgw.KeepsAddress(&last.Services[i]) {
+			asked = append(asked, last.Services[i].UID)
+		}
+	}
+	var out []string
+	for _, uid := range asked {
+		holds := slices.ContainsFunc(lb.Cluster.Services, func(c lbClusterSvc) bool { return c.UID == uid && c.VIP != "" })
+		if holds && !slices.Contains(out, uid) && !slices.ContainsFunc(stored, func(s lbgw.Service) bool { return s.UID == uid }) {
+			out = append(out, uid)
+		}
+	}
+	return out, nil
+}
+
+// lbClusterAddressEvents is what a Service that is not refused is told about the address it asks for
+// (spec.loadBalancerIP) and the one it asks to keep. kept are the addresses its cluster keeps.
+//
+// The address a Service names is its own when the cluster keeps it and the Service has none yet: OCCM reads
+// loadBalancerIP only for a balancer without a floating address, and takes one that exists and that nothing uses
+// (loadbalancer.go:732-755). It also creates the address when none exists, and fails the Service when another port
+// has it; here every other value is one answer, whatever the address is to anyone else: the Service is told so and
+// served on an address of the pool. So a Service never learns from it whether an address it names is another
+// cluster's, another project's or free, and never gets one of those.
+func lbClusterAddressEvents(kept []string, s *lbgw.Service, status lbgw.ServiceStatus) []lbgw.Event {
+	if status.State == lbgw.StateRefused {
+		return nil
+	}
+	const how = `Only an address this cluster keeps can be named: one a Service left behind with ` + lbgw.OwnPrefix + lbgw.KnobKeepAddress + `: "true"`
+	var out []lbgw.Event
+	switch want := s.LoadBalancerIP; {
+	case want == "" || want == status.Address:
+	case status.Address != "":
+		out = append(out, lbgw.Event{Type: "Warning", Reason: lbgw.ReasonLoadBalancerIPIgnored, Message: "spec.loadBalancerIP " + want +
+			" is not obeyed: the Service has " + status.Address + ". An address is taken when the Service gets its address, not after. " + how})
+	case !slices.Contains(kept, want):
+		out = append(out, lbgw.Event{Type: "Warning", Reason: lbgw.ReasonLoadBalancerIPIgnored, Message: "spec.loadBalancerIP " + want +
+			" is not an address this cluster keeps: the Service gets an address of the pool. " + how})
+	}
+	if lbgw.KeepsAddress(s) && len(kept) >= lbgw.MaxKeptAddresses {
+		out = append(out, lbgw.Event{Type: "Warning", Reason: lbgw.ReasonKeepAddressLimit, Message: fmt.Sprintf(
+			"This cluster keeps %d addresses already, the most it can: this Service's address is given back when the Service goes. Release a kept address on the cluster's page first", lbgw.MaxKeptAddresses)})
+	}
+	return out
 }
 
 // lbClusterStatus is a Service as the row has it; a Service the converge has not seen yet is building.
@@ -477,8 +556,9 @@ func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.Extern
 	return settled, err
 }
 
-// lbClusterDesired folds the state into the row: Services gone give up their address, new ones are added in the order
-// they come, each one that fits the config gets an address (a floatingIps quota each), and the spec is made from them.
+// lbClusterDesired folds the state into the row: Services gone give up their address (kept for the cluster when they
+// asked so, State.KeepGone), new ones are added in the order they come, each one that fits the config gets an address
+// (the kept one it names, or one of the pool for a floatingIps quota), and the spec is made from them.
 // No state (the controller never sent one) changes nothing.
 func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.ExternalService, proj *Project, lb *loadBalancer, st *lbgw.State) error {
 	if st == nil {
@@ -488,12 +568,21 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 	for _, s := range st.Services {
 		want[s.UID] = s
 	}
+	// An address no Service has any more is kept for the cluster when its Service asked so and the cluster has room
+	// for one more, and given back otherwise.
+	giveUp := func(ip string, keep bool) {
+		if keep && len(lb.Cluster.Kept) < lbgw.MaxKeptAddresses {
+			lb.Cluster.Kept = append(lb.Cluster.Kept, ip)
+		} else {
+			lb.Cluster.Releasing = append(lb.Cluster.Releasing, ip)
+		}
+	}
 	var svcs []lbClusterSvc
 	for _, s := range lb.Cluster.Services {
 		if _, ok := want[s.UID]; ok {
 			svcs = append(svcs, s)
 		} else if s.VIP != "" {
-			lb.Cluster.Releasing = append(lb.Cluster.Releasing, s.VIP)
+			giveUp(s.VIP, slices.Contains(st.KeepGone, s.UID))
 		}
 	}
 	for _, s := range st.Services {
@@ -518,7 +607,7 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 		refuse := func(reason, msg string) {
 			s.State, s.Reason, s.Message = lbgw.StateRefused, reason, msg
 			if s.VIP != "" {
-				lb.Cluster.Releasing = append(lb.Cluster.Releasing, s.VIP)
+				giveUp(s.VIP, lbgw.KeepsAddress(&w))
 				s.VIP = ""
 			}
 		}
@@ -531,6 +620,13 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 		if len(pve.RenderClusterHAProxy(trial, with)) > pve.LBMaxConfig || len(pve.RenderLVS(trial, with)) > pve.LBMaxConfig {
 			refuse(lbgw.ReasonTooLarge, "The load balancer's config would be too large with this Service: use fewer Services, ports or workers")
 			continue
+		}
+		if i := slices.Index(lb.Cluster.Kept, w.LoadBalancerIP); s.VIP == "" && w.LoadBalancerIP != "" && i >= 0 {
+			// The Service names an address its cluster keeps: it gets that one. The address is the balancer's
+			// already, counted in the quota and billed, so neither the quota nor the pool is asked. Kept is this
+			// cluster's row alone: an address of another cluster or project, or a free one, is never found here.
+			s.VIP, lb.Cluster.Kept = w.LoadBalancerIP, slices.Delete(lb.Cluster.Kept, i, i+1)
+			trial = lbClusterServiceSpecTLS(spec, w, s.VIP, st.Nodes, lb.Cluster.ID, certs)
 		}
 		if s.VIP == "" {
 			if pn == nil {
@@ -675,6 +771,59 @@ func (h *Handler) lbReleaseVIPs(ctx context.Context, es *externalservice.Externa
 	}
 	lb.Cluster.Releasing = left
 	return errors.Join(errs...)
+}
+
+// lbClusterReleaseKept gives back one address cluster clusterID of proj keeps: the tenant's
+// RELEASE_LOAD_BALANCER_ADDRESS. The address goes the way a Service's does, through Releasing, so it returns to the
+// pool, and stops being billed, once no appliance holds it (the pass that kept it may not have reached both yet).
+// Only an address in the cluster's own Kept is released: not one a Service is on, and not another cluster's.
+func (h *Handler) lbClusterReleaseKept(ctx context.Context, proj *Project, clusterID, ip string) error {
+	notKept := httpx.NewError(http.StatusNotFound, http.StatusNotFound, "Not an address this cluster keeps")
+	if h.lbGW == nil || h.sdnLock == nil || h.pveFor == nil {
+		return notKept // no balancer can have been built
+	}
+	cred, err := h.lbGW.Credential(ctx, clusterID)
+	if err != nil {
+		return err
+	}
+	if cred == nil || cred.RevokedAt != nil || cred.ProjectID != proj.ID {
+		return notKept
+	}
+	ext := lbClusterExternalID(clusterID)
+	release, ok, err := h.lbLock(ctx, ext, lbLockWait)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, "The cluster's load balancer is being changed. Try again in a moment")
+	}
+	defer release()
+	cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, cred.ComputeServiceID, ext)
+	if err != nil {
+		return err
+	}
+	if cr == nil {
+		return notKept
+	}
+	lb, err := lbOfRow(cr)
+	if err != nil {
+		return err
+	}
+	i := -1
+	if lb.Cluster != nil && lb.Cluster.ID == clusterID {
+		i = slices.Index(lb.Cluster.Kept, ip)
+	}
+	if i < 0 {
+		return notKept
+	}
+	lb.Cluster.Kept = slices.Delete(lb.Cluster.Kept, i, i+1)
+	lb.Cluster.Releasing = append(lb.Cluster.Releasing, ip)
+	if err := h.lbSave(ctx, cr, lb); err != nil {
+		return err
+	}
+	h.lbPasses.Delete(clusterID) // the next pass has an address to give back, whatever the last one found
+	go h.lbClusterConverge(context.WithoutCancel(ctx), clusterID, true)
+	return nil
 }
 
 // lbDropAddressRow archives the FLOATING_IP row of one address of owner.

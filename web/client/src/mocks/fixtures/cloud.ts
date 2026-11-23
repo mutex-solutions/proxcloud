@@ -221,6 +221,7 @@ export function seedCloudResources(): CloudResource[] {
             { uid: "u-gw", namespace: "nginx-gateway", name: "public-gateway-nginx", vip: "203.0.113.22", state: "ready" },
             { uid: "u-dns", namespace: "infra", name: "dns", state: "refused", reason: "UDPNotSupported", message: "Port 53/UDP: only TCP ports are balanced" },
           ],
+          kept: ["203.0.113.30", "203.0.113.31"],
         },
         listeners: [
           { port: 443, pool: "s0-0", vip: "203.0.113.21" },
