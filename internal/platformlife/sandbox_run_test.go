@@ -188,6 +188,11 @@ func TestApplyWithoutSandboxWritesNothingOfIt(t *testing.T) {
 		p.wl.obj(seedNS+"sandbox-system/secrets/sandbox-proxy-tls") != nil || len(in.Status.Components) != len(in2bom(t).Components)-1 {
 		t.Fatalf("pools %v, acl %v, status %+v, %d components", p.pve.pools, p.pve.acl, in.Status.Sandbox, len(in.Status.Components))
 	}
+	// The provider side as well: no sandbox settings on the Proxmox provider, the two tenant providers and no third,
+	// and no record of a sandbox provider or of an attach choice applied to one.
+	if len(p.sites) != 0 || len(p.registers) != 2 || in.Status.Providers == nil || in.Status.Providers.Sandbox != "" || in.Status.SandboxAttach != "" {
+		t.Fatalf("%d writes of sandbox settings, %d providers registered, providers %+v, sandbox attach %q", len(p.sites), len(p.registers), in.Status.Providers, in.Status.SandboxAttach)
+	}
 }
 
 // Proxmox refuses the row (a site whose portal token lost its role on the pool): the run stops before the cluster's
