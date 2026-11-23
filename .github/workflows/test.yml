@@ -54,9 +54,18 @@ jobs:
           version: v3.21.4
       - name: gofmt
         run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      # The published charts the platform tests render (internal/platformlife/chartcache_test.go): files named by
+      # their sha256, hashed against the BOM's digest at every use, so a restored file is trusted no more than a
+      # pulled one. The key is the BOMs; a changed BOM restores the newest cache and pulls only what it added.
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/proxcloud-test-charts
+          key: proxcloud-test-charts-${{ hashFiles('deploy/platform/**/*.yaml') }}
+          restore-keys: proxcloud-test-charts-
       - name: Unit tests (including required offline chart renders)
         env:
           CI: "1"
+          PROXCLOUD_TEST_CHART_CACHE: ${{ runner.temp }}/proxcloud-test-charts
         run: go test ./...
       # Standard library only. Helm renders the realm and seed files from the chart; the Compose
       # plugin of the runner renders the model and its shellcheck reads the script (all three are

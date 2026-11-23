@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-24: PR #449, the platform tests pull each chart once (Q1-5)
+
+**What changed:** no component, container, wire field, chart or behaviour of the product. Test support of
+`internal/platformlife` and one step of the `go-test` job.
+
+- `chartcache_test.go` (new): `ociChart` reads the OCI manifest a BOM pins by digest and the chart archive that
+  manifest names, each from a directory of files named by their sha256 (`cachedBlob`) or, once, from the registry
+  (`registryGet`: anonymous, by digest, with the bearer transport of go-containerregistry, which the module already
+  uses). `cachedBlob` hashes what it returns at every use, cached or pulled, writes under a temporary name and
+  renames. The directory is `proxcloud-test-charts` under `os.UserCacheDir()`, or `PROXCLOUD_TEST_CHART_CACHE`.
+- `upgrade_chart_test.go`: `clusterChart` and `certManagerChart` take their charts from it (`pinnedChart`); they ran
+  `helm pull` at every call. `helm template` reads the cached archive as it read the pulled directory.
+- `.github/workflows/test.yml`, job `go-test`: `actions/cache` restores and saves that directory, keyed by the hash
+  of `deploy/platform/**/*.yaml`.
+
+**Why:** the upgrade drill of v0.11.1-rc.1 asked where about 3.96k downloads of `charts/proxmox-kamaji-cluster` came
+from (lab report, "Answer to F"): not from a platform's ArgoCD, which pulls the chart about once a day, but from
+these tests, thirteen pulls per `go test ./...`.
+
+**Diagrams updated:** none (no element of C1 to C4 moves).
 ## 2026-11-24: the applied-state read proves the certificate files (#448)
 
 **What changed:** no new component, container, listener or relation. The state read of a load balancer appliance

@@ -929,9 +929,10 @@ in a pair that changes no k3s, Kubernetes version or node image. `go test
   `unexpected_rollout`: do not list
   the old version in `upgradeFrom` of `pc-platform`. The values come from Go
   (`ClusterValues`), so a renderer change is caught as well as a chart change. A
-  chart version that is not the one in the tree is pulled from the registry
-  (`helm pull`): the test needs `helm` and, for such a pair, the network; in CI
-  it fails without them, elsewhere it is skipped.
+  chart version that is not the one in the tree comes from the registry by the
+  BOM's digest, once (the test chart cache, below): the test needs `helm` and,
+  for a chart that is not cached yet, the network; in CI it fails without them,
+  elsewhere it is skipped.
   A pair that replaces machines by design (class `machines`: another Kubernetes
   version or node image) is compared where the comparison must hold: this
   build's chart is rendered with the values a run renders before the roll
@@ -946,14 +947,30 @@ in a pair that changes no k3s, Kubernetes version or node image. `go test
 - **A cert-manager move was read (`TestCertManagerMoveRenders`).** Every
   cert-manager row a pair allows must be a move listed in `certManagerReads`
   (`upgrade_chart_test.go`), where the release records what it read in
-  upstream's upgrade notes for that pair. The test pulls both chart versions
+  upstream's upgrade notes for that pair. The test takes both chart versions
   (from the chart mirror by the BOM's digest; a version no BOM pins yet from
-  upstream by its index digest), renders each with the values a run gives the
+  upstream by its index digest; each once, the test chart cache, below),
+  renders each with the values a run gives the
   seed's and the platform cluster's Application at the BOM's Kubernetes
   version, requires every CRD at the one version `v1`, served and stored, and
   the objects the new chart stops and starts rendering to be exactly the ones
   listed. List the old version in cert-manager's `upgradeFrom` only with such
   an entry.
+- **The test chart cache (`chartcache_test.go`).** The two tests above read a
+  published chart from the registry once per digest per machine, not once per
+  call. The cache is `proxcloud-test-charts` under the user's cache directory
+  (`~/.cache` on Linux), or the directory `PROXCLOUD_TEST_CHART_CACHE` names;
+  CI restores and saves it with `actions/cache`, keyed by the hash of
+  `deploy/platform/**/*.yaml`. Its files are named by the sha256 of their
+  content: the OCI manifest a BOM pins by digest, and the chart archive that
+  manifest names. Every use hashes both, so a cached file is trusted no more
+  than a pulled one: a file that is not what its name says is pulled again, and
+  a registry that answers other content than the BOM pins, or that it has no
+  content of the pinned digest (404), fails the test, workstation or CI, and
+  nothing of it is kept. The charts are read by digest,
+  not by tag; that a tag still serves the pinned digest is `bom_verify.py`'s
+  check, which reads the registry at every run for that reason. Deleting the
+  directory is safe: the next run pulls again.
 - **The plan as the operator reads it (`TestUpgradePlanGolden`).** Goldens under
   `testdata/upgrade/0.8.1-to-<case>/plan.golden.json`: 0.8.1 to a next release
   with the own charts bumped (allowed), with a third-party chart or a node image
