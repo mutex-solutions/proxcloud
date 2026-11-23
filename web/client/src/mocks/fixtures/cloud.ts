@@ -228,12 +228,16 @@ export function seedCloudResources(): CloudResource[] {
         listeners: [
           { port: 443, protocol: "https", pool: "s0-0", vip: "203.0.113.21", certificates: ["cert-shop"] },
           { port: 80, pool: "s1-0", vip: "203.0.113.22" },
+          { port: 443, protocol: "udp", pool: "s1-1", vip: "203.0.113.22" },
           { port: 53, protocol: "udp", pool: "s2-0", vip: "203.0.113.23" },
         ],
         pools: [
           { name: "s0-0", protocol: "http", algorithm: "roundrobin", members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 31443, weight: 1 })) },
           { name: "s1-0", protocol: "tcp", algorithm: "roundrobin", healthCheck: { type: "http", port: 32100, path: "/" },
             members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 30080, weight: 1 })) },
+          // The gateway's UDP port (policy Local): checked on the Service's health port, as its TCP port is.
+          { name: "s1-1", protocol: "udp", algorithm: "roundrobin", healthCheck: { type: "http", port: 32100, path: "/" },
+            members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 30443, weight: 1 })) },
           { name: "s2-0", protocol: "udp", algorithm: "roundrobin", healthCheck: { type: "udp-connect" },
             members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 30053, weight: 1 })) },
         ],

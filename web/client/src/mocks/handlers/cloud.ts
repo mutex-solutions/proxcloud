@@ -279,10 +279,10 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     case "GET_HEALTH":
       return { data: {
         // A pool checked over HTTP on a cluster's health port (policy Local) has one worker with a pod; a cluster's UDP
-        // pool has its last worker down.
+        // pool with its own check has its last worker down.
         result: (r?.data?.loadbalancer?.pools ?? []).flatMap((p: any) => (p.members ?? []).map((m: any, i: number) => ({
           pool: p.name, serverId: m.serverId, address: m.address, port: m.port,
-          status: p.healthCheck?.type === "none" ? "no check" : m.node && (p.protocol === "udp" ? i === 2 : p.healthCheck?.type === "http" && i > 0) ? "DOWN" : "UP",
+          status: p.healthCheck?.type === "none" ? "no check" : m.node && (p.healthCheck?.type === "http" ? i > 0 : p.protocol === "udp" && i === 2) ? "DOWN" : "UP",
         }))),
         appliances: r?.data?.loadbalancer?.appliances ?? [],
       } }

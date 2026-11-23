@@ -117,7 +117,10 @@ export function ClusterServices({ lb, health, certificates }: { lb: LB; health?:
           const protocolOf = (l: Listener) => (l.protocol || (lb.pools ?? []).find((p) => p.name === l.pool)?.protocol || "tcp").toUpperCase()
           const certs = [...new Set(listeners.flatMap((l) => l.certificates ?? []))]
             .map((id) => certificates?.find((c) => c.id === id)).filter((c): c is ClusterCertificate => !!c)
-          const udp = listeners.some((l) => protocolOf(l) === "UDP")
+          // The note on a UDP check holds for the datagram check only: with externalTrafficPolicy Local the check is the
+          // Service's health port, and a check that is turned off sees nothing at all.
+          const udp = listeners.some((l) => protocolOf(l) === "UDP" &&
+            ((lb.pools ?? []).find((p) => p.name === l.pool)?.healthCheck?.type ?? "udp-connect") === "udp-connect")
           const up = workers.filter((a) => members.some((m) => m.address === a &&
             health?.find((h) => h.pool === m.pool && h.address === m.address && h.port === m.port)?.status?.startsWith("UP"))).length
           return (

@@ -25,8 +25,9 @@ test("the cluster page says which Services get a public address, what it costs, 
   // Policy Local: only the worker with a pod answers the health port.
   await expect(block.getByRole("row").filter({ hasText: "nginx-gateway/public-gateway-nginx" })).toContainText("1 of 3 up")
   const gw = block.getByRole("row").filter({ hasText: "nginx-gateway/public-gateway-nginx" })
-  await expect(gw).toContainText("80/TCP")
+  await expect(gw).toContainText("80/TCP, 443/UDP")
   await expect(gw.getByTestId("k8s-lb-cert")).toHaveCount(0)
+  // Its UDP port is checked on the Service's health port (policy Local): the note on the datagram check is not for it.
   await expect(gw.getByTestId("k8s-lb-udp-check")).toHaveCount(0)
   // A UDP port is served, its workers are checked, and the row says what the check cannot see.
   const dns = block.getByRole("row").filter({ hasText: "infra/dns" })
