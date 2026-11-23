@@ -788,7 +788,7 @@ export function LoadBalancerDetailPage() {
                     {!certs.data?.length && <Link className="text-xs underline" to={`/p/${pid}/certificates`}>Upload one on the Certificates page</Link>}
                     <span className="basis-full text-xs text-muted-foreground">
                       A client gets the certificate that holds the name it asks for, and the first one otherwise. TLS 1.2 and 1.3.
-                      {protocolOf(l) === "https" ? " The servers are spoken to in HTTP and read the client's address in X-Forwarded-For and the scheme in X-Forwarded-Proto." : " The servers are spoken to in plain TCP."}
+                      {protocolOf(l) === "https" ? " The servers are spoken to in HTTP and read the client's address in the last value of X-Forwarded-For and the scheme in X-Forwarded-Proto." : " The servers are spoken to in plain TCP."}
                     </span>
                   </div>
                 )}
