@@ -3,8 +3,9 @@
 //
 // The controller presents a per-cluster credential (lb@proxcloud!<clusterId>) and sends the cluster's whole desired
 // state: its Services of type LoadBalancer and its nodes' addresses. Nothing in the request names a project, a network
-// or a VM: those come from the credential row. The gateway checks each Service on its own (TCP and IPv4 only, a node
-// port in range, source ranges that fit a firewall rule) and hands the rest to the portal (Portal), which stores the
+// or a VM: those come from the credential row. The gateway checks each Service on its own (TCP, UDP and IPv4 only, a
+// node port in range, source ranges that fit a firewall rule, annotations it can honour: annotations.go) and hands the
+// rest to the portal (Portal), which stores the
 // state and converges the cluster's balancer in the background: the answer is the state as it is, never a build
 // inside the request. See docs/managed-k8s.md and the v0.11.0 load balancer plan.
 package lbgw
@@ -32,11 +33,18 @@ import (
 // The protocol of /lb/v1. A controller sends its own in ProtocolHeader; the gateway answers ControllerTooOld to one
 // older than MinProtocol, so a change that needs a newer controller says "bump the cluster" instead of failing
 // silently. /lb/v1 stays backward compatible within a minor release (C12).
+//
+// Protocol 2 (v0.11.1) only adds: a Service's annotations, session affinity and own nodes in the request, its ipMode
+// and Events in the answer. A protocol 1 controller sends none of them and is served as before, with one thing kept
+// back: its UDP Services stay refused (ProtocolUDP), so that upgrading the portal alone never hands a Service that
+// stood pending a public address, which is billed. The cluster's owner gets UDP by upgrading the cluster.
 const (
 	ProtocolHeader = "ProxCloud-LB-Protocol"
-	Protocol       = 1
+	Protocol       = 2
 	MinProtocol    = 1
-	StatePath      = "/lb/v1/state"
+	// ProtocolUDP is the first protocol whose controllers get UDP ports served.
+	ProtocolUDP = 2
+	StatePath   = "/lb/v1/state"
 )
 
 // What a Service is answered with.
@@ -49,8 +57,10 @@ const (
 // Reasons, which the controller turns into Events.
 const (
 	ReasonQuotaExceeded            = "QuotaExceeded"
-	ReasonUDPNotSupported          = "UDPNotSupported" // any port that is not TCP: the whole Service (C14)
-	ReasonNoNodePort               = "NoNodePort"      // allocateLoadBalancerNodePorts: false, or a port out of range
+	ReasonUDPNotSupported          = "UDPNotSupported"      // a UDP port from a controller older than ProtocolUDP: the whole Service (C14)
+	ReasonProtocolNotSupported     = "ProtocolNotSupported" // a port that is neither TCP nor UDP (SCTP): the whole Service
+	ReasonInternalNotSupported     = "InternalNotSupported" // InternalAnnotation: the balancer's addresses are public
+	ReasonNoNodePort               = "NoNodePort"           // allocateLoadBalancerNodePorts: false, or a port out of range
 	ReasonIPFamilyNotSupported     = "IPFamilyNotSupported"
 	ReasonTooManySourceRanges      = "TooManySourceRanges"
 	ReasonPublicNetworkUnavailable = "PublicNetworkUnavailable"
@@ -92,9 +102,23 @@ type Service struct {
 	ExternalTrafficPolicy string   `json:"externalTrafficPolicy,omitempty"`
 	HealthCheckNodePort   int      `json:"healthCheckNodePort,omitempty"`
 	SourceRanges          []string `json:"sourceRanges,omitempty"`
-	// ProxyProtocol: the annotation proxcloud.io/lb-proxy-protocol is "true", so members get a PROXY v2 header.
+	// ProxyProtocol: the annotation proxcloud.io/lb-proxy-protocol is "true", so members get a PROXY v2 header. It is
+	// protocol 1's one knob; a protocol 2 controller still sends it, for a portal that reads no Annotations.
 	ProxyProtocol bool     `json:"proxyProtocol,omitempty"`
 	IPFamilies    []string `json:"ipFamilies,omitempty"`
+
+	// Protocol 2, each optional.
+	//
+	// Annotations are the Service's annotations of the names SentAnnotation takes, as the tenant wrote them (a value
+	// over MaxAnnotationValue may come cut: it is not read either way). Any other name is not read and not counted.
+	Annotations map[string]string `json:"annotations,omitempty"`
+	// SessionAffinity ClientIP keeps a client on one node for SessionAffinityTimeout seconds (0 = Kubernetes' three
+	// hours).
+	SessionAffinity        string `json:"sessionAffinity,omitempty"`
+	SessionAffinityTimeout int    `json:"sessionAffinityTimeout,omitempty"`
+	// Nodes, when set, are the only nodes behind this Service, by address: the ones of the request's Nodes that its
+	// node selector annotation matches. An empty list is a selector that matches none. nil: every node.
+	Nodes *[]string `json:"nodes,omitempty"`
 }
 
 // Port is one port of a Service.
@@ -124,6 +148,10 @@ type ServiceStatus struct {
 	State   string `json:"state"`
 	Reason  string `json:"reason,omitempty"`
 	Message string `json:"message,omitempty"`
+	// Protocol 2, for a Service that is not refused. IPMode is the ipMode of the address in the Service's status (VIP
+	// or Proxy). Events are what the Service's annotations raised, for the controller to say on the Service.
+	IPMode string  `json:"ipMode,omitempty"`
+	Events []Event `json:"events,omitempty"`
 }
 
 // NodeStatus is a refused node.
@@ -322,7 +350,8 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if r.Method != http.MethodPut {
 		return nil, &Refusal{http.StatusMethodNotAllowed, "", "lb gateway: the one call is PUT " + StatePath}
 	}
-	if v, err := strconv.Atoi(r.Header.Get(ProtocolHeader)); err != nil || v < MinProtocol {
+	protocol, err := strconv.Atoi(r.Header.Get(ProtocolHeader))
+	if err != nil || protocol < MinProtocol {
 		return nil, &Refusal{http.StatusConflict, ReasonControllerTooOld,
 			fmt.Sprintf("This cluster's load balancer controller is older than the portal accepts (protocol %d or later). Bump the cluster to the portal's chart", MinProtocol)}
 	}
@@ -332,7 +361,8 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if err := dec.Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return nil, &Refusal{http.StatusRequestEntityTooLarge, ReasonTooLarge, fmt.Sprintf("lb gateway: the state takes at most %d KiB", maxBody>>10)}
+			// Nothing was stored: the cluster's balancer stays as the last state that fitted made it.
+			return nil, &Refusal{http.StatusRequestEntityTooLarge, ReasonTooLarge, fmt.Sprintf("The cluster's load balancer state is over %d KiB and was not taken: the balancer stays as it is, and no change to a Service or a node reaches it until the state fits. Shorten the Services' load balancer annotations and source ranges", maxBody>>10)}
 		}
 		return nil, &Refusal{http.StatusBadRequest, ReasonInvalid, "lb gateway: the body is not a state: " + err.Error()}
 	}
@@ -345,6 +375,7 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		}
 	}
 	statuses := make([]ServiceStatus, len(req.Services))
+	options := make([]Options, len(req.Services))
 	var accepted []Service
 	at := map[string]int{}
 	for i := range req.Services {
@@ -358,7 +389,8 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		}
 		at[s.UID] = i
 		statuses[i] = ServiceStatus{UID: s.UID}
-		if reason, msg := CheckService(s, i); reason != "" {
+		var reason, msg string
+		if options[i], reason, msg = CheckService(s, i, protocol); reason != "" {
 			statuses[i].State, statuses[i].Reason, statuses[i].Message = StateRefused, reason, msg
 			continue
 		}
@@ -377,14 +409,25 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		if statuses[i].State == "" { // the portal's answer has every Service it got; this is a guard
 			statuses[i].State = StateBuilding
 		}
+		if statuses[i].State != StateRefused && protocol >= 2 {
+			statuses[i].IPMode, statuses[i].Events = options[i].IPMode(&req.Services[i]), options[i].Events
+		}
 	}
 	ans.Services = statuses
 	return ans, nil
 }
 
-// CheckService refuses a Service the balancer cannot serve, and puts its source ranges in the form a firewall rule
-// takes. index is its place in the request: the ones past MaxServices are refused.
-func CheckService(s *Service, index int) (reason, message string) {
+// CheckService refuses a Service the balancer cannot serve, puts its source ranges in the form a firewall rule takes
+// and reads its annotations (ServiceOptions). index is its place in the request: the ones past MaxServices are
+// refused. protocol is the controller's: one older than ProtocolUDP gets no UDP port served.
+func CheckService(s *Service, index, protocol int) (o Options, reason, message string) {
+	if reason, message = checkService(s, index, protocol); reason != "" {
+		return o, reason, message
+	}
+	return ServiceOptions(s)
+}
+
+func checkService(s *Service, index, protocol int) (reason, message string) {
 	if index >= MaxServices {
 		return ReasonTooLarge, fmt.Sprintf("A cluster's load balancer serves at most %d Services", MaxServices)
 	}
@@ -399,15 +442,35 @@ func CheckService(s *Service, index int) (reason, message string) {
 	if len(s.Ports) > MaxPorts {
 		return ReasonTooLarge, fmt.Sprintf("A Service takes at most %d ports on the load balancer", MaxPorts)
 	}
-	seen := map[int]bool{}
-	for _, p := range s.Ports {
-		if p.Protocol != "" && p.Protocol != "TCP" {
-			return ReasonUDPNotSupported, "The load balancer serves TCP only, and port " + strconv.Itoa(p.Port) + " is " + p.Protocol + ": no port of this Service is served"
+	if s.Nodes != nil {
+		if len(*s.Nodes) > MaxNodes {
+			return ReasonInvalid, fmt.Sprintf("A Service takes at most %d nodes", MaxNodes)
 		}
-		if p.Port < 1 || p.Port > 65535 || seen[p.Port] {
+		for _, n := range *s.Nodes {
+			if a, err := netip.ParseAddr(n); err != nil || !a.Is4() {
+				return ReasonInvalid, "A Service's nodes are named by their IPv4 InternalIP"
+			}
+		}
+	}
+	seen := map[string]bool{} // a port is (protocol, port): TCP 53 and UDP 53 are two listeners
+	for i := range s.Ports {
+		p := &s.Ports[i]
+		if p.Protocol == "" {
+			p.Protocol = "TCP" // as in Kubernetes
+		}
+		switch {
+		case p.Protocol == "UDP" && protocol < ProtocolUDP:
+			// Not served for a controller of before v0.11.1, whatever the portal can do: the Service would get a
+			// public address, which is billed, without anyone having asked for it since the portal's upgrade.
+			return ReasonUDPNotSupported, "This cluster's load balancer controller serves TCP only, and port " + strconv.Itoa(p.Port) + " is UDP: no port of this Service is served. For UDP, upgrade the cluster"
+		case p.Protocol != "TCP" && p.Protocol != "UDP":
+			return ReasonProtocolNotSupported, "The load balancer serves TCP and UDP, and port " + strconv.Itoa(p.Port) + " is " + p.Protocol + ": no port of this Service is served"
+		}
+		key := p.Protocol + "/" + strconv.Itoa(p.Port)
+		if p.Port < 1 || p.Port > 65535 || seen[key] {
 			return ReasonInvalid, "Port " + strconv.Itoa(p.Port) + " is out of range or listed twice"
 		}
-		seen[p.Port] = true
+		seen[key] = true
 		if p.NodePort == 0 {
 			return ReasonNoNodePort, "The load balancer sends traffic to node ports: set allocateLoadBalancerNodePorts to true"
 		}

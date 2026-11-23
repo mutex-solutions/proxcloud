@@ -215,6 +215,53 @@ func TestLBClusterStateConverges(t *testing.T) {
 		t.Fatalf("a repeated PUT took %v", got)
 	}
 
+	// Protocol 2: the Service gains UDP on its port's number (the same node port, as Kubernetes allocates it), an
+	// affinity and a method. It keeps its one address; the UDP port goes to the appliances' LVS
+	// and opens in the firewall beside the TCP one; nothing of it reaches HAProxy. When the UDP port goes, so does
+	// the UDP service of both appliances, and the config is the one it was.
+	tcpOnly := f.files[len(f.files)-1]
+	mixed := svc("a", 80, 30080)
+	mixed.Ports = append(mixed.Ports, lbgw.Port{Protocol: "UDP", Port: 80, NodePort: 30080})
+	mixed.SessionAffinity, mixed.Annotations = "ClientIP", map[string]string{"proxcloud.io/lb-method": "LEAST_CONNECTIONS"}
+	if _, reason, msg := lbgw.CheckService(&mixed, 0, lbgw.Protocol); reason != "" {
+		t.Fatalf("the gateway refuses the mixed Service: %s %s", reason, msg)
+	}
+	state(mixed)
+	lb = converge("TCP and UDP on one port", func(lb *loadBalancer) bool {
+		return len(lb.Listeners) == 2 && lb.Cluster.Services[0].State == lbgw.StateReady && lb.Status == lbStatusActive
+	})
+	if lb.Cluster.Services[0].VIP != vipA || !slices.Equal(owned(), []string{vipA}) {
+		t.Fatalf("the Service's address moved, or a second one was taken: %q %v", lb.Cluster.Services[0].VIP, owned())
+	}
+	if l, p := lb.Listeners[1], lb.Pools[1]; l.Protocol != "udp" || l.VIP != vipA || l.Port != 80 || p.Protocol != "udp" || p.Algorithm != "leastconn" ||
+		p.SessionPersistence == nil || len(p.Members) != 2 || p.Members[0].Port != 30080 || p.Name == lb.Pools[0].Name {
+		t.Fatalf("UDP listener and pool: %+v %+v", l, p)
+	}
+	for _, vm := range []string{"301", "302"} {
+		if !slices.Contains(f.log, vm+" lvs reload") {
+			t.Fatalf("appliance %s got no UDP service:\n%s", vm, strings.Join(f.log, "\n"))
+		}
+		for _, proto := range []string{"tcp", "udp"} {
+			if !slices.ContainsFunc(f.rules[vm], func(r pve.FirewallRule) bool { return r.Proto == proto && r.Dest == vipA && r.DPort == "80" }) {
+				t.Fatalf("appliance %s: no %s rule for %s:80 in %+v", vm, proto, vipA, f.rules[vm])
+			}
+		}
+	}
+	if cfg := f.files[len(f.files)-1]; strings.Contains(cfg, "udp") || !strings.Contains(cfg, "balance leastconn") || !strings.Contains(cfg, "stick on src") {
+		t.Fatalf("the HAProxy config of the mixed Service:\n%s", cfg)
+	}
+	state(svc("a", 80, 30080))
+	lb = converge("the UDP port went", func(lb *loadBalancer) bool {
+		return len(lb.Listeners) == 1 && lb.Cluster.Services[0].State == lbgw.StateReady && lb.Status == lbStatusActive &&
+			slices.Contains(f.log, "301 lvs remove") && slices.Contains(f.log, "302 lvs remove")
+	})
+	if cfg := f.files[len(f.files)-1]; cfg != tcpOnly || lb.Cluster.Services[0].VIP != vipA {
+		t.Fatalf("back to the TCP Service: address %q, config:\n%s\nwas:\n%s", lb.Cluster.Services[0].VIP, cfg, tcpOnly)
+	}
+	if slices.ContainsFunc(f.rules["301"], func(r pve.FirewallRule) bool { return r.Proto == "udp" }) {
+		t.Fatalf("a UDP rule outlived the UDP port: %+v", f.rules["301"])
+	}
+
 	// N2-4 (v0.11.0-rc.1 drill): the controller sends its state every ten seconds, and every PUT started a full pass,
 	// about 16 Proxmox calls each. A PUT that changes nothing on a settled balancer starts none; once the last look is
 	// a minute old, six of them make one; a changed state is applied by its own PUT; and a balancer that is not

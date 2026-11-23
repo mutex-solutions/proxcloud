@@ -4,6 +4,186 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: only the product's own annotation names are read
+
+**What changed:** the owner decided on 2026-11-23 that the product defines its own annotation names and keeps no
+upstream alias. This supersedes, in the two entries below, everything that speaks of an alias, of "the two prefixes"
+and of "either name". No container, no trust relation, no field of the protocol changed; the same pull request.
+
+- `internal/cloud/lbgw/annotations.go`: the table reads `proxcloud.io/lb-<knob>` and nothing else. `AliasPrefix`
+  (`loadbalancer.openstack.org/`), the `aliases` map and the rule "the own name wins" are gone; `knobs` lists the
+  fifteen names that are read. `SentAnnotation` is the prefix `proxcloud.io/lb-` alone. `InternalAnnotation` is
+  `proxcloud.io/lb-internal` (it was `service.beta.kubernetes.io/openstack-internal-load-balancer`): `"true"` refuses
+  the Service (`InternalNotSupported`, text `InternalMessage`), a value that is no boolean is named in
+  `InvalidAnnotation`. `proxy-protocol`: `true` is version 2, `v1` and `v2` pick one; the second meaning of `true`
+  went with the alias. The special case for `timeout-tcp-inspect: "0"` went too: under the product's prefix that
+  name is one more unknown name.
+- `cmd/lb-controller`: `readService` sends a Service's annotations of the prefix `proxcloud.io/lb-` and no other;
+  `protocol1` and the turn's Event for a Service that was not sent read the internal request under its new name.
+- Tests: `TestEveryAnnotationByItsName`, `TestOnlyTheOwnPrefixIsRead` (lbgw), and in the controller's tests a
+  Service with annotations of another prefix through the real gateway handler: nothing of them is in the request,
+  no Event, and the Service keeps its public address. The two golden files are unchanged: the Services that render
+  them carry the same options under the product's names (`proxy-protocol: v1` where the alias's `true` stood).
+- Diagrams: none. `c4-code.md` (the `lbgw` and `cmd/lb-controller` rows) says the same.
+
+**Why:**
+
+- *One name per knob.* An alias is a second public interface to keep for ever: its meaning is set by another
+  project's release notes, and one value already meant something else under it (`proxy-protocol: "true"`, version 1
+  upstream, version 2 here since v0.11.0). The product is not that cloud's controller and does not carry its names;
+  what it keeps is the behaviour (the knobs, their values, the Events), which is what the owner asked for.
+- *Other prefixes are not the load balancer's business.* With no alias there is no reason to send, count or name an
+  annotation of another prefix: nothing of a Service leaves the cluster but what the table can read, and a Service
+  that carries another controller's annotations gets no Event about them every time it changes.
+- *The internal request moves to the product's name, and the upstream one is not recognised.* This is the one
+  consequence with a cost, and the guide says it in so many words (differences 16 and 17, and the bullet in bold): a
+  manifest that carries only `service.beta.kubernetes.io/openstack-internal-load-balancer: "true"` is served with a
+  **public** address here. Recognising that single upstream name "for safety" would be an alias again, and the
+  decision was none. v0.11.0 did not read it either, so no cluster that exists changes behaviour; what changes is
+  against this pull request's earlier state, which was never released.
+- *The values keep upstream's spellings.* `ROUND_ROBIN`, `LEAST_CONNECTIONS`, `SOURCE_IP` and `-1` are still read
+  under the product's names, so renaming a manifest is a change of keys by the guide's table and of one value
+  (`proxy-protocol: "true"` becomes `v1`).
+- *A table by short key.* The guide maps upstream's short key (the part after the `/`) to the product's name. The
+  upstream prefix is written out only in this file.
+
+**Files:** `internal/cloud/lbgw/annotations.go`, `annotations_test.go`; `cmd/lb-controller/main.go`,
+`protocol2_test.go`; `internal/platform/project/cloud_lb_cluster_pve_test.go`,
+`cloud_lb_cluster_integration_test.go`; `docs/managed-k8s.md`, `docs/architecture/c4/c4-code.md`, `CHANGELOG.md`.
+
+## 2026-11-23: annotations that cannot be read, the step-down per request, a selector's spaces
+
+**What changed:** three findings of the review of the change below, in its own pull request. No container, no trust
+relation, no field of the protocol changed.
+
+- `internal/cloud/lbgw/annotations.go`: `Read` is what both sides read of a Service's annotations: the names of the
+  two prefixes and the internal one, with a value of at most `MaxAnnotationValue` (256) characters. `ServiceOptions`
+  no longer refuses a Service for a value that is too long, for more than 32 annotations or for a name that is not
+  the load balancer's: the first is not obeyed and named in the `InvalidAnnotation` Event, the count is no limit
+  (`maxNamed`, 32, is how many names the `AnnotationNotSupported` Event lists before it counts), the third is not
+  looked at. The internal annotation is read first and still refuses. The forwarded-for header asked for together
+  with PROXY no longer refuses either: PROXY holds, the header is not added, and the `InvalidAnnotation` Event names
+  the annotation. Of the annotations, the internal one alone refuses a Service now.
+- `internal/cloud/lbgw/gateway.go`: the refusal of a body over 64 KiB says what stays and what to do; it reaches
+  every Service as an Event.
+- `cmd/lb-controller`: `gateway.put` sends the whole request every time and the request of protocol 1 only after an
+  older portal's `400`, for that request; the `peer` it remembered is gone. `readService` sends a value over the
+  limit cut to one character more, after the spaces around it are dropped (the portal's readers drop them, and the
+  cut must not take the `true` off an internal annotation that came with spaces before it), and reads the node
+  selector through `lbgw.Read`. `parseSelector` drops the spaces around `=` too.
+- Diagrams: none. `c4-code.md` (the `lbgw` and `cmd/lb-controller` rows) says the same.
+
+**Why:**
+
+- *An address must not be lost over an annotation nobody can read.* v0.11.0's controller read one annotation, so a
+  Service could carry any others of the two prefixes. Refusing such a Service at the cluster's upgrade took it out
+  of the state, and its address went back to the pool. Only the internal annotation is worth that: obeying it
+  halfway would publish a Service that asked not to be.
+- *A pair that contradicts itself is not worth an address either.* The entry below counted the forwarded-for
+  header together with PROXY as the second real refusal, "as OCCM refuses it". OCCM does not give anything back for
+  it: `loadbalancer.go`:1627-1631 returns an error, the sync fails, and a balancer that exists keeps its address and
+  its listeners. A gateway refusal takes the Service out of the state. And the pair is what an upgrade can meet:
+  v0.11.0 obeyed `proxcloud.io/lb-proxy-protocol: "true"` and read no alias, so a manifest that came from a cluster
+  with OCCM could carry `x-forwarded-for` beside it and was served with PROXY. It still is. PROXY is the one kept
+  because it is the one such a Service already has, and because the header would turn its TCP ports into HTTP
+  listeners. What differs from OCCM is a new Service with both: it gets an address here (the fifteenth difference
+  in the guide).
+- *No limit on the count.* The table has 14 knobs under two names: it looks up at most 30 names, whatever else is
+  there. A limit of 32 could only pick which annotation the table knows to drop, by the order of names. What the
+  count costs is the size of the request, which has its own limit, and the length of the Event, which is capped.
+- *The cut value.* Kubernetes takes 256 KiB of annotations on one object. One long value under a load balancer
+  name would take the whole cluster's state over 64 KiB, and the gateway would refuse all of it. The controller
+  cannot drop the annotation (the portal is the one that says what is not obeyed), so it sends 257 characters: still
+  too long, so the portal names it. Both sides call `Read`, so a node selector the portal says it does not obey is
+  not applied by the controller either.
+- *The body limit stays.* 50 Services with 20 ports and 100 source ranges each never fitted 64 KiB; annotations
+  add to that. The limit is the bound on what a cluster's credential can make the portal read and store. Over it
+  nothing is stored, so nothing is released, and the Event says so.
+- *The step-down is per request.* Remembering that the portal was old made the first request to a portal that came
+  back the short one: for one turn it stored Services without their PROXY version, selected nodes and affinity, and
+  converged to that. Now nothing is remembered. The cost is on the old portal only: its `auditChange` audits a
+  refusal when it differs from the last answer, and a refused request followed by an accepted one differs every
+  turn, so a cluster whose Services use protocol 2 writes one audit event a turn while the portal is rolled back. A
+  request with nothing of protocol 2 is not refused, and a refusal that is the same without those fields is not sent
+  twice. The way out of that cost, if a rollback ever lasts, is a mark on the short request that the newer portal
+  refuses; it needs a change of the protocol and was left out.
+- *Spaces around `=`.* cloud-provider-openstack v1.37.1 `pkg/util/util.go`:73-94 (`StringToMap`, called from
+  `pkg/openstack/loadbalancer.go`:467-470) trims each term and nothing else: `" k1=v1, k2 "` is its own test, and
+  `pool = edge` gives the key `pool ` and the value ` edge`, which `matchNodeLabels` (:2360-2373) finds on no node.
+  The review read this as upstream trimming around `=`; it does not. The trim is kept as a difference on purpose,
+  the fourteenth in the guide: a label's key and value hold no space, so the term has one meaning, and every
+  selector that matches nodes upstream matches the same nodes here. A term with an empty key (`=x`) is still dropped
+  here, where upstream keeps a key no node has.
+
+## 2026-11-23: gateway protocol 2, UDP and the layer 4 annotations from Services
+
+**What changed:** no new container, no new trust relation. The one call between a cluster's load balancer controller
+and the portal carries more, in both directions, and the portal reads what a Service's annotations mean.
+
+- `internal/cloud/lbgw/gateway.go`: `Protocol` 2, `MinProtocol` still 1, `ProtocolUDP`. `Service` gains
+  `annotations`, `sessionAffinity`, `sessionAffinityTimeout` and `nodes`; `ServiceStatus` gains `ipMode` and
+  `events`. Every new field is optional. `CheckService` takes the controller's protocol: the key of a port is
+  (protocol, port), UDP is served only for protocol 2, SCTP is `ProtocolNotSupported`.
+- `internal/cloud/lbgw/annotations.go` (new): `ServiceOptions`, the table of `proxcloud.io/lb-<knob>` and its
+  `loadbalancer.openstack.org/<alias>`, the Events (`AnnotationNotSupported`, `InvalidAnnotation`,
+  `LoadBalancerLbMethodUnknown`, `KeepAddressNotServed`) and the refusals (`InternalNotSupported`, the forwarded-for
+  header together with PROXY).
+- `internal/platform/project/cloud_lb_cluster_pve.go`: `lbClusterServiceSpec` maps a Service and its options to
+  listeners and pools: UDP ports to `udp` listeners and pools (`pve.RenderLVS`), the method, the limit, the
+  timeouts, the PROXY version, the affinity, the check's figures, the Service's own nodes. The size check of a
+  config also measures the LVS file.
+- `cmd/lb-controller`: sends the annotations of the load balancer's names as they are, the affinity and the nodes a
+  node selector picks; upstream's node rule; upstream's Events and the portal's; the `ipMode` the portal answers;
+  the request of protocol 1 for a portal that answers protocol 1.
+- Diagrams: none redrawn. `c2-containers.md` (the gateway row) and `c4-code.md` (the `lbgw` and `cmd/lb-controller`
+  rows) say what the call carries.
+
+**Why:** v0.11.1 is to be a complete layer 4 balancer and its Kubernetes controller is to behave like OpenStack's
+(Octavia with the OpenStack cloud controller manager), which is what tenants' charts are written for.
+
+**Why these choices:**
+
+- *The annotations are read by the portal.* A controller is never re-pinned by itself (C12): a cluster keeps the
+  controller image it has. With the table in the portal a new knob ships with the portal; the controller's part is
+  to send annotations it does not understand. The one it reads is the node selector, which needs the nodes' labels,
+  and it sends the result (addresses) so the portal still counts only the cluster's own workers (C11).
+- *Events and ipMode in the answer.* The same reason: what is not obeyed, and whether the address is a `Proxy`
+  one, follows from the table. The gateway computes both from the request, so nothing new is stored.
+- *UDP only for protocol 2.* A UDP Service of a cluster made on v0.11.0 stands pending today. Serving it at the
+  portal's upgrade would hand out a public address, billed and counted in the quota, that nobody asked for since.
+  The condition is one line of `checkService`.
+- *An alias only where the meaning is the same.* The cost of the OpenStack names is a table; the risk, a name that
+  means something else here, is closed by aliasing only identical meanings (cloud-provider-openstack v1.37.1
+  `pkg/openstack/loadbalancer.go`:61-107, :467-542, :2345-2373) and by naming every other annotation in an Event.
+  The one value that differs is the PROXY header's `true` (version 2 under the own name since v0.11.0, version 1
+  under OpenStack's), and the guide says so.
+- *A value that is not understood is not obeyed, and the Service is served.* A gateway refusal takes a Service out
+  of the state, and its address goes back to the pool: too much for a typing mistake in a timeout. The two real
+  refusals are a request the balancer cannot honour at all (an internal address) and one that contradicts itself.
+  (Superseded the same day, entry above: the pair that contradicts itself is not obeyed and no longer refuses.)
+- *A protocol 1 state renders as before.* `lbClusterServiceSpec` writes no field for an option at its default, a
+  TCP listener still names no protocol, and a UDP pool has a name of its own (`-udp`: Kubernetes gives a TCP and a
+  UDP port of one number the same node port). So no cluster's balancer is reloaded by this change.
+- *Upstream's node rule, with our first-Ready rule on top.* `k8s.io/cloud-provider`
+  `controllers/service/controller.go` at `e951bd6`, :1002-1049: not deleted, the exclusion label read with
+  `strconv.ParseBool`, not tainted `ToBeDeletedByClusterAutoscaler`; Ready is not in the set. The first-Ready rule
+  of v0.11.0's drill (N3-8) stays for a node the balancer does not have yet, because HAProxy 3.0 starts a new member
+  as up.
+- *The controller steps down for an older portal.* The gateway decodes strictly, so a portal rolled back refuses
+  protocol 2's fields with 400 for every Service of the cluster. The portal names its protocol on every answer; the
+  controller sends protocol 1's request from the next turn on, without the Services that set the internal
+  annotation: that portal reads no annotation and would give them a public address. (Superseded the same day, entry
+  above: in the same turn, and for that request only.)
+
+**Not in this change:** TLS from a Service's Secret, the watch (the controller still polls, `-interval`), keeping a
+Service's address (`lb-keep-address` is read and answered with an Event), a chart change, the consoles and the
+tenant guide.
+
+**Files:** `internal/cloud/lbgw/gateway.go`, `annotations.go`, `annotations_test.go`, `gateway_test.go`;
+`internal/platform/project/cloud_lb_cluster_pve.go`, `cloud_lb_cluster_pve_test.go`,
+`cloud_lb_cluster_integration_test.go`; `internal/cloud/pve/testdata/lb-k8s-services.cfg`, `lvs-k8s-services.conf`;
+`cmd/lb-controller/main.go`, `protocol2_test.go`; `test/integration/lb_udp_test.go`; `docs/managed-k8s.md`,
+`CHANGELOG.md`.
 ## 2026-11-23: the managed platform registers its sandbox provider and fences its machines (dark)
 
 **What changed:** no new container. Two new relations and one changed trust boundary.

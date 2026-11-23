@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **UDP from a Kubernetes Service needs the controller of this release.** Upgrading the portal alone changes no
+  Service: a cluster made before v0.11.1 keeps answering a UDP Service `UDPNotSupported` (the message now ends "For
+  UDP, upgrade the cluster"), so no Service that stood pending gets a public address, which is billed and counts in
+  the floating IP quota, without its owner's action. The cluster gets UDP, the annotations' Events and the new node
+  rule when it is moved to the provider's chart version or given "Enable load balancer controller" again. A new
+  cluster has them from its creation. The annotations themselves are read by the portal, but a controller of
+  v0.11.0 sends none but `proxcloud.io/lb-proxy-protocol: "true"`.
 - **Every load balancer is reloaded once after the upgrade.** The HAProxy config the platform renders changed (see
   "No request is lost" under Fixed), for a single appliance too, whose config had not changed since its first release,
   and so did the pair's keepalived track script. The first services sync after the upgrade (and, for a cluster's
@@ -37,6 +44,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Kubernetes Services: UDP, session affinity and the layer 4 annotations on the cluster's load balancer**
+  (`internal/cloud/lbgw`, `cmd/lb-controller`, `internal/platform/project/cloud_lb_cluster_pve.go`; the full table
+  and the differences from OCCM: [managed-k8s.md](docs/managed-k8s.md)). The gateway speaks protocol 2, which
+  only adds to protocol 1 (a Service's annotations, affinity and selected nodes in the request, its `ipMode` and
+  Events in the answer); a controller of v0.11.0 is served as before.
+  - A Service's UDP ports are served by the pair's LVS, and a TCP and a UDP port of one number share the Service's
+    address (the listener's key is protocol and port). SCTP refuses the Service with `ProtocolNotSupported`.
+  - `sessionAffinity: ClientIP` keeps a client on one node for the Service's timeout (TCP and UDP).
+  - `externalTrafficPolicy: Local` checks UDP ports too over HTTP on `healthCheckNodePort`.
+  - Annotations, read by the portal: `proxcloud.io/lb-proxy-protocol` (now also `v1`, `v2`), `lb-method`,
+    `lb-connection-limit`, `lb-timeout-client-data`, `lb-timeout-member-connect`, `lb-timeout-member-data`,
+    `lb-x-forwarded-for`, `lb-enable-health-monitor`, `lb-health-monitor-delay`, `-timeout`, `-max-retries`,
+    `-max-retries-down`, `lb-node-selector`. Every other annotation of the prefix `proxcloud.io/lb-` is named in
+    one Warning Event `AnnotationNotSupported`; a value that is not understood is named in `InvalidAnnotation` and
+    the default holds; `proxcloud.io/lb-internal: "true"` refuses the Service (`InternalNotSupported`), so it never
+    gets a public address. `lb-keep-address` is read and not served yet, and says so (`KeepAddressNotServed`).
+  - **Only `proxcloud.io/lb-*` is read: the product defines its own annotation names.** What a knob does follows
+    OCCM, but OCCM's annotation names are not aliases: on a Service here they do nothing, are not sent to the portal
+    and raise no Event. A manifest written for OCCM is renamed first; the guide has the table by OCCM's short key.
+    **A Service that asks for an internal balancer with OCCM's annotation alone gets a public address** until the
+    annotation is renamed to `proxcloud.io/lb-internal`. `proxcloud.io/lb-proxy-protocol: "true"` is version 2, as
+    in `v0.11.0` (OCCM's `true` is version 1: write `v1`).
+  - An annotation that cannot be read never refuses a Service, so a Service that `v0.11.0` served keeps its address
+    over the cluster's upgrade whatever annotations were left on it: a value over 256 characters is not obeyed and
+    named in `InvalidAnnotation`, and any number of annotations the table does not know is named (the first 32) and
+    counted in `AnnotationNotSupported`. The forwarded-for header asked for next to the PROXY header is not added
+    and named in `InvalidAnnotation`; the PROXY header holds. The internal annotation is the one that takes an
+    address back. The controller sends only the annotations of the prefix `proxcloud.io/lb-`, a value over 256
+    characters cut.
+  - A state over the gateway's 64 KiB is refused as a whole and changes nothing: the balancer and every address stay
+    as they are until the state fits, and each Service gets a Warning Event `TooLarge` that says so.
+  - A node selector's terms may have spaces around `=` (`pool = edge`); OCCM drops them around a term only and
+    matches no node with such a term.
+  - A controller that finds an older portal (a portal rolled back to `v0.11.0`) sends it the request of protocol 1
+    in the same turn, after that portal's refusal, and remembers nothing: the first request a portal that came back
+    gets is the whole one. While the portal is rolled back, such a turn is two requests and the old portal audits
+    the refused one each turn.
+  - The controller says the Events of Kubernetes' own service controller: `UpdatedLoadBalancer`,
+    `UnAvailableLoadBalancer`, `SyncLoadBalancerFailed`, `DeletingLoadBalancer`, `DeletedLoadBalancer`.
+  - Not run on a lab: tested on fakes of the tenant cluster and of Proxmox, and against the HAProxy and keepalived
+    of both appliance images in containers.
 - **Managed platform: the sandbox provider, and the fence of its machines on the platform network (not offered yet:
   no BOM pins the sandbox chart).** With `spec.sandbox`, a run now does the portal side as well
   (`internal/platformlife/sandbox_provider.go`, `docs/managed-services.md`, "The sandbox provider"):
@@ -240,6 +288,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Which nodes are behind a cluster's Services follows Kubernetes' own rule** (`cmd/lb-controller`, `readNodes`;
+  `k8s.io/cloud-provider` `stableNodeSetPredicates`). The label
+  `node.kubernetes.io/exclude-from-external-load-balancers` is read as a boolean: `false` (and `0`, `f`) now keeps
+  the node in, where any value took it out. A node with the cluster autoscaler's taint
+  `ToBeDeletedByClusterAutoscaler` is taken out. A node new to the balancer still waits for its first Ready, and a
+  member still stays through NotReady. Both changes need the controller of this release.
+- **A Service with an SCTP port is refused with `ProtocolNotSupported`** (it was `UDPNotSupported`).
 - **A load balancer's config files are compared with what was applied, at every pass.** The state read of an
   appliance now also answers what `haproxy.cfg`, `keepalived.conf` and the UDP files hash to; an appliance whose
   file is not the one the platform recorded (edited by hand, or lost) is pushed again, on a single appliance and on

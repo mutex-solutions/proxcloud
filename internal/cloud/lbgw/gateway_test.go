@@ -2,6 +2,7 @@ package lbgw
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"io"
@@ -67,6 +68,8 @@ type rig struct {
 	reg    *fakeReg
 	portal *fakePortal
 	events []audit.AuditEvent
+	// protocol is what the controller says it speaks; "" is "1", a controller of v0.11.0.
+	protocol string
 }
 
 func newRig() *rig {
@@ -86,7 +89,7 @@ func (r *rig) put(t *testing.T, auth string, body any) (*httptest.ResponseRecord
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPut, StatePath, bytes.NewReader(raw))
 	req.Header.Set("Authorization", auth)
-	req.Header.Set(ProtocolHeader, "1")
+	req.Header.Set(ProtocolHeader, cmp.Or(r.protocol, "1"))
 	w := httptest.NewRecorder()
 	r.h.ServeHTTP(w, req)
 	var ans Answer
@@ -123,7 +126,7 @@ func TestAuthentication(t *testing.T) {
 		t.Fatalf("a refused credential reached the portal %d times", r.portal.calls)
 	}
 	w, ans := r.put(t, "PVEAPIToken=lb@proxcloud!c1=s1", body)
-	if w.Code != http.StatusOK || len(ans.Services) != 1 || ans.Services[0].State != StateBuilding || w.Header().Get(ProtocolHeader) != "1" {
+	if w.Code != http.StatusOK || len(ans.Services) != 1 || ans.Services[0].State != StateBuilding || w.Header().Get(ProtocolHeader) != strconv.Itoa(Protocol) {
 		t.Fatalf("own credential: %d %s", w.Code, w.Body)
 	}
 	// The last call is written at most once a minute.
@@ -233,7 +236,7 @@ func TestServiceChecks(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
-	want := map[string]string{"ok": "", "udp": ReasonUDPNotSupported, "mixed": ReasonUDPNotSupported, "sctp": ReasonUDPNotSupported,
+	want := map[string]string{"ok": "", "udp": ReasonUDPNotSupported, "mixed": ReasonUDPNotSupported, "sctp": ReasonProtocolNotSupported,
 		"nonodeport": ReasonNoNodePort, "outofrange": ReasonNoNodePort, "local": "", "nohc": ReasonNoNodePort, "any": "", "ranged": "",
 		"v6": ReasonIPFamilyNotSupported, "v6range": ReasonIPFamilyNotSupported, "long": ReasonTooManySourceRanges}
 	if len(ans.Services) != len(body.Services) {
