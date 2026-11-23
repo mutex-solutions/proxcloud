@@ -434,6 +434,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The tests pull each published chart once per machine, not at every call.** `go test ./internal/platformlife`
+  ran `helm pull` thirteen times at every run, in CI and on every workstation: the platform's cluster chart
+  `proxmox-kamaji-cluster` eleven times (once per call of the test helper, so once per previous BOM that may still
+  be upgraded from) and the mirrored cert-manager twice. Each was a download the package page counts, which is
+  where most of the downloads of `charts/proxmox-kamaji-cluster` came from. The tests now keep what they read in
+  `proxcloud-test-charts` under the user's cache directory (or the directory `PROXCLOUD_TEST_CHART_CACHE` names),
+  by the BOM's digest: four reads of the registry on a machine that has none of the charts, none after that, and
+  in CI only what a changed BOM added (`actions/cache`, keyed by the BOMs). The digest check is stricter than
+  before: the cluster chart was pulled by its tag and not compared with the BOM, and is now read by the pinned
+  manifest digest and hashed, with the archive, at every use, cached or not. Nothing in the product changes
+  ([ci-release.md](docs/ci-release.md), "The test chart cache").
 - **New tenant clusters get cluster chart `proxmox-kamaji-cluster` 0.1.19** (`tenantCharts.kubernetes`, digest
   `sha256:476950b5e841c9460c47960b1841ceac17998b5c06c7358c9966585f6602d5fa`, published by the tag
   `proxmox-kamaji-cluster-v0.1.19` and compared with the registry by `bom_verify.py`), and with it the load
