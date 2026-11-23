@@ -50,7 +50,48 @@ type lbGuest struct {
 	noNft    bool
 	lvs      bool
 	lvsFails string
+	// The certificate directory (v0.11.1): its files are in disk, written by the agent as <name>.pem.new and moved in
+	// place by the install command. certMode holds what stat says of the directory or of a file that is not as a
+	// push leaves it (a file or a directory somebody opened up); nothing recorded means root's alone.
+	certMode map[string]string
 	box      *lbguesttest.Guest // where the state read's script runs (stateRead)
+}
+
+// lbGuestCertDir is the certificate directory on a guest.
+const lbGuestCertDir = "/etc/haproxy/certs"
+
+// certFiles lists the certificate files in place, sorted.
+func (g *lbGuest) certFiles() []string {
+	var out []string
+	for path := range g.disk {
+		if strings.HasPrefix(path, lbGuestCertDir+"/") && strings.HasSuffix(path, ".pem") {
+			out = append(out, path)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// certState is what the guest's certstate prints: the directory, then each file's mode, then each file's digest. A
+// guest that never had a certificate has no directory and prints nothing.
+func (g *lbGuest) certState() string {
+	if _, ok := g.disk[lbGuestCertDir]; !ok {
+		return ""
+	}
+	mode := func(path, or string) string {
+		if m := g.certMode[path]; m != "" {
+			return m
+		}
+		return or
+	}
+	out := "crtdir " + mode(lbGuestCertDir, "700:root:root:directory") + "\n"
+	for _, path := range g.certFiles() {
+		out += "crt " + path + " " + mode(path, "600:root:root") + "\n"
+	}
+	for _, path := range g.certFiles() {
+		out += lbHash(g.disk[path]) + "  " + path + "\n"
+	}
+	return out
 }
 
 // lbGuestKeepalived is the VRRP keepalived's config on a guest, and lbGuestBind finds a config's first bind of an
@@ -177,7 +218,11 @@ type pairWire struct {
 	runs   map[int]lbRun
 	files  []string // the HAProxy configs written, in order
 	reads  int      // state reads
-	pages  int      // reads of the cluster's VM list: one per apply
+	// execs counts every command run in a guest, and certReads the state reads that asked for the certificate
+	// files: a balancer without a TLS listener is never asked, and one with a TLS listener is asked in the state
+	// read it already had.
+	execs, certReads int
+	pages            int // reads of the cluster's VM list: one per apply
 	// gate, while set, holds every read of the VM list until it is closed: an apply in the middle of its work.
 	gate chan struct{}
 }
@@ -199,7 +244,37 @@ func newPairWire(t *testing.T, tag string) *pairWire {
 
 // exec answers one guest command.
 func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
+	f.execs++
+	// certs is what a state read that asks for the certificate files gets after its own line.
+	certs := func() string {
+		if !strings.Contains(cmd, "certstate") {
+			return ""
+		}
+		f.certReads++
+		return "\n" + g.certState()
+	}
 	switch {
+	case strings.Contains(cmd, "is not a directory of root alone"): // the certificate directory, made private and proven
+		if g.disk == nil {
+			g.disk = map[string]string{}
+		}
+		g.disk[lbGuestCertDir] = ""
+		delete(g.certMode, lbGuestCertDir)
+		for path := range g.disk {
+			if strings.HasPrefix(path, lbGuestCertDir+"/") && strings.HasSuffix(path, ".new") {
+				delete(g.disk, path)
+			}
+		}
+		return lbRun{out: g.certState()} // what is there: the push writes the files that are not
+	case strings.Contains(cmd, "a certificate file is not root's alone"): // owner, mode and the move in place, per name
+		words := strings.Fields(cmd)
+		for i := len(words) - 1; i >= 0 && len(words[i]) == 64; i-- {
+			path := lbGuestCertDir + "/" + words[i] + ".pem"
+			g.disk[path] = g.disk[path+".new"]
+			delete(g.disk, path+".new")
+			delete(g.certMode, path)
+		}
+		return lbRun{}
 	case strings.Contains(cmd, "apt-get install"): // the install line, left running
 		f.log = append(f.log, vm+" install")
 		if strings.Contains(cmd, "nftables") { // the install line of a pair with a UDP listener
@@ -276,6 +351,11 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 			return lbRun{exit: 1, err: "[ALERT] (8464) : Binding [/etc/haproxy/haproxy.cfg:17] for frontend l" + m[1] + ": protocol tcpv4: cannot bind socket (Cannot assign requested address) for [" + m[1] + "]"}
 		}
 		g.load(g.pending)
+		for _, path := range g.certFiles() { // served: the certificate files the config does not name go
+			if !strings.Contains(g.file, " "+path) {
+				delete(g.disk, path)
+			}
+		}
 		return lbRun{}
 	case strings.Contains(cmd, "proxcloud-lb.state"):
 		f.reads++
@@ -306,7 +386,7 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		case !g.serving():
 			return lbRun{exit: 1, out: "HAProxy does not listen on 0.0.0.0:80"}
 		}
-		return lbRun{out: "ok " + lbHash(g.file)}
+		return lbRun{out: "ok " + lbHash(g.file) + certs()}
 	}
 	return lbRun{}
 }
@@ -320,6 +400,15 @@ var lbHoldsRe = regexp.MustCompile(`grep -qF ' ([0-9.]+)/'`)
 // and the script lost "holds the address" on every pair with a UDP listener while every test read ACTIVE (drill
 // Q1-2). On a machine that cannot run the script the fake still writes it.
 func (f *pairWire) stateRead(g *lbGuest, cmd string) lbRun {
+	// The certificate files, when the read asks for them, are the fake's own answer (certState), after the state
+	// line: the text of certstate runs in the real guests of test/integration/lb_tls_test.go, alone and behind this
+	// read's script.
+	certs := ""
+	if strings.Contains(cmd, "certstate") {
+		f.certReads++
+		certs = "\n" + g.certState()
+		cmd = strings.TrimSuffix(cmd, "; certstate")
+	}
 	role := g.role
 	switch {
 	case !g.keepalived:
@@ -333,7 +422,7 @@ func (f *pairWire) stateRead(g *lbGuest, cmd string) lbRun {
 		n := map[bool]int{true: 1}
 		// The files as they are on the guest, which is not always what the product wrote last.
 		return lbRun{out: fmt.Sprintf("%s %d %d %d %s %s %s %d", role, n[g.haproxy], n[holds], n[g.serving()], lbHash(g.file),
-			g.sum("/etc/keepalived/keepalived.conf"), g.lvsSum(), n[udp])}
+			g.sum("/etc/keepalived/keepalived.conf"), g.lvsSum(), n[udp]) + certs}
 	}
 	if g.box == nil {
 		g.box = lbguesttest.New(f.t)
@@ -382,7 +471,7 @@ func (f *pairWire) stateRead(g *lbGuest, cmd string) lbRun {
 	}
 	b.Stub("nft", "table ip proxcloud-lb {\n\tchain lb-forward {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n")
 	exit, out, stderr := b.Run("sh", strings.TrimPrefix(cmd, "sh -c "))
-	return lbRun{exit: exit, out: out, err: stderr}
+	return lbRun{exit: exit, out: strings.TrimRight(out, "\n") + certs, err: stderr}
 }
 
 func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {

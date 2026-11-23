@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -53,7 +54,9 @@ systemd-run -q --unit=lb-tls-echo socat TCP-LISTEN:19000,bind=127.0.0.1,fork,reu
 // client asks for, the first one for any other name and for none; TLS 1.2 and 1.3 accepted, 1.1 and 1.0 refused;
 // no suite without forward secrecy, none with CBC, none with DHE; HTTP/2 offered on https alone; the two forwarded
 // headers; a change of certificate that drops no connection and fails no handshake; a config HAProxy refuses, which
-// leaves the certificate in use in place; and the files a config no longer names, gone after it is served.
+// leaves the certificate in use in place; a certificate file truncated, deleted or opened up behind HAProxy, which the
+// state read finds and the next push puts right before a start of HAProxy would refuse the config; and the files a
+// config no longer names, gone after it is served.
 func TestLBApplianceTLS(t *testing.T) {
 	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
 		t.Run(image, func(t *testing.T) {
@@ -319,12 +322,15 @@ func TestLBApplianceTLS(t *testing.T) {
 			}
 
 			// 4. https: the member is spoken to in HTTP and reads who the client was and that it came over TLS, whatever
-			// the client claims; over HTTP/2 and over HTTP/1.1.
+			// the client claims; over HTTP/2 and over HTTP/1.1. X-Forwarded-Proto is replaced. X-Forwarded-For is
+			// appended (drill Q3-o1 of v0.11.1-rc.1): the client's own value stays first and proves nothing, the
+			// last value is the address HAProxy saw, which is what the guides tell a server to read.
 			for _, h2 := range []bool{true, false} {
 				tr := &http.Transport{TLSClientConfig: &tls.Config{ServerName: "a.example.org", RootCAs: roots(certA)}, ForceAttemptHTTP2: h2, DisableKeepAlives: true}
 				req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+https+"/path", nil)
 				req.Host = "a.example.org"
 				req.Header.Set("X-Forwarded-Proto", "http")
+				req.Header.Set("X-Forwarded-For", "198.51.100.7")
 				res, err := (&http.Client{Transport: tr, Timeout: 15 * time.Second}).Do(req)
 				if err != nil {
 					t.Fatalf("GET over https (HTTP/2 %v): %v", h2, err)
@@ -335,6 +341,17 @@ func TestLBApplianceTLS(t *testing.T) {
 				if res.StatusCode != 200 || (res.ProtoMajor == 2) != h2 || !strings.HasPrefix(head, "get /path http/1.1\n") ||
 					strings.Count(head, "x-forwarded-proto:") != 1 || !strings.Contains(head, "x-forwarded-proto: https\n") || !strings.Contains(head, "x-forwarded-for: ") {
 					t.Errorf("what the member got (HTTP/2 %v, answer %s %d):\n%s", h2, res.Proto, res.StatusCode, body)
+				}
+				var forwarded []string
+				for _, line := range strings.Split(head, "\n") {
+					if values, ok := strings.CutPrefix(line, "x-forwarded-for:"); ok {
+						for _, v := range strings.Split(values, ",") {
+							forwarded = append(forwarded, strings.TrimSpace(v))
+						}
+					}
+				}
+				if len(forwarded) != 2 || forwarded[0] != "198.51.100.7" || forwarded[1] == forwarded[0] || net.ParseIP(forwarded[1]) == nil {
+					t.Errorf("X-Forwarded-For at the member (HTTP/2 %v): %q, want the client's own value and then the address HAProxy saw", h2, forwarded)
 				}
 			}
 
@@ -459,7 +476,151 @@ func TestLBApplianceTLS(t *testing.T) {
 				t.Errorf("files of the guest that hold a key after the changes:\n%s\nwant\n%s", got, inDir(fileA2, fileB))
 			}
 
-			// 8. The last listener that ends TLS goes: so do the certificate files, after the config without them is
+			// 8. A certificate file damaged or gone while HAProxy serves it from memory (drill Q3-1 of v0.11.1-rc.1). The
+			// question of that candidate, listeners and the config's hash, still reads "serving", while the config in
+			// use would not start again: HAProxy refuses the whole file. The state read with the config's certificate
+			// files says what is wrong, in words that name a file and hold nothing of it; the push that follows such
+			// an answer puts the file right with the one reload of a push, and no handshake made meanwhile fails. A
+			// file or a directory somebody opened up is found and closed the same way. Each of these pushes writes the
+			// one file that was not in order and no other.
+			certs := []pve.LBCertFile{fileA2, fileB}
+			asked := func() (bool, string) {
+				t.Helper()
+				ok, why, err := ps.HAProxyServing(ctx, "n1", 100, lbSum(rotated), certs...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return ok, why
+			}
+			startable := func() bool {
+				code, _, _ := g.sh(ctx, "startable", "haproxy", "-c", "-q", "-f", "/etc/haproxy/haproxy.cfg")
+				return code == 0
+			}
+			reloads := func() int {
+				t.Helper()
+				n, err := strconv.Atoi(g.run(ctx, `echo "show proc" | socat -t5 - /run/haproxy-master.sock | awk '$2=="master"{print $3}'`))
+				if err != nil {
+					t.Fatalf("HAProxy's reload count: %v", err)
+				}
+				return n
+			}
+			onDisk := func(f pve.LBCertFile) bool {
+				return g.run(ctx, "sha256sum < /etc/haproxy/certs/"+f.Name+".pem | cut -c1-64") == lbSum(f.PEM)
+			}
+			if ok, why := asked(); !ok || !onDisk(fileA2) || !onDisk(fileB) {
+				t.Fatalf("before any damage: serving %v %q, the files are the certificates' %v %v", ok, why, onDisk(fileA2), onDisk(fileB))
+			}
+			// A pair's state read asks the same of its appliance, behind its own script (this guest has no keepalived:
+			// the read says STOPPED, and everything else as on a pair).
+			pairRead := func(what, want string) {
+				t.Helper()
+				st, err := ps.ReadVRRPState(ctx, "n1", 100, "", certs...)
+				if err != nil || !st.HAProxy || !st.Serving || st.HAProxySum != lbSum(rotated) || st.CertFiles != want {
+					t.Errorf("%s: a pair's state read: %+v %v; want it serving the config with certificate files %q", what, st, err, want)
+				}
+			}
+			pairRead("before any damage", "")
+			stop, done = make(chan struct{}), make(chan struct{})
+			made, failed = 0, nil
+			go func() {
+				defer close(done)
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					conn, err := dial(https, &tls.Config{ServerName: "a.example.org", RootCAs: roots(certA2)})
+					mu.Lock()
+					made++
+					if err != nil {
+						failed = append(failed, err.Error())
+					} else {
+						conn.Close()
+					}
+					mu.Unlock()
+					time.Sleep(20 * time.Millisecond)
+				}
+			}()
+			pathA2, pathB := "/etc/haproxy/certs/"+fileA2.Name+".pem", "/etc/haproxy/certs/"+fileB.Name+".pem"
+			// A push with nothing out of order writes the config and no certificate file (drill Q3-o2: every push
+			// wrote every file again, 0.6 s each on the lab).
+			_, mark := g.writtenSince(0)
+			if err := ps.PushHAProxy(ctx, "n1", 100, rotated, certs...); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := g.writtenSince(mark); !slices.Equal(got, []string{"/etc/haproxy/haproxy.cfg.new"}) {
+				t.Errorf("a push whose certificate files are all in place wrote %v", got)
+			}
+			for _, c := range []struct {
+				what, damage, why string
+				startable         bool
+				written           []string // the one file that was not in order, then the config
+			}{
+				{"a truncated file", "truncate -s 0 " + pathA2, "Certificate file " + fileA2.Name[:12] + " is not the file that was written", false, []string{pathA2 + ".new", "/etc/haproxy/haproxy.cfg.new"}},
+				{"a deleted file", "rm " + pathB, "Certificate file " + fileB.Name[:12] + " is missing", false, []string{pathB + ".new", "/etc/haproxy/haproxy.cfg.new"}},
+				{"a file anybody reads", "chmod 0644 " + pathA2, "Certificate file " + fileA2.Name[:12] + " is not root's alone", true, []string{pathA2 + ".new", "/etc/haproxy/haproxy.cfg.new"}},
+				{"a directory anybody enters", "chmod 0755 /etc/haproxy/certs", "The certificate directory is missing or is not root's alone", true, []string{"/etc/haproxy/haproxy.cfg.new"}},
+			} {
+				g.run(ctx, c.damage)
+				if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, lbSum(rotated)); err != nil || !ok {
+					t.Fatalf("%s: HAProxy does not serve from memory, so this is not the drill's case: %v %q %v", c.what, ok, why, err)
+				}
+				if got := startable(); got != c.startable {
+					t.Errorf("%s: haproxy -c on the config in use answers %v, want %v", c.what, got, c.startable)
+				}
+				if ok, why := asked(); ok || why != c.why {
+					t.Fatalf("%s: the state read with the certificate files: serving %v, %q; want %q", c.what, ok, why, c.why)
+				}
+				pairRead(c.what, c.why)
+				before := reloads()
+				_, mark := g.writtenSince(0)
+				if err := ps.PushHAProxy(ctx, "n1", 100, rotated, certs...); err != nil {
+					t.Fatalf("%s: the push that follows: %v", c.what, err)
+				}
+				if got := reloads(); got != before+1 {
+					t.Errorf("%s: %d reloads for one push", c.what, got-before)
+				}
+				if got, _ := g.writtenSince(mark); !slices.Equal(got, c.written) {
+					t.Errorf("%s: the push wrote %v, want %v", c.what, got, c.written)
+				}
+				if got := certDir(); got != holds(fileA2, fileB) || !onDisk(fileA2) || !onDisk(fileB) {
+					t.Errorf("%s: the certificate directory after the push (the files are the certificates' %v %v):\n%s", c.what, onDisk(fileA2), onDisk(fileB), got)
+				}
+				if ok, why := asked(); !ok || !startable() {
+					t.Errorf("%s: after the push: serving %v %q, the config in use would start %v", c.what, ok, why, startable())
+				}
+				pairRead(c.what+", after the push", "")
+				if got := served(https, "a.example.org"); !got.Equal(certA2.Leaf) {
+					t.Errorf("%s: a new connection does not get the certificate", c.what)
+				}
+			}
+			time.Sleep(300 * time.Millisecond)
+			close(stop)
+			<-done
+			if made < 10 || len(failed) != 0 {
+				t.Errorf("handshakes while four damaged files were put right: %d made, %d failed: %v", made, len(failed), failed)
+			}
+			t.Logf("%d handshakes while four damaged files were put right, none failed", made)
+			// And HAProxy's next start, which is where the damage would have shown: it finds a config it takes.
+			g.run(ctx, "systemctl restart haproxy")
+			for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+				ok, why := asked()
+				if ok {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("HAProxy after a restart: %q", why)
+				}
+			}
+			if a, b := served(https, "a.example.org"), served(https, "b.example.org"); !a.Equal(certA2.Leaf) || !b.Equal(certB.Leaf) {
+				t.Error("after a restart HAProxy does not present the two certificates")
+			}
+			if got := keyFiles(); got != inDir(fileA2, fileB) {
+				t.Errorf("files of the guest that hold a key after the damaged files were put right:\n%s\nwant\n%s", got, inDir(fileA2, fileB))
+			}
+
+			// 9. The last listener that ends TLS goes: so do the certificate files, after the config without them is
 			// served.
 			plain := pve.LBSpec{Listeners: []pve.LBListener{{Port: 8443, Protocol: "tcp", Pool: "echo"}}, Pools: spec(fileA).Pools[1:]}
 			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(plain)); err != nil {

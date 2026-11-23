@@ -10,7 +10,9 @@ package pve
 // A certificate reaches an appliance as one PEM file (chain, then key) in lbCertDir, named by the SHA-256 of its
 // chain and never by its id. The config names the files, so a change of certificate is a new file and a new config
 // line: it rides the check, swap and roll back of the config (haproxyReload), the file of before is still there if
-// HAProxy refuses the new config, and the config's hash covers the certificates without a term of its own.
+// HAProxy refuses the new config, and the config's hash covers which certificates are served. It does not cover
+// the files' bytes: a file damaged or removed on the appliance leaves the hash as it was, so the applied-state read
+// asks for the files too (certstate, lbCertFaults).
 
 import (
 	"bytes"
@@ -223,18 +225,35 @@ func CheckLBCertificate(chainPEM, keyPEM string, now time.Time) (info LBCertific
 }
 
 const (
+	// lbCertStateFn defines certstate(): what the certificate directory and every certificate file in it is, in
+	// three commands whatever the number of files: "crtdir <mode>:<owner>:<group>:<kind>", then
+	// "crt <path> <mode>:<owner>:<group>" per file, then sha256sum's own "<digest>  <path>" per file. The digest is
+	// all it says of a file's content. The file's name is the SHA-256 of the chain's certificates, not of the file's
+	// bytes (which hold the key too), so the digest is compared by the portal with the one of the file it would
+	// write (lbCertFaults), and no digest travels in a command line: the guest agent logs those.
+	//
+	// Why not "haproxy -c" on the config in use: it would start a second HAProxy that parses every key on each
+	// pass, it prints HAProxy's own words about a file, it does not see a file that was exchanged for another valid
+	// one or a file anybody may read, and it cannot say which file to write again.
+	lbCertStateFn = `certstate() (
+  stat -c 'crtdir %a:%U:%G:%F' ` + lbCertDir + ` 2>/dev/null || :
+  stat -c 'crt %n %a:%U:%G' ` + lbCertDir + `/*.pem 2>/dev/null || :
+  sha256sum ` + lbCertDir + `/*.pem 2>/dev/null || :
+)
+`
 	// lbCertDirScript makes lbCertDir a directory only root can enter, and proves it, before anything is written
 	// into it: the guest agent creates a file with mode 0666 whatever the umask, so a key is only ever written
 	// inside a directory nobody else reaches, under its temporary name too. A leftover of a push that did not end
-	// goes.
-	lbCertDirScript = `set -e
+	// goes. It ends in certstate: the push writes only the files that are not there as it would write them.
+	lbCertDirScript = lbCertStateFn + `set -e
 D=` + lbCertDir + `
 [ ! -L $D ] || { echo "$D is a link" >&2; exit 1; }
 mkdir -p $D
 chown root:root $D
 chmod 0700 $D
 [ "$(stat -c %a:%U:%G:%F $D)" = "700:root:root:directory" ] || { echo "$D is not a directory of root alone" >&2; exit 1; }
-rm -f $D/*.new`
+rm -f $D/*.new
+certstate`
 	// lbCertInstallScript gives each file written as <name>.pem.new to root with mode 0600, proves it, and moves it
 	// in place. Its arguments are the names.
 	lbCertInstallScript = `set -e
@@ -251,31 +270,79 @@ done`
 `
 )
 
-// pushCertificates writes the certificate files a config names, before the config: the directory first, made and
-// proven private, then each file under a temporary name inside it, then mode, owner and the move in place. A file
-// that is there already is written again: it costs one call, and a file changed by hand is put right.
+// lbCertFaults reads certstate's lines (out) for certs, the files a config names. stale are the certificates whose
+// file is not there, is not the bytes the portal would write, or is not root's alone with mode 0600; why says the
+// first thing found wrong, the directory's mode included, in words that hold the start of a file's name and nothing
+// of its content, and is "" when everything is as a push leaves it.
+func lbCertFaults(out string, certs []LBCertFile) (stale []LBCertFile, why string) {
+	if len(certs) == 0 {
+		return nil, ""
+	}
+	dir, mode, sum := false, map[string]string{}, map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		switch f := strings.Fields(line); {
+		case len(f) == 2 && f[0] == "crtdir":
+			dir = f[1] == "700:root:root:directory"
+		case len(f) == 3 && f[0] == "crt":
+			mode[f[1]] = f[2]
+		case len(f) == 2 && len(f[0]) == sha256.Size*2:
+			sum[f[1]] = f[0]
+		}
+	}
+	if !dir {
+		why = "The certificate directory is missing or is not root's alone"
+	}
+	for _, c := range certs {
+		path, want, fault := lbCertDir+"/"+c.Name+".pem", sha256.Sum256([]byte(c.PEM)), ""
+		switch {
+		case mode[path] == "":
+			fault = "is missing"
+		case sum[path] != hex.EncodeToString(want[:]):
+			fault = "is not the file that was written"
+		case mode[path] != "600:root:root":
+			fault = "is not root's alone"
+		default:
+			continue
+		}
+		stale = append(stale, c)
+		if why == "" {
+			why = "Certificate file " + c.Name[:min(12, len(c.Name))] + " " + fault
+		}
+	}
+	return stale, why
+}
+
+// pushCertificates brings the certificate files a config names in place, before the config: the directory first,
+// made and proven private, then each file the appliance does not hold as the portal would write it (missing,
+// other bytes, another mode or owner: the directory's command says what is there) under a temporary name inside
+// it, then mode, owner and the move in place. A file that is there already, byte for byte and root's alone, is not
+// written again: a write is one call through the guest agent, about 0.6 s, inside the tenant's own request.
 func (s *Service) pushCertificates(ctx context.Context, node string, vmid int, certs []LBCertFile) error {
 	if len(certs) == 0 {
 		return nil
 	}
-	names := make([]string, len(certs))
 	for i, c := range certs {
 		if !lbCertFileRe.MatchString(c.Name) {
 			return fmt.Errorf("certificate file %d has no valid name", i+1)
 		}
-		names[i] = c.Name
 	}
-	exit, _, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbCertDirScript)
+	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbCertDirScript)
 	if err != nil {
 		return err
 	}
 	if exit != 0 {
 		return fmt.Errorf("the appliance's certificate directory could not be made private, nothing was written: %s", strings.TrimSpace(stderr))
 	}
-	for _, c := range certs {
+	stale, _ := lbCertFaults(out, certs)
+	if len(stale) == 0 {
+		return nil
+	}
+	names := make([]string, len(stale))
+	for i, c := range stale {
 		if err := s.C.GuestWriteFile(ctx, node, vmid, lbCertDir+"/"+c.Name+".pem.new", c.PEM); err != nil {
 			return fmt.Errorf("write certificate file %s: %w", c.Name[:12], err)
 		}
+		names[i] = c.Name
 	}
 	exit, _, stderr, err = s.C.GuestRun(ctx, node, vmid, guestTimeout, append([]string{"sh", "-c", lbCertInstallScript, "sh"}, names...)...)
 	if err != nil {

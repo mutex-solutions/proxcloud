@@ -5,9 +5,13 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -191,6 +195,31 @@ type certGuest struct {
 	exits map[string]int
 	runs  map[int]int
 	files map[string]string
+	// cmds are the commands as they were sent, and out is what the next ones print.
+	cmds []string
+	out  string
+	outs map[int]string
+	// modes holds what stat says of a certificate file that is not root's alone; the install command clears it.
+	modes map[string]string
+}
+
+// certState is what certstate prints of the guest's certificate directory: the files the install command moved in
+// place, as they are now.
+func (g *certGuest) certState() string {
+	out, sums := "crtdir 700:root:root:directory\n", ""
+	for _, path := range slices.Sorted(maps.Keys(g.files)) {
+		if !strings.HasPrefix(path, lbCertDir+"/") || !strings.HasSuffix(path, ".pem") {
+			continue
+		}
+		mode := "600:root:root"
+		if m := g.modes[path]; m != "" {
+			mode = m
+		}
+		sum := sha256.Sum256([]byte(g.files[path]))
+		out += "crt " + path + " " + mode + "\n"
+		sums += hex.EncodeToString(sum[:]) + "  " + path + "\n"
+	}
+	return out + sums
 }
 
 func (g *certGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -212,12 +241,28 @@ func (g *certGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			what = "reload"
 		}
 		g.log = append(g.log, what)
+		g.cmds = append(g.cmds, cmd)
 		pid := len(g.runs) + 1
 		g.runs[pid] = g.exits[strings.SplitN(what, " ", 3)[0]+" "+strings.SplitN(what+" ", " ", 3)[1]]
+		if g.outs == nil {
+			g.outs = map[int]string{}
+		}
+		g.outs[pid] = g.out
+		switch {
+		case what == "certificate directory" && g.runs[pid] == 0:
+			g.outs[pid] = g.certState()
+		case strings.HasPrefix(what, "certificate install") && g.runs[pid] == 0:
+			for _, name := range r.Form["command"][4:] {
+				path := lbCertDir + "/" + name + ".pem"
+				g.files[path] = g.files[path+".new"]
+				delete(g.files, path+".new")
+				delete(g.modes, path)
+			}
+		}
 		write(map[string]any{"pid": pid})
 	case "GET exec-status":
 		pid, _ := strconv.Atoi(r.Form.Get("pid"))
-		write(map[string]any{"exited": 1, "exitcode": g.runs[pid], "err-data": "refused by the guest"})
+		write(map[string]any{"exited": 1, "exitcode": g.runs[pid], "out-data": g.outs[pid], "err-data": "refused by the guest"})
 	case "POST file-write":
 		g.log = append(g.log, "write "+r.Form.Get("file"))
 		g.files[r.Form.Get("file")] = r.Form.Get("content")
@@ -255,7 +300,7 @@ func TestCertificatesReachAnApplianceBeforeItsConfig(t *testing.T) {
 	if !slices.Equal(g.log, want) {
 		t.Errorf("order of a push:\n%s\nwant\n%s", strings.Join(g.log, "\n"), strings.Join(want, "\n"))
 	}
-	if g.files["/etc/haproxy/certs/"+a+".pem.new"] != "PEM-A" || len(g.files) != 3 {
+	if g.files["/etc/haproxy/certs/"+a+".pem"] != "PEM-A" || len(g.files) != 3 {
 		t.Errorf("files written: %v", g.log)
 	}
 	// A single appliance: the same order.
@@ -300,5 +345,203 @@ func TestCertificatesReachAnApplianceBeforeItsConfig(t *testing.T) {
 	}
 	if s := (LBCertFile{Name: a, PEM: "PEM-A"}); strings.Contains(s.String()+s.LogValue().String(), "PEM-A") {
 		t.Error("a certificate file prints its content")
+	}
+}
+
+// A push writes the certificate files the appliance does not hold as the portal would write them, and no other
+// (drill Q3-o2 of v0.11.1-rc.1: every push wrote every file again, about 0.6 s each through the guest agent, inside
+// the tenant's request: 13.5 s with eleven). The directory's command, which a push sends anyway, answers what is
+// there; the order stays certificates before config, and the config's check, swap and roll back are as they were.
+func TestPushWritesOnlyTheCertificateFilesThatDiffer(t *testing.T) {
+	ctx := context.Background()
+	g := &certGuest{exits: map[string]int{}, runs: map[int]int{}, files: map[string]string{}, modes: map[string]string{}}
+	srv := httptest.NewServer(g)
+	t.Cleanup(srv.Close)
+	ps, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var certs []LBCertFile
+	for i := range 11 { // the drill's balancer: eleven certificates
+		certs = append(certs, LBCertFile{Name: strings.Repeat(fmt.Sprintf("%02x", 0xa0+i), 32), PEM: fmt.Sprintf("PEM-%d", i)})
+	}
+	path := func(c LBCertFile) string { return "/etc/haproxy/certs/" + c.Name + ".pem" }
+	push := func(what string, certs []LBCertFile, written ...LBCertFile) {
+		t.Helper()
+		g.mu.Lock()
+		g.log = nil
+		g.mu.Unlock()
+		if err := ps.PushHAProxy(ctx, "n1", 100, "config", certs...); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		want := []string{"ready", "certificate directory"}
+		var names []string
+		for _, c := range written {
+			want = append(want, "write "+path(c)+".new")
+			names = append(names, c.Name)
+		}
+		if len(written) > 0 {
+			want = append(want, "certificate install "+strings.Join(names, ","))
+		}
+		want = append(want, "write /etc/haproxy/haproxy.cfg.new", "reload")
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if !slices.Equal(g.log, want) {
+			t.Errorf("%s: the guest got\n%s\nwant\n%s", what, strings.Join(g.log, "\n"), strings.Join(want, "\n"))
+		}
+		for _, c := range certs {
+			if g.files[path(c)] != c.PEM || g.modes[path(c)] != "" {
+				t.Errorf("%s: file %s after the push is not the certificate's, or not root's alone", what, c.Name[:12])
+			}
+		}
+	}
+	damage := func(change func()) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		change()
+	}
+	push("the first push: every file", certs[:10], certs[:10]...)
+	// The same certificates again, as with any change of a member or a limit: 4 calls where there were 15.
+	push("nothing differs: no file", certs[:10])
+	push("an eleventh certificate: that file alone", certs, certs[10])
+	damage(func() { g.files[path(certs[3])] = "" })
+	push("a truncated file: that file alone", certs, certs[3])
+	damage(func() { delete(g.files, path(certs[0])); g.files[path(certs[7])] = certs[8].PEM })
+	push("a file gone and one with another certificate's bytes", certs, certs[0], certs[7])
+	damage(func() { g.modes[path(certs[5])] = "644:root:root" })
+	push("a file anybody reads is written again, not only closed", certs, certs[5])
+	push("and nothing after it", certs)
+	// A file the config no longer names is not looked at: the apply prunes it once the new config is served.
+	push("fewer certificates", certs[:2])
+	// A directory that cannot be made private still stops the push before any file, and before the config.
+	damage(func() { g.exits["certificate directory"] = 1; delete(g.files, path(certs[0])) })
+	if err := ps.PushHAProxy(ctx, "n1", 100, "config", certs[:2]...); err == nil || !strings.Contains(err.Error(), "nothing was written") || g.files[path(certs[0])] != "" {
+		t.Errorf("a directory that is not private: %v", err)
+	}
+}
+
+// The applied-state read proves the certificate files a config names (drill Q3-1 of v0.11.1-rc.1: HAProxy served from
+// memory with a truncated file, the row read ACTIVE, and at its next start HAProxy would have refused the whole
+// config, the plain listeners with it). The read says of each named file whether it is there, whether its bytes are
+// the ones the portal would write, and whether it is root's alone in a directory of root alone. What it answers
+// holds the start of a file's name and nothing of its content, not its digest either. It is the same one command:
+// without a certificate the command is the one of before, to the byte.
+func TestStateReadProvesTheCertificateFiles(t *testing.T) {
+	ctx := context.Background()
+	a, b := strings.Repeat("a1", 32), strings.Repeat("b2", 32)
+	certs := []LBCertFile{{Name: a, PEM: "PEM-A"}, {Name: b, PEM: "PEM-B"}}
+	digest := func(content string) string {
+		sum := sha256.Sum256([]byte(content))
+		return hex.EncodeToString(sum[:])
+	}
+	path := func(name string) string { return "/etc/haproxy/certs/" + name + ".pem" }
+	// state is what certstate prints for a directory and its files, each given as name, mode and content.
+	state := func(dir string, files ...[3]string) string {
+		out := ""
+		if dir != "" {
+			out = "crtdir " + dir + "\n"
+		}
+		for _, f := range files {
+			out += "crt " + path(f[0]) + " " + f[1] + "\n"
+		}
+		for _, f := range files {
+			out += digest(f[2]) + "  " + path(f[0]) + "\n"
+		}
+		return out
+	}
+	const dirOK, fileOK = "700:root:root:directory", "600:root:root"
+	good := state(dirOK, [3]string{a, fileOK, "PEM-A"}, [3]string{b, fileOK, "PEM-B"})
+	for name, c := range map[string]struct {
+		out   string
+		stale []string
+		why   string
+	}{
+		"as a push leaves it":           {good, nil, ""},
+		"with a file no config names":   {good + "crt " + path(strings.Repeat("c3", 32)) + " 644:root:root\n", nil, ""},
+		"a file gone":                   {state(dirOK, [3]string{b, fileOK, "PEM-B"}), []string{a}, "Certificate file a1a1a1a1a1a1 is missing"},
+		"a file truncated":              {state(dirOK, [3]string{a, fileOK, "PEM-A"}, [3]string{b, fileOK, ""}), []string{b}, "Certificate file b2b2b2b2b2b2 is not the file that was written"},
+		"another certificate's bytes":   {state(dirOK, [3]string{a, fileOK, "PEM-B"}, [3]string{b, fileOK, "PEM-B"}), []string{a}, "Certificate file a1a1a1a1a1a1 is not the file that was written"},
+		"a file anybody reads":          {state(dirOK, [3]string{a, "644:root:root", "PEM-A"}, [3]string{b, fileOK, "PEM-B"}), []string{a}, "Certificate file a1a1a1a1a1a1 is not root's alone"},
+		"a file of another user":        {state(dirOK, [3]string{a, fileOK, "PEM-A"}, [3]string{b, "600:haproxy:haproxy", "PEM-B"}), []string{b}, "Certificate file b2b2b2b2b2b2 is not root's alone"},
+		"a directory anybody enters":    {state("755:root:root:directory", [3]string{a, fileOK, "PEM-A"}, [3]string{b, fileOK, "PEM-B"}), nil, "The certificate directory is missing or is not root's alone"},
+		"a directory that is a link":    {state("777:root:root:symbolic link", [3]string{a, fileOK, "PEM-A"}, [3]string{b, fileOK, "PEM-B"}), nil, "The certificate directory is missing or is not root's alone"},
+		"no directory":                  {"", []string{a, b}, "The certificate directory is missing or is not root's alone"},
+		"an answer that is not the one": {"something else\n", []string{a, b}, "The certificate directory is missing or is not root's alone"},
+	} {
+		stale, why := lbCertFaults(c.out, certs)
+		var names []string
+		for _, s := range stale {
+			names = append(names, s.Name)
+		}
+		if !slices.Equal(names, c.stale) || why != c.why {
+			t.Errorf("%s: stale %v, %q; want %v, %q", name, names, why, c.stale, c.why)
+		}
+		if strings.Contains(why, "PEM-") || strings.Contains(why, digest("PEM-A")) || strings.Contains(why, digest("PEM-B")) {
+			t.Errorf("%s: the answer holds something of a file's content: %q", name, why)
+		}
+	}
+	// A config that names no certificate is asked nothing, whatever the guest holds.
+	if stale, why := lbCertFaults("", nil); stale != nil || why != "" {
+		t.Errorf("no certificate: %v %q", stale, why)
+	}
+
+	guest := func(out string) (*certGuest, *Service) {
+		g := &certGuest{exits: map[string]int{}, runs: map[int]int{}, files: map[string]string{}, out: out}
+		srv := httptest.NewServer(g)
+		t.Cleanup(srv.Close)
+		ps, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g, ps
+	}
+	// A single appliance. Without a certificate: the command of v0.11.1-rc.1, written out here.
+	before := "sh -c " + lbServingFn + "serving && echo ok $(sha256sum < /etc/haproxy/haproxy.cfg | cut -c1-64)"
+	g, ps := guest("ok " + digest("config") + "\n")
+	if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, digest("config")); err != nil || !ok || why != "" || len(g.cmds) != 1 || g.cmds[0] != before {
+		t.Errorf("no certificate: %v %q %v, sent %d commands:\n%s", ok, why, err, len(g.cmds), strings.Join(g.cmds, "\n"))
+	}
+	// With certificates: still one command, the one of before with the files' state after it.
+	g, ps = guest("ok " + digest("config") + "\n" + good)
+	if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, digest("config"), certs...); err != nil || !ok || why != "" || len(g.cmds) != 1 ||
+		g.cmds[0] != "sh -c "+lbCertStateFn+strings.TrimPrefix(before, "sh -c ")+" && certstate" {
+		t.Errorf("certificates in place: %v %q %v, sent %d commands:\n%s", ok, why, err, len(g.cmds), strings.Join(g.cmds, "\n"))
+	}
+	g, ps = guest("ok " + digest("config") + "\n" + state(dirOK, [3]string{a, fileOK, "PEM-A"}, [3]string{b, fileOK, ""}))
+	if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, digest("config"), certs...); err != nil || ok || why != "Certificate file b2b2b2b2b2b2 is not the file that was written" {
+		t.Errorf("a truncated file: %v %q %v", ok, why, err)
+	}
+	// A config edited by hand is said first, and a HAProxy that does not serve is said as before.
+	g, ps = guest("ok " + digest("another config") + "\n" + good)
+	if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, digest("config"), certs...); err != nil || ok || why != "HAProxy's configuration file is not the one that was applied" {
+		t.Errorf("another config: %v %q %v", ok, why, err)
+	}
+	g, ps = guest("HAProxy is not running\n")
+	g.exits["other "] = 1
+	if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, digest("config"), certs...); err != nil || ok || why != "HAProxy is not running" {
+		t.Errorf("HAProxy stopped: %v %q %v", ok, why, err)
+	}
+
+	// An appliance of a pair: the state line first, as before, then the files' state from the same command.
+	line := "MASTER 1 1 1 " + digest("config") + " " + digest("keepalived") + " - 0\n"
+	g, ps = guest(line)
+	st, err := ps.ReadVRRPState(ctx, "n1", 100, "203.0.113.10")
+	if err != nil || st.State != "MASTER" || !st.Serving || st.HAProxySum != digest("config") || st.CertFiles != "" || len(g.cmds) != 1 || strings.Contains(g.cmds[0], "certstate") {
+		t.Errorf("a pair without a certificate: %+v %v\n%s", st, err, strings.Join(g.cmds, "\n"))
+	}
+	without := g.cmds[0]
+	g, ps = guest(line + good)
+	if st, err := ps.ReadVRRPState(ctx, "n1", 100, "203.0.113.10", certs...); err != nil || st.State != "MASTER" || !st.Serving || !st.HoldsVIP || st.HAProxySum != digest("config") ||
+		st.KeepalivedSum != digest("keepalived") || st.CertFiles != "" || len(g.cmds) != 1 || g.cmds[0] != "sh -c "+lbCertStateFn+strings.TrimPrefix(without, "sh -c ")+"; certstate" {
+		t.Errorf("a pair with its certificates in place: %+v %v\n%s", st, err, strings.Join(g.cmds, "\n"))
+	}
+	g, ps = guest(line + state(dirOK, [3]string{b, fileOK, "PEM-B"}))
+	if st, err := ps.ReadVRRPState(ctx, "n1", 100, "203.0.113.10", certs...); err != nil || st.State != "MASTER" || !st.Serving || st.CertFiles != "Certificate file a1a1a1a1a1a1 is missing" {
+		t.Errorf("a pair with a file gone: %+v %v", st, err)
+	}
+
+	// certstate itself: three commands whatever the number of files, and none that prints a file's content.
+	if strings.Count(lbCertStateFn, "\n") != 5 || strings.Contains(lbCertStateFn, "cat ") || strings.Contains(lbCertStateFn, "haproxy -c") {
+		t.Errorf("certstate:\n%s", lbCertStateFn)
 	}
 }

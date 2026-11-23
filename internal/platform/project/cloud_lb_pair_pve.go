@@ -441,7 +441,15 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			continue
 		}
 		vmid, _ := strconv.Atoi(a.ServerID)
-		if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip); err == nil {
+		// The certificate files are asked for only where the row records the config that names them. An appliance
+		// with a change still to take does not hold a new certificate's file yet, and that is no fault: read as
+		// one, every change of certificate logged a config not served, and it pushed the holder after the standby
+		// had refused the config.
+		var named []pve.LBCertFile
+		if a.HAProxyHash == hhash {
+			named = certs
+		}
+		if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip, named...); err == nil {
 			seen[a] = st
 			// The pushes below go to the standby first by what the appliance says now, not by what the row said at
 			// the pass before: the address may have moved since, and a row v0.11.1-rc.1 wrote for a pair with a UDP
@@ -471,12 +479,15 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		// keepalived stopped by a replace's planned switch may be started again here before its VM goes: it comes
 		// back as BACKUP and stays so (nopreempt), the address has moved already.
 		restartKeepalived := known && a.KeepalivedHash != "" && st.State == "STOPPED"
-		reloadHAProxy := known && a.HAProxyHash != "" && (!st.Serving || differs(st.HAProxySum, a.HAProxyHash))
+		// A certificate file that is damaged, gone or readable by others counts as a config not served: HAProxy
+		// still serves from memory, and the push writes the file again before its next start would refuse the
+		// whole config. The standby comes first here too (lbPushOrder).
+		reloadHAProxy := known && a.HAProxyHash != "" && (!st.Serving || differs(st.HAProxySum, a.HAProxyHash) || st.CertFiles != "")
 		reloadLVS := known && a.LVSHash != "" && lvs != "" && (!st.LVS || differs(st.LVSSum, a.LVSHash))
 		if restartKeepalived || reloadHAProxy || reloadLVS {
 			slog.Warn("load balancer: an appliance does not run what its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID,
 				"keepalived", st.State, "haproxyServing", st.Serving, "haproxyFile", !differs(st.HAProxySum, a.HAProxyHash),
-				"udpServing", st.LVS || a.LVSHash == "", "udpFiles", !differs(st.LVSSum, a.LVSHash))
+				"udpServing", st.LVS || a.LVSHash == "", "udpFiles", !differs(st.LVSSum, a.LVSHash), "certificateFilesFault", st.CertFiles)
 		}
 		// keepalived on every appliance, with a peer or without: it is what holds the addresses and what lets HAProxy
 		// bind them (ip_nonlocal_bind is one of its files). An appliance with no peer in the row, the first of a

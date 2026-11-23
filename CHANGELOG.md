@@ -285,8 +285,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **On the appliances.** Each certificate is one file in `/etc/haproxy/certs` (root, mode 0700; files 0600),
     named by the SHA-256 of its chain. The directory is made private and checked before anything is written into
     it, because the guest agent creates files readable by all. Files go before the config that names them, on the
-    standby first; a config HAProxy refuses leaves the certificate in use in place; files no config names are
-    removed after the new config is served. A key is never in cloud-init. The container test searches every
+    standby first; a new config HAProxy refuses leaves the certificate in use in place (a file of the config in
+    use that is damaged on the appliance is another matter, see "A damaged certificate file" under Fixed); files
+    no config names are removed after the new config is served. A key is never in cloud-init. The container
+    test searches every
     file of the guest for the key, on both images: it is in the certificate files in use and nowhere else, after
     the first push, after three changes of certificate, and in no file once the last TLS listener is gone.
   - **A change of certificate closes no connection**: it is one HAProxy reload. In the container test, over 300
@@ -495,6 +497,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pushed because of this. Found by the drill of v0.11.1-rc.1 (Q0b-1). In a real guest of both appliance images
   and in the wire fake; not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "One appliance of a
   pair").
+- **A damaged certificate file on a load balancer went unnoticed until HAProxy's next start, which then took every
+  listener down.** HAProxy reads a certificate file when it starts or reloads and serves from memory after that.
+  A file truncated or deleted on an appliance therefore changed nothing that the platform asked about: the row
+  read `ACTIVE`, the same request sent again and a services sync pushed nothing. HAProxy refuses its whole config
+  when one file of it cannot be loaded, so the next reboot or restart of the appliance would have left the plain
+  listeners down with the TLS ones, for up to the 15 minutes of the next services sync. Now the state read of
+  every pass also asks for the certificate files the config names: each must be there, hold the bytes the portal
+  would write, and be root's alone (mode 0600 in a directory of mode 0700). One that is not is written again in
+  that pass, while HAProxy still serves from memory, at the cost of one reload and no connection; a mode or an
+  owner that is wrong is put right the same way, and the pass logs at WARN which file and what was wrong. On a
+  pair only the appliance concerned is pushed, the standby first, and an appliance that has a change of config
+  still to take is asked after it took it: a certificate new to it is no damage, and a config the standby
+  refuses still reaches no other appliance. The read is the command the pass already sent:
+  a balancer without a TLS listener runs the command of before and is asked nothing more. What the appliance
+  answers of a file is its SHA-256, which the portal compares; nothing of a certificate or a key, and not that
+  digest either, is in a command line, a log line, an error or a status text. Found by the drill of v0.11.1-rc.1
+  (Q3-1). In a real guest of both appliance images (a file truncated, deleted and opened to all, then a restart
+  of HAProxy) and in the wire fake; not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "The
+  files are proven on every pass").
+- **Every change of a load balancer with TLS wrote every certificate file again.** A write through the guest
+  agent took about 0.6 s on the lab and happens inside the tenant's request, so a change of anything (a member, a
+  limit) answered after 8.8 s on a balancer with two certificates and after 13.5 s on one with eleven. A push now
+  asks the appliance what its certificate directory holds, in the command that makes the directory private, and
+  writes only the files that are missing, hold other bytes or are not root's alone: none for a change that
+  touches no certificate, the new file alone for a change of certificate. Certificates still reach an appliance
+  before the config that names them, and the config's check, swap and roll back are unchanged. Found by the
+  drill of v0.11.1-rc.1 (Q3-o2). The calls are counted against the wire fake and in a real guest of both
+  appliance images; the time saved was not measured on a lab.
 - **A project could not see which public addresses its quota counts.** The `floatingIps` quota counts every
   public address of a project: a server's public NIC, a load balancer's address, each Service address of a
   Kubernetes cluster and each address a cluster keeps. `GET /api/v1/project/{id}/quota-usage` gave the limit with
@@ -504,6 +534,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row per address with what holds it (the server, the balancer, the Service with its cluster, a kept address, one
   being given back). The tenant dashboard's **Quota & usage** card shows a "Public addresses" tile and the list
   under it. Found by the drill of v0.11.1-rc.1 (Q0b-2) ([api.md](docs/api.md), "Quota usage").
+- **Docs: a certificate file damaged on an appliance does not give a refused config.** The integration notes
+  said that the config's hash covers the certificates and that the applied-state check needs no term for them,
+  and the review list of TLS expected a file damaged by hand to end in a refused config with the last good one
+  kept. Neither holds. The hash covers the files' names, not their bytes; and a push brings every file its config
+  names in place before the config is checked, so a change made after the damage is applied and the file is whole
+  again (drill of v0.11.1-rc.1, Q3-2: shown twice). A refused config needs a new config that names a file HAProxy
+  cannot load, which the container test holds. The notes now tell the two cases apart and say what ran on a lab
+  and what did not ([cloud-integration.md](docs/cloud-integration.md), "A refused config and a damaged file are
+  two things").
+- **Guides: only the last `X-Forwarded-For` value is the load balancer's.** An `http` or `https` listener adds the
+  client's address to `X-Forwarded-For` after whatever the client sent in that header, as HAProxy's `option
+  forwardfor` and other balancers do. The API reference and the tenant guide read as if a server could take the
+  header as it comes: a server that reads the first value is told whatever the client wrote. They now say that
+  the last value is the one the balancer wrote, that earlier values come from the client and prove nothing, and
+  that the PROXY protocol is the way to get an address a client cannot forge. The behaviour did not change, and
+  the real-guest test now holds it. Found by the drill of v0.11.1-rc.1 (Q3-o1).
+- **Guides: with the PROXY protocol on, health checks carry the header too.** The API reference, the tenant guide
+  and the integration notes described `proxyProtocol` for the traffic alone. HAProxy sends the PROXY header on a
+  health check as well when the check goes to the member's own port, and sends none on a check with a port of its
+  own (`healthCheck.port`), the same port number included. So a server that accepts connections only with the
+  header is checked correctly as long as the check has no port of its own, and a health endpoint on its own port
+  must answer a plain connection. The texts say so now; nothing in the config changed. Seen by the drill of
+  v0.11.1-rc.1 (Q3-o3) on HAProxy 3.2.25 and, for both cases, on 3.0.11 in a container.
 - **`proxcloud.io/lb-internal` with a value that is no boolean gave the Service a public address.** A value such as
   `"yes"` was named in `InvalidAnnotation` and the Service was served, so the one annotation that guards an address
   failed open over a typing mistake. It fails closed now: a Service gets a public address only when the annotation
