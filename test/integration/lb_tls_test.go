@@ -322,12 +322,15 @@ func TestLBApplianceTLS(t *testing.T) {
 			}
 
 			// 4. https: the member is spoken to in HTTP and reads who the client was and that it came over TLS, whatever
-			// the client claims; over HTTP/2 and over HTTP/1.1.
+			// the client claims; over HTTP/2 and over HTTP/1.1. X-Forwarded-Proto is replaced. X-Forwarded-For is
+			// appended (drill Q3-o1 of v0.11.1-rc.1): the client's own value stays first and proves nothing, the
+			// last value is the address HAProxy saw, which is what the guides tell a server to read.
 			for _, h2 := range []bool{true, false} {
 				tr := &http.Transport{TLSClientConfig: &tls.Config{ServerName: "a.example.org", RootCAs: roots(certA)}, ForceAttemptHTTP2: h2, DisableKeepAlives: true}
 				req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+https+"/path", nil)
 				req.Host = "a.example.org"
 				req.Header.Set("X-Forwarded-Proto", "http")
+				req.Header.Set("X-Forwarded-For", "198.51.100.7")
 				res, err := (&http.Client{Transport: tr, Timeout: 15 * time.Second}).Do(req)
 				if err != nil {
 					t.Fatalf("GET over https (HTTP/2 %v): %v", h2, err)
@@ -338,6 +341,17 @@ func TestLBApplianceTLS(t *testing.T) {
 				if res.StatusCode != 200 || (res.ProtoMajor == 2) != h2 || !strings.HasPrefix(head, "get /path http/1.1\n") ||
 					strings.Count(head, "x-forwarded-proto:") != 1 || !strings.Contains(head, "x-forwarded-proto: https\n") || !strings.Contains(head, "x-forwarded-for: ") {
 					t.Errorf("what the member got (HTTP/2 %v, answer %s %d):\n%s", h2, res.Proto, res.StatusCode, body)
+				}
+				var forwarded []string
+				for _, line := range strings.Split(head, "\n") {
+					if values, ok := strings.CutPrefix(line, "x-forwarded-for:"); ok {
+						for _, v := range strings.Split(values, ",") {
+							forwarded = append(forwarded, strings.TrimSpace(v))
+						}
+					}
+				}
+				if len(forwarded) != 2 || forwarded[0] != "198.51.100.7" || forwarded[1] == forwarded[0] || net.ParseIP(forwarded[1]) == nil {
+					t.Errorf("X-Forwarded-For at the member (HTTP/2 %v): %q, want the client's own value and then the address HAProxy saw", h2, forwarded)
 				}
 			}
 

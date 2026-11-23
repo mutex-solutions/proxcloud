@@ -52,13 +52,13 @@ TLS and UDP have sections of their own below.
 
 Press **Save configuration**. The change reaches the load balancer within seconds. If HAProxy refuses it, the page shows why and the load balancer keeps running the last configuration that worked.
 
-Only servers of this project, on the load balancer's own network and subnet, can be added. HTTP pools add an `X-Forwarded-For` header with the client's address. To serve HTTPS, either let the load balancer end TLS (next section) or use a TCP listener on port 443 and end TLS on your servers.
+Only servers of this project, on the load balancer's own network and subnet, can be added. HTTP pools add the client's address to the `X-Forwarded-For` header. It is added **after** anything the client sent in that header: the last value is the one the load balancer wrote; earlier values come from the client and prove nothing. Make your servers read the last value only. If you need an address a client cannot forge and cannot rely on that rule in your server, turn on the pool's PROXY protocol: the address then travels outside the request, where a client cannot write. To serve HTTPS, either let the load balancer end TLS (next section) or use a TCP listener on port 443 and end TLS on your servers.
 
 ## TLS and HTTPS
 
 A **TLS** or **HTTPS** listener ends TLS on the load balancer, with a certificate you upload, and speaks plain to your servers:
 
-- **HTTPS** speaks HTTP to the pool. Your servers read the client's address in `X-Forwarded-For` and the scheme in `X-Forwarded-Proto: https` (whatever the client sent in that header is replaced). Clients may use HTTP/2 or HTTP/1.1; your servers are spoken to in HTTP/1.1.
+- **HTTPS** speaks HTTP to the pool. Your servers read the client's address in the **last** value of `X-Forwarded-For` (the load balancer adds it after anything the client sent in that header, as described above: earlier values prove nothing) and the scheme in `X-Forwarded-Proto: https` (whatever the client sent in that header is replaced). Clients may use HTTP/2 or HTTP/1.1; your servers are spoken to in HTTP/1.1.
 - **TLS** passes the bytes on as TCP, for any protocol over TLS. Turn on the pool's PROXY protocol if your servers need the client's address.
 
 The connection from the load balancer to your servers is not encrypted: it stays on your project's network. If it must be encrypted too, use a TCP listener and end TLS on the servers.

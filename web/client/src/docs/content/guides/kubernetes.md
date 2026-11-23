@@ -113,7 +113,7 @@ A Service sets its options with annotations named `proxcloud.io/lb-<option>`. No
 | `method` | `roundrobin`, `leastconn`, `source` | How traffic is spread over the workers. |
 | `connection-limit` | 1 to 20000, `-1` for none | Open connections per port; per worker on a UDP port. |
 | `timeout-client-data`, `timeout-member-connect`, `timeout-member-data` | 1000 to 86400000 (milliseconds) | The idle time of a client, how long a worker may take to accept a connection, and the idle time of a worker. TCP ports only. |
-| `x-forwarded-for` | `true` | The TCP ports speak HTTP and add `X-Forwarded-For`. Not together with the PROXY header: the PROXY header then holds. |
+| `x-forwarded-for` | `true` | The TCP ports speak HTTP and add `X-Forwarded-For` (after any value the client sent: the last value is the load balancer's, earlier ones prove nothing). Not together with the PROXY header: the PROXY header then holds. |
 | `enable-health-monitor` | `true`, `false` | `false` turns the health check off. Not obeyed with `externalTrafficPolicy: Local`. |
 | `health-monitor-delay`, `health-monitor-timeout`, `health-monitor-max-retries`, `health-monitor-max-retries-down` | 1 to 300 s, 1 to 300 s, 1 to 10, 1 to 10 | How often a worker is checked, how long it may take, and how many good checks bring it back or bad ones take it out. The default is every 3 s, back after 2, out after 2. A UDP port is back at its first good check and out after 2 bad ones at least. |
 | `node-selector` | `key=value, key` | Only workers with all of these labels get the Service's traffic. |

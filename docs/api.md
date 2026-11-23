@@ -223,9 +223,12 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
     names hold the server name it asks for (SNI), and the **first** one when none does or it asks for none. The
     policy is fixed: TLS 1.2 and 1.3, suites with forward secrecy and an AEAD cipher only (ECDHE with AES-GCM or
     ChaCha20-Poly1305; no RSA key exchange, no CBC, no DHE). An `https` listener offers HTTP/2 and HTTP/1.1 (ALPN),
-    speaks HTTP/1.1 to the servers and sets `X-Forwarded-For` (the client's address) and `X-Forwarded-Proto: https`
-    (replacing what the client sent). A `tls` listener passes the bytes on as TCP; the client's address reaches the
-    servers with `proxyProtocol`. TLS to the servers is not offered. The row's listeners also carry `certFiles`,
+    speaks HTTP/1.1 to the servers, adds the client's address to `X-Forwarded-For` and sets
+    `X-Forwarded-Proto: https` (replacing what the client sent). `X-Forwarded-For` is **appended**, on an `http`
+    listener too: the last value is the one the balancer wrote; earlier values come from the client and prove
+    nothing. A server reads the last value only; the PROXY protocol (`proxyProtocol` on the pool) is the way to
+    get an address a client cannot forge. A `tls` listener passes the bytes on as TCP; the client's address
+    reaches the servers with `proxyProtocol`. TLS to the servers is not offered. The row's listeners also carry `certFiles`,
     which the platform sets and a request cannot. `503` when the portal has no encryption key (below).
   - **UDP** (`protocol: "udp"` on a listener and its pool) is served by a load balancer on two appliances only:
     on one VM it answers `400` "UDP needs a high-availability load balancer". The servers see the address of the

@@ -579,6 +579,8 @@ func renderHAProxy(s LBSpec, vips []string, idle string) string {
 		}
 		fmt.Fprintf(&b, "  mode %s\n  default_backend %s\n", m, backends[i])
 		if m == "http" {
+			// Appended, not replaced: a value the client sent stays before it, so only the last one is the balancer's
+			// word (the guides say so; drill Q3-o1 of v0.11.1-rc.1). PROXY protocol is the address nobody can forge.
 			b.WriteString("  option forwardfor\n")
 		}
 		if l.Protocol == "https" { // whatever the client sent in the header: the member reads what the balancer saw

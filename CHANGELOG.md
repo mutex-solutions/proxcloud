@@ -516,6 +516,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row per address with what holds it (the server, the balancer, the Service with its cluster, a kept address, one
   being given back). The tenant dashboard's **Quota & usage** card shows a "Public addresses" tile and the list
   under it. Found by the drill of v0.11.1-rc.1 (Q0b-2) ([api.md](docs/api.md), "Quota usage").
+- **Guides: only the last `X-Forwarded-For` value is the load balancer's.** An `http` or `https` listener adds the
+  client's address to `X-Forwarded-For` after whatever the client sent in that header, as HAProxy's `option
+  forwardfor` and other balancers do. The API reference and the tenant guide read as if a server could take the
+  header as it comes: a server that reads the first value is told whatever the client wrote. They now say that
+  the last value is the one the balancer wrote, that earlier values come from the client and prove nothing, and
+  that the PROXY protocol is the way to get an address a client cannot forge. The behaviour did not change, and
+  the real-guest test now holds it. Found by the drill of v0.11.1-rc.1 (Q3-o1).
 - **Guides: with the PROXY protocol on, health checks carry the header too.** The API reference, the tenant guide
   and the integration notes described `proxyProtocol` for the traffic alone. HAProxy sends the PROXY header on a
   health check as well when the check goes to the member's own port, and sends none on a check with a port of its
