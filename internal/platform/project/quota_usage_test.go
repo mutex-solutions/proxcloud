@@ -68,6 +68,7 @@ func TestQuotaAddressesNameTheirHolder(t *testing.T) {
 		{IP: "10.91.0.13", NetworkID: "vmbr1", ServerID: LBAddressOwner("k8s"), NIC: publicNIC},
 		{IP: "10.91.0.12", NetworkID: "vmbr1", ServerID: LBAddressOwner("k8s"), NIC: publicNIC},
 		{IP: "10.91.0.10", NetworkID: "vmbr1", ServerID: LBAddressOwner("k8s"), NIC: publicNIC},
+		{IP: "10.91.0.11", NetworkID: "vmbr1", ServerID: LBAddressOwner("k8s"), NIC: publicNIC}, // allocated, not in the row yet
 		{IP: "10.91.0.9", NetworkID: "vmbr1", ServerID: LBAddressOwner("pair"), NIC: publicNIC},
 		{IP: "10.91.0.100", NetworkID: "vmbr1", ServerID: "130", NIC: publicNIC},
 		{IP: "10.91.0.101", NetworkID: "vmbr1", ServerID: "999", NIC: publicNIC}, // a server whose row is not there yet
@@ -75,6 +76,7 @@ func TestQuotaAddressesNameTheirHolder(t *testing.T) {
 	want := []quotaAddress{
 		{IP: "10.91.0.9", NetworkID: "vmbr1", Kind: "loadBalancer", Name: "web", ResourceID: "lb-pair"},
 		{IP: "10.91.0.10", NetworkID: "vmbr1", Kind: "service", Name: "default/web", ResourceID: "lb-k8s", Cluster: "pc-c-1", ClusterName: "prod"},
+		{IP: "10.91.0.11", NetworkID: "vmbr1", Kind: "loadBalancer", Name: "k8s-k8s", ResourceID: "lb-k8s", Cluster: "pc-c-1", ClusterName: "prod"},
 		{IP: "10.91.0.12", NetworkID: "vmbr1", Kind: "kept", ResourceID: "lb-k8s", Cluster: "pc-c-1", ClusterName: "prod"},
 		{IP: "10.91.0.13", NetworkID: "vmbr1", Kind: "releasing", ResourceID: "lb-k8s", Cluster: "pc-c-1", ClusterName: "prod"},
 		{IP: "10.91.0.14", NetworkID: "vmbr1", Kind: "loadBalancer", Name: "one", ResourceID: "lb-one"},

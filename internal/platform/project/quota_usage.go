@@ -114,9 +114,9 @@ func quotaAddresses(rows []cloud.CloudResource, svcID string, allocs []PublicIP)
 					q.Kind, q.Name = "service", c.Services[j].Namespace+"/"+c.Services[j].Name
 				} else if slices.Contains(c.Kept, a.IP) {
 					q.Kind, q.Name = "kept", ""
-				} else {
+				} else if slices.Contains(c.Releasing, a.IP) {
 					q.Kind, q.Name = "releasing", ""
-				}
+				} // else an address allocated a moment ago, before the row names its Service: the balancer's
 			}
 		}
 		out = append(out, q)
