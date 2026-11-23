@@ -29,15 +29,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for every cluster whose controller runs this release's image, on any chart. The console's "the controller last
   reported" therefore reads up to a minute and a half.
 
-- **A Service whose `proxcloud.io/lb-internal` is neither true nor false loses its public address at the upgrade.**
-  `v0.11.0` did not read the annotation, so a Service that carries `proxcloud.io/lb-internal: "yes"` (or an empty
-  value) is served there on a public address. From this release only a false value or no annotation gives one: the
-  Service is refused with `InvalidAnnotation`, which names the value, and its address goes back. Before the
-  upgrade, set the annotation to `"false"` or remove it on the Services whose address must stay.
+- **A Service whose `proxcloud.io/lb-internal` is not false loses its public address when its cluster gets the
+  controller of this release.** `v0.11.0` did not read the annotation, so a Service that carries
+  `proxcloud.io/lb-internal: "true"`, `"yes"` or an empty value is served there on a public address. From this
+  release only a false value or no annotation gives one: the Service is refused (`InternalNotSupported` for a true
+  value, `InvalidAnnotation`, which names the value, for one that is no boolean) and its address goes back. The
+  portal's upgrade alone takes no address: the controller of `v0.11.0` sends no annotation but
+  `proxcloud.io/lb-proxy-protocol`, so the portal does not see this one until the cluster is moved to the provider's
+  chart version or given "Enable load balancer controller" again. Before that move, set the annotation to `"false"`
+  or remove it on the Services whose address must stay.
 - **A Service that ends TLS with a Secret loses its address if the portal is rolled back to v0.11.0.** That portal
   ends no TLS and would hand the port to the pods without it, so the cluster's controller does not send it such a
   Service: the address goes back, the Service says `TLSNotAvailable`, and it gets a new address when the portal is
   on v0.11.1 again. Before a rollback, take `proxcloud.io/lb-tls-secret` off the Services whose address must stay.
+- **Kept addresses are lost from view if the portal is rolled back to v0.11.0.** That portal does not know the
+  list of kept addresses (`proxcloud.io/lb-keep-address`) and saves the cluster's balancer without it. The addresses
+  stay allocated, billed and in the floating IP quota, no page lists them, also after the portal is on v0.11.1
+  again, and they go back to the pool only with the cluster. Before a rollback, release every kept address on the
+  cluster's page.
 - **UDP from a Kubernetes Service needs the controller of this release.** Upgrading the portal alone changes no
   Service: a cluster made before v0.11.1 keeps answering a UDP Service `UDPNotSupported` (the message now ends "For
   UDP, upgrade the cluster"), so no Service that stood pending gets a public address, which is billed and counts in
@@ -630,6 +639,8 @@ certificates on one HAProxy bind. It is a spike of the method, not a test of thi
   annotation name gets a public address until the annotation is renamed to `proxcloud.io/lb-internal`.
 - Chart 0.1.19 with the controller image of `v0.11.0` does not run (`--watch=true`): do not enable the controller
   again or set the chart version on such a cluster while the portal is rolled back to `v0.11.0`.
+- A portal rolled back to `v0.11.0` drops a cluster's list of kept addresses: they stay billed and in the quota,
+  and no page lists them, until the cluster is deleted. Release them before a rollback.
 - A bill with sandbox items that round to 0.00 gets one summed item, "Sandbox runs below 0.005 each (n)".
 - The full list is in `docs/releases/v0.11.1-rc.1.md`.
 
