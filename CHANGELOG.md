@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **A Service that ends TLS with a Secret loses its address if the portal is rolled back to v0.11.0.** That portal
+  ends no TLS and would hand the port to the pods without it, so the cluster's controller does not send it such a
+  Service: the address goes back, the Service says `TLSNotAvailable`, and it gets a new address when the portal is
+  on v0.11.1 again. Before a rollback, take `proxcloud.io/lb-tls-secret` off the Services whose address must stay.
 - **UDP from a Kubernetes Service needs the controller of this release.** Upgrading the portal alone changes no
   Service: a cluster made before v0.11.1 keeps answering a UDP Service `UDPNotSupported` (the message now ends "For
   UDP, upgrade the cluster"), so no Service that stood pending gets a public address, which is billed and counts in
@@ -44,6 +48,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Kubernetes Services: TLS ends on the cluster's load balancer, with the certificate of a Secret**
+  (`internal/cloud/lbgw/tls.go`, `cmd/lb-controller`, `internal/platform/project/cloud_lb_cluster_tls.go`;
+  "TLS from a Service's Secret" in [managed-k8s.md](docs/managed-k8s.md)).
+  - `proxcloud.io/lb-tls-secret: <name>[,<name>...]` names one to four `kubernetes.io/tls` Secrets of the
+    Service's own namespace. Every TCP port of the Service then ends TLS on the balancer, or only the ports of
+    `proxcloud.io/lb-tls-ports`. The nodes are spoken to in HTTP, with `X-Forwarded-For` and
+    `X-Forwarded-Proto: https`, or in plain TCP with `proxcloud.io/lb-backend-protocol: tcp`. Several Secrets are
+    chosen by the name the client asks for; the first one is the default. TLS 1.2 and 1.3 with the suites of the
+    project certificates.
+  - The cluster's controller reads only the Secrets its Services name: a GET of one name in the Service's
+    namespace, never a list or a watch, and nothing of another type. It sends the hash of each one every turn and
+    the Secret itself once, when the portal asks for that hash; a changed Secret (a renewal) is sent once more and
+    reaches both appliances as a new file and one reload.
+  - The portal checks a Secret as an uploaded certificate, seals it with its encryption key in a row that
+    belongs to the cluster's balancer and that no project route reaches, and keeps only hashes in the cluster's
+    state. No log line, audit event, Event or error text holds anything of a certificate or a key; the audit log
+    names the Secret and the certificate's public fingerprint.
+  - A Secret that is deleted, of another type, incomplete or refused by the check never takes TLS off a port and
+    never costs a Service its address: the Service stays exactly as it was served and a Warning Event
+    `InvalidCertificate` says why. A Service that was never served gets no address until its Secret is good. An
+    expired certificate is served, with a Warning Event `CertificateExpired`.
+  - Whoever may write a Service in a namespace can have any TLS Secret of that namespace served, as with an
+    Ingress.
+  - No chart value and no RBAC in the tenant cluster is new: the controller is the portal image's and uses the
+    kubeconfig it already has. Not run on a lab yet.
 - **Kubernetes Services: UDP, session affinity and the layer 4 annotations on the cluster's load balancer**
   (`internal/cloud/lbgw`, `cmd/lb-controller`, `internal/platform/project/cloud_lb_cluster_pve.go`; the full table
   and the differences from OCCM: [managed-k8s.md](docs/managed-k8s.md)). The gateway speaks protocol 2, which

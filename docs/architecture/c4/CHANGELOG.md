@@ -4,6 +4,66 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: TLS on a cluster's balancer from a Service's Secret
+
+**What changed:** a Kubernetes Service can end TLS on the cluster's balancer with the certificate of a Secret it
+names. One new data flow: a tenant's TLS Secret (certificate and private key) leaves the tenant cluster, through the
+cluster's load balancer controller and the gateway, into the portal's `lb_certificates` and from there onto the
+cluster's appliances. No new container, no new listener, no new credential, no chart change.
+
+- `internal/cloud/lbgw/tls.go` (new): the three annotations `proxcloud.io/lb-tls-secret`, `lb-tls-ports`,
+  `lb-backend-protocol` (own names only, as decided on 2026-11-23); `CertRef` (a Secret's name and `SecretHash`, or
+  the code of why it cannot be used), `CertificateData`, `TLSSecretNames`, `CertProblem`, `Options.EndsTLS`.
+  `gateway.go`: protocol 2 gains `Service.certificates`, `Request.certificateData` and `Answer.needCertificates`
+  (protocol 2 is not released yet, so it has no second number); the state's part of a body keeps 64 KiB and the
+  certificates that were asked for are measured apart (`maxCertBody`); a body that holds a key gives a decode error
+  that names nothing of it; at most 4 certificates a Service and 16 a cluster.
+- `cmd/lb-controller`: `controller.certificates` reads the Secrets (GET by name, the Service's namespace, type
+  `kubernetes.io/tls`, never a list or a watch; the reach is K11 of the plan), and `turn` sends a Secret in a second
+  request only when the answer asked for its hash. `protocol1` leaves a Service that asks for TLS out of the request
+  for an older portal. `kamajik8s.Client.GetSecret` is the read.
+- `internal/platform/project/cloud_lb_cluster_tls.go` (new): `lbClusterTLS` (which Services are stored as sent,
+  which stay as they were, which get no address, which hashes are asked for), `lbClusterTakeCerts` (the upload
+  check of `pve.CheckLBCertificate`, the seal under `lbc:<clusterId>`, the audit event with the Secret's name and
+  the public fingerprint), `lbClusterCertNames`, `lbClusterPruneCerts`. `cloud_lb_cluster_pve.go`:
+  `LBClusterState` takes the certificates, `lbClusterServiceSpecTLS` makes `https` and `tls` listeners,
+  `lbDropState` removes the rows. `cloud_lb_certs.go`: `lbApplyCerts` opens a cluster balancer's certificates under
+  the cluster's owner name.
+- Tests: `TestCertificatesThroughTheGateway`, `TestTLSAnnotations`, `TestTLSSecretNames` (lbgw);
+  `TestTLSFromASecret`, `TestTLSServiceAndAPortalOfProtocol1` (controller, through the real gateway handler);
+  `TestLBClusterServicesEndTLS` with the golden `haproxy-tls-k8s.cfg`, which `TestLBApplianceTLS` hands to the
+  HAProxy of both images; `TestLBClusterStateConverges/TLSFromSecret` (PostgreSQL and the pair's wire fake).
+- Diagrams: none redrawn; `c2-containers.md` (the gateway row and the load balancer row) and `c4-code.md` (a new
+  row, and the `lbgw` row) say it in words.
+
+**Why:**
+
+- The plan's PR 5 of v0.11.1 ("complete layer 4"): the upstream controller ends TLS from a reference into its
+  cloud's secret store, which this product does not have. A Secret of the Service's namespace is what an Ingress
+  uses, and what cert-manager renews.
+- **Hashes each turn, the Secret once (K10).** The controller sends its whole state every 10 s. Sixteen private
+  keys in each of those requests would be the most sensitive thing the gateway sees, 8640 times a day per cluster,
+  for a value that changes a few times a year.
+- **The portal computes the hash and takes only what a Service names.** A controller cannot file a certificate
+  under another one's hash, and what the portal stores is bounded by what the cluster's Services ask for.
+- **A row of the cluster, not of the project.** A project's certificates are its members' to list, name on a
+  listener and delete. A Secret's owner did not put it there: the row is bound to the cluster (owner and seal) and
+  no project route reaches it.
+- **The Service stays as it was when its Secret fails.** A refusal gives a Service's address back, and serving the
+  port without TLS would put what the pods answer in the clear on a public address. Neither is what a deleted or
+  mistyped Secret should do; the upstream controller's failed sync leaves its balancer as it was, too.
+- **The same on a rollback of the portal:** a v0.11.0 portal would serve the port without TLS, so such a Service
+  is not sent to it and loses its address until the portal is upgraded again. Said in the guide and the changelog.
+- **No dedicated identity for the controller yet (K11).** It holds the tenant's admin kubeconfig, as the CSI
+  controller does; RBAC cannot say "the Secrets a Service names" in any case. The limit is in the code and its
+  tests, and the guide lists the rights an identity of its own would need.
+
+**Files:** `internal/cloud/lbgw/tls.go`, `tls_test.go`, `gateway.go`, `annotations.go`, `store.go`;
+`cmd/lb-controller/main.go`, `tls_test.go`; `internal/cloud/kamajik8s/client.go`;
+`internal/platform/project/cloud_lb_cluster_tls.go` and its two tests, `cloud_lb_cluster_pve.go`,
+`cloud_lb_certs.go`; `internal/cloud/pve/testdata/haproxy-tls-k8s.cfg`; `test/integration/lb_tls_test.go`;
+`docs/managed-k8s.md`, `docs/data-model.md`, `CHANGELOG.md`.
+
 ## 2026-11-23: only the product's own annotation names are read
 
 **What changed:** the owner decided on 2026-11-23 that the product defines its own annotation names and keeps no

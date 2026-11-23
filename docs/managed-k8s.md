@@ -844,7 +844,7 @@ other path to the CSI gateway, unchanged) takes `Authorization: PVEAPIToken=lb@p
 header `ProxCloud-LB-Protocol` (1, or 2 from v0.11.1: below) and a body of at most 64 KiB: the Services of type
 LoadBalancer the controller owns (uid, ports with protocol, port and node port, `externalTrafficPolicy`,
 `healthCheckNodePort`, `loadBalancerSourceRanges`, the PROXY annotation, the IP families; with protocol 2 also the
-load balancer annotations, the session affinity and the nodes of a node selector) and the nodes' InternalIPs. Nothing in it names a
+load balancer annotations, the session affinity, the nodes of a node selector and the hashes of its TLS Secrets) and the nodes' InternalIPs. Nothing in it names a
 project, network or VM. The credential (`lbGatewayCredential`, `_id` = the cluster id: project, compute and Kubernetes
 provider, the cluster's network; only the secret's SHA-256; last seen written at most once a minute) allows this one
 call for its own cluster, and minting it again rotates it.
@@ -1081,8 +1081,9 @@ served as before.
 Annotations. A knob has one name, `proxcloud.io/lb-<knob>`, and no other name is read: the product defines its own.
 What a knob does follows OCCM (v1.37.1, `loadbalancer.go`:61-107; the repository and the lines are named in
 [the C4 change log](architecture/c4/CHANGELOG.md), 2026-11-23). The portal reads them
-(`internal/cloud/lbgw/annotations.go`), so a new knob ships with the portal and needs no new controller; the node
-selector alone is read by the controller, which has the nodes' labels.
+(`internal/cloud/lbgw/annotations.go`), so a new knob ships with the portal and needs no new controller. Two are
+read by the controller, because they need the tenant's API: the node selector (the nodes' labels) and `tls-secret`
+(the Secrets, "TLS from a Service's Secret" below).
 
 | `proxcloud.io/lb-` | Values | Effect |
 |---|---|---|
@@ -1096,6 +1097,9 @@ selector alone is read by the controller, which has the nodes' labels.
 | `node-selector` | `key=value, key` | only the nodes with every one of these labels are behind the Service; none = no member and `UnAvailableLoadBalancer`. Spaces around a term and around `=` are dropped |
 | `keep-address` | `true` | read, and not served yet: the Event `KeepAddressNotServed` says that the address is given back with the Service |
 | `internal` | `true`, `false` | `true` **refuses** the Service (`InternalNotSupported`): it never gets a public address |
+| `tls-secret` | one to four names of Secrets, between commas | TLS ends on the balancer with the certificates of these `kubernetes.io/tls` Secrets of the Service's namespace; the first one answers a client that asks for no name |
+| `tls-ports` | TCP ports of the Service, between commas | only these ports end TLS; unset, every TCP port does. A list that cannot be read is not obeyed (`InvalidAnnotation`) and every TCP port ends TLS |
+| `backend-protocol` | `http`, `tcp` | what the nodes are spoken to in behind a port that ends TLS: HTTP with `X-Forwarded-For` and `X-Forwarded-Proto: https` (the default), or plain TCP |
 
 - A value that is not understood is not obeyed and named in a Warning Event `InvalidAnnotation`; the Service is
   served with the default. Refusing it would give its address back over a typing mistake.
@@ -1140,9 +1144,11 @@ purpose:
 4. **The health check is on by default**; OCCM's is off (`create-monitor` false) unless asked for.
 5. **Other defaults.** A check every 3 s, 2 good checks up, 2 bad ones down, and an idle timeout of an hour;
    OCCM: 5 s, 3 s timeout, 1 up, 3 down, and 50 s. The annotations set OCCM's figures.
-6. **TLS.** OCCM's `default-tls-container-ref` names a container of its secret store and has no counterpart. OCCM turns every port of
-   such a Service, UDP too, into a listener that ends TLS; here TLS from a Service's `kubernetes.io/tls` Secret is
-   a change of its own, for TCP ports only. Until then a Service's TLS passes through a TCP port.
+6. **TLS.** OCCM's `default-tls-container-ref` names a container of its secret store, which does not exist here.
+   Here `proxcloud.io/lb-tls-secret` names `kubernetes.io/tls` Secrets of the Service's own namespace. OCCM turns
+   every port of such a Service, UDP too, into a listener that ends TLS; here only TCP ports end TLS, all of them
+   or the ones `proxcloud.io/lb-tls-ports` names. Without the annotation a Service's TLS passes through a TCP port
+   as before.
 7. **`proxy-protocol: "true"` is version 2**, as v0.11.0 shipped it; OCCM's `"true"` is version 1. A manifest that
    is renamed says `v1` to keep version 1.
 8. **A port without a node port refuses the Service** (`NoNodePort`); OCCM makes a pool without members.
@@ -1190,15 +1196,93 @@ otherwise.
 | `keep-floatingip` | `proxcloud.io/lb-keep-address` | read, not served yet |
 | the internal-load-balancer annotation | `proxcloud.io/lb-internal` | `"true"` refuses the Service; left under OCCM's name the Service gets a public address |
 | `timeout-tcp-inspect` | none | nothing of a TCP stream is inspected here: leave it out |
-| `default-tls-container-ref` | none | see difference 6 |
+| `default-tls-container-ref` | none; `proxcloud.io/lb-tls-secret` does its work | the value is not a container reference but the name of a `kubernetes.io/tls` Secret in the Service's namespace: put the certificate there (difference 6) |
 | `load-balancer-id`, `load-balancer-address` | none | no shared balancer; `spec.loadBalancerIP` is not obeyed either |
 | the network, subnet, port, floating network and subnet, member subnet, class, flavor, availability zone, tag and hostname keys | none | the provider's `config.cluster.loadBalancer` decides these; leave them out |
 
 A key with "none" written under the product's prefix all the same is named in `AnnotationNotSupported`.
 
-Not run on a lab: UDP from a Service, the affinity, the annotations, the Events and the step-down for an older
-portal are tested on fakes of the tenant cluster and of Proxmox, and against the HAProxy and keepalived of both
-appliance images in containers. The one lab figure in this section is the spike's, where it is named.
+#### TLS from a Service's Secret
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop
+  namespace: web
+  annotations:
+    proxcloud.io/lb-tls-secret: shop-tls          # a kubernetes.io/tls Secret of namespace web
+    proxcloud.io/lb-tls-ports: "443"              # port 80 stays as it is
+spec:
+  type: LoadBalancer
+  ports:
+    - {name: http, port: 80, targetPort: 8080}
+    - {name: https, port: 443, targetPort: 8080}  # the pods speak HTTP: TLS ends on the balancer
+```
+
+- **What the Service gets.** Port 443 is an `https` listener: the balancer ends TLS (1.2 and 1.3, the suites of
+  the project certificates, "TLS termination" in [cloud-integration.md](cloud-integration.md)) and speaks HTTP to the node port, adding
+  `X-Forwarded-For` and `X-Forwarded-Proto: https`. With `proxcloud.io/lb-backend-protocol: tcp` it is a `tls`
+  listener that speaks plain TCP to the node port (any protocol over TLS; add `proxcloud.io/lb-proxy-protocol` for
+  the client's address). The forwarded-for annotation says nothing on a port that ends TLS. Nothing is encrypted
+  again towards the nodes. With several Secrets the certificate is chosen by the name the client asks for (SNI),
+  and the first Secret answers a client that asks for none or for a name no certificate holds.
+- **Which Secrets a Service may name.** Secrets of its own namespace, by name: a value with a `/` or anything that
+  is not a Secret's name is not read. Only Secrets of type `kubernetes.io/tls`, with `tls.crt` (the server's
+  certificate first, then its intermediates) and `tls.key`. At most 4 a Service and 16 different ones a cluster,
+  16 KiB each. As with an Ingress, **whoever may create or change a Service in a namespace can have any TLS Secret
+  of that namespace served** on a public address, without the right to read Secrets: give the right to write
+  Services in a namespace to those who may use its certificates.
+- **What the controller reads, and with what right.** The controller runs on the platform cluster with the
+  cluster's admin kubeconfig, so the tenant API would let it read every Secret; nothing in the tenant cluster's
+  RBAC is changed or added for this. The limit is in its code and its tests: it reads a Secret only with a GET of
+  one name (`GET /api/v1/namespaces/<the Service's namespace>/secrets/<name>`), only a name an owned Service's
+  annotation gives, each turn; it never lists or watches Secrets; a Secret of another type is read and dropped,
+  neither hashed nor sent. Its whole use of the tenant API is: list Services and Nodes, patch a Service (the
+  finalizer) and its status, create Events, get these Secrets. An identity of its own with exactly those rights
+  (`services` get, list, watch, patch; `services/status` patch; `nodes` get, list, watch; `events` create, patch;
+  `secrets` get) is a later hardening together with the CSI controller's; a controller given such an identity
+  without `secrets get` serves every other Service and says `InvalidCertificate` ("may not be read by the
+  cluster's load balancer controller") on the ones that name a Secret.
+- **What crosses to the portal.** Each turn, per Service, the Secrets' names and a SHA-256 of each one's
+  certificate and key. The portal answers with the hashes it holds no certificate for, and the controller sends
+  those Secrets once, in a second request of the same turn. A Secret that did not change is never sent again, and
+  the portal cannot ask for a Secret no Service names. The request's 64 KiB is the state's; certificates that
+  were asked for come on top.
+- **What the portal does with it.** It checks the Secret exactly as a certificate uploaded to a project (the key
+  fits the certificate; RSA of 2048 bits or more, or ECDSA P-256 or P-384; at most five certificates that sign
+  each other in order; no passphrase), seals chain and key with its encryption key into a row that belongs to the
+  cluster's balancer (`lb_certificates`, owner `lbc:<clusterId>`; no project lists, names or deletes it, and
+  another cluster with the same Secret has a row of its own), and keeps only the hash in the cluster's state
+  (`lbGatewayState`). The appliances get it as a project's certificate: a file named by the chain's fingerprint in
+  the root-only directory, before the config that names it, the standby first, the config checked and rolled
+  back. The audit log names the Secret and the certificate's public fingerprint. Where a key rests is what
+  [cloud-integration.md](cloud-integration.md) says of project certificates: the sealed row, the appliances' disks, and
+  with them the portal's backups and a node-level backup of an appliance. A portal without an encryption key
+  takes no certificate (`TLSNotAvailable`).
+- **A Secret that changes.** The controller reads the Secret every turn (10 s), so a renewed certificate (by
+  cert-manager, say) is a new hash: one upload, a new file on both appliances, one reload that drops no
+  connection. The old file leaves the appliances after the new config is served, the old row a few minutes later.
+- **A Secret that is deleted, or cannot be used.** A Service is never served without the TLS it asks for, and a
+  missing Secret takes no certificate off a balancer. While the Secret is gone, of another type, without its two
+  keys, too large, or refused by the check, a Service the balancer serves stays **exactly as it was served**, with
+  the certificate it had (other changes to that Service wait too), and a Warning Event `InvalidCertificate` names
+  the Secret and the reason. A Service that was never served gets no address and the same Event. A certificate
+  the check refused is remembered by its hash and not sent again until the Secret changes. An expired certificate
+  is served (that is the owner's choice) with a Warning Event `CertificateExpired`.
+- **Removing the annotation** makes the port a plain TCP port again at the next turn. That is the owner's word; a
+  Secret that fails never does it.
+- **A portal rolled back to v0.11.0** ends no TLS and reads no annotation, so it would hand port 443 to the pods
+  without TLS. The controller keeps a Service that asks for TLS out of what it sends to such a portal: the Service
+  **loses its address** for as long as the portal is old (`TLSNotAvailable`) and gets a new one when the portal is
+  upgraded again. Take the annotation off first if the address matters more than the TLS.
+- A cluster made before v0.11.1 gets all of this when it is moved to the provider's chart version or given "Enable
+  load balancer controller" again: the controller is the portal image's. No chart value and no tenant RBAC is new.
+
+Not run on a lab: UDP from a Service, the affinity, the annotations, TLS from a Secret, the Events and the
+step-down for an older portal are tested on fakes of the tenant cluster and of Proxmox, and against the HAProxy and
+keepalived of both appliance images in containers. The one lab figure in this section is the spike's, where it is
+named.
 
 Modes. A **new** cluster gets the controller in **default** mode when every gate holds: this portal has the gateway's
 store, a gateway URL (`PROXCLOUD_CSI_GATEWAY_URL`) and the controller image (`PROXCLOUD_LB_CONTROLLER_IMAGE`, the API's
