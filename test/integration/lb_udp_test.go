@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 )
 
 // lbUDPNet builds, around the guest, the networks an appliance of a pair sits in. The guest is the appliance: pub0 is
@@ -301,6 +303,42 @@ done`)
 
 			// 3. "alpha": a member is in the table after its first good check, not before.
 			t.Logf("both members in the table %s after the push", waitHealth("after the first push", spec(nil), "101 UP, 102 UP", 30*time.Second))
+
+			// 3a. Drill Q1-2 (v0.11.1-rc.1): while a UDP listener was served, the state read said of the appliance
+			// that holds the address that it held nothing (lvsserving()'s loop variable was the script's answer), so
+			// a pair's row read "neither appliance holds the address", its pushes went to the holder first and
+			// GET_HEALTH asked nobody. This test read HoldsVIP before the first UDP push and after the last one only.
+			// Here, with the listener served and both members in the table: the read still names the holder; a pass's
+			// pushes go to the other appliance first (this guest's peer does not exist, so the standby's read is
+			// written out: it holds nothing); and what GET_HEALTH asks the holder for, HAProxy's members and the
+			// kernel table's, answers for both pools.
+			holder := state()
+			if holder.State != "MASTER" || !holder.HoldsVIP || !holder.HAProxy || !holder.Serving || !holder.LVS {
+				t.Fatalf("with a UDP listener served, the appliance that holds %s reads: %+v\n%s", vip, holder, diag())
+			}
+			if got := g.run(ctx, "ip -o -4 addr show dev pub0 | grep -c ' "+vip+"/'"); got != "1" {
+				t.Fatalf("the guest does not hold %s on its public NIC: the read above says nothing", vip)
+			}
+			standby := pve.VRRPState{State: "BACKUP", HAProxy: true, Serving: true, LVS: true, HAProxySum: holder.HAProxySum, KeepalivedSum: holder.KeepalivedSum, LVSSum: holder.LVSSum}
+			if order := project.LBPushOrder([]pve.VRRPState{holder, standby}); !slices.Equal(order, []int{1, 0}) {
+				t.Fatalf("with a UDP listener served, a pass pushes in the order %v of (holder, standby): want the standby first", order)
+			}
+			for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+				hs, notLoaded, err := ps.LBHealth(ctx, "n1", 100, spec(nil))
+				var got []string
+				for _, m := range hs {
+					got = append(got, m.Pool+" "+m.ServerID+" "+m.Status)
+				}
+				if err == nil && len(notLoaded) == 0 && slices.Equal(got, []string{"tcp 101 UP", "tcp 102 UP"}) {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("GET_HEALTH of the holder, HAProxy's part: %q, not loaded %q, %v", got, notLoaded, err)
+				}
+			}
+			if got := health(spec(nil)); got != "101 UP, 102 UP" {
+				t.Fatalf("GET_HEALTH of the holder, the UDP pool: %q", got)
+			}
 
 			// 4. The reply path, for a client behind the public gateway. Each datagram comes from a new port, so
 			// round robin takes the members in turn; the answer names the member and the address it saw.

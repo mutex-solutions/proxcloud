@@ -578,6 +578,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address holder runs the config of before a change it could not take yet read "One appliance carries the traffic,
   with no standby", with the healthy standby as the one listed up: it reads "The appliance that holds the address is
   the one that is not in order (...); the other one is ready, as its standby".
+- **A pair with a UDP listener did not know which appliance holds its address.** The state read's script keeps
+  its answer to "holds the address" in the shell variable `v`, and the check of the UDP service, which the same
+  script calls, loops over the virtual servers with a variable of the same name: a shell function's variables are
+  its caller's. With any UDP listener the read said "holds nothing" for both appliances. The row read `DEGRADED`
+  "Neither appliance holds the address yet" for as long as the listener stood, every Service of a cluster made or
+  changed afterwards stayed pending in its status although it answered, a pass's pushes went to the appliances in
+  the row's order, which may be the holder first, and `GET_HEALTH` found no appliance to ask and answered no
+  member. Nothing was wrong on the appliances: the addresses, HAProxy and the UDP listeners were served throughout.
+  Now every function a script of the product's defines for another script to call runs in a subshell (the checks
+  of HAProxy's listeners, of the UDP service and of HAProxy's worker), and the read calls them in one. A pass also
+  orders its pushes by what the appliances say at that pass, not by what the row said at the pass before. **A pair
+  that reads `DEGRADED` by this heals at the first pass after the upgrade**, with nothing to do: the script of the
+  read is sent with every read, so the first pass names the holder, the row is `ACTIVE` and its Services are
+  ready, and the controller writes their address into their status at its next call after that pass. Found by the
+  drill of v0.11.1-rc.1 (Q1-2). The
+  tests that let it through answered the read from what it should say; now the script's text is run, in dash and
+  bash, with and without UDP listeners (`TestVRRPStateScriptWithAndWithoutUDP`), the wire fake of every apply test
+  runs it too, and the real-guest test reads the holder, the push order and the members' health while a UDP
+  listener is served. Not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "What the drill of
+  v0.11.1-rc.1 found").
 
 ## [0.11.1-rc.1] - 2026-11-23
 

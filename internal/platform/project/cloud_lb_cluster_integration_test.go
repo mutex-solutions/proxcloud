@@ -257,10 +257,31 @@ func TestLBClusterStateConverges(t *testing.T) {
 	if cfg := f.files[len(f.files)-1]; strings.Contains(cfg, "udp") || !strings.Contains(cfg, "balance leastconn") || !strings.Contains(cfg, "stick on src") {
 		t.Fatalf("the HAProxy config of the mixed Service:\n%s", cfg)
 	}
+	// Drill Q1-2 (v0.11.1-rc.1): while the pair served a UDP listener the state read lost which appliance holds the
+	// address, the row stayed DEGRADED, and no Service made or changed afterwards got its address in its status,
+	// though it answered. The fake runs the read's script (pairWire.stateRead): the holder is known, and a Service
+	// made now is ready with its address in the answer the controller writes into its status.
+	if holders := slices.DeleteFunc(slices.Clone(lb.Appliances), func(a lbAppliance) bool { return !a.HoldsVIP }); len(holders) != 1 || holders[0].ServerID != "302" {
+		t.Fatalf("with a UDP listener the row does not know its holder: %+v", lb.Appliances)
+	}
+	late := svc("late", 81, 30081)
+	state(mixed, late)
+	lb = converge("a Service made while a UDP listener is served", func(lb *loadBalancer) bool {
+		return len(lb.Cluster.Services) == 2 && lb.Cluster.Services[1].State == lbgw.StateReady && lb.Status == lbStatusActive
+	})
+	if ans := state(mixed, late); ans.Services[1].State != lbgw.StateReady || ans.Services[1].Address == "" || ans.Services[1].Address == vipA ||
+		ans.Services[0].State != lbgw.StateReady || ans.Services[0].Address != vipA {
+		t.Fatalf("the answer for a Service made while a UDP listener is served: %+v", ans.Services)
+	}
+	if holds := func(vm string) bool { // the standby got each change first
+		return slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID == vm && a.HoldsVIP })
+	}; !holds("302") || holds("301") || f.first("301 lvs reload") > f.first("302 lvs reload") {
+		t.Fatalf("holder and push order with a UDP listener: %+v\n%s", lb.Appliances, strings.Join(f.log, "\n"))
+	}
 	state(svc("a", 80, 30080))
 	lb = converge("the UDP port went", func(lb *loadBalancer) bool {
-		return len(lb.Listeners) == 1 && lb.Cluster.Services[0].State == lbgw.StateReady && lb.Status == lbStatusActive &&
-			slices.Contains(f.log, "301 lvs remove") && slices.Contains(f.log, "302 lvs remove")
+		return len(lb.Listeners) == 1 && len(lb.Cluster.Services) == 1 && lb.Cluster.Services[0].State == lbgw.StateReady && lb.Status == lbStatusActive &&
+			slices.Contains(f.log, "301 lvs remove") && slices.Contains(f.log, "302 lvs remove") && len(owned()) == 1
 	})
 	if cfg := f.files[len(f.files)-1]; cfg != tcpOnly || lb.Cluster.Services[0].VIP != vipA {
 		t.Fatalf("back to the TCP Service: address %q, config:\n%s\nwas:\n%s", lb.Cluster.Services[0].VIP, cfg, tcpOnly)

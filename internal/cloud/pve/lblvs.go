@@ -326,8 +326,8 @@ const (
 	// lvsServingFn defines lvsserving(): the unit runs, IPVS tracks and reroutes, the forward chain is loaded with
 	// forwarding on, and the IPVS table holds every virtual server of the config on disk; it prints what is missing
 	// otherwise. The table is keepalived's own word that it runs the file: /proc/net/ip_vs prints a server as
-	// "UDP  CB00710A:1388 wrr".
-	lvsServingFn = `lvsserving() {
+	// "UDP  CB00710A:1388 wrr". A subshell, as serving() is: nothing it sets reaches its caller.
+	lvsServingFn = `lvsserving() (
   systemctl is-active -q ` + lvsService + ` || { echo "the UDP service is not running"; return 1; }
   [ "$(cat /proc/sys/net/ipv4/vs/conntrack 2>/dev/null)" = 1 ] && [ "$(cat /proc/sys/net/ipv4/vs/snat_reroute 2>/dev/null)" = 1 ] || { echo "IPVS does not track and reroute its connections"; return 1; }
   nft list chain ` + lvsTable + ` ` + lvsForward + ` 2>/dev/null | grep -q 'policy drop' || { echo "the forwarding filter is not loaded"; return 1; }
@@ -336,7 +336,7 @@ const (
   for v in $(awk '$1=="virtual_server"{split($2,a,"."); printf "%02X%02X%02X%02X:%04X/%s:%s\n",a[1],a[2],a[3],a[4],$3,$2,$3}' ` + lvsConfig + `); do
     echo "$have" | grep -qxF -e "${v%%/*}" || { echo "the UDP listener ${v#*/} is not in the IPVS table"; return 1; }
   done
-}
+)
 `
 	// lvsApply runs after the files are written. keepalived checks the new config before it replaces the one in
 	// use; a running unit reloads (HUP: the table keeps the members that are up), a stopped one starts, and a unit
@@ -356,7 +356,7 @@ if [ -f $F ]; then cp $F $F.old; else rm -f $F.old; fi
 mv $F.new $F
 systemctl enable -q ` + lvsService + `
 ` + lvsServingFn + `swap() {
-  if systemctl is-active -q ` + lvsService + `; then systemctl $how ` + lvsService + ` || return 1; else systemctl reset-failed ` + lvsService + ` 2>/dev/null; systemctl start ` + lvsService + ` || { echo "the UDP service did not start" >&2; return 1; }; fi
+  if systemctl is-active -q ` + lvsService + `; then systemctl $how ` + lvsService + ` || return 1; else systemctl reset-failed ` + lvsService + ` 2>/dev/null || true; systemctl start ` + lvsService + ` || { echo "the UDP service did not start" >&2; return 1; }; fi
   n=0
   until why=$(lvsserving); do
     n=$((n+1))

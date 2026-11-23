@@ -286,6 +286,21 @@ func lbPeerOf(lb *loadBalancer, a *lbAppliance) *lbAppliance {
 	return nil
 }
 
+// LBPushOrder is lbPushOrder for a caller that holds a pair's state reads and no row: the indexes of states in the
+// order a pass's pushes reach their appliances. The real-guest test asks it with a real appliance's own read
+// (test/integration/lb_udp_test.go): the order is only as good as that read (drill Q1-2 of v0.11.1).
+func LBPushOrder(states []pve.VRRPState) []int {
+	apps := make([]*lbAppliance, len(states))
+	for i, st := range states {
+		apps[i] = &lbAppliance{ServerID: strconv.Itoa(i), KeepalivedHash: st.KeepalivedSum, HoldsVIP: st.HoldsVIP}
+	}
+	out := make([]int, len(apps))
+	for i, a := range lbPushOrder(apps) {
+		out[i], _ = strconv.Atoi(a.ServerID)
+	}
+	return out
+}
+
 // lbApplyPair brings a pair in line with its row. Order (C14): firewall and new VIPs in the ip filter sets on every
 // running appliance first, so a VIP is in both sets before keepalived can take it; then per appliance, standby first,
 // keepalived and HAProxy; then a VIP no longer served leaves the sets, once keepalived let go of it; then each one's
@@ -417,6 +432,10 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		vmid, _ := strconv.Atoi(a.ServerID)
 		if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip); err == nil {
 			seen[a] = st
+			// The pushes below go to the standby first by what the appliance says now, not by what the row said at
+			// the pass before: the address may have moved since, and a row v0.11.1-rc.1 wrote for a pair with a UDP
+			// listener says that neither appliance holds it (drill Q1-2).
+			a.Role, a.HoldsVIP = st.State, st.HoldsVIP || (vip == "" && st.State == "MASTER")
 		}
 	}
 	// differs: the appliance said what its file hashes to, and it is not what the row records for it.

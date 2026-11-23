@@ -4,6 +4,30 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: what the upgrade drill of v0.11.1-rc.1 found in a pair's scripts
+
+**What changed:** no new component, container, listener, credential, wire field or chart. The shell the portal sends
+to a load balancer appliance, how a pass reads a pair, and how the tests run that shell.
+
+- *The holder of a pair with a UDP listener (Q1-2).* `internal/cloud/pve`: `lbServingFn`, `lvsServingFn` and
+  `lbWorkerFn` define `serving`, `lvsserving` and `worker` with a subshell as their body, and `ReadVRRPState` calls
+  the first two in one: `lvsserving`'s loop variable `v` was the read's own answer to "holds the address", so a pair
+  with a UDP listener read as held by neither appliance. `lvsApply` no longer ends at a failed
+  `systemctl reset-failed` under `set -e`. `internal/platform/project/cloud_lb_pair_pve.go`: `lbApplyPair` sets an
+  appliance's role and holder from the read it makes before the pushes, so `lbPushOrder` works on this pass's reads;
+  `LBPushOrder` is that order for a caller that holds reads and no row (the real-guest test). New test support
+  `internal/cloud/pve/lbguesttest`: a guest made of a directory and stub commands, on which a script of the
+  product's runs as the text it is, and the guest agent API in front of it (`Guest`, `Agent`). The pair fake of the
+  apply tests (`pairWire.stateRead`) answers the state read by running its script there.
+
+**Why:** the drill's pair served and read `DEGRADED` for ever, and no Service made after its first UDP listener got
+its address in its status. Every test read `ACTIVE`, because every fake wrote the read's answer itself: the one
+place the script's text ran was the real-guest test, which read the holder before the first UDP push and after the
+last one only. A row that is wrong by this is put right by the first pass that reads it, since the script is sent
+with every read.
+
+**Diagrams:** none changed.
+
 ## 2026-11-23: chart 0.1.19 offered to new tenant clusters, and the consoles' layer 4 view
 
 **What changed:** no new component, container, listener or relation. The platform BOM pins cluster chart 0.1.19

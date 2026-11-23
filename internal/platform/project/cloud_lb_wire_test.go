@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve/lbguesttest"
 )
 
 // lbGuest is one appliance as its guest is: what dpkg says, what HAProxy runs next to what its file holds, and
@@ -48,6 +50,7 @@ type lbGuest struct {
 	noNft    bool
 	lvs      bool
 	lvsFails string
+	box      *lbguesttest.Guest // where the state read's script runs (stateRead)
 }
 
 // The UDP service's files, in the order the guest sums them (pve's lvssum).
@@ -241,28 +244,7 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		return lbRun{}
 	case strings.Contains(cmd, "proxcloud-lb.state"):
 		f.reads++
-		role, h, v, c := g.role, 0, 0, 0
-		switch {
-		case !g.keepalived:
-			role = "STOPPED"
-		case !g.haproxy:
-			role = "FAULT" // the track script
-		}
-		if g.haproxy {
-			h = 1
-		}
-		if g.holds && g.keepalived && g.haproxy {
-			v = 1
-		}
-		if g.serving() {
-			c = 1
-		}
-		l := 0
-		if g.lvs && g.disk[lbGuestLVSFiles[0]] != "" {
-			l = 1
-		}
-		// The files as they are on the guest, which is not always what the product wrote last.
-		return lbRun{out: fmt.Sprintf("%s %d %d %d %s %s %s %d", role, h, v, c, lbHash(g.file), g.sum("/etc/keepalived/keepalived.conf"), g.lvsSum(), l)}
+		return f.stateRead(g, cmd)
 	case strings.Contains(cmd, "show stat"): // what the running HAProxy holds, not what the file says
 		if !g.haproxy {
 			return lbRun{exit: 1, err: "socat: /run/haproxy/admin.sock: Connection refused"}
@@ -292,6 +274,80 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		return lbRun{out: "ok " + lbHash(g.file)}
 	}
 	return lbRun{}
+}
+
+// lbHoldsRe finds, in the state read's script, the address it asks the guest for.
+var lbHoldsRe = regexp.MustCompile(`grep -qF ' ([0-9.]+)/'`)
+
+// stateRead answers the state read. The fake says what the guest is: keepalived's state, HAProxy and its listeners,
+// the address, the files. What the product reads of it is the script's own answer, run as the text it is on this
+// machine (lbguesttest), so a mistake in the script shows here: until v0.11.1-rc.1 the fake wrote the answer itself,
+// and the script lost "holds the address" on every pair with a UDP listener while every test read ACTIVE (drill
+// Q1-2). On a machine that cannot run the script the fake still writes it.
+func (f *pairWire) stateRead(g *lbGuest, cmd string) lbRun {
+	role := g.role
+	switch {
+	case !g.keepalived:
+		role = "STOPPED"
+	case !g.haproxy:
+		role = "FAULT" // the track script
+	}
+	holds := g.holds && g.keepalived && g.haproxy
+	udp := g.lvs && g.disk[lbGuestLVSFiles[0]] != ""
+	if !lbguesttest.Available() {
+		n := map[bool]int{true: 1}
+		// The files as they are on the guest, which is not always what the product wrote last.
+		return lbRun{out: fmt.Sprintf("%s %d %d %d %s %s %s %d", role, n[g.haproxy], n[holds], n[g.serving()], lbHash(g.file),
+			g.sum("/etc/keepalived/keepalived.conf"), g.lvsSum(), n[udp])}
+	}
+	if g.box == nil {
+		g.box = lbguesttest.New(f.t)
+	}
+	b := g.box
+	b.Write("/run/proxcloud-lb.state", role+"\n")
+	active := ""
+	for unit, runs := range map[string]bool{"keepalived": g.keepalived, "haproxy": g.haproxy, "proxcloud-lvs": udp} {
+		if runs {
+			active += unit + "\n"
+		}
+	}
+	b.Stub("active", active)
+	b.Unstub("socat")
+	if g.haproxy {
+		b.Stub("socat", "7 master 0 [failed: 0] 0d00h01m00s 3.2.4\n# workers\n9 worker 0 0d00h01m00s 3.2.4\n")
+	}
+	addrs := "2: ens18    inet 10.0.0.31/24 brd 10.0.0.255 scope global ens18\n"
+	if m := lbHoldsRe.FindStringSubmatch(cmd); m != nil && holds {
+		addrs += "3: ens19    inet " + m[1] + "/24 scope global ens19\n"
+	}
+	b.Stub("ip", addrs)
+	// HAProxy listens on the binds of the config it read; the fake's "serves" is that this is the file's.
+	b.Write("/etc/haproxy/haproxy.cfg", g.file)
+	var listens []string
+	for _, line := range strings.Split(g.file, "\n") {
+		if w := strings.Fields(line); g.serving() && len(w) >= 2 && w[0] == "bind" && !strings.HasPrefix(w[1], "unix@") {
+			if strings.HasPrefix(w[1], ":") {
+				w[1] = "0.0.0.0" + w[1]
+			}
+			listens = append(listens, w[1])
+		}
+	}
+	b.Listen(listens...)
+	// The files as they are on the guest, which is not always what the product wrote last.
+	for _, path := range append([]string{"/etc/keepalived/keepalived.conf"}, lbGuestLVSFiles...) {
+		if content, ok := g.disk[path]; ok {
+			b.Write(path, content)
+		} else {
+			b.Remove(path)
+		}
+	}
+	b.Write("/proc/net/ip_vs", g.ipvs())
+	for _, key := range []string{"vs/conntrack", "vs/snat_reroute", "ip_forward"} {
+		b.Write("/proc/sys/net/ipv4/"+key, "1\n")
+	}
+	b.Stub("nft", "table ip proxcloud-lb {\n\tchain lb-forward {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n")
+	exit, out, stderr := b.Run("sh", strings.TrimPrefix(cmd, "sh -c "))
+	return lbRun{exit: exit, out: out, err: stderr}
 }
 
 func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
