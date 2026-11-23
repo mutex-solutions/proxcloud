@@ -271,8 +271,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **On the appliances.** Each certificate is one file in `/etc/haproxy/certs` (root, mode 0700; files 0600),
     named by the SHA-256 of its chain. The directory is made private and checked before anything is written into
     it, because the guest agent creates files readable by all. Files go before the config that names them, on the
-    standby first; a config HAProxy refuses leaves the certificate in use in place; files no config names are
-    removed after the new config is served. A key is never in cloud-init. The container test searches every
+    standby first; a new config HAProxy refuses leaves the certificate in use in place (a file of the config in
+    use that is damaged on the appliance is another matter, see "A damaged certificate file" under Fixed); files
+    no config names are removed after the new config is served. A key is never in cloud-init. The container
+    test searches every
     file of the guest for the key, on both images: it is in the certificate files in use and nowhere else, after
     the first push, after three changes of certificate, and in no file once the last TLS listener is gone.
   - **A change of certificate closes no connection**: it is one HAProxy reload. In the container test, over 300
@@ -516,6 +518,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row per address with what holds it (the server, the balancer, the Service with its cluster, a kept address, one
   being given back). The tenant dashboard's **Quota & usage** card shows a "Public addresses" tile and the list
   under it. Found by the drill of v0.11.1-rc.1 (Q0b-2) ([api.md](docs/api.md), "Quota usage").
+- **Docs: a certificate file damaged on an appliance does not give a refused config.** The integration notes
+  said that the config's hash covers the certificates and that the applied-state check needs no term for them,
+  and the review list of TLS expected a file damaged by hand to end in a refused config with the last good one
+  kept. Neither holds. The hash covers the files' names, not their bytes; and a push brings every file its config
+  names in place before the config is checked, so a change made after the damage is applied and the file is whole
+  again (drill of v0.11.1-rc.1, Q3-2: shown twice). A refused config needs a new config that names a file HAProxy
+  cannot load, which the container test holds. The notes now tell the two cases apart and say what ran on a lab
+  and what did not ([cloud-integration.md](docs/cloud-integration.md), "A refused config and a damaged file are
+  two things").
 - **Guides: only the last `X-Forwarded-For` value is the load balancer's.** An `http` or `https` listener adds the
   client's address to `X-Forwarded-For` after whatever the client sent in that header, as HAProxy's `option
   forwardfor` and other balancers do. The API reference and the tenant guide read as if a server could take the
