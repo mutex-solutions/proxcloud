@@ -284,7 +284,9 @@ func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip 
 	}
 	script := lbServingFn + lbWorkerFn + lvsServingFn + lvsSumFn + "sum() { [ -f $1 ] && sha256sum < $1 | cut -c1-64 || echo -; }\n" +
 		"s=$(cat " + lbStateFile + " 2>/dev/null); systemctl is-active -q keepalived || s=STOPPED; " +
-		"worker && h=1 || h=0; " + holds + "; serving >/dev/null 2>&1 && c=1 || c=0; lvsserving >/dev/null 2>&1 && l=1 || l=0; " +
+		// serving and lvsserving run in a subshell: their loops use variables of their own, and lvsserving's is v,
+		// which is the answer to "holds the address" here (with a UDP listener the holder read as holding nothing).
+		"worker && h=1 || h=0; " + holds + "; (serving) >/dev/null 2>&1 && c=1 || c=0; (lvsserving) >/dev/null 2>&1 && l=1 || l=0; " +
 		"echo \"${s:-UNKNOWN} $h $v $c $(sum " + haproxyConfig + ") $(sum /etc/keepalived/keepalived.conf) $(lvssum) $l\""
 	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", script)
 	if err != nil {

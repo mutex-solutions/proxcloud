@@ -463,6 +463,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A pair with a UDP listener never read as holding its address.** The state read of an appliance lost "holds the
+  address" to a variable of the UDP service's check, on every appliance whose UDP config has a listener. Such a
+  pair read `DEGRADED` "Neither appliance holds the address yet" while it served, and a cluster whose pair has a
+  UDP Service never called any of its Services ready, since a Service is ready by the appliance that holds the
+  addresses. In v0.11.1-rc.1 only (v0.11.0 has no UDP). Found by the container test of the fix above, which reads
+  the state of an appliance that serves UDP; the UDP container test asserts it too now.
 - **`proxcloud.io/lb-internal` with a value that is no boolean gave the Service a public address.** A value such as
   `"yes"` was named in `InvalidAnnotation` and the Service was served, so the one annotation that guards an address
   failed open over a typing mistake. It fails closed now: a Service gets a public address only when the annotation
