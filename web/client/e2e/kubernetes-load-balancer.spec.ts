@@ -68,6 +68,7 @@ test("a cluster whose controller is the one of an earlier release says what it d
   await expect(old).toContainText("no TLS from a Secret")
   await expect(old).toContainText("Apply the platform update on this page")
   await expect(old).toContainText("chart 0.1.19 or later")
+  await expect(old).toContainText("If the page offers no update, ask your operator")
 })
 
 test("the cluster page lists the addresses the cluster keeps and releases one after a confirmation", async ({ page }) => {

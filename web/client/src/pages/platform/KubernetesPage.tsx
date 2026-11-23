@@ -915,7 +915,7 @@ function ClusterLoadBalancer({ pid, mode, gatewayFabric, view, release, resource
           Service with a UDP port is refused, and the <code>proxcloud.io/lb-*</code> annotations other than{" "}
           <code>proxcloud.io/lb-proxy-protocol</code> are not read, so no TLS from a Secret and no kept address. Apply the
           platform update on this page to get them: it moves the cluster to chart 0.1.19 or later and changes no Service that
-          is served today.
+          is served today. If the page offers no update, ask your operator.
         </p>
       )}
       {lb ? (
