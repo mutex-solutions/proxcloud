@@ -30,6 +30,23 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
+// lbClusterPassed runs a pass over a cluster's state under the cluster's lock, as lbClusterConverge does, and says
+// whether it ran. A state the controller sends starts a pass of its own in the background, and while that one holds
+// the lock lbClusterConverge does nothing: a test that called it and then read the row could read the row of before
+// that state, and took it for the answer whenever what it waited for was already true of that row.
+// TestLBClusterStateConverges/KeepAddress failed so in CI ("d on a's address" read d as still refused) once the pair
+// fake ran the state read's script, which makes a pass take longer. So a test's converge reads the row only after a
+// pass of its own.
+func lbClusterPassed(ctx context.Context, h *Handler, clusterID string) bool {
+	release, ok, err := h.sdnLock.Hold(ctx, "lbc-"+clusterID, lbcLease, 0)
+	if err != nil || !ok {
+		return false
+	}
+	defer release()
+	_ = h.lbClusterPass(ctx, clusterID, true)
+	return true
+}
+
 // A cluster's balancer from the gateway's state to its release, against Postgres and a fake Proxmox with the pair's
 // two appliances already built: members only from the cluster's worker addresses, one address per Service that a
 // repeated PUT does not double, a Service removed gives its address back once the appliances let go of it, the
@@ -120,7 +137,9 @@ func TestLBClusterStateConverges(t *testing.T) {
 	converge := func(what string, done func(*loadBalancer) bool) *loadBalancer {
 		t.Helper()
 		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-			h.lbClusterConverge(ctx, "c1", true)
+			if !lbClusterPassed(ctx, h, "c1") {
+				continue // another pass is at work: the row may still be the one of before
+			}
 			if lb := read(); done(lb) {
 				return lb
 			}
