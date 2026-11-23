@@ -1141,8 +1141,9 @@ metadata:
     proxcloud.io/lb-keep-address: "true"
 ```
 
-- **When the Service goes** (it is deleted, stops being of type LoadBalancer, or is refused by the gateway), its
-  address leaves both appliances and their firewall and is listed under "Kept addresses" on the cluster's page. It
+- **When the Service goes** (it is deleted, stops being of type LoadBalancer, or is refused: a refused Service
+  has no address), its address leaves both appliances and their firewall and is listed under "Kept addresses" on
+  the cluster's page. A refused Service that is put right gets a kept address back only by naming it. It
   is still a public address of the project: **billed, and counted in the floating IP quota**, like the address of
   a Service. The annotation is read as the Service's last state had it, so `kubectl annotate` followed at once by
   `kubectl delete` keeps the address. A Service that goes before it ever had an address keeps none.
