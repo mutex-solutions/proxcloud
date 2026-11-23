@@ -470,6 +470,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   appliance now also answers what `haproxy.cfg`, `keepalived.conf` and the UDP files hash to; an appliance whose
   file is not the one the platform recorded (edited by hand, or lost) is pushed again, on a single appliance and on
   a pair. Before, only "HAProxy listens on every bind" was asked, and a file changed by hand stayed.
+- **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1-rc.2`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.1-rc.2.yaml`, sha256
+  `b66f6e7f3f96efa724393abc2f070fedbf4c2fcf1ef79ce6411d933a38944073`, the file of the tag byte for byte). The
+  candidate's commit left the BOM at `0.11.1-rc.2`, and the release gate refuses only `-dev`. A platform moved to
+  that BOM (the candidate's drill) is not refused (`bom_unsupported`) under a later build while the file is carried.
+  Its pins are those of `main`, so the plan from it has one change, the release, record only.
+  `TestPreviousBOMsMoveCertManager` states that answer, and `TestUpgradeRollsNoMachine` compares ten of the
+  nineteen previous BOMs with the BOM on `main`, none of them rolling. No move to that BOM and no apply on such a
+  platform was run on a lab.
 - **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1-rc.1`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.1-rc.1.yaml`, sha256
   `2d96e6c616ec26f0263e94b190f7d10936645fa6d184bb789d9870518b4248ee`, the file of the tag byte for byte). The
