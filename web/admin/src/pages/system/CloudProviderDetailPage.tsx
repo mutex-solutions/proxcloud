@@ -562,7 +562,10 @@ function ClusterLoadBalancerDialog({ serviceId, cluster, pin, onClose, onChanged
                 and its <code>proxcloud.io/lb-*</code> annotations other than <code>lb-proxy-protocol</code> are not read: no TLS
                 from a Secret, no kept address. Bump the cluster to the provider's chart{pin ? <> (<span className="font-mono">{pin}</span>)</> : ""} on
                 its row, or rotate the credential below: either sets the controller's image to the portal's. The tenant can do
-                the same with the platform update on the cluster's page. Nothing that is served today changes.
+                the same with the platform update on the cluster's page. Two kinds of Service change with it: one whose{" "}
+                <code>proxcloud.io/lb-internal</code> is not <code>"false"</code> loses its public address, and one whose{" "}
+                <code>proxcloud.io/lb-tls-secret</code> names no usable Secret stays as it is served and takes no change
+                until the Secret is right. Nothing else that is served today changes.
               </p>
             )}
             {lb ? (

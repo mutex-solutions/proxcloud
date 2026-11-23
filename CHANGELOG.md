@@ -598,6 +598,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs it too, and the real-guest test reads the holder, the push order and the members' health while a UDP
   listener is served. Not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "What the drill of
   v0.11.1-rc.1 found").
+- **Both consoles said that a cluster's update changes no Service that is served.** It does, in two cases the
+  upgrade notes name: a Service whose `proxcloud.io/lb-internal` is not `"false"` loses its public address when its
+  cluster gets the controller of this release, and one whose `proxcloud.io/lb-tls-secret` names no usable Secret
+  stays as it is served and takes no change until the Secret is right. The hint on the tenant's cluster page, the
+  one in the operator's load balancer dialog and the tenant guide now say so, and that every other Service that is
+  served stays as it is. Text only. Found by the drill of v0.11.1-rc.1 (Q1-1), where two such Services lost their
+  address 20 s after the update.
 
 ## [0.11.1-rc.1] - 2026-11-23
 
