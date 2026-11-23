@@ -611,3 +611,40 @@ func TestLBFirstApplianceServes(t *testing.T) {
 		t.Fatalf("after a replace took its peer: %s %q, %+v, rules %+v\n%s", lb.Status, lb.StatusMessage, *a, f.rules["301"], f.guests["301"].disk[lbGuestKeepalived])
 	}
 }
+
+// HAProxy is not pushed to an appliance keepalived is not on: its frontends bind the addresses, and only keepalived's
+// files let it bind one (drill Q0b-1). With keepalived on every appliance one case is left, a public network this
+// project may no longer use, for which no keepalived config can be made. The appliance waits and says why, and
+// nothing is handed to HAProxy to refuse; when the network is the project's again, it serves.
+func TestLBHAProxyWaitsForKeepalived(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	var logs bytes.Buffer
+	before := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(before)
+	lb.Appliances = lb.Appliances[:1]
+	delete(f.guests, "302")
+	*f.guests["301"] = lbGuest{packages: "installed", haproxy: true}
+	lb.PublicNetworkID = "vmbr9" // not a public network of the service
+
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+		t.Fatal(err)
+	}
+	a := &lb.Appliances[0]
+	if lb.Status != lbStatusBuild || a.State != lbAppBuilding || !strings.Contains(a.Reason, "public network") || a.KeepalivedHash != "" || a.HAProxyHash != "" {
+		t.Fatalf("an appliance keepalived is not on: %s %q, %+v", lb.Status, lb.StatusMessage, *a)
+	}
+	if f.count("301 keepalived reload") != 0 || f.count("301 haproxy reload") != 0 || strings.Contains(logs.String(), "did not take a push") {
+		t.Fatalf("HAProxy was handed a config before keepalived:\n%s\n%s", strings.Join(f.log, "\n"), logs.String())
+	}
+
+	lb.PublicNetworkID = "vmbr1"
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+		t.Fatal(err)
+	}
+	if k, hp := f.first("301 keepalived reload"), f.first("301 haproxy reload"); lb.Status != lbStatusDegraded || a.State != lbAppUp || !a.HoldsVIP || k < 0 || k > hp {
+		t.Fatalf("with its public network again: %s %q, %+v\n%s", lb.Status, lb.StatusMessage, *a, strings.Join(f.log, "\n"))
+	}
+}

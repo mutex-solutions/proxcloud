@@ -40,9 +40,12 @@ const (
 	lbPlaceholderVIP = "192.0.2.1/32 dev lo"
 	// lbNoPeer is the unicast peer of an appliance that has none: the first of a pair until the second is built,
 	// or the one a replace left. It hears no advert, so it becomes master and holds the addresses, and its own
-	// adverts reach nobody: the kernel finds no neighbour for a loopback address on the tenant NIC, and no VRRP
-	// packet leaves the appliance (what does is the ARP request for it, which every host drops: the same one a
-	// second a pair sends for a peer that is down). Leaving unicast_peer out is not the way: keepalived 2.3 then
+	// adverts reach no keepalived: they are addressed to a loopback address, which no host takes from a NIC and no
+	// router forwards. What is on the tenant network meanwhile follows the appliance's routes. With a default
+	// route through the tenant NIC, which an appliance has, one advert a second goes to the tenant gateway's
+	// Ethernet address alone, and the gateway drops it; no other host of the network is sent it. With no such
+	// route the kernel asks for 127.0.0.1 by ARP once a second and nothing leaves but that request, which no host
+	// answers. Leaving unicast_peer out is not the way: keepalived 2.3 then
 	// falls back to multicast (and -t refuses the file), and multicast adverts meet every VRRP instance of the
 	// network with the same router id, a tenant's own among them (lbRouterID is one of 255). When the peer comes
 	// the config names it and keepalived reloads, which keeps its state and the addresses

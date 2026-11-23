@@ -30,7 +30,8 @@ five.
 without a peer.
 
 - `internal/cloud/pve/lbpair.go`: `RenderKeepalived` takes no `Peer` and renders `lbNoPeer` (`127.0.0.1`) in
-  `unicast_peer`: the appliance is its own master and puts no advert on the wire. A config with a peer is byte for
+  `unicast_peer`: the appliance is its own master, and its adverts, addressed to a loopback address, reach no
+  other appliance (one a second goes to the tenant gateway alone, which drops it). A config with a peer is byte for
   byte what it was. `ReadVRRPState` runs the two "serving" checks in a subshell: the UDP check's loop variable was
   the one that held "holds the address".
 - `internal/platform/project/cloud_lb_pair_pve.go`: `lbApplyPair` pushes keepalived to every running appliance,

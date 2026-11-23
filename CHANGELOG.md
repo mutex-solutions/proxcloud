@@ -472,13 +472,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   end where no node has room). The same held for a tenant's pair left with one appliance by a replace whose new
   clone failed. Now an appliance with no peer gets keepalived too and is its own master: it holds the addresses
   and serves TCP, TLS and UDP alone, follows every change of the row, and the row reads `DEGRADED` with no standby
-  (a cluster's pair says that the platform builds the second one). It sends no VRRP advert meanwhile. When the
-  second appliance comes, the one that served is told of its peer first and keeps the addresses, and the new one
-  starts as its standby: no address moves. HAProxy is never pushed before keepalived, and a push an appliance
-  refuses is logged at WARN with the balancer and the appliance (the reason stays in the row's message). The
-  config of a pair that has both appliances did not change by a byte, so no existing pair is pushed because of
-  this. Found by the drill of v0.11.1-rc.1 (Q0b-1). In a real guest of both appliance images and in the wire
-  fake; not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "One appliance of a pair").
+  (a cluster's pair says that the platform builds the second one). Its adverts meanwhile are addressed to
+  `127.0.0.1` and reach no other appliance: one a second goes to the tenant network's gateway alone, which
+  drops it. When the second appliance comes, the one that served is told of its peer first and keeps the
+  addresses, and the new one starts as its standby: no address moves. HAProxy is never pushed before keepalived,
+  and a push an appliance refuses is logged at WARN with the balancer and the appliance (the reason stays in the
+  row's message). The config of a pair that has both appliances did not change by a byte, so no existing pair is
+  pushed because of this. Found by the drill of v0.11.1-rc.1 (Q0b-1). In a real guest of both appliance images
+  and in the wire fake; not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "One appliance of a
+  pair").
 - **A project could not see which public addresses its quota counts.** The `floatingIps` quota counts every
   public address of a project: a server's public NIC, a load balancer's address, each Service address of a
   Kubernetes cluster and each address a cluster keeps. `GET /api/v1/project/{id}/quota-usage` gave the limit with

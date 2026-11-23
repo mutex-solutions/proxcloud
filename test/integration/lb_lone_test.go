@@ -19,10 +19,11 @@ import (
 )
 
 // lbLoneNet wires the guest. The guest itself is the first appliance: pub0 its public NIC, ten0 its tenant NIC
-// (10.77.0.5).
+// (10.77.0.5), with a default route through the tenant gateway as an appliance has one (the guest's own, for apt,
+// comes first; keepalived's socket is bound to ten0 and takes this one).
 //
 //	pub   the public network: a bridge with the gateway's address 203.0.113.1, which is also the client's
-//	sw    the tenant network's switch (a bridge)
+//	sw    the tenant network's switch (a bridge), with the tenant gateway's address 10.77.0.1
 //	m1    member 10.77.0.11: on port 5000 a TCP and a UDP service that answer its name and who spoke to it
 //	peer  the second appliance, 10.77.0.6, with a tenant and a public NIC of its own and nothing running yet
 const lbLoneNet = `set -e
@@ -32,12 +33,14 @@ ip -n pub link set br0 up
 ip -n pub addr add 203.0.113.1/24 dev br0
 ip -n sw link add br0 type bridge
 ip -n sw link set br0 up
+ip -n sw addr add 10.77.0.1/24 dev br0
 ip link add pub0 type veth peer name p-a netns pub
 ip -n pub link set p-a master br0 up
 ip link add ten0 type veth peer name s-a netns sw
 ip addr add 10.77.0.5/24 dev ten0
 ip link set ten0 up
 ip -n sw link set s-a master br0 up
+ip route add default via 10.77.0.1 dev ten0 metric 500
 ip -n peer link add pub0 type veth peer name p-b netns pub
 ip -n peer link set pub0 up
 ip -n pub link set p-b master br0 up
@@ -73,7 +76,8 @@ systemd-run -q --unit=lb-tcp-m1 ip netns exec m1 socat TCP4-LISTEN:5000,fork,reu
 // Shown, in order: the control, HAProxy on an appliance without keepalived refuses the pair's config, as the lab
 // saw; with the config of an appliance that has no peer it becomes master, holds the address, and a client on the
 // public network is answered over TCP, over TLS with the certificate that was pushed, and over UDP (where the
-// kernel has IPVS); no VRRP packet leaves it meanwhile; the control of the order, a peer started before the first
+// kernel has IPVS); its adverts meanwhile go to the tenant gateway alone, addressed to 127.0.0.1, and no other host
+// of the tenant network is sent one; the control of the order, a peer started before the first
 // appliance was told of it takes the address too; in the product's order the first appliance is told, reloads and
 // stays master with the address untouched, the peer starts as its standby, and a client that asks ten times a
 // second is answered every time; the peer taken away again, as a replace does, and a new one put in, with no
@@ -171,19 +175,31 @@ func TestLBFirstApplianceServesAlone(t *testing.T) {
 					}
 				}
 			}
-			// vrrpOnTheWire counts the VRRP packets the appliance puts on its tenant NIC in four seconds.
-			vrrpOnTheWire := func() (n int, others string) {
+			// vrrpOnTheWire reads the tenant network for four seconds: the VRRP packets the appliance sends on its
+			// tenant NIC, how many of them go anywhere but to the tenant gateway's Ethernet address with 127.0.0.1
+			// as their destination, and how many reach the peer's tenant NIC, which stands for any other host of the
+			// network (another pair's appliance among them).
+			gwMAC := g.run(ctx, "ip netns exec sw cat /sys/class/net/br0/address")
+			vrrpOnTheWire := func() (sent, astray, heard int, sample string) {
 				t.Helper()
-				out := g.run(ctx, "timeout 4 tcpdump -nli ten0 'ip proto 112 or arp' 2>/dev/null || true")
-				for _, line := range strings.Split(out, "\n") {
-					switch {
-					case strings.Contains(line, "VRRP"):
-						n++
-					case strings.TrimSpace(line) != "" && !strings.Contains(others, line[strings.IndexByte(line, ' ')+1:]):
-						others += line[strings.IndexByte(line, ' ')+1:] + "; "
+				out := g.run(ctx, `ip netns exec peer timeout 4 tcpdump -nli ten0 -Q in 'ip proto 112' > /root/heard.log 2>/dev/null &
+timeout 4 tcpdump -neli ten0 -Q out 'ip proto 112' 2>/dev/null || true
+wait
+echo ---
+cat /root/heard.log`)
+				onNIC, atPeer, _ := strings.Cut(out, "---")
+				for _, line := range strings.Split(onNIC, "\n") {
+					if !strings.Contains(line, "VRRP") {
+						continue
+					}
+					if sent++; sample == "" {
+						sample = strings.TrimSpace(line)
+					}
+					if !strings.Contains(line, "> "+gwMAC+",") || !strings.Contains(line, " > 127.0.0.1: ") {
+						astray++
 					}
 				}
-				return n, others
+				return sent, astray, strings.Count(atPeer, "VRRP"), sample
 			}
 
 			// 1. The control, the lab's finding in a real guest: the pair's HAProxy config on an appliance keepalived
@@ -226,10 +242,13 @@ func TestLBFirstApplianceServesAlone(t *testing.T) {
 			if got := g.run(ctx, "ip netns exec pub openssl s_client -connect "+vip+":8443 -servername a.example.org </dev/null 2>/dev/null | openssl x509 -noout -ext subjectAltName"); !strings.Contains(got, "a.example.org") {
 				t.Fatalf("the certificate a client is shown: %q", got)
 			}
-			if n, others := vrrpOnTheWire(); n != 0 {
-				t.Fatalf("an appliance with no peer put %d VRRP packets on the tenant network", n)
+			// Its adverts: with the default route of an appliance each one goes to the gateway's Ethernet address,
+			// for 127.0.0.1, which the gateway drops. None goes to another host.
+			if sent, astray, heard, sample := vrrpOnTheWire(); astray != 0 || heard != 0 {
+				t.Fatalf("an appliance with no peer: %d of its %d adverts went elsewhere than to the gateway (%s) for 127.0.0.1, and another host of the tenant network was sent %d\n%s",
+					astray, sent, gwMAC, heard, sample)
 			} else {
-				t.Logf("alone: no VRRP packet on the tenant NIC in 4 s; what was: %s", others)
+				t.Logf("alone: %d adverts in 4 s, all to the tenant gateway for 127.0.0.1, none at another host: %s", sent, sample)
 			}
 
 			// 3. UDP: the second keepalived fills the kernel's table, and the address is on this appliance, so a
@@ -327,11 +346,11 @@ sleep 1`)
 			if failed := g.run(ctx, "grep -v '^ok' /root/client.log || true"); failed != "" || ok < 30 {
 				t.Fatalf("the client while the peer joined: %d answers; the first appliance was told at %s and the peer started at %s; not answered:\n%s", ok, told, started, failed)
 			}
-			n, _ := vrrpOnTheWire()
-			if n == 0 {
-				t.Fatalf("no VRRP packet on the tenant NIC with a peer: the count of step 2 proves nothing\n%s", diag())
+			sent, _, heard, _ := vrrpOnTheWire()
+			if sent == 0 || heard == 0 {
+				t.Fatalf("with a peer: %d adverts on the tenant NIC and %d at the peer's: the read of step 2 proves nothing\n%s", sent, heard, diag())
 			}
-			t.Logf("the peer joined: %d answers of %d, no address change, no state change; %d adverts to the peer in 4 s", ok, ok, n)
+			t.Logf("the peer joined: %d answers of %d, no address change, no state change; %d adverts in 4 s, %d of them at the peer", ok, ok, sent, heard)
 
 			// 6. A replace takes the peer away, and the appliance that is left has no peer in the row again: its
 			// config goes back to the one of step 2 by a reload, and nothing moves. Then the new peer comes, in the
