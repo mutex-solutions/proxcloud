@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-24: the platform tests pull each chart once (Q1-5)
+## 2026-11-24: PR #449, the platform tests pull each chart once (Q1-5)
 
 **What changed:** no component, container, wire field, chart or behaviour of the product. Test support of
 `internal/platformlife` and one step of the `go-test` job.
