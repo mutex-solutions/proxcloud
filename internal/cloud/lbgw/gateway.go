@@ -263,8 +263,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// The protocol the controller names is kept with its last call, and written at once when it changes: a cluster
 	// that was bumped to the portal's chart stops reading as an old controller with its first call. A header that is
-	// no number is 0, which serve refuses below.
-	named, _ := strconv.Atoi(r.Header.Get(ProtocolHeader))
+	// no number is 0, which serve refuses below, and so is one that is out of range or negative: the row never holds
+	// what strconv made of a header it could not read.
+	named, err := strconv.Atoi(r.Header.Get(ProtocolHeader))
+	if err != nil || named < 0 {
+		named = 0
+	}
 	if cred.LastSeenAt == nil || time.Since(*cred.LastSeenAt) > seenEvery || cred.Protocol != named {
 		if err := h.Reg.Seen(ctx, cred.ID, time.Now().UTC(), named); err != nil {
 			h.log().Warn("lb gateway: last seen", "cluster", cred.ID, "err", err)

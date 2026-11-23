@@ -155,6 +155,10 @@ func TestControllerProtocolIsRecorded(t *testing.T) {
 		{"2", own, 2, 2},
 		{"2", own, 2, 2},
 		{"0", own, 0, 3}, // refused as too old, and shown as it named itself
+		// A header that is no protocol is 0 too, so nothing is written for it: out of range, negative, not a number.
+		{"99999999999999999999", own, 0, 3},
+		{"-1", own, 0, 3},
+		{"two", own, 0, 3},
 	} {
 		r.protocol = c.protocol
 		r.put(t, c.auth, body)
