@@ -142,6 +142,18 @@ func TestTLSFromASecret(t *testing.T) {
 		t.Fatalf("a Secret asked for again after the minute: %d requests, %d certificates sent", puts, len(uploads))
 	}
 
+	// A second Service with a Secret of its own: the one the portal lacks crosses, the one it holds does not, however
+	// long ago it was sent.
+	f.secrets["web/api-tls"] = tlsSecret("CERT-API", "KEY-API-MARKER")
+	f.add("web", "api", "u-4", "2026-11-23T10:00:03Z", lbSpec(Class, tcp(443, 30445)))
+	annotate(f.svc("web", "api"), secret, "api-tls")
+	c.sent = nil
+	if _, puts, uploads = turn(); puts != 2 || !slices.Equal(uploads, []lbgw.CertificateData{{Certificate: "CERT-API", PrivateKey: "KEY-API-MARKER"}}) ||
+		!slices.Equal(f.reads, []string{"web/shop-tls", "web/api-tls"}) {
+		t.Fatalf("a second Service's Secret: %d requests, %d certificates sent, read %v", puts, len(uploads), f.reads)
+	}
+	delete(f.services, "web/api")
+
 	// What a Service cannot name, and what the controller says of a Secret it cannot use.
 	for _, tc := range []struct {
 		name, value, problem string
