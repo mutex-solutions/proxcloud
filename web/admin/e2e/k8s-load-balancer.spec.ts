@@ -97,7 +97,7 @@ test("a controller of an earlier release is named, with what it does not serve a
   await expect(hint).toContainText("Bump the cluster to the provider's chart (0.1.19)")
   await expect(hint).toContainText("sets the controller's image to the portal's")
   // The move is not without effect on what is served (drill Q1-1 of v0.11.1-rc.1): the two cases are named.
-  await expect(hint).toContainText('one whose proxcloud.io/lb-internal is not "false" loses its public address')
+  await expect(hint).toContainText('one that carries proxcloud.io/lb-internal with a value other than "false" loses its public address')
   await expect(hint).toContainText("one whose proxcloud.io/lb-tls-secret names no usable Secret stays as it is served")
   await expect(hint).toContainText("Nothing else that is served today changes")
   await expect(hint).not.toContainText("Nothing that is served today changes")
