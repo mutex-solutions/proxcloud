@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-23: a Service's address kept for its cluster, and spec.loadBalancerIP
+## 2026-11-23: a Service's address kept for its cluster, and spec.loadBalancerIP (#440)
 
 **What changed:** what happens to a Service's public address when the Service goes, and what a Service's
 `spec.loadBalancerIP` does. No new container, listener or credential, and no chart change. Gateway protocol 2 gains
