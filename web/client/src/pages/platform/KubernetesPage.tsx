@@ -914,8 +914,13 @@ function ClusterLoadBalancer({ pid, mode, gatewayFabric, view, release, resource
           This cluster's load balancer controller is older than the platform (protocol {v.controllerProtocol} of {v.protocol}). A
           Service with a UDP port is refused, and the <code>proxcloud.io/lb-*</code> annotations other than{" "}
           <code>proxcloud.io/lb-proxy-protocol</code> are not read, so no TLS from a Secret and no kept address. Apply the
-          platform update on this page to get them: it moves the cluster to chart 0.1.19 or later and changes no Service that
-          is served today. If the page offers no update, ask your operator.
+          platform update on this page to get them: it moves the cluster to chart 0.1.19 or later. Two kinds of Service
+          change with it: one that carries <code>proxcloud.io/lb-internal</code> with a value other than{" "}
+          <code>"false"</code> loses its public address (set it to <code>"false"</code> or remove it first where the
+          address must stay), and one whose{" "}
+          <code>proxcloud.io/lb-tls-secret</code> names no usable Secret stays as it is served and takes no change until
+          the Secret is right. Every other Service that is served today stays as it is. If the page offers no update, ask
+          your operator.
         </p>
       )}
       {lb ? (

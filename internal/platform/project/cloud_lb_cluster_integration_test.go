@@ -30,6 +30,23 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
+// lbClusterPassed runs a pass over a cluster's state under the cluster's lock, as lbClusterConverge does, and says
+// whether it ran. A state the controller sends starts a pass of its own in the background, and while that one holds
+// the lock lbClusterConverge does nothing: a test that called it and then read the row could read the row of before
+// that state, and took it for the answer whenever what it waited for was already true of that row.
+// TestLBClusterStateConverges/KeepAddress failed so in CI ("d on a's address" read d as still refused) once the pair
+// fake ran the state read's script, which makes a pass take longer. So a test's converge reads the row only after a
+// pass of its own.
+func lbClusterPassed(ctx context.Context, h *Handler, clusterID string) bool {
+	release, ok, err := h.sdnLock.Hold(ctx, "lbc-"+clusterID, lbcLease, 0)
+	if err != nil || !ok {
+		return false
+	}
+	defer release()
+	_ = h.lbClusterPass(ctx, clusterID, true)
+	return true
+}
+
 // A cluster's balancer from the gateway's state to its release, against Postgres and a fake Proxmox with the pair's
 // two appliances already built: members only from the cluster's worker addresses, one address per Service that a
 // repeated PUT does not double, a Service removed gives its address back once the appliances let go of it, the
@@ -120,7 +137,9 @@ func TestLBClusterStateConverges(t *testing.T) {
 	converge := func(what string, done func(*loadBalancer) bool) *loadBalancer {
 		t.Helper()
 		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-			h.lbClusterConverge(ctx, "c1", true)
+			if !lbClusterPassed(ctx, h, "c1") {
+				continue // another pass is at work: the row may still be the one of before
+			}
 			if lb := read(); done(lb) {
 				return lb
 			}
@@ -257,10 +276,31 @@ func TestLBClusterStateConverges(t *testing.T) {
 	if cfg := f.files[len(f.files)-1]; strings.Contains(cfg, "udp") || !strings.Contains(cfg, "balance leastconn") || !strings.Contains(cfg, "stick on src") {
 		t.Fatalf("the HAProxy config of the mixed Service:\n%s", cfg)
 	}
+	// Drill Q1-2 (v0.11.1-rc.1): while the pair served a UDP listener the state read lost which appliance holds the
+	// address, the row stayed DEGRADED, and no Service made or changed afterwards got its address in its status,
+	// though it answered. The fake runs the read's script (pairWire.stateRead): the holder is known, and a Service
+	// made now is ready with its address in the answer the controller writes into its status.
+	if holders := slices.DeleteFunc(slices.Clone(lb.Appliances), func(a lbAppliance) bool { return !a.HoldsVIP }); len(holders) != 1 || holders[0].ServerID != "302" {
+		t.Fatalf("with a UDP listener the row does not know its holder: %+v", lb.Appliances)
+	}
+	late := svc("late", 81, 30081)
+	state(mixed, late)
+	lb = converge("a Service made while a UDP listener is served", func(lb *loadBalancer) bool {
+		return len(lb.Cluster.Services) == 2 && lb.Cluster.Services[1].State == lbgw.StateReady && lb.Status == lbStatusActive
+	})
+	if ans := state(mixed, late); ans.Services[1].State != lbgw.StateReady || ans.Services[1].Address == "" || ans.Services[1].Address == vipA ||
+		ans.Services[0].State != lbgw.StateReady || ans.Services[0].Address != vipA {
+		t.Fatalf("the answer for a Service made while a UDP listener is served: %+v", ans.Services)
+	}
+	if holds := func(vm string) bool { // the standby got each change first
+		return slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID == vm && a.HoldsVIP })
+	}; !holds("302") || holds("301") || f.first("301 lvs reload") > f.first("302 lvs reload") {
+		t.Fatalf("holder and push order with a UDP listener: %+v\n%s", lb.Appliances, strings.Join(f.log, "\n"))
+	}
 	state(svc("a", 80, 30080))
 	lb = converge("the UDP port went", func(lb *loadBalancer) bool {
-		return len(lb.Listeners) == 1 && lb.Cluster.Services[0].State == lbgw.StateReady && lb.Status == lbStatusActive &&
-			slices.Contains(f.log, "301 lvs remove") && slices.Contains(f.log, "302 lvs remove")
+		return len(lb.Listeners) == 1 && len(lb.Cluster.Services) == 1 && lb.Cluster.Services[0].State == lbgw.StateReady && lb.Status == lbStatusActive &&
+			slices.Contains(f.log, "301 lvs remove") && slices.Contains(f.log, "302 lvs remove") && len(owned()) == 1
 	})
 	if cfg := f.files[len(f.files)-1]; cfg != tcpOnly || lb.Cluster.Services[0].VIP != vipA {
 		t.Fatalf("back to the TCP Service: address %q, config:\n%s\nwas:\n%s", lb.Cluster.Services[0].VIP, cfg, tcpOnly)

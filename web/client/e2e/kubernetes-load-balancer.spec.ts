@@ -70,6 +70,11 @@ test("a cluster whose controller is the one of an earlier release says what it d
   await expect(old).toContainText("Apply the platform update on this page")
   await expect(old).toContainText("chart 0.1.19 or later")
   await expect(old).toContainText("If the page offers no update, ask your operator")
+  // The update is not without effect on what is served (drill Q1-1 of v0.11.1-rc.1): the two cases are named.
+  await expect(old).toContainText('one that carries proxcloud.io/lb-internal with a value other than "false" loses its public address')
+  await expect(old).toContainText("one whose proxcloud.io/lb-tls-secret names no usable Secret stays as it is served")
+  await expect(old).toContainText("Every other Service that is served today stays as it is")
+  await expect(old).not.toContainText("changes no Service")
 })
 
 test("the cluster page lists the addresses the cluster keeps and releases one after a confirmation", async ({ page }) => {

@@ -1,0 +1,24 @@
+/etc/sysctl.d/90-proxcloud-lb.conf
+net.ipv4.ip_nonlocal_bind = 1
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+/etc/systemd/system/keepalived.service.d/proxcloud.conf
+[Service]
+ExecStartPre=/usr/sbin/ip link set dev ens19 up
+/usr/local/sbin/proxcloud-lb-check
+#!/bin/sh
+worker() ( out=$(echo 'show proc' | socat -t1 - UNIX-CONNECT:/run/haproxy-master.sock 2>/dev/null) && echo "$out" | grep -qw worker )
+n=0
+until worker; do
+  n=$((n+1))
+  [ $n -lt 4 ] || exit 1
+  sleep 0.2
+done
+[ $(( $(date +%s) - $(stat -c %Y /etc/haproxy/haproxy.cfg 2>/dev/null || echo 0) )) -ge 10 ] || exit 0
+b=$(awk '$1=="bind" && $2 !~ /^unix@/{print $2; exit}' /etc/haproxy/haproxy.cfg 2>/dev/null)
+[ -n "$b" ] || exit 0
+case "$b" in :*) b="0.0.0.0$b" ;; esac
+ss -Hltn | awk '{print $4}' | grep -qxF -e "$b"
+/usr/local/sbin/proxcloud-lb-notify
+#!/bin/sh
+echo "$3" > /run/proxcloud-lb.state.$$ && mv -f /run/proxcloud-lb.state.$$ /run/proxcloud-lb.state

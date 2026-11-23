@@ -717,14 +717,18 @@ const (
 	// the package's config, with no listener of the product's (drill N2-2: a pair refused connections for 458 s
 	// and read "up"). ss prints a bind without an address as 0.0.0.0. The unix socket of an idle config is no
 	// listener of a tenant's and is left out.
-	lbServingFn = `serving() {
+	//
+	// Its body is a subshell, "( )" and not "{ }", as is every function a script of the product's defines for another
+	// script to call (lvsserving, worker): a shell function's variables are its caller's, and lvsserving's loop
+	// variable was the state read's answer to "holds the address" (drill Q1-2 of v0.11.1).
+	lbServingFn = `serving() (
   systemctl is-active -q haproxy || { echo "HAProxy is not running"; return 1; }
   l=$(ss -Hltnp | awk '/"haproxy"/{print $4}')
   for b in $(awk '$1=="bind" && $2 !~ /^unix@/{print $2}' ` + haproxyConfig + `); do
     case "$b" in :*) b="0.0.0.0$b" ;; esac
     echo "$l" | grep -qxF -e "$b" || { echo "HAProxy does not listen on $b"; return 1; }
   done
-}
+)
 `
 	// haproxyReload checks the new file before it replaces the one in use, makes HAProxy run it, and proves that
 	// it does before it answers 0: only then is the config's hash recorded. HAProxy is started when it does not

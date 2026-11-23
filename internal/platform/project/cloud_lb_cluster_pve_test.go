@@ -350,3 +350,55 @@ func TestLBClusterRefusedServiceKeepsItsAddress(t *testing.T) {
 		t.Errorf("the cluster keeps %d already: kept %v, given back %v", lbgw.MaxKeptAddresses, c.Kept, c.Releasing)
 	}
 }
+
+// Drill Q1-3 of v0.11.1-rc.1: a Service that named an address its cluster does not keep got two Warnings
+// LoadBalancerIPIgnored with two texts, the first before it had its pool address ("is not an address this cluster
+// keeps") and the second once it had it ("An address is taken when the Service gets its address, not after"), which
+// reads as if it had been named too late. "Not kept" is asked before "has an address": one text for the whole life
+// of that Service, and the late text only for an address the cluster does keep.
+func TestLBClusterAddressEventsNotKeptComesFirst(t *testing.T) {
+	kept := []string{"203.0.113.30"}
+	said := func(want string, status lbgw.ServiceStatus) string {
+		t.Helper()
+		evs := lbClusterAddressEvents(kept, &lbgw.Service{UID: "a", LoadBalancerIP: want}, status)
+		switch len(evs) {
+		case 0:
+			return ""
+		case 1:
+			if evs[0].Type != "Warning" || evs[0].Reason != lbgw.ReasonLoadBalancerIPIgnored {
+				t.Fatalf("event %+v", evs[0])
+			}
+			return evs[0].Message
+		}
+		t.Fatalf("%d events for one loadBalancerIP: %+v", len(evs), evs)
+		return ""
+	}
+	building, ready := lbgw.ServiceStatus{State: lbgw.StateBuilding}, lbgw.ServiceStatus{State: lbgw.StateReady, Address: "203.0.113.13"}
+
+	// An address the cluster does not keep: the same words before the Service has its address and after.
+	before, after := said("203.0.113.77", building), said("203.0.113.77", ready)
+	if before == "" || before != after {
+		t.Fatalf("a not-kept address: %q before the Service had its address, %q after: want one text", before, after)
+	}
+	if !strings.Contains(before, "spec.loadBalancerIP 203.0.113.77 is not an address this cluster keeps") || strings.Contains(before, "203.0.113.13") ||
+		strings.Contains(before, "not after") {
+		t.Fatalf("a not-kept address: %q", before)
+	}
+	// An address the cluster keeps: taken in silence by a Service without one, and named too late by one that has
+	// another, which is the one case the late text is for.
+	if msg := said("203.0.113.30", building); msg != "" {
+		t.Fatalf("a kept address named in time: %q", msg)
+	}
+	if msg := said("203.0.113.30", ready); !strings.Contains(msg, "the Service has 203.0.113.13") || !strings.Contains(msg, "not after") {
+		t.Fatalf("a kept address named by a Service that has another: %q", msg)
+	}
+	// The Service's own address, no address, and a Service that is refused: nothing to say.
+	for name, msg := range map[string]string{
+		"its own address": said("203.0.113.13", ready), "no address named": said("", ready),
+		"a refused Service": said("203.0.113.77", lbgw.ServiceStatus{State: lbgw.StateRefused}),
+	} {
+		if msg != "" {
+			t.Fatalf("%s: %q", name, msg)
+		}
+	}
+}

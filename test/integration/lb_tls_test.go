@@ -510,6 +510,16 @@ func TestLBApplianceTLS(t *testing.T) {
 			if ok, why := asked(); !ok || !onDisk(fileA2) || !onDisk(fileB) {
 				t.Fatalf("before any damage: serving %v %q, the files are the certificates' %v %v", ok, why, onDisk(fileA2), onDisk(fileB))
 			}
+			// A pair's state read asks the same of its appliance, behind its own script (this guest has no keepalived:
+			// the read says STOPPED, and everything else as on a pair).
+			pairRead := func(what, want string) {
+				t.Helper()
+				st, err := ps.ReadVRRPState(ctx, "n1", 100, "", certs...)
+				if err != nil || !st.HAProxy || !st.Serving || st.HAProxySum != lbSum(rotated) || st.CertFiles != want {
+					t.Errorf("%s: a pair's state read: %+v %v; want it serving the config with certificate files %q", what, st, err, want)
+				}
+			}
+			pairRead("before any damage", "")
 			stop, done = make(chan struct{}), make(chan struct{})
 			made, failed = 0, nil
 			go func() {
@@ -562,6 +572,7 @@ func TestLBApplianceTLS(t *testing.T) {
 				if ok, why := asked(); ok || why != c.why {
 					t.Fatalf("%s: the state read with the certificate files: serving %v, %q; want %q", c.what, ok, why, c.why)
 				}
+				pairRead(c.what, c.why)
 				before := reloads()
 				_, mark := g.writtenSince(0)
 				if err := ps.PushHAProxy(ctx, "n1", 100, rotated, certs...); err != nil {
@@ -579,6 +590,7 @@ func TestLBApplianceTLS(t *testing.T) {
 				if ok, why := asked(); !ok || !startable() {
 					t.Errorf("%s: after the push: serving %v %q, the config in use would start %v", c.what, ok, why, startable())
 				}
+				pairRead(c.what+", after the push", "")
 				if got := served(https, "a.example.org"); !got.Equal(certA2.Leaf) {
 					t.Errorf("%s: a new connection does not get the certificate", c.what)
 				}

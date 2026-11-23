@@ -182,7 +182,9 @@ func testLBClusterTLSFromSecret(t *testing.T) {
 	converge := func(what string, done func(*loadBalancer) bool) *loadBalancer {
 		t.Helper()
 		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-			h.lbClusterConverge(ctx, "c1", true)
+			if !lbClusterPassed(ctx, h, "c1") {
+				continue // another pass is at work: the row may still be the one of before
+			}
 			if lb := read(); done(lb) {
 				return lb
 			}

@@ -69,6 +69,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listens on every bind of it, and puts the old file back otherwise; a hash is recorded only for a config that is
   served. The new directives are checked against the HAProxy of both appliance images (3.0 on Debian 13, 3.2 on
   Ubuntu 26.04) by the container test, not on a lab.
+- **From v0.11.1-rc.1: every pair gets keepalived's files once more, and nothing else.** Two files an existing
+  pair runs changed since that candidate: keepalived's track script `/usr/local/sbin/proxcloud-lb-check` (it asks
+  HAProxy's master again during a reload) and its notify script `/usr/local/sbin/proxcloud-lb-notify` (it writes
+  the state by a rename). `keepalived.conf`, the sysctl file and the unit drop-in are the same to the byte and are
+  written again with them. `haproxy.cfg` is the same to the byte and is not pushed, so HAProxy is not reloaded,
+  and the files of a pair's UDP listeners are the same and are not pushed either. The first pass after the upgrade
+  (the first services sync, or the controller's next call for a cluster's pair) gives each appliance of a pair
+  those five files and one `systemctl reload keepalived`, the standby first. A reload keeps keepalived's state, so
+  no address moves (the same reload at the upgrade to rc.1 made no VRRP transition on the lab). A single appliance
+  runs no keepalived and gets nothing. A pair that has one appliance at the upgrade is the other case: that
+  appliance gets keepalived's files as its own master, for the first time where it never had them (see Fixed,
+  "The first appliance of a pair"). Upgrading from v0.11.0, this is part of the one push described above. A
+  pair with a UDP listener that read `DEGRADED` "Neither appliance holds the address yet" under rc.1 reads `ACTIVE`
+  after that pass, and its cluster's pending Services become ready (see Fixed). Not run on a lab.
 - **Until its push, `GET_HEALTH` of a balancer lists its members as `NOT LOADED`**: the stored config names its
   backends by pool, and the appliance still runs the names of before. The listeners are not affected.
 - **The controller's two fixes need the controller of this release.** A cluster keeps the controller image it has
@@ -541,12 +555,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   header is checked correctly as long as the check has no port of its own, and a health endpoint on its own port
   must answer a plain connection. The texts say so now; nothing in the config changed. Seen by the drill of
   v0.11.1-rc.1 (Q3-o3) on HAProxy 3.2.25 and, for both cases, on 3.0.11 in a container.
-- **A pair with a UDP listener never read as holding its address.** The state read of an appliance lost "holds the
-  address" to a variable of the UDP service's check, on every appliance whose UDP config has a listener. Such a
-  pair read `DEGRADED` "Neither appliance holds the address yet" while it served, and a cluster whose pair has a
-  UDP Service never called any of its Services ready, since a Service is ready by the appliance that holds the
-  addresses. In v0.11.1-rc.1 only (v0.11.0 has no UDP). Found by the container test of the fix above, which reads
-  the state of an appliance that serves UDP; the UDP container test asserts it too now.
 - **`proxcloud.io/lb-internal` with a value that is no boolean gave the Service a public address.** A value such as
   `"yes"` was named in `InvalidAnnotation` and the Service was served, so the one annotation that guards an address
   failed open over a typing mistake. It fails closed now: a Service gets a public address only when the annotation
@@ -662,6 +670,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address holder runs the config of before a change it could not take yet read "One appliance carries the traffic,
   with no standby", with the healthy standby as the one listed up: it reads "The appliance that holds the address is
   the one that is not in order (...); the other one is ready, as its standby".
+- **A pair with a UDP listener did not know which appliance holds its address.** The state read's script keeps
+  its answer to "holds the address" in the shell variable `v`, and the check of the UDP service, which the same
+  script calls, loops over the virtual servers with a variable of the same name: a shell function's variables are
+  its caller's. With any UDP listener the read said "holds nothing" for both appliances. The row read `DEGRADED`
+  "Neither appliance holds the address yet" for as long as the listener stood, every Service of a cluster made or
+  changed afterwards stayed pending in its status although it answered, a pass's pushes went to the appliances in
+  the row's order, which may be the holder first, and `GET_HEALTH` found no appliance to ask and answered no
+  member. Nothing was wrong on the appliances: the addresses, HAProxy and the UDP listeners were served throughout.
+  Now every function a script of the product's defines for another script to call runs in a subshell (the checks
+  of HAProxy's listeners, of the UDP service and of HAProxy's worker), and the read calls them in one. A pass also
+  orders its pushes by what the appliances say at that pass, not by what the row said at the pass before. **A pair
+  that reads `DEGRADED` by this heals at the first pass after the upgrade**, with nothing to do: the script of the
+  read is sent with every read, so the first pass names the holder, the row is `ACTIVE` and its Services are
+  ready, and the controller writes their address into their status at its next call after that pass. In
+  v0.11.1-rc.1 only: v0.11.0 has no UDP listener. Found by the drill of v0.11.1-rc.1 (Q1-2), and by the container
+  test of the first-appliance fix above, which reads the state of an appliance that serves UDP. The
+  tests that let it through answered the read from what it should say; now the script's text is run, in dash and
+  bash, with and without UDP listeners (`TestVRRPStateScriptWithAndWithoutUDP`), the wire fake of every apply test
+  runs it too, and the real-guest test reads the holder, the push order and the members' health while a UDP
+  listener is served. Not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "What the drill of
+  v0.11.1-rc.1 found").
+- **Both consoles said that a cluster's update changes no Service that is served.** It does, in two cases the
+  upgrade notes name: a Service whose `proxcloud.io/lb-internal` is not `"false"` loses its public address when its
+  cluster gets the controller of this release, and one whose `proxcloud.io/lb-tls-secret` names no usable Secret
+  stays as it is served and takes no change until the Secret is right. The hint on the tenant's cluster page, the
+  one in the operator's load balancer dialog and the tenant guide now say so, and that every other Service that is
+  served stays as it is. Text only. Found by the drill of v0.11.1-rc.1 (Q1-1), where two such Services lost their
+  address 20 s after the update.
+- **A Service that named an address its cluster does not keep got two Warnings.** `LoadBalancerIPIgnored` said
+  "is not an address this cluster keeps" until the Service had its address of the pool, and from then on "the
+  Service has ...: an address is taken when the Service gets its address, not after", which reads as if the
+  address had been named too late. It is one Warning now, in the same words before and after, and it names no
+  address the Service has. The second text stays for the case it is true of: an address the cluster does keep,
+  named by a Service that already has another. Found by the drill of v0.11.1-rc.1 (Q1-3).
+- **The log said "an appliance's keepalived config is not the one its row records" at every planned change.** A
+  pass compared the file on the appliance with the config it was about to push, so each Service that came or went
+  on a cluster's pair, and each address a tenant's pair gained or lost, was logged at WARN as a config changed
+  behind the product (16 lines in 18 minutes on the lab). The file is now compared with the config the row records
+  (a pair's row keeps the hash of `keepalived.conf` itself, `keepalivedConfHash`, beside the one of the config with
+  its support files): the line means a hand edit or a lost file, and only that, and such a config is pushed again as
+  before. A row of before this release needs nothing: its hash is filled in by its next pass. Log only: no push
+  was added or left out. Found by the drill of v0.11.1-rc.1 (Q1-4).
+- **A reload of HAProxy could cost the appliance that holds the address a failed run of keepalived's track
+  script.** At a reload HAProxy's master replaces itself and its socket refuses connections for a moment (about
+  10 ms with HAProxy 3.2 and 70 ms with 3.0 on an idle config). The track script asked it once, so a push that met
+  that moment was one failed run on the master, and after two in a row keepalived gives the addresses up: one
+  more failed run would have moved them at a push. The script now asks up to four times, 0.2 s apart: a reload that
+  is over within 0.6 s is no failed run. An HAProxy that is really gone is seen at most 0.6 s later than before,
+  less than keepalived's interval of one second. Found by the drill of v0.11.1-rc.1 (Q1-o1). In a real guest of
+  both appliance images: 20 reloads in a row on the appliance that holds the address, with the script also run
+  without a pause meanwhile (over 1000 runs), no failed run and no state change, and a stopped HAProxy still gives
+  the address up. Not run on a lab.
+- **A file of an appliance could be read empty or half written during a push.** keepalived's support files (its
+  track and notify scripts, the sysctl file, the unit drop-in) and the UDP service's (the nftables table, its
+  sysctls, its network script) were written onto their place through the guest agent, which empties a file and
+  then fills it and creates it with mode 0666: the track script, which keepalived runs every second, was empty
+  for a moment at every push (seen twice on the lab by a read every 4 s) and writable by anyone until the apply set
+  its mode. Every file of a push is now written beside its place, as `<path>.new`, given its owner and mode there,
+  and moved in by a rename: a reader sees the file of before or the new one. keepalived's notify script writes the
+  state the portal reads the same way. HAProxy's config and the certificate files already went in so. Found by
+  the drill of v0.11.1-rc.1 (Q1-o2). The fakes and the real-guest tests now refuse any write of the agent's that
+  names a file's place.
 
 ## [0.11.1-rc.1] - 2026-11-23
 

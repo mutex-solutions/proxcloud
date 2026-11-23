@@ -151,7 +151,9 @@ func testLBClusterKeepAddress(t *testing.T) {
 	converge := func(what string, done func(*loadBalancer) bool) *loadBalancer {
 		t.Helper()
 		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
-			h.lbClusterConverge(ctx, "c1", true)
+			if !lbClusterPassed(ctx, h, "c1") {
+				continue // another pass is at work: the row may still be the one of before
+			}
 			if lb := read(); done(lb) {
 				return lb
 			}
@@ -365,7 +367,7 @@ func testLBClusterKeepAddress(t *testing.T) {
 	named := map[string]string{"e1": other.IP, "e2": server.IP, "e3": free, "e4": vipA}
 	asked := []lbgw.Service{d, svc("e1", 91, "", other.IP), svc("e2", 92, "", server.IP), svc("e3", 93, "", free), svc("e4", 94, "", vipA),
 		svc("e5", 95, "", "not-an-address"), svc("e6", 96, "", "2001:db8::1")}
-	put(asked...)
+	first := put(asked...)
 	lb = converge("the named addresses", settled(7))
 	ans := put(asked...)
 	var said []string
@@ -375,10 +377,15 @@ func testLBClusterKeepAddress(t *testing.T) {
 			t.Fatalf("%s named %s and got %q", uid, ip, got)
 		}
 		msg := event(ans, uid, lbgw.ReasonLoadBalancerIPIgnored)
-		if !strings.Contains(msg, ip) || !strings.Contains(msg, got) {
-			t.Fatalf("%s: event %q, want the address named and the one it has", uid, msg)
+		if !strings.Contains(msg, ip) || !strings.Contains(msg, "not an address this cluster keeps") {
+			t.Fatalf("%s: event %q, want the address named and that the cluster does not keep it", uid, msg)
 		}
-		said = append(said, strings.NewReplacer(ip, "<named>", got, "<has>").Replace(msg))
+		// One Warning for one refusal: the words are the same before the Service has its address and after
+		// (drill Q1-3 of v0.11.1: the second text read as if the address had been named too late).
+		if was := event(first, uid, lbgw.ReasonLoadBalancerIPIgnored); was != msg {
+			t.Fatalf("%s heard %q before it had its address and %q after", uid, was, msg)
+		}
+		said = append(said, strings.ReplaceAll(msg, ip, "<named>"))
 	}
 	if uniq := slices.Compact(slices.Sorted(slices.Values(said))); len(uniq) != 1 {
 		t.Fatalf("the answer differs with whose the named address is: %q", said)
