@@ -159,8 +159,11 @@ func (h *Handler) lbClusterTLS(ctx context.Context, cred *lbgw.Credential, servi
 		switch {
 		case prev != nil && problem != "":
 			store = append(store, *prev)
-			held[s.UID] = lbgw.ServiceStatus{Events: []lbgw.Event{{Type: "Warning", Reason: reason,
-				Message: problem + ". The load balancer keeps serving the Service as it did before this change, with the certificate it had"}}}
+			kept := ". The load balancer keeps serving the Service as it did before this change"
+			if len(prev.Certificates) > 0 { // one that was served plain has none to speak of
+				kept += ", with the certificate it had"
+			}
+			held[s.UID] = lbgw.ServiceStatus{Events: []lbgw.Event{{Type: "Warning", Reason: reason, Message: problem + kept}}}
 		case prev != nil: // its certificate is on the way
 			store = append(store, *prev)
 		case problem != "":

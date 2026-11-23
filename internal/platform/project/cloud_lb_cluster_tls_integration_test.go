@@ -440,6 +440,18 @@ func testLBClusterTLSFromSecret(t *testing.T) {
 		!slices.Equal(stored().Services[0].Certificates, []lbgw.CertRef{named(hashB)}) || stored().Services[0].Annotations["proxcloud.io/lb-tls-secret"] != "shop-tls" {
 		t.Fatalf("a served Service whose TLS annotation was emptied: %+v, stored %+v", st, stored().Services[0])
 	}
+	// A Service that is served plain and then gets the empty annotation (one v0.11.0 served without reading it, at
+	// the upgrade) keeps its address and its plain port, and its Event names no certificate: it never had one.
+	templated := plain
+	templated.Annotations = map[string]string{"proxcloud.io/lb-tls-secret": ""}
+	ans = put(lbgw.Request{Services: []lbgw.Service{shop(named(hashB)), templated}})
+	was := stored().Services[1]
+	if st, said := status(ans, plain.UID), event(status(ans, plain.UID), lbgw.ReasonInvalidCertificate); st.Address == "" || st.State == lbgw.StateRefused || len(st.Events) != 1 ||
+		!strings.Contains(said, "proxcloud.io/lb-tls-secret is empty") || !strings.Contains(said, "as it did before this change") || strings.Contains(said, "certificate it had") ||
+		was.UID != plain.UID || len(was.Annotations) != 0 || len(was.Certificates) != 0 {
+		t.Fatalf("a Service served plain that got an empty TLS annotation: %+v, stored %+v", st, was)
+	}
+	ans = put(lbgw.Request{Services: []lbgw.Service{shop(named(hashB)), plain}})
 	addresses, _ := h.publicIPs.ForServer(ctx, "svc", LBAddressOwner(id))
 	if len(addresses) != 2 {
 		t.Fatalf("%d addresses: a refused Service took one", len(addresses))
