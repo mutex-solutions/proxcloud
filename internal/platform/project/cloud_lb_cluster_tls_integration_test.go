@@ -315,9 +315,18 @@ func testLBClusterTLSFromSecret(t *testing.T) {
 	if len(writes) != 2 || !strings.HasSuffix(writes[0], " /etc/haproxy/certs/"+fileA+".pem.new") || strings.HasPrefix(writes[0], holder+" ") || !strings.HasPrefix(writes[1], holder+" ") {
 		t.Fatalf("certificate writes %v, the address is on %s", writes, holder)
 	}
-	for vm, config := range f.files {
+	// The config each appliance serves now (a pass for the Service without TLS may have written one before).
+	if len(f.files) < 2 {
+		t.Fatalf("%d configs written", len(f.files))
+	}
+	for _, config := range f.files[len(f.files)-2:] {
 		if !strings.Contains(config, ":443 ssl crt /etc/haproxy/certs/"+fileA+".pem alpn h2,http/1.1\n") || strings.Contains(config, ":80 ssl") {
-			t.Errorf("the config of %v:\n%s", vm, config)
+			t.Errorf("the config served:\n%s", config)
+		}
+	}
+	for _, config := range f.files { // and no config ever had the port without TLS
+		if strings.Contains(config, ":443\n") {
+			t.Errorf("a config with port 443 and no TLS:\n%s", config)
 		}
 	}
 	vip := status(put(lbgw.Request{Services: []lbgw.Service{shop(named(hashA)), plain}}), "shop").Address
