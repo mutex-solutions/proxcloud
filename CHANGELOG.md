@@ -750,8 +750,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The second release candidate of 0.11.1, published as a prerelease and never as `latest`. It is not the release:
 `v0.11.0` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
-still name it. It holds what is under Unreleased above: what `v0.11.1-rc.1` held, and the three fixes its lab drill
-asked for (#446, #447, #448). It exists so that the drill can go on with the defect that stopped it fixed. Nothing
+still name it. It holds what is under Unreleased above: what `v0.11.1-rc.1` held, the three fixes its lab drill
+asked for (#446, #447, #448), and a change of the repository's own tests, which pull each published chart once
+(#449; no product code). It exists so that the drill can go on with the defect that stopped it fixed. Nothing
 of the three fixes had run on a lab when it was tagged. The entries above are not repeated here. Not for a
 production site.
 

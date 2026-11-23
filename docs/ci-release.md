@@ -642,7 +642,8 @@ ones.
 that drill: it holds the three fixes merged since the first candidate (#446, a lone appliance of a pair serves, and
 a project sees which public addresses its quota counts; #447, the read of which appliance of a pair with a UDP
 listener holds the address, with the smaller findings of the same part; #448, a damaged certificate file is
-noticed and healed, and a push writes only the certificate files that differ). No chart of the product differs
+noticed and healed, and a push writes only the certificate files that differ), and one change of the repository's
+own tests, which now pull each published chart once (#449; no product code). No chart of the product differs
 from its newest tag (the same four `git diff` commands print nothing on its commit), so the BOM needs no new chart
 version, and no component of the sandbox feature is in the BOM (`TestSandboxIsDark`). The app chart, the
 installer's ProxCloud pin and `DEFAULT_VERSION` stay on `v0.11.0`. For a pair that ran under `v0.11.1-rc.1` the
