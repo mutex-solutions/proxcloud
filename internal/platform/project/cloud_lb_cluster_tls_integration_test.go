@@ -308,6 +308,20 @@ func testLBClusterTLSFromSecret(t *testing.T) {
 	if l := tlsListener(lb); l.Protocol != "https" || !slices.Equal(l.CertFiles, []string{fileA}) || !slices.Equal(l.Certificates, []string{rows[0].ID}) {
 		t.Fatalf("the listener: %+v", l)
 	}
+	// What the consoles show next to the cluster: the certificate under the id its listener names, with the Secret it
+	// came from and what it says in public. Nothing of the key, the sealed blob or the Secret's hash.
+	view, err := h.lbClusterView(ctx, "c1")
+	if err != nil || view == nil || len(view.Certificates) != 1 {
+		t.Fatalf("view: %+v, %v", view, err)
+	}
+	if c := view.Certificates[0]; c.ID != rows[0].ID || c.Secret != rows[0].Name || c.Secret == "" || !c.NotAfter.Equal(rows[0].NotAfter) || c.NotAfter.IsZero() ||
+		c.Fingerprint != rows[0].Fingerprint || c.Subject != rows[0].Subject {
+		t.Fatalf("the view's certificate %+v, the row %+v", c, rows[0].LBCertificate)
+	}
+	if b, _ := json.Marshal(view); strings.Contains(string(b), hashA) || strings.Contains(string(b), rows[0].Sealed) || strings.Contains(string(b), "PRIVATE KEY") ||
+		strings.Contains(string(b), "sealed") || strings.Contains(string(b), "secretHash") {
+		t.Fatalf("the view carries more than a certificate's public part: %s", b)
+	}
 	holder := "301"
 	if lb.Appliances[1].HoldsVIP {
 		holder = "302"

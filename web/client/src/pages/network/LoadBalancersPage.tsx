@@ -20,7 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch, type CloudScope } from "@/lib/api"
-import { timeAgo } from "@/lib/format"
+import { fmtDate, timeAgo } from "@/lib/format"
 import { useCloudList, useCloudScope, useProjectId } from "@/lib/hooks"
 import { certificatesKey, ExpiryNote, fetchCertificates } from "./CertificatesPage"
 import type { CloudResource } from "@/lib/types"
@@ -60,6 +60,9 @@ export interface LB {
   cluster?: { id: string; services?: ClusterService[] | null; kept?: string[] | null }
 }
 export interface Health { pool: string; serverId: string; address?: string; port: number; status: string }
+// A certificate a cluster's Services end TLS with, as the cluster's page reads it: the Secret it came from and what it
+// says in public. A listener of the cluster's balancer names it by id. It is not a certificate of the project.
+export interface ClusterCertificate { id: string; secret: string; subject?: string; dnsNames?: string[] | null; notBefore: string; notAfter: string; fingerprint?: string }
 
 const lbOf = (r: CloudResource) => (r.data?.loadbalancer ?? {}) as LB
 
@@ -89,7 +92,9 @@ export function ApplianceList({ appliances }: { appliances: Appliance[] }) {
 
 // A cluster balancer's Services: each one's address, its ports and how many of the cluster's workers answer its health
 // check (with externalTrafficPolicy Local, only the workers that run one of its pods).
-export function ClusterServices({ lb, health }: { lb: LB; health?: Health[] }) {
+// certificates: the cluster's, where the page has them (the cluster's own page): a port that ends TLS then names its
+// Secret and when the certificate expires. Without them the port still says that it ends TLS.
+export function ClusterServices({ lb, health, certificates }: { lb: LB; health?: Health[]; certificates?: ClusterCertificate[] }) {
   const services = lb.cluster?.services ?? []
   if (!services.length) return <p className="text-sm text-muted-foreground">No Service of type LoadBalancer is on this load balancer.</p>
   return (
@@ -108,14 +113,34 @@ export function ClusterServices({ lb, health }: { lb: LB; health?: Health[] }) {
           const listeners = (lb.listeners ?? []).filter((l) => s.vip && l.vip === s.vip)
           const members = listeners.flatMap((l) => ((lb.pools ?? []).find((p) => p.name === l.pool)?.members ?? []).map((m) => ({ ...m, pool: l.pool })))
           const workers = [...new Set(members.map((m) => m.address))]
+          // What clients are spoken to in on each port: a listener made before it said so has its pool's.
+          const protocolOf = (l: Listener) => (l.protocol || (lb.pools ?? []).find((p) => p.name === l.pool)?.protocol || "tcp").toUpperCase()
+          const certs = [...new Set(listeners.flatMap((l) => l.certificates ?? []))]
+            .map((id) => certificates?.find((c) => c.id === id)).filter((c): c is ClusterCertificate => !!c)
+          const udp = listeners.some((l) => protocolOf(l) === "UDP")
           const up = workers.filter((a) => members.some((m) => m.address === a &&
             health?.find((h) => h.pool === m.pool && h.address === m.address && h.port === m.port)?.status?.startsWith("UP"))).length
           return (
             <TableRow key={s.uid}>
               <TableCell className="font-mono text-xs">{s.namespace}/{s.name}</TableCell>
               <TableCell className="font-mono text-sm">{s.vip || "—"}</TableCell>
-              <TableCell className="text-sm">{listeners.map((l) => l.port).join(", ") || "—"}</TableCell>
-              <TableCell className="text-sm">{!workers.length ? "—" : health ? `${up} of ${workers.length} up` : `${workers.length}`}</TableCell>
+              <TableCell className="whitespace-normal text-sm">
+                {listeners.map((l) => `${l.port}/${protocolOf(l)}`).join(", ") || "—"}
+                {certs.map((c) => (
+                  <div key={c.id} className="text-xs text-muted-foreground" data-testid="k8s-lb-cert">
+                    Secret <span className="font-mono">{c.secret}</span>{c.dnsNames?.length ? ` (${c.dnsNames.join(", ")})` : ""}, expires {fmtDate(c.notAfter)}{" "}
+                    <ExpiryNote cert={c} />
+                  </div>
+                ))}
+              </TableCell>
+              <TableCell className="whitespace-normal text-sm">
+                {!workers.length ? "—" : health ? `${up} of ${workers.length} up` : `${workers.length}`}
+                {udp && workers.length > 0 && (
+                  <div className="text-xs text-muted-foreground" data-testid="k8s-lb-udp-check">
+                    UDP: a worker that is down leaves in about 10 s; a closed port may not be seen under traffic.
+                  </div>
+                )}
+              </TableCell>
               <TableCell className="max-w-sm whitespace-normal text-sm">
                 <StatusBadge status={s.state} />
                 {s.reason && <span className="ml-2 text-muted-foreground">{s.reason}: {s.message}</span>}

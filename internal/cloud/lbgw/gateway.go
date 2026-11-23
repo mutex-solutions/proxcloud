@@ -190,7 +190,7 @@ func (r *Refusal) Error() string { return r.Message }
 // Registry is the credential side of the Store; the tests use one in memory.
 type Registry interface {
 	Credential(ctx context.Context, clusterID string) (*Credential, error)
-	Seen(ctx context.Context, clusterID string, at time.Time) error
+	Seen(ctx context.Context, clusterID string, at time.Time, protocol int) error
 }
 
 // Portal is the project side: it filters the nodes against the cluster's workers, takes the certificates it asked
@@ -261,8 +261,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeRefusal(w, &Refusal{http.StatusUnauthorized, "", "authentication failure"})
 		return
 	}
-	if cred.LastSeenAt == nil || time.Since(*cred.LastSeenAt) > seenEvery {
-		if err := h.Reg.Seen(ctx, cred.ID, time.Now().UTC()); err != nil {
+	// The protocol the controller names is kept with its last call, and written at once when it changes: a cluster
+	// that was bumped to the portal's chart stops reading as an old controller with its first call. A header that is
+	// no number is 0, which serve refuses below.
+	named, _ := strconv.Atoi(r.Header.Get(ProtocolHeader))
+	if cred.LastSeenAt == nil || time.Since(*cred.LastSeenAt) > seenEvery || cred.Protocol != named {
+		if err := h.Reg.Seen(ctx, cred.ID, time.Now().UTC(), named); err != nil {
 			h.log().Warn("lb gateway: last seen", "cluster", cred.ID, "err", err)
 		}
 	}

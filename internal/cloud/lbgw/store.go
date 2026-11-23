@@ -34,6 +34,10 @@ type Credential struct {
 	RevokedAt    *time.Time `json:"revokedAt,omitempty"`
 	// LastSeenAt is the last authenticated call, written at most once a minute.
 	LastSeenAt *time.Time `json:"lastSeenAt,omitempty"`
+	// Protocol is the protocol of /lb/v1 the controller named at that call (ProtocolHeader); 0 before its first call
+	// and for a call that named none. It is what the consoles go by to say that a cluster's controller is older than
+	// the portal: one below ProtocolUDP gets no UDP port served and none of its annotations read.
+	Protocol int `json:"protocol,omitempty"`
 }
 
 // State is what a cluster's controller last asked for and the portal accepted (collection lbGatewayState, _id =
@@ -74,7 +78,7 @@ func (s *Store) MintCredential(ctx context.Context, c Credential) (tokenID, secr
 	}
 	secret = hex.EncodeToString(b)
 	now := time.Now().UTC()
-	c.SecretSHA256, c.CreatedAt, c.RevokedAt, c.LastSeenAt = hashSecret(secret), &now, nil, nil
+	c.SecretSHA256, c.CreatedAt, c.RevokedAt, c.LastSeenAt, c.Protocol = hashSecret(secret), &now, nil, nil, 0
 	if err := s.creds.Upsert(ctx, c.ID, c); err != nil {
 		return "", "", err
 	}
@@ -101,9 +105,9 @@ func (s *Store) Credential(ctx context.Context, clusterID string) (*Credential, 
 	return &c, nil
 }
 
-// Seen records an authenticated call.
-func (s *Store) Seen(ctx context.Context, clusterID string, at time.Time) error {
-	_, err := s.creds.SetByID(ctx, clusterID, pgdoc.M{"lastSeenAt": at}, nil)
+// Seen records an authenticated call and the protocol its controller named.
+func (s *Store) Seen(ctx context.Context, clusterID string, at time.Time, protocol int) error {
+	_, err := s.creds.SetByID(ctx, clusterID, pgdoc.M{"lastSeenAt": at, "protocol": protocol}, nil)
 	return err
 }
 
