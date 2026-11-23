@@ -443,6 +443,66 @@ func TestLBClusterStateConverges(t *testing.T) {
 	})
 	quiet()
 
+	// Two changes 2 to 3 s apart (review of #439): the second arrives while the pass of the first is at work. Its PUT
+	// finds the cluster's lock held and starts no pass, and the state was applied only when the controller sent it
+	// again, about 11 s later. The converge that ran looks at the stored state once more before it lets go of the
+	// lock: no PUT comes after the second one here, and it is applied.
+	hold := make(chan struct{})
+	base = passes()
+	f.mu.Lock()
+	f.gate = hold
+	f.mu.Unlock()
+	state(svc("a", 80, 30085))
+	until("the first change's pass in the middle of its work", func() bool { return passes() > base && lockedUntil().After(time.Now()) })
+	state(svc("a", 80, 30086)) // stored; the pass at work read the state before it
+	f.mu.Lock()
+	f.gate = nil
+	f.mu.Unlock()
+	close(hold)
+	until("a state stored during a pass applied by the converge that ran, with no PUT after it", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.files[len(f.files)-1], worker1+":30086 check")
+	})
+	quiet()
+	// Once more, not until the state stands still: under a Service that keeps changing a converge still ends, so
+	// its lock is free for the next one and no pass runs without a PUT behind it.
+	stop, flapped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(flapped)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			if st, err := store.State(ctx, "c1"); err == nil && st != nil {
+				st.Services = []lbgw.Service{svc("a", 80, 30100+i%2000)} // never the state a pass just applied
+				_ = store.PutState(ctx, st)
+			}
+		}
+	}()
+	ended := make(chan struct{})
+	go func() { h.lbClusterConverge(ctx, "c1", true); close(ended) }()
+	select {
+	case <-ended:
+	case <-time.After(20 * time.Second):
+		close(stop)
+		t.Fatal("a Service that keeps changing kept one converge at work")
+	}
+	close(stop)
+	<-flapped
+	if lockedUntil().After(time.Now()) {
+		t.Fatal("the converge of a changing state kept its lock")
+	}
+	state(a)
+	until("the state put back", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.files[len(f.files)-1], worker1+":30080 check")
+	})
+	quiet()
+
 	// N3-7 (v0.11.0-rc.2 drill): the controller writes a Service's address into its status when the Service is
 	// answered "ready", so ready means that the appliance holding the address serves the Service's config. Here the
 	// holder cannot take a change yet (its package manager runs) and the standby has it: the Service is not ready,

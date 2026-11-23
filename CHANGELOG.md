@@ -411,6 +411,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   served gets no address, one that is served stays exactly as it was, and one Warning Event `InvalidCertificate`
   says that the annotation is empty. Removing the annotation is still the way to a plain port. The controller does
   not send such a Service to a portal of protocol 1 either. Found in the review of #438.
+- **The second of two quick changes to a cluster's Services waited about 11 s for the controller's next send.** A
+  pass over a cluster's balancer applies the state it read at its start; a state the controller stored while that
+  pass was at work started no pass of its own and was applied only when the controller sent it again. The pass
+  that ran now looks at the stored state once more before it ends and applies it when it changed, so two changes
+  2 to 3 s apart are both live within the 15 s the layer 4 plan asks for. It looks once: a Service that keeps
+  changing does not keep a pass running, and one pass at a time per cluster still holds. Found in the review of
+  #439.
 - **Sandboxes worth less than half a cent each were invoiced 0.00.** Every sandbox is a bill item of its own, and a
   sent bill rounds each item to two decimals, so 10,000 one-minute sandboxes at 0.0002 accrued 2.00 and were
   invoiced nothing. At the send, what the sandbox items that round to 0.00 accrued is now summed per project and

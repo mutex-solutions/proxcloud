@@ -374,6 +374,15 @@ func lbClusterStatus(lb *loadBalancer, uid string) lbgw.ServiceStatus {
 // state every few seconds and the provider sync calls this too, so a converge that is skipped comes again. force is
 // the sync's: its pass runs whatever the last one found. A PUT's pass asks lbPassDue again once it holds the lock,
 // since the pass it waited behind may have applied its state.
+//
+// A pass applies the state it read at its start. One the controller stores while the pass is at work finds the lock
+// held and starts no pass of its own, so it waited for the controller's next send of the same state (about 11 s for
+// the second of two changes 2 to 3 s apart). The converge therefore looks at the stored state once more before it
+// lets go of the lock, and passes over it again when it is not the one it applied. Once, not until the state stands
+// still: a Service that keeps changing cannot keep a converge and its lock, and what changes during the second pass
+// is the next PUT's.
+// ponytail: a state stored between that last look and the release still waits for the controller's next send; a
+// "changed" mark the PUT leaves for the lock's holder would close it, if a drill ever shows the gap.
 func (h *Handler) lbClusterConverge(ctx context.Context, clusterID string, force bool) {
 	release, ok, err := h.sdnLock.Hold(ctx, "lbc-"+clusterID, lbcLease, 0)
 	if err != nil {
@@ -384,8 +393,15 @@ func (h *Handler) lbClusterConverge(ctx context.Context, clusterID string, force
 		return
 	}
 	defer release()
-	if err := h.lbClusterPass(ctx, clusterID, force); err != nil {
-		slog.Warn("load balancer: cluster converge", "cluster", clusterID, "err", err)
+	for range 2 {
+		if err := h.lbClusterPass(ctx, clusterID, force); err != nil {
+			slog.Warn("load balancer: cluster converge", "cluster", clusterID, "err", err)
+		}
+		applied, ok := h.lbPasses.Load(clusterID)
+		st, err := h.lbGW.State(ctx, clusterID)
+		if !ok || err != nil || applied.(lbPass).digest == lbStateDigest(st) {
+			return
+		}
 	}
 }
 
