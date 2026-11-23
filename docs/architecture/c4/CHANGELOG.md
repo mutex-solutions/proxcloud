@@ -13,7 +13,8 @@ and rules: [README.md](README.md#maintenance-rule).
   `admin.Handler.PlatformSandboxSite` in `internal/platform/admin/platform_sandbox.go`: `config.sandbox`,
   `config.network.sandboxCidrs`, `secret.sandboxKubeconfig`, never over a block of another owner) and registers a
   sandbox provider, DISABLED (`SandboxProviderBody`, through the existing `Runner.Register`). `ProviderIDs.Sandbox`
-  and `Status.SandboxAttach` record it. `AdoptProvider` never gives a sandbox provider its status back.
+  and `Status.SandboxAttach` record it. `AdoptProvider` never gives a sandbox provider its status back, and on an
+  adopted row it rewrites `config.sandbox.mode` and `domain`, which follow the settings (`providerOwned`).
 - **Platform run to the sandbox cluster.** With `separate` the run reads the admin kubeconfig Kamaji keeps for
   `pc-sandbox` on the platform cluster, uses it for two reads (the token Secrets of the chart's identities) and one
   write (the proxy's certificate Secret), and stores it nowhere.

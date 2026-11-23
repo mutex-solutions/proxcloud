@@ -175,11 +175,11 @@ func TestSandboxTemplatesArePinned(t *testing.T) {
 func TestAdoptProviderKeepsASandboxProviderDisabled(t *testing.T) {
 	row := func(provider string) map[string]any {
 		return map[string]any{"_id": "svc-" + provider, "name": "Lab " + provider, "status": "DISABLED",
-			"config": map[string]any{"provider": provider, ProviderMarker: "pi-1", providerStatusBefore: "PUBLIC", "sandbox": map[string]any{"templates": map[string]any{"mine": map[string]any{"image": "x"}}}}}
+			"config": map[string]any{"provider": provider, ProviderMarker: "pi-1", providerStatusBefore: "PUBLIC", "sandbox": map[string]any{"mode": SandboxShared, "domain": "old.example.org", "templates": map[string]any{"mine": map[string]any{"image": "x"}}}}}
 	}
 	body := func(provider string) map[string]any {
 		return map[string]any{"name": "Lab " + provider, "status": "DISABLED", "config": map[string]any{"provider": provider, ProviderMarker: "pi-1",
-			"sandbox": map[string]any{"templates": map[string]any{"base": map[string]any{"image": "y"}}}}}
+			"sandbox": map[string]any{"mode": SandboxSeparate, "domain": "sbx.example.org", "templates": map[string]any{"base": map[string]any{"image": "y"}}}}}
 	}
 	sbx, err := AdoptProvider([]map[string]any{row("sandbox")}, body("sandbox"))
 	if err != nil || sbx["status"] != "DISABLED" || dig(sbx, "config", providerStatusBefore) != nil {
@@ -188,6 +188,11 @@ func TestAdoptProviderKeepsASandboxProviderDisabled(t *testing.T) {
 	// What the operator owns is kept: the run's template list does not replace an edited one.
 	if dig(sbx, "config", "sandbox", "templates", "mine") == nil || dig(sbx, "config", "sandbox", "templates", "base") != nil {
 		t.Fatalf("an adopted sandbox row was rewritten: %v", sbx)
+	}
+	// What the settings own follows them: sandboxes switched off and built again with the other placement, or with
+	// another domain, must not leave the row describing the cluster that is gone.
+	if mode, domain := dig(sbx, "config", "sandbox", "mode"), dig(sbx, "config", "sandbox", "domain"); mode != SandboxSeparate || domain != "sbx.example.org" {
+		t.Fatalf("an adopted sandbox row keeps mode %v and domain %v of the cluster before", mode, domain)
 	}
 	if k8s, _ := AdoptProvider([]map[string]any{row("kamaji")}, body("kamaji")); k8s["status"] != "PUBLIC" {
 		t.Fatalf("the Kubernetes provider after a Remove: %v", k8s)

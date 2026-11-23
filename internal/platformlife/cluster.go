@@ -1988,9 +1988,16 @@ func DisableProvider(row map[string]any) bool {
 // created and is the operator's from then on: its name, its status, the node image versions, the attach policy. Two
 // things a run still does there: it adds a Kubernetes version the row does not name (OfferVersion), and it applies a
 // changed spec.tenants.attach (Runner.Attach).
+//
+// Of a sandbox provider the run owns the mode and the domain: both say what the cluster is, not what the operator
+// chose on the row. A row adopted after sandboxes were switched off and built again with the other placement would
+// otherwise keep the old mode, and the portal would ask a separate cluster for the shared identity's bindings (or a
+// shared one for cluster-wide reads) and be refused at every call; a domain changed in the settings would leave the
+// row naming one sandbox-proxy no longer serves.
 var providerOwned = [][]string{{"argocd"}, {"namespacePlacement"}, {"cluster", "pveApiUrl"},
 	{"database", "egressFence"}, {"database", "lbAddressPool"}, {"database", "storageClasses"},
-	{"database", "engines", "postgresql", "replicas"}} // [1] again when the dbaas group drops below three PVE nodes
+	{"database", "engines", "postgresql", "replicas"}, // [1] again when the dbaas group drops below three PVE nodes
+	{"sandbox", "mode"}, {"sandbox", "domain"}}
 
 // AdoptProvider finds among the stored provider rows the one a stage 10 body adopts, the row of the body's
 // config.provider that carries its marker, and rewrites the owned keys on it. nil = there is none: create it. Two rows
