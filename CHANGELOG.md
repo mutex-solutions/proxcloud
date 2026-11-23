@@ -735,6 +735,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the drill of v0.11.1-rc.1 (Q1-o2). The fakes and the real-guest tests now refuse any write of the agent's that
   names a file's place.
 
+## [0.11.1-rc.2] - 2026-11-24
+
+The second release candidate of 0.11.1, published as a prerelease and never as `latest`. It is not the release:
+`v0.11.0` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
+still name it. It holds what is under Unreleased above: what `v0.11.1-rc.1` held, and the three fixes its lab drill
+asked for (#446, #447, #448). It exists so that the drill can go on with the defect that stopped it fixed. Nothing
+of the three fixes had run on a lab when it was tagged. The entries above are not repeated here. Not for a
+production site.
+
+### Changed
+
+- **The platform BOM's release is `0.11.1-rc.2`** (`deploy/platform/platform-bom.yaml`), with the pins of
+  `0.11.1-rc.1`: the two files differ in the release line alone. No chart of the product differs from its newest tag
+  (`git diff proxmox-kamaji-cluster-v0.1.19 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster`,
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` and
+  `git diff proxcloud-sandbox-v0.1.0 -- deploy/charts/proxcloud-sandbox` print nothing), so no chart tag is needed.
+  It is a release BOM, and the release gate passes on it and on the eighteen previous BOMs.
+- **No component of the sandbox feature is in this BOM** (`TestSandboxIsDark`). The sandbox code is in the build and
+  cannot be turned on, as in `v0.11.1-rc.1`.
+- **The plan from each previous BOM** (`PlanFor`). From 0.11.1-rc.1 one change, the release, record only, allowed,
+  with no part, no seed row and no machine replaced; phrase `upgrade <name> to 0.11.1-rc.2`. From 0.11.0,
+  0.11.0-rc.1 and 0.11.0-rc.2 two changes, the release and `tenantCharts.kubernetes` 0.1.17 to 0.1.19, both record
+  only, allowed. From 0.10.2 and 0.10.2-rc.1 the same two rows (the chart from 0.1.16); four from 0.10.1 and
+  0.10.1-rc.2 (those and `cert-manager` on the seed and on the platform cluster); five from 0.10.1-rc.1 (also
+  `pc-platform` 0.1.15 to 0.1.16); and a refusal by the pair gate from the nine BOMs on Kubernetes 1.35.10. This BOM
+  carries no unfinished replacement (`TestRollTowardAKeptCandidateGoesOn` passes under it unchanged).
+- **What the portal's upgrade does to the balancers, from `v0.11.0`.** What the first candidate's upgrade did:
+  the HAProxy config and a pair's keepalived files differ from the ones `v0.11.0` wrote, so every balancer is pushed
+  once at its next pass, the standby first. This candidate renders the HAProxy config of `v0.11.1-rc.1` to the byte
+  (no config golden changed since that tag).
+- **What the portal's upgrade does to the balancers, from `v0.11.1-rc.1`.** See "From v0.11.1-rc.1" under Upgrade
+  notes above: keepalived's five files once per appliance of a pair, with one keepalived reload, the standby first;
+  no HAProxy push; nothing on a single appliance; a pair that read `DEGRADED` by the defect of the holder read is
+  `ACTIVE` after that pass; the certificate files a config names are checked at every pass from now on. Read
+  again from the code on this commit.
+- **A candidate moves nothing a final moves.** The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION`
+  stay on `v0.11.0`.
+
+### Verified on a lab
+
+Nothing on this candidate. On `v0.11.1-rc.1`, on one lab on 2026-11-23 (Ubuntu 26.04 appliances), two parts of its
+drill ran:
+
+- The upgrade from `v0.11.0`: the portal upgrade under five client loops (31365 requests on the Service that
+  stayed served through the part, 0 failed); one push per balancer, the pair's standby first, with no VRRP
+  transition and no new package; the platform run of two record-only rows, which replaced no machine; a cluster on
+  the `v0.11.0` controller unchanged by both; the cluster's update with no machine rolled; the `lb-internal`,
+  keep-address and `loadBalancerIP` cases; a UDP Service answering from outside the cluster (50 of 50 datagrams).
+- TLS on a single balancer: SNI, the TLS versions and suites, HTTP/2, PROXY version 1 and 2, a rotation under load
+  (0 failed of 6450), a bundle of 16 KiB, and a search for the private key that found it only sealed in the
+  database and in the root-only certificate files of the appliance.
+
+### Not verified
+
+- Everything of this candidate on a lab, and each of the three fixes since `v0.11.1-rc.1`: the holder read on a
+  pair with a UDP listener and the healing of a degraded pair, a lone appliance of a pair, the check and the heal
+  of a certificate file, the push of only the files that differ, the quota list.
+- The upgrade from `v0.11.1-rc.1` (the one keepalived reload per appliance of a pair), and any move to the BOM
+  `0.11.1-rc.2` (plans read, not run).
+- UDP and TLS on a tenant's own pair, TLS on any pair, a failover under UDP, Debian 13 appliances on a lab, TLS
+  from a Service's Secret on a lab, the watch timings, the consoles in a browser, and any production site with a
+  public network.
+- The candidate's images and its tag's workflows: they do not exist before the tag.
+
+### Known issues
+
+- Those of `v0.11.1-rc.1`, below.
+- A lone appliance of a pair sends one VRRP advert a second, addressed to `127.0.0.1`, to its network's gateway.
+- A second appliance that joins can hold the addresses beside the first for one pass, when the push that tells
+  the first of its peer fails.
+- A reload that keeps HAProxy's master socket closed for more than 0.6 s is still one failed run of keepalived's
+  track script.
+- While an appliance holds a change it refused, its certificate files are not checked; a single balancer whose
+  heal cannot be pushed reads `DOWN` although HAProxy still serves.
+- The full list is in `docs/releases/v0.11.1-rc.2.md`.
+
 ## [0.11.1-rc.1] - 2026-11-23
 
 The first release candidate of 0.11.1, published as a prerelease and never as `latest`. It is not the release:
