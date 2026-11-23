@@ -605,6 +605,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one in the operator's load balancer dialog and the tenant guide now say so, and that every other Service that is
   served stays as it is. Text only. Found by the drill of v0.11.1-rc.1 (Q1-1), where two such Services lost their
   address 20 s after the update.
+- **A Service that named an address its cluster does not keep got two Warnings.** `LoadBalancerIPIgnored` said
+  "is not an address this cluster keeps" until the Service had its address of the pool, and from then on "the
+  Service has ...: an address is taken when the Service gets its address, not after", which reads as if the
+  address had been named too late. It is one Warning now, in the same words before and after, and it names no
+  address the Service has. The second text stays for the case it is true of: an address the cluster does keep,
+  named by a Service that already has another. Found by the drill of v0.11.1-rc.1 (Q1-3).
 
 ## [0.11.1-rc.1] - 2026-11-23
 

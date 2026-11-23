@@ -1156,8 +1156,10 @@ metadata:
 - **Any other `spec.loadBalancerIP` is not obeyed**: an address this cluster does not keep (another cluster's,
   another project's, a free one of the pool, one a Service of this cluster is on) or a text that is no IPv4
   address. The Service gets an address of the pool and one Warning `LoadBalancerIPIgnored`, in the same words
-  whichever of these it was: the answer does not say whose an address is. A Service that already has an address
-  keeps it whatever it names afterwards; to move it onto a kept address, delete it and create it again.
+  whichever of these it was, before it has its address and after: the answer does not say whose an address is. A
+  Service that already has an address keeps it whatever it names afterwards; one that then names an address the
+  cluster does keep is told that an address is taken when the Service gets its address, not after. To move it onto
+  a kept address, delete it and create it again.
 - **A kept address is released** on the cluster's page (button "Release", the cluster action
   `RELEASE_LOAD_BALANCER_ADDRESS` with `{"address": "..."}`), or with the cluster. It returns to the pool, and its
   billing stops, once no appliance holds it, as a Service's address does. A released address cannot be asked for

@@ -19,6 +19,11 @@ to a load balancer appliance, how a pass reads a pair, and how the tests run tha
   `internal/cloud/pve/lbguesttest`: a guest made of a directory and stub commands, on which a script of the
   product's runs as the text it is, and the guest agent API in front of it (`Guest`, `Agent`). The pair fake of the
   apply tests (`pairWire.stateRead`) answers the state read by running its script there.
+- *The consoles' promise (Q1-1).* The hint for a cluster on an older controller (`ClusterLoadBalancer` in
+  `KubernetesPage.tsx`, `ClusterLoadBalancerDialog` in `CloudProviderDetailPage.tsx`) and the tenant guide name the
+  two kinds of Service the cluster's update changes. Text only.
+- *One Warning for a named address that is not kept (Q1-3).* `lbClusterAddressEvents` asks "does the cluster keep
+  it" before "does the Service have an address": the same text before and after the Service gets its pool address.
 
 **Why:** the drill's pair served and read `DEGRADED` for ever, and no Service made after its first UDP listener got
 its address in its status. Every test read `ACTIVE`, because every fake wrote the read's answer itself: the one
