@@ -518,3 +518,40 @@ func TestPatchService(t *testing.T) {
 		t.Fatalf("requests:\n%s", strings.Join(got, "\n"))
 	}
 }
+
+// GetSecret is one GET of one name, and answers what the API server does for a Secret: its type, its data decoded,
+// "not found" as no Secret and no error, and a forbidden read as an error with its status.
+func TestGetSecret(t *testing.T) {
+	var calls []string
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/namespaces/web/secrets/shop-tls":
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","kind":"Secret","metadata":{"name":"shop-tls","namespace":"web"},"type":"kubernetes.io/tls",`+
+				`"data":{"tls.crt":"`+base64.StdEncoding.EncodeToString([]byte("CERT"))+`","tls.key":"`+base64.StdEncoding.EncodeToString([]byte("KEY"))+`"}}`)
+		case "/api/v1/namespaces/web/secrets/denied":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"kind":"Status","apiVersion":"v1","status":"Failure","message":"secrets \"denied\" is forbidden","reason":"Forbidden","code":403}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`)
+		}
+	})
+	ctx := context.Background()
+	typ, data, found, err := c.GetSecret(ctx, "web", "shop-tls")
+	if err != nil || !found || typ != "kubernetes.io/tls" || string(data["tls.crt"]) != "CERT" || string(data["tls.key"]) != "KEY" {
+		t.Fatalf("a Secret: %q %v %v %v", typ, data, found, err)
+	}
+	if _, _, found, err := c.GetSecret(ctx, "web", "gone"); err != nil || found {
+		t.Fatalf("a Secret that is gone: %v %v", found, err)
+	}
+	var ae *APIError
+	if _, _, found, err := c.GetSecret(ctx, "web", "denied"); found || !errors.As(err, &ae) || ae.Status != http.StatusForbidden {
+		t.Fatalf("a forbidden Secret: %v %v", found, err)
+	}
+	want := []string{"GET /api/v1/namespaces/web/secrets/shop-tls", "GET /api/v1/namespaces/web/secrets/gone", "GET /api/v1/namespaces/web/secrets/denied"}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("calls %v, want %v", calls, want)
+	}
+}

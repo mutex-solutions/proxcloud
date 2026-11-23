@@ -3,8 +3,8 @@ package lbgw
 // annotations.go: what a Service's annotations and session affinity ask of its listeners and pools. The table is read
 // here, in the portal, and not in the controller: the controller sends the annotations of the prefix
 // proxcloud.io/lb-, and no other, as they are (protocol 2), so a new knob ships with the portal and needs no new
-// controller in every cluster (C12). The one the controller reads itself is the node selector, which needs the nodes'
-// labels (Annotation).
+// controller in every cluster (C12). The two the controller reads itself need the tenant's API: the node selector
+// (the nodes' labels, Annotation) and the TLS Secrets (tls.go).
 //
 // A knob has one name, proxcloud.io/lb-<knob>, and no other name is read: the product defines its own. What a knob
 // does follows OCCM, the upstream cloud controller manager most charts for a private cloud are written for (v1.37.1,
@@ -79,7 +79,8 @@ const (
 // knobs: every name that is read after proxcloud.io/lb-.
 var knobs = []string{KnobProxyProtocol, KnobMethod, KnobConnectionLimit, KnobTimeoutClientData, KnobTimeoutMemberConnect,
 	KnobTimeoutMemberData, KnobXForwardedFor, KnobEnableHealthMonitor, KnobHealthDelay, KnobHealthTimeout,
-	KnobHealthMaxRetries, KnobHealthMaxRetriesDown, KnobNodeSelector, KnobKeepAddress, KnobInternal}
+	KnobHealthMaxRetries, KnobHealthMaxRetriesDown, KnobNodeSelector, KnobKeepAddress, KnobInternal,
+	KnobTLSSecret, KnobTLSPorts, KnobBackendProtocol}
 
 // methods: an algorithm by its short name and by the name OCCM's values spell it with, so a renamed annotation keeps
 // its value.
@@ -157,6 +158,10 @@ type Options struct {
 	AffinityTimeout int
 	// KeepAddress: the Service's address is to outlive it. Read here, served by a later change.
 	KeepAddress bool
+	// TLSPorts are the TCP ports that end TLS when the Service came with certificates (EndsTLS); nil: every TCP
+	// port. TLSBackendTCP: their members are spoken plain TCP, not HTTP.
+	TLSPorts      []int
+	TLSBackendTCP bool
 	// Events are what the Service's owner is told: annotations that are not obeyed, values that are not understood.
 	Events []Event
 }
@@ -270,6 +275,7 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 	o.HealthRise = number(KnobHealthMaxRetries, 1, 10, "1 to 10 checks")
 	o.HealthFall = number(KnobHealthMaxRetriesDown, 1, 10, "1 to 10 checks")
 	flag(KnobInternal) // true never comes this far; a value that is no boolean is named
+	o.TLSPorts, o.TLSBackendTCP = tlsOptions(s, ann, bad)
 	if o.KeepAddress, _ = flag(KnobKeepAddress); o.KeepAddress {
 		_, name, _ := Annotation(ann, KnobKeepAddress)
 		o.Events = append(o.Events, Event{Type: "Warning", Reason: ReasonKeepAddressNotServed,

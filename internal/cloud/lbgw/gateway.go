@@ -11,11 +11,13 @@
 package lbgw
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -34,8 +36,9 @@ import (
 // older than MinProtocol, so a change that needs a newer controller says "bump the cluster" instead of failing
 // silently. /lb/v1 stays backward compatible within a minor release (C12).
 //
-// Protocol 2 (v0.11.1) only adds: a Service's annotations, session affinity and own nodes in the request, its ipMode
-// and Events in the answer. A protocol 1 controller sends none of them and is served as before, with one thing kept
+// Protocol 2 (v0.11.1) only adds: a Service's annotations, session affinity, own nodes and certificates in the
+// request, and the certificates the portal asked for; its ipMode and Events in the answer, and the certificates the
+// portal asks for (tls.go). A protocol 1 controller sends none of them and is served as before, with one thing kept
 // back: its UDP Services stay refused (ProtocolUDP), so that upgrading the portal alone never hands a Service that
 // stood pending a public address, which is billed. The cluster's owner gets UDP by upgrading the cluster.
 const (
@@ -76,7 +79,7 @@ const (
 	MaxServices    = 50
 	MaxPorts       = 20
 	MaxNodes       = 64
-	maxBody        = 64 << 10
+	maxBody        = 64 << 10 // the state's part of a request; the certificates the portal asked for come on top (maxCertBody)
 	NodePortMin    = 30000
 	NodePortMax    = 32767
 	seenEvery      = time.Minute
@@ -88,6 +91,9 @@ const (
 type Request struct {
 	Services []Service `json:"services"`
 	Nodes    []Node    `json:"nodes"`
+	// CertificateData (protocol 2) are the Secrets whose hashes the last answer asked for (Answer.NeedCertificates),
+	// and no other.
+	CertificateData []CertificateData `json:"certificateData,omitempty"`
 }
 
 // Service is one Service of type LoadBalancer the controller owns. Namespace and Name are for people: they never reach
@@ -119,6 +125,9 @@ type Service struct {
 	// Nodes, when set, are the only nodes behind this Service, by address: the ones of the request's Nodes that its
 	// node selector annotation matches. An empty list is a selector that matches none. nil: every node.
 	Nodes *[]string `json:"nodes,omitempty"`
+	// Certificates are the Secrets the Service's proxcloud.io/lb-tls-secret names, in its order: each one's name
+	// and the hash of its content, never the content (tls.go). The first one answers a client that asks for no name.
+	Certificates []CertRef `json:"certificates,omitempty"`
 }
 
 // Port is one port of a Service.
@@ -139,6 +148,9 @@ type Node struct {
 type Answer struct {
 	Services []ServiceStatus `json:"services"`
 	Nodes    []NodeStatus    `json:"nodes,omitempty"`
+	// NeedCertificates (protocol 2) are the hashes of the request's certificates the portal holds no certificate
+	// for: the controller sends those Secrets, once, in its next request.
+	NeedCertificates []string `json:"needCertificates,omitempty"`
 }
 
 // ServiceStatus is one Service's state. Address is the public address once it has one.
@@ -177,11 +189,11 @@ type Registry interface {
 	Seen(ctx context.Context, clusterID string, at time.Time) error
 }
 
-// Portal is the project side: it filters the nodes against the cluster's workers, stores the state and starts the
-// converge, and answers each Service as the cluster's balancer has it now. It may refuse the whole request with a
-// *Refusal (a project that is suspended or being deleted).
+// Portal is the project side: it filters the nodes against the cluster's workers, takes the certificates it asked
+// for, stores the state and starts the converge, and answers each Service as the cluster's balancer has it now. It
+// may refuse the whole request with a *Refusal (a project that is suspended or being deleted).
 type Portal interface {
-	LBClusterState(ctx context.Context, cred *Credential, services []Service, nodes []Node) (*Answer, error)
+	LBClusterState(ctx context.Context, cred *Credential, services []Service, nodes []Node, certs []CertificateData) (*Answer, error)
 }
 
 // Handler serves /lb/v1/ on the gateway listener.
@@ -355,14 +367,38 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		return nil, &Refusal{http.StatusConflict, ReasonControllerTooOld,
 			fmt.Sprintf("This cluster's load balancer controller is older than the portal accepts (protocol %d or later). Bump the cluster to the portal's chart", MinProtocol)}
 	}
-	var req Request
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			// Nothing was stored: the cluster's balancer stays as the last state that fitted made it.
-			return nil, &Refusal{http.StatusRequestEntityTooLarge, ReasonTooLarge, fmt.Sprintf("The cluster's load balancer state is over %d KiB and was not taken: the balancer stays as it is, and no change to a Service or a node reaches it until the state fits. Shorten the Services' load balancer annotations and source ranges", maxBody>>10)}
+	// The body is the state and, when the last answer asked for them, certificates: the state's part keeps its
+	// limit, and the certificates are measured as they were sent.
+	var body struct {
+		Request
+		CertificateData json.RawMessage `json:"certificateData"`
+	}
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody+maxCertBody))
+	if err == nil {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		err = dec.Decode(&body)
+	}
+	// Over the limit: a body that was cut, a state that is too large, and a body of that size without certificates
+	// that is no state either.
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) || (err == nil && len(raw)-len(body.CertificateData) > maxBody) ||
+		(err != nil && len(raw) > maxBody && !bytes.Contains(raw, []byte("certificateData"))) {
+		// Nothing was stored: the cluster's balancer stays as the last state that fitted made it.
+		return nil, &Refusal{http.StatusRequestEntityTooLarge, ReasonTooLarge, fmt.Sprintf("The cluster's load balancer state is over %d KiB and was not taken: the balancer stays as it is, and no change to a Service or a node reaches it until the state fits. Shorten the Services' load balancer annotations and source ranges", maxBody>>10)}
+	}
+	req := body.Request
+	if err == nil && len(body.CertificateData) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(body.CertificateData))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&req.CertificateData) != nil || len(req.CertificateData) > MaxClusterCerts {
+			return nil, &Refusal{http.StatusBadRequest, ReasonInvalid, fmt.Sprintf("lb gateway: certificateData is at most %d certificates, each with its certificate and privateKey", MaxClusterCerts)}
+		}
+	}
+	if err != nil {
+		// A body that holds a key says nothing of itself in an error: a decoder names what it stumbled over.
+		if bytes.Contains(raw, []byte("PRIVATE KEY")) || bytes.Contains(raw, []byte("certificateData")) {
+			return nil, &Refusal{http.StatusBadRequest, ReasonInvalid, "lb gateway: the body is not a state"}
 		}
 		return nil, &Refusal{http.StatusBadRequest, ReasonInvalid, "lb gateway: the body is not a state: " + err.Error()}
 	}
@@ -378,6 +414,7 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	options := make([]Options, len(req.Services))
 	var accepted []Service
 	at := map[string]int{}
+	named := map[string]bool{} // the certificates of the Services accepted so far, by hash
 	for i := range req.Services {
 		s := &req.Services[i]
 		if !uidRe.MatchString(s.UID) || len(s.Name) > maxNameLen || len(s.Namespace) > maxNameLen ||
@@ -394,9 +431,28 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 			statuses[i].State, statuses[i].Reason, statuses[i].Message = StateRefused, reason, msg
 			continue
 		}
+		if protocol < 2 { // no controller of protocol 1 sends them, and they are read for none
+			s.Certificates = nil
+		}
+		more := 0
+		for j, c := range s.Certificates {
+			if c.SHA256 != "" && !named[c.SHA256] && !slices.ContainsFunc(s.Certificates[:j], func(b CertRef) bool { return b.SHA256 == c.SHA256 }) {
+				more++
+			}
+		}
+		if len(named)+more > MaxClusterCerts {
+			statuses[i].State, statuses[i].Reason = StateRefused, ReasonTooLarge
+			statuses[i].Message = fmt.Sprintf("A cluster's load balancer holds at most %d certificates: name fewer TLS Secrets in the cluster's Services", MaxClusterCerts)
+			continue
+		}
+		for _, c := range s.Certificates {
+			if c.SHA256 != "" {
+				named[c.SHA256] = true
+			}
+		}
 		accepted = append(accepted, *s)
 	}
-	ans, err := h.Portal.LBClusterState(ctx, cred, accepted, req.Nodes)
+	ans, err := h.Portal.LBClusterState(ctx, cred, accepted, req.Nodes, req.CertificateData)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +466,8 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 			statuses[i].State = StateBuilding
 		}
 		if statuses[i].State != StateRefused && protocol >= 2 {
-			statuses[i].IPMode, statuses[i].Events = options[i].IPMode(&req.Services[i]), options[i].Events
+			// The portal's own Events (a certificate that cannot be used) come before the annotations'.
+			statuses[i].IPMode, statuses[i].Events = options[i].IPMode(&req.Services[i]), append(statuses[i].Events, options[i].Events...)
 		}
 	}
 	ans.Services = statuses
@@ -441,6 +498,9 @@ func checkService(s *Service, index, protocol int) (reason, message string) {
 	}
 	if len(s.Ports) > MaxPorts {
 		return ReasonTooLarge, fmt.Sprintf("A Service takes at most %d ports on the load balancer", MaxPorts)
+	}
+	if reason, message = checkCertRefs(s.Certificates); reason != "" {
+		return reason, message
 	}
 	if s.Nodes != nil {
 		if len(*s.Nodes) > MaxNodes {

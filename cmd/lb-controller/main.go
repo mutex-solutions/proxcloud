@@ -7,8 +7,9 @@
 // A poll, not a watch: a full list each turn means a PUT never comes from a half-filled cache. See docs/managed-k8s.md.
 //
 // What a Service's annotations mean is the portal's to say (internal/cloud/lbgw/annotations.go): the controller sends
-// the ones of the prefix proxcloud.io/lb-, and no other, as they are and says the Events the answer carries. The one it reads itself is the node selector, which needs
-// the nodes' labels.
+// the ones of the prefix proxcloud.io/lb-, and no other, as they are and says the Events the answer carries. The two
+// it reads itself need the tenant's API: the node selector (the nodes' labels) and proxcloud.io/lb-tls-secret (the
+// Secrets a Service's TLS ends with: certificates, below).
 package main
 
 import (
@@ -32,6 +33,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
@@ -47,7 +49,9 @@ const (
 	excludeLabel    = "node.kubernetes.io/exclude-from-external-load-balancers"
 	// toBeDeletedTaint is the cluster autoscaler's mark on a node it is about to remove.
 	toBeDeletedTaint = "ToBeDeletedByClusterAutoscaler"
-	component        = "proxcloud-lb-controller"
+	// sentEvery is the least time between two sends of one Secret to the portal.
+	sentEvery = time.Minute
+	component = "proxcloud-lb-controller"
 )
 
 func main() {
@@ -95,12 +99,14 @@ type gateway struct {
 	url, dir string
 }
 
-// protocol1 is req without what protocol 2 added, and without the Services that ask for an internal balancer: a
-// portal of protocol 1 reads no annotation, so it would give such a Service a public address.
+// protocol1 is req without what protocol 2 added, and without the Services a portal of protocol 1 would serve as
+// they must never be served. It reads no annotation, so it would give a Service that asks for an internal balancer
+// a public address, and it would hand the port of a Service that asks for TLS to its members as it comes, without
+// TLS: what the members answer in the clear would be public. No certificate is sent to it either.
 func protocol1(req *lbgw.Request) *lbgw.Request {
 	out := &lbgw.Request{Services: []lbgw.Service{}, Nodes: req.Nodes}
 	for _, s := range req.Services {
-		if lbgw.Internal(s.Annotations) {
+		if lbgw.Internal(s.Annotations) || lbgw.WantsTLS(&s) {
 			continue
 		}
 		s.Annotations, s.SessionAffinity, s.SessionAffinityTimeout, s.Nodes = nil, "", 0, nil
@@ -196,6 +202,8 @@ type tenantAPI interface {
 	PatchService(ctx context.Context, ns, name string, patch map[string]any) error
 	PatchServiceStatus(ctx context.Context, ns, name string, patch map[string]any) error
 	CreateCore(ctx context.Context, plural string, obj map[string]any) error
+	// GetSecret is the controller's one read of a Secret: one name in one namespace (certificates).
+	GetSecret(ctx context.Context, ns, name string) (typ string, data map[string][]byte, found bool, err error)
 }
 
 type controller struct {
@@ -213,6 +221,9 @@ type controller struct {
 	members map[string]bool
 	// hosts are the nodes last sent behind each Service (by UID), for the Event that says they changed.
 	hosts map[string]string
+	// sent is when the Secret of each hash was last sent to the portal (turn).
+	// ponytail: per process; a controller that starts may send a Secret the portal asks for once more.
+	sent map[string]time.Time
 }
 
 // service is what a turn reads of one Service.
@@ -253,7 +264,8 @@ func (c *controller) turn(ctx context.Context) error {
 	nodes, labels, members := readNodes(nodeItems, c.members)
 	c.members = members
 	req := &lbgw.Request{Services: []lbgw.Service{}, Nodes: nodes}
-	hosts := map[string]string{} // by UID: the addresses behind the Service this turn
+	hosts := map[string]string{}                 // by UID: the addresses behind the Service this turn
+	secrets := map[string]lbgw.CertificateData{} // by hash: the Secrets the Services of this turn name, for this turn
 	var owned []*service
 	for _, s := range services {
 		if !s.owned || s.deleting {
@@ -272,10 +284,33 @@ func (c *controller) turn(ctx context.Context) error {
 			s.wire.Nodes = &behind
 		}
 		hosts[s.uid] = strings.Join(behind, ",")
+		s.wire.Certificates = c.certificates(ctx, s, secrets)
 		req.Services = append(req.Services, s.wire)
 		owned = append(owned, s)
 	}
 	ans, err := c.put(ctx, req)
+	if err == nil && len(ans.NeedCertificates) > 0 {
+		// The portal holds no certificate for these hashes: a new Secret, or one that changed. Their Secrets are
+		// sent now, once, and only the ones a Service of this turn names: the portal cannot ask for another.
+		if c.sent == nil {
+			c.sent = map[string]time.Time{}
+		}
+		for _, hash := range ans.NeedCertificates {
+			// Once, and not again within sentEvery whatever the portal answers: a portal that cannot keep what
+			// it was sent does not get a key at every turn.
+			if data, ok := secrets[hash]; ok && time.Since(c.sent[hash]) >= sentEvery {
+				req.CertificateData, c.sent[hash] = append(req.CertificateData, data), time.Now()
+			}
+		}
+		for hash := range c.sent { // a Secret that changed or went: its hash is not asked for again
+			if _, ok := secrets[hash]; !ok {
+				delete(c.sent, hash)
+			}
+		}
+		if len(req.CertificateData) > 0 {
+			ans, err = c.put(ctx, req)
+		}
+	}
 	if err != nil {
 		var rf *lbgw.Refusal
 		if errors.As(err, &rf) {
@@ -302,12 +337,19 @@ func (c *controller) turn(ctx context.Context) error {
 	for _, s := range owned {
 		st, ok := answered[s.uid]
 		if !ok {
-			// Not sent: an internal Service and a portal of protocol 1 (protocol1). It has no address there.
-			if lbgw.Internal(s.wire.Annotations) {
+			// Not sent: an internal Service, or one that asks for TLS, and a portal of protocol 1 (protocol1). It has
+			// no address there.
+			switch {
+			case lbgw.Internal(s.wire.Annotations):
 				if len(s.ingress) > 0 {
 					c.setStatus(ctx, s, "")
 				}
 				c.report(ctx, s, "state", "Warning", lbgw.ReasonInternalNotSupported, lbgw.InternalMessage)
+			case lbgw.WantsTLS(&s.wire):
+				if len(s.ingress) > 0 {
+					c.setStatus(ctx, s, "")
+				}
+				c.report(ctx, s, "state", "Warning", lbgw.ReasonTLSNotAvailable, "The portal is older than this cluster's load balancer controller and ends no TLS: the Service is not served, so that its port is never public without TLS, until the portal is upgraded")
 			}
 			continue
 		}
@@ -398,6 +440,60 @@ func (c *controller) turn(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// certificates reads the Secrets Service s names in proxcloud.io/lb-tls-secret, and answers each one's name and the
+// hash of its content. What it read goes into secrets by that hash, for this turn only: it is sent when the portal
+// asks for the hash, and dropped with the turn.
+//
+// What the controller may read of the tenant's Secrets is decided here, since its kubeconfig could read them all:
+// only a Secret an owned Service names, by a GET of that name (it never lists or watches Secrets), only in the
+// Service's own namespace (a name with a namespace in it is no name: lbgw.TLSSecretNames), and only one of type
+// kubernetes.io/tls: a Secret of another type is not hashed, not kept and not sent. Nothing of a Secret is logged.
+//
+// A Secret that cannot be used is answered with the reason. The portal then leaves the Service as the balancer last
+// served it, or refuses one it never served, and says InvalidCertificate on the Service: a deleted Secret takes no
+// certificate off a balancer. A read the API server forbids (a controller given an identity without "get" on
+// Secrets) is one such reason, and every other Service is served as before.
+func (c *controller) certificates(ctx context.Context, s *service, secrets map[string]lbgw.CertificateData) []lbgw.CertRef {
+	value, set := s.wire.Annotations[lbgw.OwnPrefix+lbgw.KnobTLSSecret]
+	if value = strings.TrimSpace(value); !set || value == "" {
+		return nil
+	}
+	names, ok := lbgw.TLSSecretNames(value)
+	if !ok {
+		return []lbgw.CertRef{{Problem: lbgw.CertBadNames}}
+	}
+	refs := make([]lbgw.CertRef, 0, len(names))
+	for _, name := range names {
+		ref := lbgw.CertRef{Secret: name}
+		typ, data, found, err := c.api.GetSecret(ctx, s.ns, name)
+		var ae *kamajik8s.APIError
+		switch crt, key := data["tls.crt"], data["tls.key"]; {
+		case errors.As(err, &ae) && ae.Status == http.StatusForbidden:
+			ref.Problem = lbgw.CertForbidden
+		case err != nil:
+			c.log.Warn("lb-controller: read a TLS Secret", "service", s.ns+"/"+s.name, "secret", name, "err", err)
+			ref.Problem = lbgw.CertUnreadable
+		case !found:
+			ref.Problem = lbgw.CertNotFound
+		case typ != lbgw.TLSSecretType:
+			ref.Problem = lbgw.CertWrongType
+		case len(crt) == 0 || len(key) == 0:
+			ref.Problem = lbgw.CertIncomplete
+		case len(crt)+len(key) > lbgw.MaxCertBundle:
+			ref.Problem = lbgw.CertTooLarge
+		case !utf8.Valid(crt) || !utf8.Valid(key):
+			// PEM is text. Bytes that are none would not cross to the portal as they are, so the portal could
+			// never hold what this hash names and would ask for it at every turn.
+			ref.Problem = lbgw.CertNotText
+		default:
+			ref.SHA256 = lbgw.SecretHash(crt, key)
+			secrets[ref.SHA256] = lbgw.CertificateData{Certificate: string(crt), PrivateKey: string(key)}
+		}
+		refs = append(refs, ref)
+	}
+	return refs
 }
 
 // readService reads one Service. Owned: type LoadBalancer and class proxcloud.io/lb, or no class in default mode.

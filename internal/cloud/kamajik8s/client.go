@@ -417,6 +417,25 @@ func (c *Client) GetSecretData(ctx context.Context, ns, name string) (map[string
 	return out, nil
 }
 
+// GetSecret reads one Secret by its name: its type and its base64-decoded .data. found is false when there is none.
+// It is the load balancer controller's one read of a Secret (cmd/lb-controller): a GET of a name, never a list.
+func (c *Client) GetSecret(ctx context.Context, ns, name string) (typ string, data map[string][]byte, found bool, err error) {
+	obj, err := c.get(ctx, fmt.Sprintf(pathSecrets, ns), name)
+	if err != nil || obj == nil {
+		return "", nil, false, err
+	}
+	raw, _ := obj["data"].(map[string]any)
+	data = make(map[string][]byte, len(raw))
+	for k, v := range raw {
+		b, err := base64.StdEncoding.DecodeString(strValue(v))
+		if err != nil {
+			return "", nil, false, fmt.Errorf("secret %s/%s: %s is not base64", ns, name, k)
+		}
+		data[k] = b
+	}
+	return strValue(obj["type"]), data, true, nil
+}
+
 // AnnotateSecret adds/overwrites annotations on a secret, leaving everything else alone. A JSON
 // merge-patch rather than an apply: the secret's data belongs to whoever created it (Kamaji, for
 // the kubeconfig secrets proxcloud annotates to trigger a rotation) and must not change owner.

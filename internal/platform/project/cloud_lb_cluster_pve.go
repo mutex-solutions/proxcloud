@@ -199,10 +199,10 @@ func (h *Handler) lbClusterSettings(ctx context.Context, cred *lbgw.Credential, 
 }
 
 // LBClusterState is the gateway's call (lbgw.Portal): services passed the gateway's own checks, nodes did not yet. It
-// refuses with no change while the project is suspended or being deleted (C3), stores the state, starts a converge
-// when there is something to converge (lbPassDue), and answers each Service as the balancer has it now. Nothing is
-// built here.
-func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, services []lbgw.Service, nodes []lbgw.Node) (*lbgw.Answer, error) {
+// refuses with no change while the project is suspended or being deleted (C3), takes the certificates it asked for
+// (lbClusterTLS), stores the state, starts a converge when there is something to converge (lbPassDue), and answers
+// each Service as the balancer has it now. Nothing is built here.
+func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, services []lbgw.Service, nodes []lbgw.Node, certs []lbgw.CertificateData) (*lbgw.Answer, error) {
 	if h.lbGW == nil || h.sdnLock == nil || h.publicIPs == nil || h.pveFor == nil || h.pveFlavors == nil {
 		return nil, &lbgw.Refusal{Status: http.StatusServiceUnavailable, Message: "Load balancers are not configured on this portal"}
 	}
@@ -253,15 +253,27 @@ func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, ser
 			return ans, nil
 		}
 	}
-	st := &lbgw.State{ID: cred.ID, Services: services, Nodes: accepted}
+	// A Service whose TLS is not as it asks stays as the last state had it, or out of the state (lbClusterTLS).
+	stored, keep, held, need, err := h.lbClusterTLS(ctx, cred, services, certs)
+	if err != nil {
+		return nil, err
+	}
+	st := &lbgw.State{ID: cred.ID, Services: stored, Nodes: accepted, CertHashes: keep}
 	if err := h.lbGW.PutState(ctx, st); err != nil {
 		return nil, err
 	}
 	if h.lbPassDue(cred.ID, lbStateDigest(st)) {
 		go h.lbClusterConverge(context.WithoutCancel(ctx), cred.ID, false)
 	}
+	ans.NeedCertificates = need
 	for _, s := range services {
-		ans.Services = append(ans.Services, lbClusterStatus(lb, s.UID))
+		status := lbClusterStatus(lb, s.UID)
+		if said, ok := held[s.UID]; ok && said.State != "" {
+			status = said // not in the state: refused, or waiting for its certificate
+		} else if ok {
+			status.Events = said.Events
+		}
+		ans.Services = append(ans.Services, status)
 	}
 	return ans, nil
 }
@@ -357,6 +369,11 @@ func (h *Handler) lbClusterPass(ctx context.Context, clusterID string, force boo
 	}
 	settled, err := h.lbClusterApply(ctx, es, proj, ext, st)
 	h.lbPasses.Store(clusterID, lbPass{digest: digest, at: time.Now(), settled: settled})
+	if settled { // the appliances serve the state: the certificates nothing names any more are not needed again
+		if perr := h.lbClusterPruneCerts(ctx, clusterID); perr != nil {
+			slog.Warn("load balancer: cluster certificates", "cluster", clusterID, "err", perr)
+		}
+	}
 	return err
 }
 
@@ -485,6 +502,13 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 		}
 	}
 	pn := pveAllowedPublicNetwork(es, proj, lb.PublicNetworkID)
+	var certs map[string]*lbCertificate // the cluster's certificates, read when a Service ends TLS
+	if slices.ContainsFunc(st.Services, func(s lbgw.Service) bool { return len(s.Certificates) > 0 }) {
+		var err error
+		if certs, err = h.lbClusterCertRowsOf(ctx, lb.Cluster.ID); err != nil {
+			return err
+		}
+	}
 	var spec pve.LBSpec
 	var vips []string
 	for i := range svcs {
@@ -502,7 +526,7 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 		if vip == "" {
 			vip = lbSizePlaceholder
 		}
-		trial := lbClusterServiceSpec(spec, w, vip, st.Nodes)
+		trial := lbClusterServiceSpecTLS(spec, w, vip, st.Nodes, lb.Cluster.ID, certs)
 		with := append(slices.Clone(vips), vip)
 		if len(pve.RenderClusterHAProxy(trial, with)) > pve.LBMaxConfig || len(pve.RenderLVS(trial, with)) > pve.LBMaxConfig {
 			refuse(lbgw.ReasonTooLarge, "The load balancer's config would be too large with this Service: use fewer Services, ports or workers")
@@ -527,7 +551,7 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 				continue
 			}
 			s.VIP = ip.IP
-			trial = lbClusterServiceSpec(spec, w, s.VIP, st.Nodes)
+			trial = lbClusterServiceSpecTLS(spec, w, s.VIP, st.Nodes, lb.Cluster.ID, certs)
 		}
 		spec, vips = trial, append(vips, s.VIP)
 	}
@@ -554,6 +578,16 @@ func (h *Handler) lbClusterDesired(ctx context.Context, es *externalservice.Exte
 // made before protocol 2, field for field: its listener names no protocol (it reads its pool's) and its pool has no
 // option set.
 func lbClusterServiceSpec(spec pve.LBSpec, w lbgw.Service, vip string, nodes []string) pve.LBSpec {
+	return lbClusterServiceSpecTLS(spec, w, vip, nodes, "", nil)
+}
+
+// lbClusterServiceSpecTLS is lbClusterServiceSpec with the certificates of cluster clusterID (by the hash of their
+// Secret), for the TCP ports of w that end TLS (lbgw.Options.EndsTLS): such a port is an https listener to an HTTP
+// pool, which adds the two forwarded headers, or with proxcloud.io/lb-backend-protocol: tcp a tls listener to a TCP
+// pool. It presents the certificates of the Service's Secrets in their order, the first one to a client that asks
+// for no name. Its members are spoken to without TLS either way, on the node port. The forwarded-for annotation
+// says nothing on such a port: the backend protocol decides.
+func lbClusterServiceSpecTLS(spec pve.LBSpec, w lbgw.Service, vip string, nodes []string, clusterID string, certs map[string]*lbCertificate) pve.LBSpec {
 	out := pve.LBSpec{Listeners: slices.Clone(spec.Listeners), Pools: slices.Clone(spec.Pools)}
 	o, _, _ := lbgw.ServiceOptions(&w) // the gateway refused what this refuses before the state was stored
 	if w.Nodes != nil {                // the Service's node selector; only the cluster's own workers count (C11)
@@ -569,7 +603,14 @@ func lbClusterServiceSpec(spec pve.LBSpec, w lbgw.Service, vip string, nodes []s
 			pool.Name += "-udp"
 			pool.Protocol, l.Protocol = "udp", "udp"
 		default:
-			if o.XForwardedFor {
+			switch {
+			case o.EndsTLS(&w, p):
+				pool.Protocol, l.Protocol = "http", "https"
+				if o.TLSBackendTCP {
+					pool.Protocol, l.Protocol = "tcp", "tls"
+				}
+				l.Certificates, l.CertFiles = lbClusterCertNames(clusterID, w, certs)
+			case o.XForwardedFor:
 				pool.Protocol, l.Protocol = "http", "http"
 			}
 			pool.ProxyProtocol = o.ProxyVersion != 0
@@ -718,6 +759,11 @@ func (h *Handler) LBReleaseCluster(ctx context.Context, computeID, projectID, cl
 
 func (h *Handler) lbDropState(ctx context.Context, clusterID string) error {
 	h.lbPasses.Delete(clusterID)
+	if h.lbCerts != nil { // the certificates of the cluster's Services, and their sealed keys, go with it
+		if _, err := h.lbCerts.DeleteMany(ctx, pgdoc.M{"projectId": lbClusterCertOwner(clusterID)}); err != nil {
+			return err
+		}
+	}
 	if h.lbGW == nil {
 		return nil
 	}

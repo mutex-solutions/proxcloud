@@ -28,6 +28,11 @@ func TestEveryAnnotationByItsName(t *testing.T) {
 		knob, value string
 		want        Options
 	}{
+		// The three of TLS on the balancer (tls_test.go): the Secrets are the controller's to read, and the other
+		// two say nothing of a Service that came without certificates.
+		{KnobTLSSecret, "web-tls", Options{}},
+		{KnobTLSPorts, "", Options{}},
+		{KnobBackendProtocol, "tcp", Options{TLSBackendTCP: true}},
 		{KnobProxyProtocol, "v1", Options{ProxyVersion: 1}},
 		{KnobProxyProtocol, "v2", Options{ProxyVersion: 2}},
 		{KnobProxyProtocol, "true", Options{ProxyVersion: 2}},
@@ -94,7 +99,7 @@ func TestEveryAnnotationByItsName(t *testing.T) {
 func TestAnnotationsThatAreNotObeyed(t *testing.T) {
 	// Short keys the upstream controller reads and this balancer has no counterpart for, under the own prefix.
 	other := []string{"availability-zone", "class", "flavor-id", "hostname", "keep-floatingip", "lb-method", "load-balancer-address",
-		"load-balancer-id", "network-id", "port-id", "subnet-id", "timeout-tcp-inspect", "tls-secret"}
+		"load-balancer-id", "network-id", "port-id", "subnet-id", "timeout-tcp-inspect", "default-tls-container-ref"}
 	var kv, names []string
 	for _, n := range other {
 		kv, names = append(kv, OwnPrefix+n, "x"), append(names, OwnPrefix+n)
