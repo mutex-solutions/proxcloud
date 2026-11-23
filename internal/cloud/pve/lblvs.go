@@ -342,14 +342,17 @@ const (
 	// use; a running unit reloads (HUP: the table keeps the members that are up), a stopped one starts, and a unit
 	// file a release changed restarts it. Then lvsserving() must hold: only on the answer 0 is the hash recorded. If
 	// it does not, the file in use before goes back and is loaded again; with none before, the unit stops, which
-	// switches forwarding off. The agent creates a file with mode 0666, so every file gets its mode here first.
+	// switches forwarding off. Every file is written beside its place, as <path>.new, and moved in here by a rename
+	// with its owner and mode set, as keepalived's own are (lbKeepalivedApply): the unit reads the table's file and
+	// runs the script at every start, also one systemd makes by itself, and never meets one that is half written.
 	lvsApply = `set -e
 F=` + lvsConfig + `
 U=` + lvsUnit + `
-chown root:root ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` $F.new $U.new
-chmod 0755 ` + lvsNet + `
-chmod 0644 ` + lvsNft + ` ` + lvsSysctl + ` $F.new $U.new
+chown root:root ` + lvsNft + `.new ` + lvsSysctl + `.new ` + lvsNet + `.new $F.new $U.new
+chmod 0755 ` + lvsNet + `.new
+chmod 0644 ` + lvsNft + `.new ` + lvsSysctl + `.new $F.new $U.new
 keepalived -t -f $F.new
+for f in ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + `; do mv -f $f.new $f; done
 how=reload
 if cmp -s $U.new $U; then rm -f $U.new; else mv $U.new $U; systemctl daemon-reload; how=restart; fi
 if [ -f $F ]; then cp $F $F.old; else rm -f $F.old; fi
@@ -372,7 +375,7 @@ exit 1`
 	lvsRemove = `systemctl disable -q --now ` + lvsService + ` 2>/dev/null
 sysctl -q -w net.ipv4.ip_forward=0
 nft delete table ` + lvsTable + ` 2>/dev/null
-rm -f ` + lvsConfig + ` ` + lvsConfig + `.old ` + lvsConfig + `.new ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` ` + lvsUnit + `.new
+rm -f ` + lvsConfig + ` ` + lvsConfig + `.old ` + lvsConfig + `.new ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` ` + lvsUnit + `.new ` + lvsNft + `.new ` + lvsSysctl + `.new ` + lvsNet + `.new
 rmdir ` + lvsDir + ` 2>/dev/null
 systemctl daemon-reload
 [ "$(cat /proc/sys/net/ipv4/ip_forward)" = 0 ] || { echo "forwarding is still on" >&2; exit 1; }
@@ -407,12 +410,10 @@ func (s *Service) PushLVS(ctx context.Context, node string, vmid int, config, te
 	if exit != 0 {
 		return fmt.Errorf("lvs: %s", strings.TrimSpace(stderr))
 	}
+	// Each beside its place: lvsApply moves them in, and compares the unit file with the one in use first (a changed
+	// unit file restarts the service).
 	for _, f := range lvsFiles(tenantIface) {
-		path := f[0]
-		if path == lvsUnit { // compared with the one in use: a changed unit file restarts the service
-			path += ".new"
-		}
-		if err := s.C.GuestWriteFile(ctx, node, vmid, path, f[1]); err != nil {
+		if err := s.C.GuestWriteFile(ctx, node, vmid, f[0]+".new", f[1]); err != nil {
 			return err
 		}
 	}

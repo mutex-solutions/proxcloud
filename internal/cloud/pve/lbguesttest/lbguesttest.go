@@ -59,9 +59,18 @@ var stubs = map[string]string{
 	// "is-active": the units listed in stub/active are. Every other verb succeeds and does nothing.
 	"systemctl": `for a; do u=$a; done
 case " $* " in *" is-active "*) grep -qxF -e "$u" "$R/stub/active" 2>/dev/null ;; esac`,
-	"ss":  `cat "$R/stub/ss" 2>/dev/null`,
-	"ip":  `cat "$R/stub/ip" 2>/dev/null`,
-	"nft": `cat "$R/stub/nft" 2>/dev/null`,
+	// What an apply asks besides: the owner cannot be root's here, so chown does nothing and stat says root; no
+	// package manager runs and every package is installed; sysctl does nothing; keepalived -t takes every config
+	// unless stub/keepalived-refuses holds what it says of one it refuses.
+	"chown":      `:`,
+	"sysctl":     `:`,
+	"pgrep":      `exit 1`,
+	"dpkg-query": `printf 'install ok installed'`,
+	"keepalived": `[ ! -e "$R/stub/keepalived-refuses" ] || { cat "$R/stub/keepalived-refuses" >&2; exit 1; }`,
+	"stat":       `case "$2" in %a:%U:%G) echo "$(PATH=/usr/bin:/bin stat -c %a "$3"):root:root" ;; *) PATH=/usr/bin:/bin exec stat "$@" ;; esac`,
+	"ss":         `cat "$R/stub/ss" 2>/dev/null`,
+	"ip":         `cat "$R/stub/ip" 2>/dev/null`,
+	"nft":        `cat "$R/stub/nft" 2>/dev/null`,
 	// HAProxy's master socket. stub/socat-refuses holds how many more connections it refuses first: a reload.
 	"socat": `cat >/dev/null
 n=$(cat "$R/stub/socat-refuses" 2>/dev/null || echo 0)
@@ -96,7 +105,7 @@ func (a *Agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			for i := range args[1:] {
 				args[i+1] = a.Guest.Script(args[i+1])
 			}
-			exit, out, stderr = a.Guest.Run(a.Shell, `"$@"`, args...)
+			exit, out, stderr = a.Guest.Run(a.Shell, `"$@"`, append([]string{"sh"}, args...)...)
 		}
 		a.runs = append(a.runs, map[string]any{"exited": 1, "exitcode": exit, "out-data": out, "err-data": stderr})
 		write(map[string]any{"pid": len(a.runs)})
@@ -106,6 +115,7 @@ func (a *Agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent/file-write"):
 		a.Writes = append(a.Writes, r.Form.Get("file"))
 		a.Guest.Write(r.Form.Get("file"), r.Form.Get("content"))
+		_ = os.Chmod(a.Guest.Path(r.Form.Get("file")), 0o666) // as the real agent creates a file
 		write(nil)
 	default:
 		a.Guest.tb.Errorf("reached PVE: %s %s", r.Method, r.URL.Path)

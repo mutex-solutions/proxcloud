@@ -558,6 +558,11 @@ systemd-run -q --unit=lb-hc-m2 ip netns exec m2 socat TCP4-LISTEN:32000,fork,reu
 					t.Errorf("%s is %s", path, got)
 				}
 			}
+			// Each was written beside its place and moved in by the apply (the agent rule of guestAgent holds that no
+			// write names a file's place): nothing is left beside them.
+			if got := g.run(ctx, "ls /etc/keepalived/*.new /etc/proxcloud-lb/*.new /usr/local/sbin/*.new /etc/systemd/system/*.new 2>/dev/null | wc -l"); got != "0" {
+				t.Errorf("%s files of the UDP service written beside their place were not moved in", got)
+			}
 			for _, file := range []string{"/etc/keepalived/lvs.conf", "/etc/proxcloud-lb/lvs.nft"} {
 				g.run(ctx, "cp "+file+" /root/kept && echo '# by hand' >> "+file)
 				if st := state(); st.LVSSum == pve.LVSHash(lvs, "ten0") {

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -254,5 +255,130 @@ func TestTrackScriptAsksAgainDuringAReload(t *testing.T) {
 				t.Fatalf("HAProxy runs and listens: exit %d", exit)
 			}
 		})
+	}
+}
+
+// Drill Q1-o2 of v0.11.1-rc.1: keepalived's support files were written onto their place by the guest agent, which
+// empties a file and then fills it, and creates it with mode 0666; the track script, which keepalived runs every
+// second, was seen empty on the lab. Every file of a push is now written beside its place, as <path>.new, and the
+// apply moves it in by a rename with its mode set. Here the product's own pushes run against a guest whose apply
+// scripts are run as text: no write of the agent's names a file's place, each file ends in place, whole, with its
+// mode, nothing stays beside it, and a config keepalived refuses leaves the one in use.
+func TestPushesMoveEveryFileIn(t *testing.T) {
+	for _, shell := range lbguesttest.Shells() {
+		t.Run(shell, func(t *testing.T) {
+			ctx := context.Background()
+			ps, g, a := scriptGuest(t, shell)
+			holder(g)
+			conf, err := RenderKeepalived(keepalivedFor(1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// placed: path is in place with content and mode, and nothing is left beside it.
+			placed := func(when, path, content string, mode os.FileMode) {
+				t.Helper()
+				got, err := os.ReadFile(g.Path(path))
+				st, serr := os.Stat(g.Path(path))
+				if err != nil || serr != nil || string(got) != content || st.Mode().Perm() != mode {
+					t.Errorf("%s: %s is %q with mode %v (%v), want the pushed file with mode %v", when, path, got, st.Mode().Perm(), err, mode)
+				}
+				if _, err := os.Stat(g.Path(path + ".new")); err == nil {
+					t.Errorf("%s: %s.new was not moved in", when, path)
+				}
+			}
+			onlyBeside := func(when string) {
+				t.Helper()
+				for _, w := range a.Writes {
+					if !strings.HasSuffix(w, ".new") {
+						t.Errorf("%s: the agent wrote %s onto its place", when, w)
+					}
+				}
+				a.Writes = nil
+			}
+			// The files of the release before are in place and in use.
+			const before = "of the release before\n"
+			for path := range lbPairFiles("pub0") {
+				g.Write(path, before)
+			}
+			g.Write("/etc/keepalived/keepalived.conf", before)
+
+			// keepalived refuses the config: the one in use stays, and the push says so.
+			g.Stub("keepalived-refuses", "(keepalived.conf.new: Line 3) Unknown keyword\n")
+			if err := ps.PushKeepalived(ctx, "n1", 100, conf, "pub0"); err == nil || !strings.Contains(err.Error(), "Unknown keyword") {
+				t.Fatalf("a config keepalived refuses: %v", err)
+			}
+			placedConf, _ := os.ReadFile(g.Path("/etc/keepalived/keepalived.conf"))
+			if string(placedConf) != before {
+				t.Fatalf("a config keepalived refused replaced the one in use: %q", placedConf)
+			}
+			onlyBeside("a refused config")
+			g.Unstub("keepalived-refuses")
+
+			if err := ps.PushKeepalived(ctx, "n1", 100, conf, "pub0"); err != nil {
+				t.Fatalf("push keepalived: %v", err)
+			}
+			onlyBeside("keepalived's push")
+			placed("keepalived's push", "/etc/keepalived/keepalived.conf", conf, 0o644)
+			for path, content := range lbPairFiles("pub0") {
+				mode := os.FileMode(0o644)
+				if path == lbCheckScript || path == lbNotifyScript {
+					mode = 0o755
+				}
+				placed("keepalived's push", path, content, mode)
+			}
+
+			// The UDP service's files, the same way. Its apply proves that the table holds the config's servers.
+			udp(g, "203.0.113.10 53")
+			lvs, _ := os.ReadFile(g.Path(lvsConfig))
+			g.Write(lvsNft, before)
+			if err := ps.PushLVS(ctx, "n1", 100, string(lvs), "ten0"); err != nil {
+				t.Fatalf("push the UDP service: %v", err)
+			}
+			onlyBeside("the UDP service's push")
+			placed("the UDP service's push", lvsConfig, string(lvs), 0o644)
+			for _, f := range lvsFiles("ten0") {
+				mode := os.FileMode(0o644)
+				if f[0] == lvsNet {
+					mode = 0o755
+				}
+				placed("the UDP service's push", f[0], f[1], mode)
+			}
+			if got := LVSHash(string(lvs), "ten0"); func() VRRPState { st, _ := ps.ReadVRRPState(ctx, "n1", 100, "203.0.113.10"); return st }().LVSSum != got {
+				t.Errorf("after the push the guest's files do not sum to %s", got)
+			}
+		})
+	}
+}
+
+// The notify script writes keepalived's state where the state read finds it, by a rename: no read meets an empty
+// file, and nothing stays beside it.
+func TestNotifyScriptWritesTheStateByARename(t *testing.T) {
+	for _, shell := range lbguesttest.Shells() {
+		g := lbguesttest.New(t)
+		g.Write(lbStateFile, "BACKUP\n")
+		script := lbPairFiles("pub0")[lbNotifyScript]
+		if exit, out, stderr := g.Run(shell, script, "sh", "INSTANCE", "lb", "MASTER", "100"); exit != 0 {
+			t.Fatalf("%s: exit %d %q %q", shell, exit, out, stderr)
+		}
+		got, _ := os.ReadFile(g.Path(lbStateFile))
+		left, _ := filepath.Glob(g.Path(lbStateFile) + ".*")
+		if string(got) != "MASTER\n" || len(left) != 0 || !strings.Contains(script, "mv -f") {
+			t.Fatalf("%s: the state file holds %q, beside it %v", shell, got, left)
+		}
+	}
+}
+
+// keepalived's support files, as every appliance of a pair gets them. Their text is part of the hash a pair's row
+// records (LBPairFilesDigest), so a change to this golden is a keepalived push to every appliance of every pair at
+// the upgrade that carries it: one reload of keepalived each, the standby first. Change it knowingly, and say so in
+// the release's upgrade note. v0.11.1-rc.2 changed the track script (it asks HAProxy's master again during a
+// reload, drill Q1-o1) and the notify script (it writes the state by a rename); the sysctl file and the unit drop-in
+// are those of v0.11.0.
+func TestLBPairFilesGolden(t *testing.T) {
+	golden(t, "lb-pair-files.txt", LBPairFilesDigest("ens19"))
+	files := lbPairFiles("ens19")
+	if got := files[lbSysctlFile] + files[lbDropIn]; got != "net.ipv4.ip_nonlocal_bind = 1\nnet.ipv4.conf.all.rp_filter = 2\nnet.ipv4.conf.default.rp_filter = 2\n"+
+		"[Service]\nExecStartPre=/usr/sbin/ip link set dev ens19 up\n" {
+		t.Errorf("the sysctl file or the unit drop-in changed:\n%s", got)
 	}
 }

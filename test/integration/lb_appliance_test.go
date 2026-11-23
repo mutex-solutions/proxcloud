@@ -95,6 +95,13 @@ func (g *guestAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		write(map[string]any{"exited": 1, "exitcode": run.code, "out-data": run.out, "err-data": run.err})
 	case "POST file-write":
+		// The real agent opens the file, which empties it, and then fills it. So the product writes no file onto
+		// its place, where keepalived runs it or systemd reads it: it writes <path>.new and its apply moves that in
+		// by a rename (drill Q1-o2 of v0.11.1: the track script was seen empty). docker cp replaces a file in one
+		// step and would not show the difference, so the rule is held here, for every push of every test.
+		if !strings.HasSuffix(r.Form.Get("file"), ".new") {
+			g.t.Errorf("the agent was asked to write %s onto its place: a file of the product's is written as <path>.new and moved in", r.Form.Get("file"))
+		}
 		if err := g.c.CopyToContainer(r.Context(), []byte(r.Form.Get("content")), r.Form.Get("file"), 0o666); err != nil {
 			g.t.Errorf("file-write %s: %v", r.Form.Get("file"), err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -553,6 +560,18 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 				if got := g.run(ctx, "stat -c %a:%U:%G "+path); got != fmt.Sprintf("%s:root:root", mode) {
 					t.Errorf("%s is %s", path, got)
 				}
+			}
+			// Each of them was moved in from <path>.new by its apply: none is left behind, and what is in place is
+			// what the product renders (the track and notify scripts of this build, whole).
+			if got := g.run(ctx, "ls /etc/haproxy/*.new /etc/keepalived/*.new /etc/sysctl.d/*.new /etc/systemd/system/keepalived.service.d/*.new /usr/local/sbin/*.new 2>/dev/null | wc -l"); got != "0" {
+				t.Errorf("%s files written beside their place were not moved in:\n%s", got, g.run(ctx, "ls -l /etc/haproxy /etc/keepalived /etc/sysctl.d /etc/systemd/system/keepalived.service.d /usr/local/sbin"))
+			}
+			if got := g.run(ctx, "cat /etc/keepalived/keepalived.conf; for f in /etc/sysctl.d/90-proxcloud-lb.conf /etc/systemd/system/keepalived.service.d/proxcloud.conf /usr/local/sbin/proxcloud-lb-check /usr/local/sbin/proxcloud-lb-notify; do echo $f; cat $f; done"); got != strings.TrimSpace(keepalived+pve.LBPairFilesDigest("lo")) {
+				t.Errorf("keepalived's config and support files on the guest are not the ones the product renders:\n%s", got)
+			}
+			// The notify script writes keepalived's state by a rename too: no temporary file stays beside it.
+			if got := g.run(ctx, "cat /run/proxcloud-lb.state; ls /run/proxcloud-lb.state.* 2>/dev/null | wc -l"); got != "MASTER\n0" {
+				t.Errorf("the state file and what is beside it: %q", got)
 			}
 		})
 	}

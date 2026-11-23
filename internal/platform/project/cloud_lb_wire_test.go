@@ -57,6 +57,21 @@ type lbGuest struct {
 var lbGuestLVSFiles = []string{"/etc/keepalived/lvs.conf", "/etc/proxcloud-lb/lvs.nft", "/etc/proxcloud-lb/lvs.sysctl", "/usr/local/sbin/proxcloud-lvs-net",
 	"/etc/systemd/system/proxcloud-lvs.service"}
 
+// keepalived's config and its support files (pve's lbPairFiles).
+var lbGuestPairFiles = []string{"/etc/keepalived/keepalived.conf", "/usr/local/sbin/proxcloud-lb-check", "/usr/local/sbin/proxcloud-lb-notify",
+	"/etc/sysctl.d/90-proxcloud-lb.conf", "/etc/systemd/system/keepalived.service.d/proxcloud.conf"}
+
+// moveIn is an apply moving in the files the agent wrote beside their place, as <path>.new: every file of the
+// product's reaches its place by a rename (drill Q1-o2 of v0.11.1).
+func (g *lbGuest) moveIn(paths ...string) {
+	for _, path := range paths {
+		if content, ok := g.disk[path+".new"]; ok {
+			g.disk[path] = content
+			delete(g.disk, path+".new")
+		}
+	}
+}
+
 // sum is what sha256sum says of a file of the guest, "-" for one that is not there.
 func (g *lbGuest) sum(path string) string {
 	if content, ok := g.disk[path]; ok {
@@ -199,10 +214,7 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 			delete(g.disk, lbGuestLVSFiles[0]+".new")
 			return lbRun{exit: 1, err: g.lvsFails}
 		}
-		for _, path := range []string{lbGuestLVSFiles[0], lbGuestLVSFiles[4]} {
-			g.disk[path] = g.disk[path+".new"]
-			delete(g.disk, path+".new")
-		}
+		g.moveIn(lbGuestLVSFiles...)
 		g.lvs = true
 		return lbRun{}
 	case strings.Contains(cmd, "systemctl disable -q --now proxcloud-lvs"): // the last UDP listener went
@@ -222,8 +234,7 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 	case strings.Contains(cmd, "keepalived -t"):
 		f.log = append(f.log, vm+" keepalived reload")
 		g.keepalived = true
-		g.disk["/etc/keepalived/keepalived.conf"] = g.disk["/etc/keepalived/keepalived.conf.new"]
-		delete(g.disk, "/etc/keepalived/keepalived.conf.new")
+		g.moveIn(lbGuestPairFiles...)
 		if g.role == "" {
 			g.role = "BACKUP"
 		}
@@ -464,6 +475,11 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if g.disk == nil {
 			g.disk = map[string]string{}
+		}
+		// The agent truncates the file and fills it: no file of the product's is written onto its place, where
+		// keepalived, systemd or HAProxy may be reading it (drill Q1-o2 of v0.11.1).
+		if !strings.HasSuffix(r.Form.Get("file"), ".new") {
+			f.t.Errorf("the agent wrote %s onto its place: a file reaches its place by a rename of <path>.new", r.Form.Get("file"))
 		}
 		g.disk[r.Form.Get("file")] = r.Form.Get("content")
 		f.log = append(f.log, vm+" write "+r.Form.Get("file"))

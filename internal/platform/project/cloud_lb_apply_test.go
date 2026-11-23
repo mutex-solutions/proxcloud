@@ -554,3 +554,51 @@ func TestLBKeepalivedWarnMeansAHandEdit(t *testing.T) {
 		}
 	}
 }
+
+// The upgrade to v0.11.1-rc.2 changes two of keepalived's support files (the track and the notify script) and
+// nothing else an existing pair runs: its row records another hash for keepalived's files, so the first pass gives
+// each appliance keepalived's files and one reload of keepalived, the standby first, and no HAProxy config: that
+// one is the same to the byte, and HAProxy is not reloaded. A pair without a UDP listener is asked nothing of the
+// UDP service. (TestLBPairWithUDPKnowsItsHolder shows the same pass for a pair with one.)
+func TestLBUpgradePushesKeepalivedAlone(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || lb.Status != lbStatusActive {
+		t.Fatalf("first apply: %s %v", lb.Status, err)
+	}
+	config, applied := f.guests["302"].file, lb.AppliedHash
+	// The row as the release before left it: keepalived's files hashed with that release's support files.
+	for i := range lb.Appliances {
+		lb.Appliances[i].KeepalivedHash, lb.Appliances[i].KeepalivedConfHash = "the-hash-of-the-release-before", ""
+	}
+	f.mu.Lock()
+	mark := len(f.log)
+	f.mu.Unlock()
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || lb.Status != lbStatusActive || lb.AppliedHash != applied {
+		t.Fatalf("the first pass after the upgrade: %s %q %v", lb.Status, lb.StatusMessage, err)
+	}
+	var did []string
+	for _, l := range f.log[mark:] {
+		if !strings.Contains(l, " write ") {
+			did = append(did, l)
+		} else if !strings.HasPrefix(strings.SplitN(l, " write ", 2)[1], "/etc/keepalived/") && !slices.Contains(lbGuestPairFiles, strings.TrimSuffix(strings.SplitN(l, " write ", 2)[1], ".new")) {
+			t.Errorf("the first pass after the upgrade wrote %q: only keepalived's config and support files change", l)
+		}
+	}
+	if want := []string{"301 keepalived reload", "302 keepalived reload"}; !slices.Equal(did, want) {
+		t.Fatalf("the first pass after the upgrade did %q, want one keepalived reload per appliance, the standby first: %q", did, want)
+	}
+	if f.guests["301"].file != config || f.guests["302"].file != config || lbHash(lbRender(lb)) != lbHash(config) {
+		t.Fatal("HAProxy's config changed at the upgrade")
+	}
+	for _, a := range lb.Appliances {
+		if a.KeepalivedHash == "the-hash-of-the-release-before" || a.KeepalivedConfHash == "" {
+			t.Fatalf("appliance %s after the pass: %+v", a.ServerID, a)
+		}
+	}
+	mark = len(f.log)
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || len(f.log) != mark {
+		t.Fatalf("the pass after that wrote %q (%v)", f.log[mark:], err)
+	}
+}

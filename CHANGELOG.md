@@ -69,6 +69,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listens on every bind of it, and puts the old file back otherwise; a hash is recorded only for a config that is
   served. The new directives are checked against the HAProxy of both appliance images (3.0 on Debian 13, 3.2 on
   Ubuntu 26.04) by the container test, not on a lab.
+- **From v0.11.1-rc.1: every pair gets keepalived's files once more, and nothing else.** Two files an existing
+  pair runs changed since that candidate: keepalived's track script `/usr/local/sbin/proxcloud-lb-check` (it asks
+  HAProxy's master again during a reload) and its notify script `/usr/local/sbin/proxcloud-lb-notify` (it writes
+  the state by a rename). `keepalived.conf`, the sysctl file and the unit drop-in are the same to the byte and are
+  written again with them. `haproxy.cfg` is the same to the byte and is not pushed, so HAProxy is not reloaded,
+  and the files of a pair's UDP listeners are the same and are not pushed either. The first pass after the upgrade
+  (the first services sync, or the controller's next call for a cluster's pair) gives each appliance of a pair
+  those five files and one `systemctl reload keepalived`, the standby first. A reload keeps keepalived's state, so
+  no address moves (the same reload at the upgrade to rc.1 made no VRRP transition on the lab). A single appliance
+  runs no keepalived and gets nothing. Upgrading from v0.11.0, this is part of the one push described above. A
+  pair with a UDP listener that read `DEGRADED` "Neither appliance holds the address yet" under rc.1 reads `ACTIVE`
+  after that pass, and its cluster's pending Services become ready (see Fixed). Not run on a lab.
 - **Until its push, `GET_HEALTH` of a balancer lists its members as `NOT LOADED`**: the stored config names its
   backends by pool, and the appliance still runs the names of before. The listeners are not affected.
 - **The controller's two fixes need the controller of this release.** A cluster keeps the controller image it has
@@ -629,6 +641,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both appliance images: 20 reloads in a row on the appliance that holds the address, with the script also run
   without a pause meanwhile (over 1000 runs), no failed run and no state change, and a stopped HAProxy still gives
   the address up. Not run on a lab.
+- **A file of an appliance could be read empty or half written during a push.** keepalived's support files (its
+  track and notify scripts, the sysctl file, the unit drop-in) and the UDP service's (the nftables table, its
+  sysctls, its network script) were written onto their place through the guest agent, which empties a file and
+  then fills it and creates it with mode 0666: the track script, which keepalived runs every second, was empty
+  for a moment at every push (seen twice on the lab by a read every 4 s) and writable by anyone until the apply set
+  its mode. Every file of a push is now written beside its place, as `<path>.new`, given its owner and mode there,
+  and moved in by a rename: a reader sees the file of before or the new one. keepalived's notify script writes the
+  state the portal reads the same way. HAProxy's config and the certificate files already went in so. Found by
+  the drill of v0.11.1-rc.1 (Q1-o2). The fakes and the real-guest tests now refuse any write of the agent's that
+  names a file's place.
 
 ## [0.11.1-rc.1] - 2026-11-23
 

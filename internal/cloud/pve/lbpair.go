@@ -166,8 +166,9 @@ func lbPairFiles(publicIface string) map[string]string {
 			"b=$(awk '$1==\"bind\" && $2 !~ /^unix@/{print $2; exit}' " + haproxyConfig + " 2>/dev/null)\n" +
 			"[ -n \"$b\" ] || exit 0\ncase \"$b\" in :*) b=\"0.0.0.0$b\" ;; esac\n" +
 			"ss -Hltn | awk '{print $4}' | grep -qxF -e \"$b\"\n",
-		// keepalived calls it with TYPE NAME STATE PRIORITY; the portal reads the state back.
-		lbNotifyScript: "#!/bin/sh\necho \"$3\" > " + lbStateFile + "\n",
+		// keepalived calls it with TYPE NAME STATE PRIORITY; the portal reads the state back. By a rename, as the
+		// product's own files reach the appliance (lbKeepalivedApply): the read never meets an empty state file.
+		lbNotifyScript: "#!/bin/sh\necho \"$3\" > " + lbStateFile + ".$$ && mv -f " + lbStateFile + ".$$ " + lbStateFile + "\n",
 	}
 }
 
@@ -194,14 +195,21 @@ const (
 	lbSysctlFile  = "/etc/sysctl.d/90-proxcloud-lb.conf"
 	lbDropIn      = "/etc/systemd/system/keepalived.service.d/proxcloud.conf"
 	// lbKeepalivedApply runs after the files are written: keepalived checks the new config before it is moved in, and
-	// a running keepalived reloads, which keeps its state; a stopped one is started. The agent creates a file with
-	// mode 0666, so every file gets its mode here, before anything reads it. It answers 0 only when keepalived
-	// runs after the change: only then is the config's hash recorded.
+	// a running keepalived reloads, which keeps its state; a stopped one is started. It answers 0 only when
+	// keepalived runs after the change: only then is the config's hash recorded.
+	//
+	// Every file is written beside its place, as <path>.new, and moved in here by a rename, with root as its owner
+	// and its final mode already set. The agent's write truncates a file and fills it, and creates it with mode
+	// 0666: written onto its place, the track script keepalived runs every second was empty or half there for a
+	// moment at every push (seen empty twice by a read every 4 s on the lab, drill Q1-o2 of v0.11.1), and writable
+	// by anyone until the chmod. A reader now sees the file of before or the new one. Nothing reads a name that
+	// ends in .new: systemd and sysctl take *.conf only.
 	lbKeepalivedApply = `set -e
 F=/etc/keepalived/keepalived.conf
-chown root:root ` + lbCheckScript + ` ` + lbNotifyScript + ` ` + lbSysctlFile + ` ` + lbDropIn + ` $F.new
-chmod 0755 ` + lbCheckScript + ` ` + lbNotifyScript + `
-chmod 0644 ` + lbSysctlFile + ` ` + lbDropIn + ` $F.new
+chown root:root ` + lbCheckScript + `.new ` + lbNotifyScript + `.new ` + lbSysctlFile + `.new ` + lbDropIn + `.new $F.new
+chmod 0755 ` + lbCheckScript + `.new ` + lbNotifyScript + `.new
+chmod 0644 ` + lbSysctlFile + `.new ` + lbDropIn + `.new $F.new
+for f in ` + lbCheckScript + ` ` + lbNotifyScript + ` ` + lbSysctlFile + ` ` + lbDropIn + `; do mv -f $f.new $f; done
 sysctl -q -p ` + lbSysctlFile + `
 systemctl daemon-reload
 keepalived -t -f $F.new
@@ -246,9 +254,9 @@ func (s *Service) PushKeepalived(ctx context.Context, node string, vmid int, con
 		return fmt.Errorf("keepalived: %s", strings.TrimSpace(stderr))
 	}
 	files := lbPairFiles(publicIface)
-	files["/etc/keepalived/keepalived.conf.new"] = config
-	for _, path := range slices.Sorted(maps.Keys(files)) {
-		if err := s.C.GuestWriteFile(ctx, node, vmid, path, files[path]); err != nil {
+	files["/etc/keepalived/keepalived.conf"] = config
+	for _, path := range slices.Sorted(maps.Keys(files)) { // beside its place: lbKeepalivedApply moves each one in
+		if err := s.C.GuestWriteFile(ctx, node, vmid, path+".new", files[path]); err != nil {
 			return err
 		}
 	}

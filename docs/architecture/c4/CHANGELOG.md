@@ -33,12 +33,23 @@ to a load balancer appliance, how a pass reads a pair, and how the tests run tha
   to `lbWorkerTries` (4) times, 0.2 s apart, before a run fails; at a reload the master's socket refuses connections
   for a moment. The script is one of keepalived's support files, so their digest changes and every pair gets one
   keepalived push at the upgrade.
+- *Files reach their place by a rename (Q1-o2).* `PushKeepalived` and `PushLVS` write every file as `<path>.new`;
+  `lbKeepalivedApply` and `lvsApply` set owner and mode there and move each in (`lvsRemove` clears what a push left
+  beside). The notify script writes `/run/proxcloud-lb.state` by a rename. `testdata/lb-pair-files.txt` is the
+  golden of keepalived's support files: a change to it is a keepalived push to every pair.
 
 **Why:** the drill's pair served and read `DEGRADED` for ever, and no Service made after its first UDP listener got
 its address in its status. Every test read `ACTIVE`, because every fake wrote the read's answer itself: the one
 place the script's text ran was the real-guest test, which read the holder before the first UDP push and after the
 last one only. A row that is wrong by this is put right by the first pass that reads it, since the script is sent
 with every read.
+The other five are what the same drill saw beside it: a promise in both consoles that the upgrade notes
+contradict, a Warning said twice in two wordings, a WARN line at every planned change, one failed run of the track
+script at a reload on the appliance that holds the address, and a script file read empty.
+
+**Upgrade:** an existing pair gets keepalived's five files and one reload of keepalived per appliance, the standby
+first, at its first pass. `haproxy.cfg`, `keepalived.conf` and the UDP service's files are the same to the byte; the
+track and notify scripts are the two files that changed.
 
 **Diagrams:** none changed.
 
