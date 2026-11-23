@@ -195,7 +195,9 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
   - A **pool**: `name`; `protocol`, what its servers are spoken to in, `tcp`, `http` or `udp` (absent: what its first
     listener needs, `http` when none says); `algorithm` `roundrobin`, `leastconn` or `source`; `members`
     (`serverId`, `port`, `weight` 1 to 256); `healthCheck`; `proxyProtocol` (boolean) with `proxyVersion` `1` or
-    `2` (absent: 2), the PROXY header sent to the servers; `sessionPersistence` `{type: "source_ip", timeout}`,
+    `2` (absent: 2), the PROXY header sent to the servers (a health check on the server's own port carries the
+    header too; one with `healthCheck.port` carries none, the same port number included, so that port must answer
+    a plain connection); `sessionPersistence` `{type: "source_ip", timeout}`,
     which keeps a client address on the server it first reached until `timeout` seconds pass without a new
     connection from it (1 to 86400, absent: 10800); `timeoutMemberConnect` and `timeoutMemberData`, milliseconds
     a server may take to accept a connection (absent: 2 s) and a connection to it may stay idle (absent: 60 s),

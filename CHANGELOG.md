@@ -490,6 +490,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row per address with what holds it (the server, the balancer, the Service with its cluster, a kept address, one
   being given back). The tenant dashboard's **Quota & usage** card shows a "Public addresses" tile and the list
   under it. Found by the drill of v0.11.1-rc.1 (Q0b-2) ([api.md](docs/api.md), "Quota usage").
+- **Guides: with the PROXY protocol on, health checks carry the header too.** The API reference, the tenant guide
+  and the integration notes described `proxyProtocol` for the traffic alone. HAProxy sends the PROXY header on a
+  health check as well when the check goes to the member's own port, and sends none on a check with a port of its
+  own (`healthCheck.port`), the same port number included. So a server that accepts connections only with the
+  header is checked correctly as long as the check has no port of its own, and a health endpoint on its own port
+  must answer a plain connection. The texts say so now; nothing in the config changed. Seen by the drill of
+  v0.11.1-rc.1 (Q3-o3) on HAProxy 3.2.25 and, for both cases, on 3.0.11 in a container.
 - **A pair with a UDP listener never read as holding its address.** The state read of an appliance lost "holds the
   address" to a variable of the UDP service's check, on every appliance whose UDP config has a listener. Such a
   pair read `DEGRADED` "Neither appliance holds the address yet" while it served, and a cluster whose pair has a
