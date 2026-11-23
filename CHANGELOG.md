@@ -479,6 +479,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config of a pair that has both appliances did not change by a byte, so no existing pair is pushed because of
   this. Found by the drill of v0.11.1-rc.1 (Q0b-1). In a real guest of both appliance images and in the wire
   fake; not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "One appliance of a pair").
+- **A project could not see which public addresses its quota counts.** The `floatingIps` quota counts every
+  public address of a project: a server's public NIC, a load balancer's address, each Service address of a
+  Kubernetes cluster and each address a cluster keeps. `GET /api/v1/project/{id}/quota-usage` gave the limit with
+  no figure in use, and no list showed the addresses of balancers and Services, so a project at its limit read
+  "Quota exceeded for floatingIps: 5 in use" and could not tell which five. The quota read now answers `network`:
+  `floatingIps` and `networks` as used and limit, by the count the quota check itself uses, and `addresses`, one
+  row per address with what holds it (the server, the balancer, the Service with its cluster, a kept address, one
+  being given back). The tenant dashboard's **Quota & usage** card shows a "Public addresses" tile and the list
+  under it. Found by the drill of v0.11.1-rc.1 (Q0b-2) ([api.md](docs/api.md), "Quota usage").
 - **A pair with a UDP listener never read as holding its address.** The state read of an appliance lost "holds the
   address" to a variable of the UDP service's check, on every appliance whose UDP config has a listener. Such a
   pair read `DEGRADED` "Neither appliance holds the address yet" while it served, and a cluster whose pair has a

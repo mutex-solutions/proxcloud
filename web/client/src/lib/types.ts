@@ -155,6 +155,19 @@ export type QuotaMetric = {
   limit: number
 }
 
+// One public address the floatingIps quota counts, with what holds it: a server's public NIC, a load balancer's
+// own address, a Service of a Kubernetes cluster, an address a cluster keeps, or one on its way back to the pool.
+export type QuotaAddress = {
+  ip: string
+  networkId?: string
+  kind: "server" | "loadBalancer" | "service" | "kept" | "releasing"
+  name?: string
+  resourceId?: string
+  cluster?: string
+  clusterName?: string
+  since?: string
+}
+
 export type ProjectQuotaUsage = {
   serviceId: string
   region: string
@@ -173,6 +186,12 @@ export type ProjectQuotaUsage = {
       gigabytes?: QuotaMetric
       snapshots?: QuotaMetric
     }>
+  }
+  // The network leg (a Proxmox project): the public addresses in use next to their limit, and which they are.
+  network?: {
+    networks?: QuotaMetric
+    floatingIps?: QuotaMetric
+    addresses?: QuotaAddress[]
   }
   gpu: {
     limits: Record<string, number>

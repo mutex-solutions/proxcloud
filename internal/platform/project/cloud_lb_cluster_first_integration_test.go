@@ -179,6 +179,22 @@ func testLBClusterFirstAppliance(t *testing.T) {
 	if slices.ContainsFunc(f.rules["301"], func(r pve.FirewallRule) bool { return r.Proto == "vrrp" }) {
 		t.Fatalf("an appliance with no peer lets VRRP in: %+v", f.rules["301"])
 	}
+	// What the quota read says of these two addresses (drill Q0b-2): as many in use as the quota gate counts, each
+	// named by its Service and its cluster.
+	rows, err := h.cloud.FindAllByProjectID(ctx, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nq, err := h.pveNetworkQuota(ctx, "p1", "svc", map[string]any{"floatingIps": 5}, rows)
+	counted, cerr := h.publicIPs.CountForProject(ctx, "svc", "p1")
+	if err != nil || cerr != nil || counted != 2 || nq.FloatingIPs != (quotaMetric{Used: 2, Limit: 5}) || len(nq.Addresses) != 2 {
+		t.Fatalf("quota of two Service addresses: %+v, counted %d (%v %v)", nq, counted, err, cerr)
+	}
+	for i, name := range []string{"default/web", "default/dns"} {
+		if a := nq.Addresses[i]; a.IP != lb.VIPs[i] || a.Kind != "service" || a.Name != name || a.Cluster != "c1" || a.ResourceID != ext || a.Since == nil {
+			t.Fatalf("address %d of the quota: %+v, want Service %s of cluster c1 on %s", i, a, name, lb.VIPs[i])
+		}
+	}
 
 	// A Service added while it is alone is served, and one removed gives its address back.
 	state(web, dns, svc("api", "TCP", 81, 30081))

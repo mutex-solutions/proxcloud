@@ -387,6 +387,20 @@ secrets of the tokens it made (see the credentials route). It goes without
 [proxmox-permissions.md](proxmox-permissions.md#portal-token-script) and
 [Managed services](proxmox-permissions.md#managed-services).
 
+Quota usage: `GET /api/v1/project/{id}/quota-usage` answers the limits that apply to the project (`limits`) and,
+for a Proxmox project, what is in use against them: `compute` (`instances`, `cores`, `ramMb`), `storage`
+(`gigabytes`) and `network`. Each figure is `{used, reserved, limit}`, with a negative `limit` for none.
+`network.floatingIps` is the count the quota check itself uses (the project's public address allocations, not the
+`FLOATING_IP` rows, which the metering derives from them a sample later), and `network.addresses` lists those
+addresses, so the list is always as long as `used`: each has `ip`, `networkId`, `since`, a `kind` and what holds
+it. `server`: a server's public NIC (`name`, `resourceId` = the server). `loadBalancer`: a load balancer's own
+address (`name`, `resourceId` = the balancer). `service`: a Service of a Kubernetes cluster (`name` =
+`namespace/name`, `cluster`, `clusterName`, `resourceId` = the cluster's balancer). `kept`: an address a cluster
+keeps after its Service went. `releasing`: a Service's address on its way back to the pool, which counts until the
+appliances have let go of it. A refusal such as `Quota exceeded for floatingIps: 5 in use, 1 requested, limit 5`
+names the same five. `network.networks` is the networks figure. When the allocations cannot be read the answer
+carries no `network` and a line in `warnings`.
+
 Cloud service selection: the project cloud routes (`/project/{id}/cloud`, its
 actions and deletes, `quota-usage`, `gpu-capacity`, `public-networks`, the S3
 key routes) run against the service named by the `x-service-id` header (with

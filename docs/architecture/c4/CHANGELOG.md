@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: the public addresses in use, in the quota read
+
+**What changed:** no new component, container, listener or relation; no architecture impact. One read gains a
+leg.
+
+- `internal/platform/project/quota_usage.go`: `GET /project/{id}/quota-usage` answers `network` for a Proxmox
+  project: `networks` and `floatingIps` as `{used, limit}`, and `addresses`, one row per public address with what
+  holds it (`quotaAddresses`: a server, a balancer, a Service of a cluster with the cluster's name, a kept
+  address, one being given back). `publicip_pve.go`: `PublicIPRepo.PublicForProject` lists what `CountForProject`
+  counts, by the one filter both use.
+- Tenant console: `QuotaOverview` (`quota-overview.tsx`, on the dashboard) shows a "Public addresses" tile and
+  the list "Public addresses in use".
+
+**Why:** drill Q0b of v0.11.1-rc.1 (Q0b-2). The `floatingIps` quota counts a balancer's address and every
+Service address of a cluster, the quota read gave the limit with no figure in use, and the `FLOATING_IP` list was
+empty: a project at five of five read "Quota exceeded for floatingIps: 5 in use" and had no page that showed the
+five.
+
+**Diagrams updated:** none.
+
 ## 2026-11-23: the first appliance of a pair serves
 
 **What changed:** no new component, container, listener or relation. One appliance of a pair now runs keepalived

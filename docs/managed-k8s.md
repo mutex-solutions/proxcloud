@@ -912,7 +912,9 @@ call for its own cluster, and minting it again rotates it.
   caps the cluster's Services**: a project's public addresses count together (its servers', its own load balancers',
   each Service's), and the quota the seed gives a provider is 5 (`deploy/seed`, `floatingIps`), so a cluster in
   default mode gets at most five Services of type LoadBalancer, each NGINX Gateway Fabric Gateway included; the next
-  one stays `<pending>` with a Warning `QuotaExceeded`. Raise it for one project on its admin **Quota** tab
+  one stays `<pending>` with a Warning `QuotaExceeded`. Which addresses count is on the tenant's dashboard ("Public
+  addresses in use": each Service by its name and cluster, each kept address, each balancer and server) and in
+  `GET /api/v1/project/{id}/quota-usage` (`network`). Raise it for one project on its admin **Quota** tab
   (`PUT /api/v1/admin/project/{id}/quota`), or for every project without a quota of its own in the compute
   provider's default quota (`config.provisioning.quota`, `PUT /api/v1/admin/service/{id}/quota`); the refused Service
   gets its address within about a minute. What HA means is

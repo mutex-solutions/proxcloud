@@ -94,10 +94,20 @@ func (p PublicIP) OwnedByLB() bool { return strings.HasPrefix(p.ServerID, lbOwne
 // vnet (zones without DHCP) and costs nothing.
 func (p PublicIP) IsPublic() bool { return p.NIC == publicNIC }
 
-// CountForProject is the floatingIps quota usage: public NICs only, not the net0 addresses
+// publicOfProject selects what the floatingIps quota counts: public NICs only, not the net0 addresses
 // allocated on the project's own vnets.
+func publicOfProject(serviceID, projectID string) pgdoc.M {
+	return pgdoc.M{"serviceId": serviceID, "projectId": projectID, "nic": publicNIC}
+}
+
+// CountForProject is the floatingIps quota usage.
 func (r *PublicIPRepo) CountForProject(ctx context.Context, serviceID, projectID string) (int64, error) {
-	return r.col.Count(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID, "nic": publicNIC})
+	return r.col.Count(ctx, publicOfProject(serviceID, projectID))
+}
+
+// PublicForProject lists the addresses CountForProject counts, for the tenant who asks which ones they are.
+func (r *PublicIPRepo) PublicForProject(ctx context.Context, serviceID, projectID string) ([]PublicIP, error) {
+	return r.find(ctx, publicOfProject(serviceID, projectID))
 }
 
 // ReleaseNIC frees the address the server holds on one NIC.

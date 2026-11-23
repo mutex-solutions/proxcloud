@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react"
-import { CircuitBoard, Cpu, HardDrive, MemoryStick, Server, TriangleAlert } from "lucide-react"
+import { CircuitBoard, Cpu, Globe, HardDrive, MemoryStick, Server, TriangleAlert } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import {
@@ -10,7 +10,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import type { CloudScope } from "@/lib/api"
-import type { GpuCapacityUsage, ProjectQuotaUsage, QuotaMetric } from "@/lib/types"
+import type { GpuCapacityUsage, ProjectQuotaUsage, QuotaAddress, QuotaMetric } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 type QuotaOverviewProps = {
@@ -159,6 +159,24 @@ function MetricTile({ label, metric, icon: Icon, format = formatCount, details =
   )
 }
 
+// addressHolder says what holds a public address: the quota counts a balancer's address, each Service address of
+// a cluster and each address a cluster keeps, and none of them shows in the servers list.
+function addressHolder(a: QuotaAddress): string {
+  const cluster = a.clusterName || a.cluster || "a cluster"
+  switch (a.kind) {
+    case "loadBalancer":
+      return `Load balancer ${a.name || a.resourceId || ""}`.trim()
+    case "service":
+      return `Service ${a.name || ""} of cluster ${cluster}`.replace("  ", " ")
+    case "kept":
+      return `Kept by cluster ${cluster}`
+    case "releasing":
+      return `Being given back by cluster ${cluster}`
+    default:
+      return `Server ${a.name || a.resourceId || ""}`.trim()
+  }
+}
+
 // gpuMetrics builds the per-model GPU tiles. When the operator enabled GPU capacity for the
 // project (gpuCapacity.visible), the tiles list the FULL region GPU catalog — every model the
 // region offers, not only the ones this project already uses — and a model with no project limit
@@ -270,6 +288,7 @@ export function QuotaOverview({
   ].filter((detail): detail is string => !!detail)
   const gpu = gpuMetrics(data, gpuCapacity)
   const warnings = data?.warnings ?? []
+  const addresses = data?.network?.addresses ?? []
 
   return (
     <Card className="min-w-0">
@@ -329,6 +348,9 @@ export function QuotaOverview({
                 format={formatGiB}
                 details={storageDetails}
               />
+              {data.network?.floatingIps ? (
+                <MetricTile label="Public addresses" metric={data.network.floatingIps} icon={Globe} />
+              ) : null}
               {gpu.map((item) => (
                 <MetricTile
                   key={item.key}
@@ -339,6 +361,24 @@ export function QuotaOverview({
                 />
               ))}
             </div>
+
+            {addresses.length > 0 ? (
+              <div className="mt-4">
+                <h3 className="text-sm font-medium">Public addresses in use</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Each one counts in the public address quota: a server&apos;s public IP, a load balancer&apos;s address,
+                  and every address of a Kubernetes cluster&apos;s Services.
+                </p>
+                <ul className="mt-2 divide-y rounded-lg border text-sm" aria-label="Public addresses in use">
+                  {addresses.map((a) => (
+                    <li key={a.ip} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-3 py-2">
+                      <span className="font-mono tabular-nums">{a.ip}</span>
+                      <span className="min-w-0 break-words text-muted-foreground">{addressHolder(a)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
 
             {warnings.length > 0 ? (
               <div className="mt-4 flex gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm text-warning-text" role="status">

@@ -139,6 +139,10 @@ func TestCloudServiceSelection(t *testing.T) {
 		if code != http.StatusOK || json.Unmarshal([]byte(body), &env) != nil || env.Data.ServiceID != "pve" {
 			t.Fatalf("quota-usage: %d %s, want the Proxmox service", code, body)
 		}
+		// The network leg: the public addresses in use next to their limit, and which they are (none here).
+		if !strings.Contains(body, `"floatingIps":{"used":0,"reserved":0,"limit":`) || !strings.Contains(body, `"addresses":[]`) {
+			t.Fatalf("quota-usage: %s, want the public addresses in use and their list", body)
+		}
 		code, body = do(http.MethodGet, "/project/p1/public-networks", "", "")
 		if code != http.StatusOK || !strings.Contains(body, `"vmbr1"`) {
 			t.Fatalf("public-networks: %d %s, want the Proxmox public network", code, body)

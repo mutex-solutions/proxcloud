@@ -113,3 +113,16 @@ test("volume dialog requires an enabled storage type before creating", async ({ 
   await expect(dialog.getByText("This volume fits the current quota snapshot.")).toBeVisible()
   await expect(dialog.getByRole("button", { name: "Create volume" })).toBeEnabled()
 })
+
+test("dashboard shows the public addresses in use and what holds each one", async ({ page }) => {
+  // The project is at its limit of five, and one of the five is a server's: the tile says how many, the list which.
+  await page.goto(`${project}/dashboard`)
+  const meter = page.getByRole("meter", { name: "Public addresses quota" })
+  await expect(meter).toHaveAttribute("aria-valuetext", "5 used of 5")
+  const list = page.getByRole("list", { name: "Public addresses in use" })
+  await expect(list.getByRole("listitem")).toHaveCount(5)
+  await expect(list.getByRole("listitem").filter({ hasText: "203.0.113.10" })).toContainText("Service default/web of cluster prod")
+  await expect(list.getByRole("listitem").filter({ hasText: "203.0.113.12" })).toContainText("Kept by cluster prod")
+  await expect(list.getByRole("listitem").filter({ hasText: "203.0.113.14" })).toContainText("Load balancer shop")
+  await expect(list.getByRole("listitem").filter({ hasText: "203.0.113.20" })).toContainText("Server bastion")
+})
