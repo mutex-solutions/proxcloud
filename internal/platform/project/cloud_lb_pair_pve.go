@@ -441,7 +441,15 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			continue
 		}
 		vmid, _ := strconv.Atoi(a.ServerID)
-		if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip, certs...); err == nil {
+		// The certificate files are asked for only where the row records the config that names them. An appliance
+		// with a change still to take does not hold a new certificate's file yet, and that is no fault: read as
+		// one, every change of certificate logged a config not served, and it pushed the holder after the standby
+		// had refused the config.
+		var named []pve.LBCertFile
+		if a.HAProxyHash == hhash {
+			named = certs
+		}
+		if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip, named...); err == nil {
 			seen[a] = st
 			// The pushes below go to the standby first by what the appliance says now, not by what the row said at
 			// the pass before: the address may have moved since, and a row v0.11.1-rc.1 wrote for a pair with a UDP

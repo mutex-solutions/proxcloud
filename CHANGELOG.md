@@ -507,7 +507,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would write, and be root's alone (mode 0600 in a directory of mode 0700). One that is not is written again in
   that pass, while HAProxy still serves from memory, at the cost of one reload and no connection; a mode or an
   owner that is wrong is put right the same way, and the pass logs at WARN which file and what was wrong. On a
-  pair only the appliance concerned is pushed, the standby first. The read is the command the pass already sent:
+  pair only the appliance concerned is pushed, the standby first, and an appliance that has a change of config
+  still to take is asked after it took it: a certificate new to it is no damage, and a config the standby
+  refuses still reaches no other appliance. The read is the command the pass already sent:
   a balancer without a TLS listener runs the command of before and is asked nothing more. What the appliance
   answers of a file is its SHA-256, which the portal compares; nothing of a certificate or a key, and not that
   digest either, is in a command line, a log line, an error or a status text. Found by the drill of v0.11.1-rc.1

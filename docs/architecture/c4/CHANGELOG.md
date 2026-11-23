@@ -18,7 +18,10 @@ answers one thing more, and a push writes fewer files.
   the command is the one of before, to the byte.
 - `internal/platform/project/cloud_lb_pve.go` (`lbApplyLocked`) and `cloud_lb_pair_pve.go` (`lbApplyPair`): a
   balancer in line whose certificate files are not as a push leaves them takes the existing branch that pushes
-  again; on a pair only the appliance concerned, the standby first.
+  again; on a pair only the appliance concerned, the standby first. An appliance of a pair is asked for the
+  files only when its row records the config that names them: one with a change still to take does not hold a
+  new certificate's file yet, and read as a fault that pushed the holder after the standby had refused the
+  config (found in review, `TestLBCertificatesReachThePair`).
 
 - `lbtls.go` (`pushCertificates`): the command that makes the directory private ends in `certstate`, and the push
   writes only the files `lbCertFaults` names. The order (certificates, then the config, then its check, swap and

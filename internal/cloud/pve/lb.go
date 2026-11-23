@@ -873,7 +873,7 @@ func (s *Service) HAProxyServing(ctx context.Context, node string, vmid int, has
 	case out == "":
 		return false, "", fmt.Errorf("haproxy state: exit %d %s", exit, strings.TrimSpace(stderr))
 	}
-	return false, out, nil
+	return false, line, nil // serving's one line, never what certstate printed: this text is logged and shown
 }
 
 // SetVMInboundPorts makes the VM's direct firewall rules open exactly these TCP ports. New rules go

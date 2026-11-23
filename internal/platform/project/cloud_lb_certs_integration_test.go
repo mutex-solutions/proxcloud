@@ -292,6 +292,40 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 		t.Errorf("the first certificate is not the new one:\n%s", last)
 	}
 
+	// A change of certificate is no damage. An appliance does not hold a new certificate's file until its push, and
+	// the state read asks an appliance only for the files of the config its row records for it. Read as a fault, a
+	// change of certificate logged a config not served on both appliances, and the appliance that holds the address
+	// was pushed after the standby had refused the config. Here the standby (301) refuses a config with a
+	// certificate new to both: the holder (302) gets nothing, and takes it at the pass after, when 301 does.
+	logMu.Lock()
+	logMark := logs.Len()
+	logMu.Unlock()
+	if err := update(c1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := h.pveLBApply(ctx, es, proj, "lb-abc"); err != nil || status != lbStatusActive {
+		t.Fatalf("apply without the second certificate: %s %v", status, err)
+	}
+	f.set("301", func(g *lbGuest) { g.applyFails = "[ALERT] (1) : refused on the standby" })
+	if err := update(c2.ID, c1.ID); err != nil {
+		t.Fatal(err)
+	}
+	mark = len(wire)
+	if status, err := h.pveLBApply(ctx, es, proj, "lb-abc"); err != nil || status != lbStatusError || !slices.Equal(events(mark), steps("301", c2.File)) {
+		t.Fatalf("a config with a new certificate that the standby refuses: %s %v, wrote\n%s", status, err, strings.Join(events(mark), "\n"))
+	}
+	f.set("301", func(g *lbGuest) { g.applyFails = "" })
+	mark = len(wire)
+	taken := append([]string{"301 certificate directory", "301 write config", "301 reload"}, steps("302", c2.File)...)
+	if status, err := h.pveLBApply(ctx, es, proj, "lb-abc"); err != nil || status != lbStatusActive || !slices.Equal(events(mark), taken) {
+		t.Fatalf("the pass after the standby took it: %s %v, wrote\n%s", status, err, strings.Join(events(mark), "\n"))
+	}
+	logMu.Lock()
+	if out := logs.String()[logMark:]; strings.Contains(out, "does not run what its row records") {
+		t.Errorf("a change of certificate was logged as a config that is not served:\n%s", out)
+	}
+	logMu.Unlock()
+
 	// A certificate file damaged on an appliance while HAProxy serves from memory (drill Q3-1 of v0.11.1-rc.1: the
 	// row read ACTIVE, nothing pushed, and HAProxy would have refused its whole config at its next start). The state
 	// read of the pass asks for the files of the config in the command it already sent; the appliance whose files
