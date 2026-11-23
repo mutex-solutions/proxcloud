@@ -216,13 +216,13 @@ func TestLBClusterStateConverges(t *testing.T) {
 	}
 
 	// Protocol 2: the Service gains UDP on its port's number (the same node port, as Kubernetes allocates it), an
-	// affinity and a method by OCCM's name. It keeps its one address; the UDP port goes to the appliances' LVS
+	// affinity and a method. It keeps its one address; the UDP port goes to the appliances' LVS
 	// and opens in the firewall beside the TCP one; nothing of it reaches HAProxy. When the UDP port goes, so does
 	// the UDP service of both appliances, and the config is the one it was.
 	tcpOnly := f.files[len(f.files)-1]
 	mixed := svc("a", 80, 30080)
 	mixed.Ports = append(mixed.Ports, lbgw.Port{Protocol: "UDP", Port: 80, NodePort: 30080})
-	mixed.SessionAffinity, mixed.Annotations = "ClientIP", map[string]string{"loadbalancer.openstack.org/lb-method": "LEAST_CONNECTIONS"}
+	mixed.SessionAffinity, mixed.Annotations = "ClientIP", map[string]string{"proxcloud.io/lb-method": "LEAST_CONNECTIONS"}
 	if _, reason, msg := lbgw.CheckService(&mixed, 0, lbgw.Protocol); reason != "" {
 		t.Fatalf("the gateway refuses the mixed Service: %s %s", reason, msg)
 	}

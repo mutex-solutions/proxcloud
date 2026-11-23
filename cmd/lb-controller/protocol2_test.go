@@ -105,8 +105,9 @@ func TestNodeRuleOfUpstream(t *testing.T) {
 	}
 }
 
-// What a protocol 2 controller sends of a Service: its annotations of the load balancer's names as they are, its
-// affinity, and behind a node selector (by either name) only the nodes it selects.
+// What a protocol 2 controller sends of a Service: its annotations of the prefix proxcloud.io/lb- as they are and no
+// other annotation, its affinity, and behind a node selector only the nodes it selects. An annotation of another
+// prefix, the upstream controller's too, stays in the cluster and selects nothing.
 func TestServiceWireOfProtocol2(t *testing.T) {
 	ctx := context.Background()
 	f := &fakeTenant{services: map[string]map[string]any{}}
@@ -115,12 +116,13 @@ func TestServiceWireOfProtocol2(t *testing.T) {
 	dns["sessionAffinityConfig"] = map[string]any{"clientIP": map[string]any{"timeoutSeconds": float64(600)}}
 	f.add("kube-system", "dns", "u-1", "2026-11-23T10:00:00Z", dns)
 	annotate(f.svc("kube-system", "dns"), "proxcloud.io/lb-node-selector", "pool=edge, public",
-		"loadbalancer.openstack.org/lb-method", "SOURCE_IP", "service.beta.kubernetes.io/openstack-internal-load-balancer", "false",
-		"kubectl.kubernetes.io/last-applied-configuration", "{}", "proxcloud.io/owner", "me")
+		"proxcloud.io/lb-method", "SOURCE_IP", "proxcloud.io/lb-internal", "false", "proxcloud.io/lb-flavor-id", "f1",
+		"loadbalancer.example.org/lb-method", "LEAST_CONNECTIONS", "service.beta.kubernetes.io/example-internal-load-balancer", "true",
+		"kubectl.kubernetes.io/last-applied-configuration", "{}", "proxcloud.io/owner", "me", "proxcloud.io/lbx", "1")
 	web := lbSpec(Class, tcp(80, 30080))
 	web["sessionAffinity"] = "None"
-	f.add("web", "alias", "u-2", "2026-11-23T10:01:00Z", web)
-	annotate(f.svc("web", "alias"), "loadbalancer.openstack.org/node-selector", "pool=core")
+	f.add("web", "foreign", "u-2", "2026-11-23T10:01:00Z", web)
+	annotate(f.svc("web", "foreign"), "loadbalancer.example.org/node-selector", "pool=core")
 	f.add("web", "nowhere", "u-3", "2026-11-23T10:02:00Z", lbSpec(Class, tcp(80, 30081)))
 	annotate(f.svc("web", "nowhere"), "proxcloud.io/lb-node-selector", "pool=gone")
 	f.add("web", "plain", "u-4", "2026-11-23T10:03:00Z", lbSpec(Class, tcp(80, 30082)))
@@ -140,8 +142,8 @@ func TestServiceWireOfProtocol2(t *testing.T) {
 	if len(s) != 4 || len(g.last.Nodes) != 4 {
 		t.Fatalf("sent %+v", g.last)
 	}
-	wantAnn := map[string]string{"proxcloud.io/lb-node-selector": "pool=edge, public", "loadbalancer.openstack.org/lb-method": "SOURCE_IP",
-		"service.beta.kubernetes.io/openstack-internal-load-balancer": "false"}
+	wantAnn := map[string]string{"proxcloud.io/lb-node-selector": "pool=edge, public", "proxcloud.io/lb-method": "SOURCE_IP",
+		"proxcloud.io/lb-internal": "false", "proxcloud.io/lb-flavor-id": "f1"}
 	if len(s[0].Annotations) != len(wantAnn) {
 		t.Fatalf("annotations sent: %v", s[0].Annotations)
 	}
@@ -156,8 +158,8 @@ func TestServiceWireOfProtocol2(t *testing.T) {
 	if s[0].Nodes == nil || !slices.Equal(*s[0].Nodes, []string{"10.0.0.11"}) {
 		t.Errorf("selector pool=edge, public: %v", s[0].Nodes)
 	}
-	if s[1].Nodes == nil || !slices.Equal(*s[1].Nodes, []string{"10.0.0.13"}) || s[1].SessionAffinity != "" {
-		t.Errorf("selector by OCCM's name: %+v", s[1])
+	if s[1].Nodes != nil || s[1].Annotations != nil || s[1].SessionAffinity != "" {
+		t.Errorf("a selector of another prefix was read or sent: %+v", s[1])
 	}
 	if s[2].Nodes == nil || len(*s[2].Nodes) != 0 {
 		t.Errorf("a selector that matches no node is an empty list, not none: %v", s[2].Nodes)
@@ -184,9 +186,9 @@ func TestEventsOfProtocol2(t *testing.T) {
 	ctx := context.Background()
 	f := &fakeTenant{services: map[string]map[string]any{}}
 	f.add("web", "shop", "u-1", "2026-11-23T10:00:00Z", lbSpec(Class, tcp(80, 30080)))
-	annotate(f.svc("web", "shop"), "loadbalancer.openstack.org/proxy-protocol", "true", "loadbalancer.openstack.org/flavor-id", "f1")
+	annotate(f.svc("web", "shop"), "proxcloud.io/lb-proxy-protocol", "v1", "proxcloud.io/lb-flavor-id", "f1")
 	f.nodes = []map[string]any{node("w1", "10.0.0.11", nil)}
-	notSupported := lbgw.Event{Type: "Warning", Reason: lbgw.ReasonAnnotationNotSupported, Message: "The load balancer does not obey these annotations: loadbalancer.openstack.org/flavor-id"}
+	notSupported := lbgw.Event{Type: "Warning", Reason: lbgw.ReasonAnnotationNotSupported, Message: "The load balancer does not obey these annotations: proxcloud.io/lb-flavor-id"}
 	events := []lbgw.Event{notSupported}
 	g := &gatewayFake{answer: func(s lbgw.Service) lbgw.ServiceStatus {
 		return lbgw.ServiceStatus{UID: s.UID, State: lbgw.StateReady, Address: "203.0.113.5", IPMode: "Proxy", Events: events}
@@ -206,7 +208,7 @@ func TestEventsOfProtocol2(t *testing.T) {
 	if ev := f.events[1]; ev["type"] != "Warning" || ev["message"] != notSupported.Message {
 		t.Fatalf("the portal's Event: %v", ev)
 	}
-	// OCCM's annotation is not the controller's to read: the portal said Proxy.
+	// The version is not the controller's to read: the portal said Proxy.
 	if ing := ingress(f.svc("web", "shop")); len(ing) != 1 || ing[0].(map[string]any)["ipMode"] != "Proxy" {
 		t.Fatalf("ingress %v", ing)
 	}
@@ -463,6 +465,14 @@ func TestAnnotationsThatCannotBeReadKeepTheAddress(t *testing.T) {
 	served := func() bool { return hasIngress(ingress(f.svc("web", "shop")), "203.0.113.5") }
 	if got, err := turn(); err != nil || !slices.Equal(got, []string{"shop:EnsuredLoadBalancer"}) || !served() {
 		t.Fatalf("a plain Service: %v %v", got, err)
+	}
+
+	// Annotations of other prefixes, a request for an internal balancer in another controller's words among them:
+	// none leaves the cluster, none is spoken of, and the Service keeps its public address. The guide says so.
+	annotate(f.svc("web", "shop"), "loadbalancer.example.org/proxy-protocol", "true", "loadbalancer.example.org/flavor-id", "f1",
+		"service.beta.kubernetes.io/example-internal-load-balancer", "true", "example.com/blob", strings.Repeat("x", 200<<10))
+	if got, err := turn(); err != nil || len(got) != 0 || !served() || len(portal.got) != 1 || portal.got[0].Annotations != nil {
+		t.Fatalf("annotations of other prefixes: events %v %v, served %v, the portal got %+v", got, err, served(), portal.got)
 	}
 
 	leftover := []string{

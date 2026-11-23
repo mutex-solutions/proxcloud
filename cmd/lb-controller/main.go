@@ -7,7 +7,7 @@
 // A poll, not a watch: a full list each turn means a PUT never comes from a half-filled cache. See docs/managed-k8s.md.
 //
 // What a Service's annotations mean is the portal's to say (internal/cloud/lbgw/annotations.go): the controller sends
-// them as they are and says the Events the answer carries. The one it reads itself is the node selector, which needs
+// the ones of the prefix proxcloud.io/lb-, and no other, as they are and says the Events the answer carries. The one it reads itself is the node selector, which needs
 // the nodes' labels.
 package main
 
@@ -307,8 +307,7 @@ func (c *controller) turn(ctx context.Context) error {
 				if len(s.ingress) > 0 {
 					c.setStatus(ctx, s, "")
 				}
-				c.report(ctx, s, "state", "Warning", lbgw.ReasonInternalNotSupported,
-					"The load balancer's addresses are public: for an address inside the cluster's network set loadBalancerClass proxcloud.io/internal and remove "+lbgw.InternalAnnotation)
+				c.report(ctx, s, "state", "Warning", lbgw.ReasonInternalNotSupported, lbgw.InternalMessage)
 			}
 			continue
 		}
@@ -319,7 +318,7 @@ func (c *controller) turn(ctx context.Context) error {
 		// a provider returns a status once its balancer is provisioned, an error before (k8s.io/cloud-provider
 		// controllers/service/controller.go, syncLoadBalancerIfNeeded, v0.34.0). An address already written stays
 		// while a later change is building, and goes when the portal names none (refused, or given back).
-		if st.IPMode != "" { // protocol 2: the portal read the annotations, the alias too
+		if st.IPMode != "" { // protocol 2: the portal read the annotations
 			s.proxy = st.IPMode == "Proxy"
 		}
 		if st.State == lbgw.StateReady || st.Address == "" || hasIngress(s.ingress, st.Address) {

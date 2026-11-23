@@ -1,16 +1,18 @@
 package lbgw
 
 // annotations.go: what a Service's annotations and session affinity ask of its listeners and pools. The table is read
-// here, in the portal, and not in the controller: the controller sends the annotations of the two prefixes, and no
-// other, as they are (protocol 2), so a new knob ships with the portal and needs no new controller in every cluster (C12). The one
-// the controller reads itself is the node selector, which needs the nodes' labels (Annotation).
+// here, in the portal, and not in the controller: the controller sends the annotations of the prefix
+// proxcloud.io/lb-, and no other, as they are (protocol 2), so a new knob ships with the portal and needs no new
+// controller in every cluster (C12). The one the controller reads itself is the node selector, which needs the nodes'
+// labels (Annotation).
 //
-// The own name is proxcloud.io/lb-<knob>. A loadbalancer.openstack.org/<alias> annotation is obeyed where it means the
-// same thing here as in OCCM, the cloud controller manager those names belong to (v1.37.1, loadbalancer.go:61-107
-// and its guide to Services of type LoadBalancer; the repository and every line this file follows are named in
-// docs/architecture/c4/CHANGELOG.md, 2026-11-23), so a manifest moved from a cluster that runs OCCM behaves the same
-// without an edit. When both names are set the own one wins. Every other annotation of the two prefixes is named in
-// one Warning Event (AnnotationNotSupported): nothing is ignored in silence.
+// A knob has one name, proxcloud.io/lb-<knob>, and no other name is read: the product defines its own. What a knob
+// does follows OCCM, the upstream cloud controller manager most charts for a private cloud are written for (v1.37.1,
+// loadbalancer.go:61-107 and its guide to Services of type LoadBalancer; the repository and every line this file
+// follows are named in docs/architecture/c4/CHANGELOG.md, 2026-11-23), so a manifest written for it needs its
+// annotations renamed and nothing else (docs/managed-k8s.md has the table). An annotation of the prefix that is no
+// knob is named in one Warning Event (AnnotationNotSupported); an annotation of any other prefix is not the load
+// balancer's: it is not sent, not counted and not spoken of.
 
 import (
 	"fmt"
@@ -20,11 +22,10 @@ import (
 )
 
 const (
-	OwnPrefix   = "proxcloud.io/lb-"
-	AliasPrefix = "loadbalancer.openstack.org/"
-	// InternalAnnotation asks OCCM for a balancer without a floating IP. Here the pair's addresses are public, so a
-	// Service that sets it to true is refused and never gets one (ReasonInternalNotSupported).
-	InternalAnnotation = "service.beta.kubernetes.io/openstack-internal-load-balancer"
+	OwnPrefix = "proxcloud.io/lb-"
+	// InternalAnnotation asks for a balancer without a public address. The pair's addresses are public, so a Service
+	// that sets it to true is refused and never gets one (ReasonInternalNotSupported).
+	InternalAnnotation = OwnPrefix + KnobInternal
 
 	// MaxAnnotationValue: an annotation with a longer value is not read (Read). How many annotations a Service has
 	// is no limit of its own: the table looks up the names it knows and names the others, and the size of the whole
@@ -42,6 +43,9 @@ const (
 	// A timeout is one second to a day, in milliseconds (pve lbMinTimeout, lbMaxTimeout).
 	minTimeout, maxTimeout = 1000, 24 * 3600 * 1000
 )
+
+// InternalMessage is what a Service that asks for an internal balancer is told, by the gateway and by the controller.
+const InternalMessage = "The load balancer's addresses are public: for an address inside the cluster's network set loadBalancerClass proxcloud.io/internal and remove " + InternalAnnotation
 
 // Reasons of the Events a Service's annotations raise.
 const (
@@ -69,27 +73,21 @@ const (
 	KnobHealthMaxRetriesDown = "health-monitor-max-retries-down"
 	KnobNodeSelector         = "node-selector"
 	KnobKeepAddress          = "keep-address"
+	KnobInternal             = "internal"
 )
 
-// aliases: knob -> the name after loadbalancer.openstack.org/ that means the same.
-var aliases = map[string]string{
-	KnobProxyProtocol: "proxy-protocol", KnobMethod: "lb-method", KnobConnectionLimit: "connection-limit",
-	KnobTimeoutClientData: "timeout-client-data", KnobTimeoutMemberConnect: "timeout-member-connect",
-	KnobTimeoutMemberData: "timeout-member-data", KnobXForwardedFor: "x-forwarded-for",
-	KnobEnableHealthMonitor: "enable-health-monitor", KnobHealthDelay: "health-monitor-delay",
-	KnobHealthTimeout: "health-monitor-timeout", KnobHealthMaxRetries: "health-monitor-max-retries",
-	KnobHealthMaxRetriesDown: "health-monitor-max-retries-down", KnobNodeSelector: "node-selector",
-	KnobKeepAddress: "keep-floatingip",
-}
+// knobs: every name that is read after proxcloud.io/lb-.
+var knobs = []string{KnobProxyProtocol, KnobMethod, KnobConnectionLimit, KnobTimeoutClientData, KnobTimeoutMemberConnect,
+	KnobTimeoutMemberData, KnobXForwardedFor, KnobEnableHealthMonitor, KnobHealthDelay, KnobHealthTimeout,
+	KnobHealthMaxRetries, KnobHealthMaxRetriesDown, KnobNodeSelector, KnobKeepAddress, KnobInternal}
 
-// methods: both spellings of an algorithm, under either name.
+// methods: an algorithm by its short name and by the name OCCM's values spell it with, so a renamed annotation keeps
+// its value.
 var methods = map[string]string{"roundrobin": "roundrobin", "leastconn": "leastconn", "source": "source",
 	"round_robin": "roundrobin", "least_connections": "leastconn", "source_ip": "source"}
 
-// SentAnnotation: the controller sends a Service's annotation of this name.
-func SentAnnotation(key string) bool {
-	return strings.HasPrefix(key, OwnPrefix) || strings.HasPrefix(key, AliasPrefix) || key == InternalAnnotation
-}
+// SentAnnotation: the controller sends a Service's annotation of this name, and of no other.
+func SentAnnotation(key string) bool { return strings.HasPrefix(key, OwnPrefix) }
 
 // Internal: the Service asks for a balancer without a public address (InternalAnnotation is a true boolean). The
 // gateway refuses it; the controller keeps it out of a request to a portal that reads no annotations.
@@ -125,17 +123,10 @@ func named(names []string) string {
 	return strings.Join(names, ", ")
 }
 
-// Annotation reads one knob: the own name, then OCCM's alias. name is the annotation that was read.
+// Annotation reads one knob. name is the annotation that was read.
 func Annotation(ann map[string]string, knob string) (value, name string, ok bool) {
-	if v, ok := ann[OwnPrefix+knob]; ok {
-		return strings.TrimSpace(v), OwnPrefix + knob, true
-	}
-	if a := aliases[knob]; a != "" {
-		if v, ok := ann[AliasPrefix+a]; ok {
-			return strings.TrimSpace(v), AliasPrefix + a, true
-		}
-	}
-	return "", "", false
+	v, ok := ann[OwnPrefix+knob]
+	return strings.TrimSpace(v), OwnPrefix + knob, ok
 }
 
 // Event is something the controller says on the Service, in the answer's order.
@@ -184,12 +175,13 @@ func (o Options) IPMode(s *Service) string {
 // not understood is not obeyed and named in one Event (InvalidAnnotation), and the Service is served with the
 // default, since refusing it would give its address back over a typing mistake, or over an annotation left on a
 // Service that v0.11.0 served without reading it. The forwarded-for header asked for next to PROXY is not obeyed in
-// the same way. The number of annotations refuses nothing either: the ones the table does not know are named
+// the same way. The internal annotation with a value that is no boolean is named so too: the Service is not internal
+// then, and its owner is told. The number of annotations refuses nothing either: the ones the table does not know are named
 // (AnnotationNotSupported).
 func ServiceOptions(s *Service) (o Options, reason, message string) {
 	// Read before anything is left out: a Service that asks for an internal balancer never gets a public address.
 	if Internal(s.Annotations) {
-		return o, ReasonInternalNotSupported, "The load balancer's addresses are public: for an address inside the cluster's network set loadBalancerClass proxcloud.io/internal and remove " + InternalAnnotation
+		return o, ReasonInternalNotSupported, InternalMessage
 	}
 	ann, long := Read(s.Annotations)
 	var invalid []string
@@ -228,19 +220,13 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 		o.ProxyVersion = 2
 	}
 	if v, name, ok := Annotation(ann, KnobProxyProtocol); ok {
-		// The own name's "true" is version 2, as it shipped in v0.11.0; OCCM's "true" is version 1
-		// (loadbalancer.go:531-542).
-		own := strings.HasPrefix(name, OwnPrefix)
+		// "true" is version 2, as it shipped in v0.11.0. OCCM's "true" is version 1 (loadbalancer.go:531-542): a
+		// manifest renamed from it says v1 to keep that.
 		switch strings.ToLower(v) {
 		case "v1":
 			o.ProxyVersion = 1
-		case "v2":
+		case "v2", "true":
 			o.ProxyVersion = 2
-		case "true":
-			o.ProxyVersion = 1
-			if own {
-				o.ProxyVersion = 2
-			}
 		case "false", "":
 			o.ProxyVersion = 0
 		default:
@@ -263,8 +249,8 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 	o.TimeoutMemberData = number(KnobTimeoutMemberData, minTimeout, maxTimeout, ms)
 	// The forwarded-for header and PROXY both carry the client's address, and OCCM takes a Service that asks for both
 	// as an error (loadbalancer.go:1627-1631): its sync fails and a balancer that exists stays as it was, address
-	// and all. A refusal here would give the address back instead, also of a Service that v0.11.0 served with its
-	// own PROXY annotation and the other name left on it. So PROXY holds, and the header is not added.
+	// and all. A refusal here would give the address back instead, over two annotations that contradict each other.
+	// So PROXY holds, and the header is not added.
 	if on, _ := flag(KnobXForwardedFor); on && o.ProxyVersion != 0 {
 		_, name, _ := Annotation(ann, KnobXForwardedFor)
 		invalid = append(invalid, name+": the forwarded-for header is not added next to the PROXY header, which carries the client's address already; set one of the two")
@@ -283,6 +269,7 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 	o.HealthTimeout = number(KnobHealthTimeout, 1, 300, "1 to 300 seconds")
 	o.HealthRise = number(KnobHealthMaxRetries, 1, 10, "1 to 10 checks")
 	o.HealthFall = number(KnobHealthMaxRetriesDown, 1, 10, "1 to 10 checks")
+	flag(KnobInternal) // true never comes this far; a value that is no boolean is named
 	if o.KeepAddress, _ = flag(KnobKeepAddress); o.KeepAddress {
 		_, name, _ := Annotation(ann, KnobKeepAddress)
 		o.Events = append(o.Events, Event{Type: "Warning", Reason: ReasonKeepAddressNotServed,
@@ -301,19 +288,10 @@ func ServiceOptions(s *Service) (o Options, reason, message string) {
 		return Options{}, ReasonInvalid, "sessionAffinity must be None or ClientIP"
 	}
 
-	// What is left: names of the two prefixes that are no knob here.
-	known := map[string]bool{InternalAnnotation: true}
-	for knob, alias := range aliases {
-		known[OwnPrefix+knob], known[AliasPrefix+alias] = true, true
-	}
-	// OCCM's fourth timeout has no counterpart: HAProxy inspects nothing of a TCP stream here. Its default, 0,
-	// asks for nothing.
-	if strings.TrimSpace(ann[AliasPrefix+"timeout-tcp-inspect"]) == "0" {
-		known[AliasPrefix+"timeout-tcp-inspect"] = true
-	}
+	// What is left: names of the prefix that are no knob here.
 	var unknown []string
 	for k := range ann {
-		if !known[k] {
+		if !slices.Contains(knobs, strings.TrimPrefix(k, OwnPrefix)) {
 			unknown = append(unknown, k)
 		}
 	}

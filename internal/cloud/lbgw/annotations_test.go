@@ -21,72 +21,56 @@ func annotated(kv ...string) *Service {
 	return &s
 }
 
-// Every knob, by its own name and by OCCM's name, gives the same option; the one exception is the PROXY
-// header's "true", version 2 under the own name (as v0.11.0 shipped it) and version 1 under OCCM's (as the
-// OCCM reads it).
-func TestEveryAnnotationByOwnNameAndByAlias(t *testing.T) {
+// Every knob gives its option under its one name, proxcloud.io/lb-<knob>. "true" for the PROXY header is version 2,
+// as v0.11.0 shipped it.
+func TestEveryAnnotationByItsName(t *testing.T) {
 	cases := []struct {
-		knob, alias, value string
-		want               Options
+		knob, value string
+		want        Options
 	}{
-		{KnobProxyProtocol, "proxy-protocol", "v1", Options{ProxyVersion: 1}},
-		{KnobProxyProtocol, "proxy-protocol", "v2", Options{ProxyVersion: 2}},
-		{KnobProxyProtocol, "proxy-protocol", "false", Options{}},
-		{KnobMethod, "lb-method", "leastconn", Options{Method: "leastconn"}},
-		{KnobMethod, "lb-method", "LEAST_CONNECTIONS", Options{Method: "leastconn"}},
-		{KnobMethod, "lb-method", "ROUND_ROBIN", Options{Method: "roundrobin"}},
-		{KnobMethod, "lb-method", "SOURCE_IP", Options{Method: "source"}},
-		{KnobMethod, "lb-method", "source", Options{Method: "source"}},
-		{KnobConnectionLimit, "connection-limit", "500", Options{ConnectionLimit: 500}},
-		{KnobConnectionLimit, "connection-limit", "-1", Options{}},
-		{KnobTimeoutClientData, "timeout-client-data", "50000", Options{TimeoutClientData: 50000}},
-		{KnobTimeoutMemberConnect, "timeout-member-connect", "5000", Options{TimeoutMemberConnect: 5000}},
-		{KnobTimeoutMemberData, "timeout-member-data", "60000", Options{TimeoutMemberData: 60000}},
-		{KnobXForwardedFor, "x-forwarded-for", "true", Options{XForwardedFor: true}},
-		{KnobEnableHealthMonitor, "enable-health-monitor", "false", Options{NoMonitor: true}},
-		{KnobEnableHealthMonitor, "enable-health-monitor", "true", Options{}},
-		{KnobHealthDelay, "health-monitor-delay", "5", Options{HealthDelay: 5}},
-		{KnobHealthTimeout, "health-monitor-timeout", "3", Options{HealthTimeout: 3}},
-		{KnobHealthMaxRetries, "health-monitor-max-retries", "1", Options{HealthRise: 1}},
-		{KnobHealthMaxRetriesDown, "health-monitor-max-retries-down", "3", Options{HealthFall: 3}},
-		{KnobNodeSelector, "node-selector", "pool=edge, public", Options{}}, // the controller's to read: nothing here, and no Event
+		{KnobProxyProtocol, "v1", Options{ProxyVersion: 1}},
+		{KnobProxyProtocol, "v2", Options{ProxyVersion: 2}},
+		{KnobProxyProtocol, "true", Options{ProxyVersion: 2}},
+		{KnobProxyProtocol, "false", Options{}},
+		{KnobMethod, "leastconn", Options{Method: "leastconn"}},
+		{KnobMethod, "LEAST_CONNECTIONS", Options{Method: "leastconn"}},
+		{KnobMethod, "ROUND_ROBIN", Options{Method: "roundrobin"}},
+		{KnobMethod, "SOURCE_IP", Options{Method: "source"}},
+		{KnobMethod, "source", Options{Method: "source"}},
+		{KnobConnectionLimit, "500", Options{ConnectionLimit: 500}},
+		{KnobConnectionLimit, "-1", Options{}},
+		{KnobTimeoutClientData, "50000", Options{TimeoutClientData: 50000}},
+		{KnobTimeoutMemberConnect, "5000", Options{TimeoutMemberConnect: 5000}},
+		{KnobTimeoutMemberData, "60000", Options{TimeoutMemberData: 60000}},
+		{KnobXForwardedFor, "true", Options{XForwardedFor: true}},
+		{KnobEnableHealthMonitor, "false", Options{NoMonitor: true}},
+		{KnobEnableHealthMonitor, "true", Options{}},
+		{KnobHealthDelay, "5", Options{HealthDelay: 5}},
+		{KnobHealthTimeout, "3", Options{HealthTimeout: 3}},
+		{KnobHealthMaxRetries, "1", Options{HealthRise: 1}},
+		{KnobHealthMaxRetriesDown, "3", Options{HealthFall: 3}},
+		{KnobNodeSelector, "pool=edge, public", Options{}}, // the controller's to read: nothing here, and no Event
+		{KnobInternal, "false", Options{}},                 // "true" refuses: TestAnnotationsThatRefuseTheService
 	}
 	seen := map[string]bool{}
 	for _, c := range cases {
 		seen[c.knob] = true
-		if aliases[c.knob] != c.alias {
-			t.Errorf("%s: alias %q, want %q", c.knob, aliases[c.knob], c.alias)
-		}
-		for _, name := range []string{OwnPrefix + c.knob, AliasPrefix + c.alias} {
-			got, reason, msg := ServiceOptions(annotated(name, c.value))
-			if reason != "" || !reflect.DeepEqual(got, c.want) {
-				t.Errorf("%s: %q = %+v (%s %s), want %+v", name, c.value, got, reason, msg, c.want)
-			}
+		got, reason, msg := ServiceOptions(annotated(OwnPrefix+c.knob, c.value))
+		if reason != "" || !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: %q = %+v (%s %s), want %+v", c.knob, c.value, got, reason, msg, c.want)
 		}
 	}
-	// keep-address is read under both names and says that it is not served yet.
+	// keep-address is read and says that it is not served yet.
 	seen[KnobKeepAddress] = true
-	for _, name := range []string{OwnPrefix + "keep-address", AliasPrefix + "keep-floatingip"} {
-		got, reason, _ := ServiceOptions(annotated(name, "true"))
-		if reason != "" || !got.KeepAddress || len(got.Events) != 1 || got.Events[0].Reason != ReasonKeepAddressNotServed || !strings.Contains(got.Events[0].Message, name) {
-			t.Errorf("%s: %+v %s", name, got, reason)
-		}
+	got, reason, _ := ServiceOptions(annotated(OwnPrefix+"keep-address", "true"))
+	if reason != "" || !got.KeepAddress || len(got.Events) != 1 || got.Events[0].Reason != ReasonKeepAddressNotServed ||
+		!strings.Contains(got.Events[0].Message, OwnPrefix+"keep-address") {
+		t.Errorf("keep-address: %+v %s", got, reason)
 	}
-	for knob := range aliases {
+	for _, knob := range knobs {
 		if !seen[knob] {
 			t.Errorf("knob %s has no case here", knob)
 		}
-	}
-
-	// "true": version 2 by the own name, version 1 by OCCM's. With both set the own name wins.
-	if o, _, _ := ServiceOptions(annotated(OwnPrefix+"proxy-protocol", "true")); o.ProxyVersion != 2 {
-		t.Errorf("own true = %+v", o)
-	}
-	if o, _, _ := ServiceOptions(annotated(AliasPrefix+"proxy-protocol", "true")); o.ProxyVersion != 1 {
-		t.Errorf("alias true = %+v", o)
-	}
-	if o, _, _ := ServiceOptions(annotated(OwnPrefix+"method", "source", AliasPrefix+"lb-method", "LEAST_CONNECTIONS")); o.Method != "source" {
-		t.Errorf("both names: %+v, want the own one", o)
 	}
 	// Protocol 1's flag is version 2, and an annotation the portal reads itself overrides it.
 	old := web("u")
@@ -105,17 +89,16 @@ func TestEveryAnnotationByOwnNameAndByAlias(t *testing.T) {
 	}
 }
 
-// What is not obeyed is said: every other annotation of the two prefixes in ONE Event, a value that is not understood
-// in another, an unknown method under OCCM's own reason. The Service is served.
+// What is not obeyed is said: every other annotation of the prefix in ONE Event, a value that is not understood in
+// another, an unknown method under its own reason. The Service is served.
 func TestAnnotationsThatAreNotObeyed(t *testing.T) {
-	other := []string{"availability-zone", "class", "default-tls-container-ref", "enable-ingress-hostname", "flavor-id", "floating-network-id",
-		"floating-subnet", "floating-subnet-id", "floating-subnet-tags", "hostname", "listener-tags", "load-balancer-address", "load-balancer-id",
-		"load-balancer-tags", "member-subnet-id", "network-id", "pool-tags", "port-id", "subnet-id", "timeout-tcp-inspect"}
+	// Short keys the upstream controller reads and this balancer has no counterpart for, under the own prefix.
+	other := []string{"availability-zone", "class", "flavor-id", "hostname", "keep-floatingip", "lb-method", "load-balancer-address",
+		"load-balancer-id", "network-id", "port-id", "subnet-id", "timeout-tcp-inspect", "tls-secret"}
 	var kv, names []string
 	for _, n := range other {
-		kv, names = append(kv, AliasPrefix+n, "x"), append(names, AliasPrefix+n)
+		kv, names = append(kv, OwnPrefix+n, "x"), append(names, OwnPrefix+n)
 	}
-	kv, names = append(kv, OwnPrefix+"tls-secret", "web-tls"), append(names, OwnPrefix+"tls-secret")
 	s := annotated(kv...)
 	o, reason, _ := ServiceOptions(s)
 	if reason != "" || len(o.Events) != 1 || o.Events[0].Reason != ReasonAnnotationNotSupported || o.Events[0].Type != "Warning" {
@@ -125,15 +108,13 @@ func TestAnnotationsThatAreNotObeyed(t *testing.T) {
 	if !strings.Contains(o.Events[0].Message, strings.Join(names, ", ")) {
 		t.Fatalf("the Event does not name them all, sorted: %s", o.Events[0].Message)
 	}
-	// OCCM's inspect timeout at its default asks for nothing.
-	if o, _, _ := ServiceOptions(annotated(AliasPrefix+"timeout-tcp-inspect", "0")); len(o.Events) != 0 {
-		t.Errorf("timeout-tcp-inspect 0: %+v", o.Events)
-	}
 
 	for name, value := range map[string]string{
-		OwnPrefix + "connection-limit": "0", AliasPrefix + "connection-limit": "20001", OwnPrefix + "timeout-client-data": "999",
-		AliasPrefix + "timeout-member-data": "fast", OwnPrefix + "health-monitor-delay": "301", AliasPrefix + "health-monitor-max-retries": "11",
-		OwnPrefix + "x-forwarded-for": "yes", AliasPrefix + "proxy-protocol": "v3", OwnPrefix + "enable-health-monitor": "off",
+		OwnPrefix + "connection-limit": "0", OwnPrefix + "timeout-client-data": "999", OwnPrefix + "timeout-member-data": "fast",
+		OwnPrefix + "health-monitor-delay": "301", OwnPrefix + "health-monitor-max-retries": "11", OwnPrefix + "x-forwarded-for": "yes",
+		OwnPrefix + "proxy-protocol": "v3", OwnPrefix + "enable-health-monitor": "off",
+		// Not a boolean: the Service is not internal, it is served, and its owner is told.
+		InternalAnnotation: "yes",
 	} {
 		o, reason, _ := ServiceOptions(annotated(name, value))
 		if reason != "" || len(o.Events) != 1 || o.Events[0].Reason != ReasonInvalidAnnotation || !strings.Contains(o.Events[0].Message, name) ||
@@ -145,17 +126,47 @@ func TestAnnotationsThatAreNotObeyed(t *testing.T) {
 			t.Errorf("%s=%s set something: %+v", name, value, o)
 		}
 	}
-	for _, name := range []string{OwnPrefix + "method", AliasPrefix + "lb-method"} {
-		o, reason, _ := ServiceOptions(annotated(name, "SOURCE_IP_PORT"))
-		if reason != "" || o.Method != "" || len(o.Events) != 1 || o.Events[0].Reason != ReasonLbMethodUnknown {
-			t.Errorf("%s: %s %+v", name, reason, o)
-		}
+	o, reason, _ = ServiceOptions(annotated(OwnPrefix+"method", "SOURCE_IP_PORT"))
+	if reason != "" || o.Method != "" || len(o.Events) != 1 || o.Events[0].Reason != ReasonLbMethodUnknown {
+		t.Errorf("method: %s %+v", reason, o)
 	}
 	// Policy Local keeps its check, and says so.
-	local := annotated(AliasPrefix+"enable-health-monitor", "false")
+	local := annotated(OwnPrefix+"enable-health-monitor", "false")
 	local.ExternalTrafficPolicy = "Local"
 	if o, _, _ := ServiceOptions(local); o.NoMonitor || len(o.Events) != 1 || o.Events[0].Reason != ReasonInvalidAnnotation {
 		t.Errorf("policy Local without a check: %+v", o)
+	}
+}
+
+// No name but proxcloud.io/lb-<knob> is read. Annotations of any other prefix, the upstream controller's among them,
+// are not the load balancer's: nothing is obeyed, nothing is named, no Event is raised, and they are not sent
+// (SentAnnotation). That holds for the upstream request for an internal balancer too: such a Service is served with a
+// public address until it is renamed, which the guide says in so many words.
+func TestOnlyTheOwnPrefixIsRead(t *testing.T) {
+	// The rule is by prefix, so any prefix stands for every one that is not the product's.
+	const other, otherInternal = "loadbalancer.example.org/", "service.beta.kubernetes.io/example-internal-load-balancer"
+	foreign := map[string]string{other + "proxy-protocol": "true", other + "lb-method": "SOURCE_IP", other + "x-forwarded-for": "true",
+		other + "connection-limit": "5", other + "flavor-id": "f1", otherInternal: "true", "example.com/owner": "team",
+		"proxcloud.io/lbx-method": "source", "proxcloud.io/internal": "true"}
+	for k := range foreign {
+		if SentAnnotation(k) {
+			t.Errorf("%s would be sent", k)
+		}
+	}
+	if !SentAnnotation(InternalAnnotation) || InternalAnnotation != "proxcloud.io/lb-internal" {
+		t.Errorf("the internal annotation is %s", InternalAnnotation)
+	}
+	// A request that carries them all the same (a controller of another make, or by hand): as if they were not there.
+	s := web("u")
+	s.Annotations = foreign
+	if o, reason, msg := ServiceOptions(&s); reason != "" || !reflect.DeepEqual(o, Options{}) {
+		t.Errorf("annotations of other prefixes: %+v %s %s, want nothing obeyed, nothing said and no refusal", o, reason, msg)
+	}
+	if read, long := Read(foreign); len(read) != 0 || len(long) != 0 {
+		t.Errorf("read %v, too long %v", read, long)
+	}
+	if Internal(foreign) {
+		t.Error("an internal request under another name is taken for the own one")
 	}
 }
 
@@ -171,12 +182,16 @@ func TestAnnotationsThatRefuseTheService(t *testing.T) {
 	}{
 		"internal":            {annotated(InternalAnnotation, "true"), ReasonInternalNotSupported},
 		"internal, as a bool": {annotated(InternalAnnotation, "True"), ReasonInternalNotSupported},
+		"internal, spaces":    {annotated(InternalAnnotation, " 1\n"), ReasonInternalNotSupported},
 		"affinity timeout":    {&affinity, ReasonInvalid},
 		"affinity type":       {&odd, ReasonInvalid},
 	} {
 		if _, reason, msg := ServiceOptions(c.s); reason != c.want || msg == "" {
 			t.Errorf("%s: %q %q, want %s", name, reason, msg, c.want)
 		}
+	}
+	if _, _, msg := ServiceOptions(annotated(InternalAnnotation, "true")); !strings.Contains(msg, "remove proxcloud.io/lb-internal") {
+		t.Errorf("the refusal does not name the annotation to remove: %s", msg)
 	}
 	if _, reason, _ := ServiceOptions(annotated(InternalAnnotation, "false")); reason != "" {
 		t.Errorf("internal false: %s", reason)
@@ -204,7 +219,7 @@ func TestProtocol2(t *testing.T) {
 	internal := web("internal")
 	internal.Annotations = map[string]string{InternalAnnotation: "true"}
 	proxy := web("proxy")
-	proxy.Annotations = map[string]string{AliasPrefix + "proxy-protocol": "true", AliasPrefix + "flavor-id": "f1", AliasPrefix + "lb-method": "SOURCE_IP_PORT"}
+	proxy.Annotations = map[string]string{OwnPrefix + "proxy-protocol": "v1", OwnPrefix + "flavor-id": "f1", OwnPrefix + "method": "SOURCE_IP_PORT"}
 	sel := web("selected")
 	sel.Nodes = &[]string{"10.0.0.11"}
 	badSel := web("badsel")
@@ -235,7 +250,7 @@ func TestProtocol2(t *testing.T) {
 		t.Errorf("ipMode: %+v", by)
 	}
 	if ev := by["proxy"].Events; len(ev) != 2 || ev[0].Reason != ReasonLbMethodUnknown || ev[1].Reason != ReasonAnnotationNotSupported ||
-		!strings.Contains(ev[1].Message, AliasPrefix+"flavor-id") {
+		!strings.Contains(ev[1].Message, OwnPrefix+"flavor-id") {
 		t.Errorf("events: %+v", ev)
 	}
 	for _, s := range r.portal.got {
@@ -295,7 +310,7 @@ func TestProtocol1RequestIsServedAsBefore(t *testing.T) {
 func TestAnnotationsThatCannotBeReadAreNotObeyed(t *testing.T) {
 	long := strings.Repeat("x", MaxAnnotationValue+1)
 	leftover := func() *Service {
-		s := annotated(OwnPrefix+KnobMethod, long, AliasPrefix+"lb-method", "SOURCE_IP", OwnPrefix+KnobConnectionLimit, "500",
+		s := annotated(OwnPrefix+KnobMethod, long, OwnPrefix+KnobConnectionLimit, "500",
 			OwnPrefix+"zz", long, "example.com/owner", long)
 		for i := range 40 {
 			s.Annotations[OwnPrefix+"x"+strconv.Itoa(10+i)] = "1"
@@ -306,8 +321,8 @@ func TestAnnotationsThatCannotBeReadAreNotObeyed(t *testing.T) {
 	if reason != "" {
 		t.Fatalf("refused: %s %s", reason, msg)
 	}
-	// The own name's value cannot be read, so the alias is the one that is set.
-	if o.Method != "source" || o.ConnectionLimit != 500 {
+	// The method's value cannot be read, so the default holds; the limit is read.
+	if o.Method != "" || o.ConnectionLimit != 500 {
 		t.Errorf("the annotations that can be read: %+v", o)
 	}
 	if len(o.Events) != 2 || o.Events[0].Reason != ReasonInvalidAnnotation || o.Events[1].Reason != ReasonAnnotationNotSupported {
@@ -353,10 +368,10 @@ func TestAnnotationsThatCannotBeReadAreNotObeyed(t *testing.T) {
 
 // The forwarded-for header asked for next to PROXY. OCCM fails such a Service's sync and leaves a balancer that exists
 // as it was (loadbalancer.go:1627-1631). A refusal here would take the Service out of the state and give its address
-// back, also of a Service that v0.11.0 served with its PROXY annotation while the other name lay on it unread. So the
+// back, also of a Service that v0.11.0 served with its PROXY annotation while the other one lay on it unread. So the
 // Service is served, PROXY holds, the header is not added, and the one Event names the annotation.
 func TestForwardedForNextToProxyKeepsTheAddress(t *testing.T) {
-	leftover := annotated(OwnPrefix+KnobProxyProtocol, "true", AliasPrefix+"x-forwarded-for", "true")
+	leftover := annotated(OwnPrefix+KnobProxyProtocol, "true", OwnPrefix+KnobXForwardedFor, "true")
 	leftover.ProxyProtocol = true // as v0.11.0's controller read it, and this one still sends it
 	for name, c := range map[string]struct {
 		s       *Service
@@ -364,11 +379,11 @@ func TestForwardedForNextToProxyKeepsTheAddress(t *testing.T) {
 		named   string
 	}{
 		"own names":                          {annotated(OwnPrefix+KnobXForwardedFor, "true", OwnPrefix+KnobProxyProtocol, "true"), 2, OwnPrefix + KnobXForwardedFor},
-		"OCCM's names":                       {annotated(AliasPrefix+"x-forwarded-for", "true", AliasPrefix+"proxy-protocol", "true"), 1, AliasPrefix + "x-forwarded-for"},
-		"v0.11.0's PROXY and a name left on": {leftover, 2, AliasPrefix + "x-forwarded-for"},
+		"version 1":                          {annotated(OwnPrefix+KnobXForwardedFor, "true", OwnPrefix+KnobProxyProtocol, "v1"), 1, OwnPrefix + KnobXForwardedFor},
+		"v0.11.0's PROXY and a name left on": {leftover, 2, OwnPrefix + KnobXForwardedFor},
 		"PROXY off: the header is added":     {annotated(OwnPrefix+KnobXForwardedFor, "true", OwnPrefix+KnobProxyProtocol, "false"), 0, ""},
 		"the header off: nothing to be said": {annotated(OwnPrefix+KnobXForwardedFor, "false", OwnPrefix+KnobProxyProtocol, "v1"), 1, ""},
-		"the header alone, as it always was": {annotated(AliasPrefix+"x-forwarded-for", "true"), 0, ""},
+		"the header alone":                   {annotated(OwnPrefix+KnobXForwardedFor, "true"), 0, ""},
 	} {
 		o, reason, msg := ServiceOptions(c.s)
 		if reason != "" {

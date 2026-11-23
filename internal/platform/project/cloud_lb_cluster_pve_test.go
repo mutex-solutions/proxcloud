@@ -139,7 +139,7 @@ func TestLBClusterServiceSpecOfProtocol1IsUnchanged(t *testing.T) {
 // k8sServices are Services as a protocol 2 controller sends them, after the gateway's checks: a DNS server on TCP 53
 // and UDP 53 (one node port for both, as Kubernetes allocates it) with affinity, a selector and policy Local; a game
 // server on UDP with every figure an annotation can set; a web Service with the forwarded-for header, a method, a
-// limit and the three timeouts by OCCM's names; and one with PROXY version 1 and no health check.
+// limit and the three timeouts; and one with PROXY version 1 and no health check.
 func k8sServices() []lbgw.Service {
 	return []lbgw.Service{
 		{UID: "dns", Ports: []lbgw.Port{{Protocol: "TCP", Port: 53, NodePort: 30053}, {Protocol: "UDP", Port: 53, NodePort: 30053}},
@@ -150,13 +150,13 @@ func k8sServices() []lbgw.Service {
 				"proxcloud.io/lb-health-monitor-delay": "10", "proxcloud.io/lb-health-monitor-timeout": "4", "proxcloud.io/lb-health-monitor-max-retries": "3",
 				"proxcloud.io/lb-health-monitor-max-retries-down": "1", "proxcloud.io/lb-proxy-protocol": "v2", "proxcloud.io/lb-timeout-client-data": "30000"}},
 		{UID: "web", Ports: []lbgw.Port{{Protocol: "TCP", Port: 80, NodePort: 30080}}, ExternalTrafficPolicy: "Cluster",
-			Annotations: map[string]string{"loadbalancer.openstack.org/x-forwarded-for": "true", "loadbalancer.openstack.org/lb-method": "LEAST_CONNECTIONS",
-				"loadbalancer.openstack.org/connection-limit": "2000", "loadbalancer.openstack.org/timeout-client-data": "50000",
-				"loadbalancer.openstack.org/timeout-member-connect": "5000", "loadbalancer.openstack.org/timeout-member-data": "50000",
-				"loadbalancer.openstack.org/health-monitor-delay": "5", "loadbalancer.openstack.org/health-monitor-timeout": "3",
-				"loadbalancer.openstack.org/health-monitor-max-retries": "1", "loadbalancer.openstack.org/health-monitor-max-retries-down": "3"}},
+			Annotations: map[string]string{"proxcloud.io/lb-x-forwarded-for": "true", "proxcloud.io/lb-method": "LEAST_CONNECTIONS",
+				"proxcloud.io/lb-connection-limit": "2000", "proxcloud.io/lb-timeout-client-data": "50000",
+				"proxcloud.io/lb-timeout-member-connect": "5000", "proxcloud.io/lb-timeout-member-data": "50000",
+				"proxcloud.io/lb-health-monitor-delay": "5", "proxcloud.io/lb-health-monitor-timeout": "3",
+				"proxcloud.io/lb-health-monitor-max-retries": "1", "proxcloud.io/lb-health-monitor-max-retries-down": "3"}},
 		{UID: "mail", Ports: []lbgw.Port{{Protocol: "TCP", Port: 25, NodePort: 30025}}, ExternalTrafficPolicy: "Cluster",
-			Annotations: map[string]string{"loadbalancer.openstack.org/proxy-protocol": "true", "proxcloud.io/lb-enable-health-monitor": "false"}},
+			Annotations: map[string]string{"proxcloud.io/lb-proxy-protocol": "v1", "proxcloud.io/lb-enable-health-monitor": "false"}},
 	}
 }
 
