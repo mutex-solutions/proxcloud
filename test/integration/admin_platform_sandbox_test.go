@@ -4,18 +4,96 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/admin"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
+
+// TestPlatformSandboxOffIsRefusedAtTheSave: the save of placement off on a platform whose sandboxes a run built is
+// refused with 409 sandbox_provider_live while the sandbox provider the run registered is live, names the provider
+// and stores nothing; with the provider disabled the same save is no longer refused for that.
+func TestPlatformSandboxOffIsRefusedAtTheSave(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	enc := textcrypt.New("test-key")
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-pve", "name": "lab", "type": "CLOUD", "status": "PUBLIC", "config": pgdoc.M{
+		"provider": "proxmox", "region": "lab", "apiUrl": "https://127.0.0.1:1", "tokenId": "proxcloud@pve!platform", "importStorage": "nas-templates",
+		"network": pgdoc.M{"cidrPool": "10.100.0.0/16"}}, "secret": pgdoc.M{"tokenSecret": enc.Encrypt(portalToken)}})
+	mustInsert(t, db, "adminPermission", pgdoc.M{"_id": "admin-sub", "role": "ADMIN"})
+	store := platformlife.NewStore(db, enc)
+	if err := store.Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()),
+		externalservice.NewService(externalservice.NewRepo(db), enc), "", "", "")
+	h.SetPlatform(store)
+	router := chi.NewRouter()
+	h.Routes(router)
+	call := func(method, path, body string) (int, string, string) {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: "admin-sub"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		var a struct {
+			Errors struct {
+				Details map[string]any `json:"details"`
+			} `json:"errors"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &a)
+		code, _ := a.Errors.Details["code"].(string)
+		return w.Code, code, w.Body.String()
+	}
+	base := "/admin/platform/installations"
+	status, _, raw := call(http.MethodPost, base, platformBody("10.200.200.1", 2, 0))
+	var created struct {
+		Data platformlife.Installation `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(raw), &created); err != nil || status != http.StatusOK || created.Data.ID == "" {
+		t.Fatalf("create: %d %s", status, raw)
+	}
+	id := created.Data.ID
+	// A run installed it, built a shared sandbox group and registered the sandbox provider, which was then set live.
+	if _, err := db.C(platformlife.InstallationCollection).SetByID(ctx, id, pgdoc.M{"status": pgdoc.M{"phase": "ready",
+		"bom":       pgdoc.M{"release": "0.12.0-dev", "sha256": "x"},
+		"sandbox":   pgdoc.M{"placement": "shared", "nodeRange": "10.200.200.64/28", "proxyAddress": "10.200.200.210", "count": 1},
+		"providers": pgdoc.M{"sandbox": "svc-sbx"}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-sbx", "name": "lab Sandboxes", "type": "CLOUD", "status": "PUBLIC",
+		"config": pgdoc.M{"provider": "sandbox", "region": "lab", platformlife.ProviderMarker: id, "sandbox": pgdoc.M{"proxmoxServiceId": "svc-pve", "mode": "shared"}}})
+	off := strings.Replace(platformBody("10.200.200.1", 2, 1), `"spec":{`, `"spec":{"sandbox":{"placement":"off"},`, 1)
+	if !strings.Contains(off, `"placement":"off"`) {
+		t.Fatal("the body names no sandbox block")
+	}
+	status, code, raw := call(http.MethodPut, base+"/"+id, off)
+	if status != http.StatusConflict || code != "sandbox_provider_live" || !strings.Contains(raw, "lab Sandboxes") || !strings.Contains(raw, "spec.sandbox.placement") {
+		t.Fatalf("off with the provider live: %d %s %s", status, code, raw)
+	}
+	if got, err := store.Get(ctx, id); err != nil || got.Rev != 1 || got.Spec.Sandbox != nil {
+		t.Fatalf("the refused save stored something: %+v %v", got, err)
+	}
+	// Disabled: the save is no longer refused for the provider (what else it answers is the settings' own check).
+	if _, err := db.C("externalService").SetByID(ctx, "svc-sbx", pgdoc.M{"status": "DISABLED"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if status, code, raw = call(http.MethodPut, base+"/"+id, off); code == "sandbox_provider_live" {
+		t.Fatalf("off with the provider disabled: %d %s", status, raw)
+	}
+}
 
 // TestPlatformSandboxProviderRows runs, against PostgreSQL, what a platform run writes for sandboxes: the sandbox
 // settings on the Proxmox provider row (read back as the provider sync reads them, the kubeconfig sealed), their

@@ -568,7 +568,7 @@ export const SHARED_GIVES_UP: string[] = [
   "The Cilium agent's credential on that machine can create and change CiliumNode objects. A forged one pulls another node's pod traffic to the escaped machine: traffic between pods that is not encrypted with both ends authenticated can be read and forged.",
   "The machine also holds the kubelet's credential (its own Node and the Secrets of the pods on it), the network guard's (it reads every pod's spec) and kube-proxy's.",
   "Sandboxes have no address of their own to the internet: abuse from a sandbox leaves under your site's public address.",
-  "What still holds: the Proxmox API, the seed, the management networks, tenant networks and every other address of the platform network stay closed to that machine by its VM firewall, and it cannot take another machine's address.",
+  "What still holds: the machine's VM firewall keeps the Proxmox API, the seed, the management networks, tenant networks and every address of the platform network that is not a machine of the cluster closed to it. Of the cluster's own machines it reaches the pod tunnel, the health port, ICMP and the Kubernetes API port, nothing else, and it cannot take another machine's address.",
   "A separate cluster limits the same escape to the sandbox cluster: other tenants' sandboxes on it, its own control plane's API and the internet. It costs a control plane (about 0.6 GiB on the kamaji group) and a system machine.",
 ]
 // By CPU a sandbox machine of n cores holds n-1 sandboxes of one vCPU: the node's own pods ask for about one core.

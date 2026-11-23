@@ -73,6 +73,17 @@ func TestSandboxSharedRuleSet(t *testing.T) {
 	if g, err = f.generation(); err != nil || !slices.ContainsFunc(g.Out, func(e IPSet) bool { return e.CIDR == "203.0.113.0/24" && e.NoMatch == 1 }) {
 		t.Fatalf("a public platform prefix stays reachable from a sandbox machine: %v %+v", err, g.Out)
 	}
+	// The peers are left out by themselves as well: a provider row that lost its deny list must not turn "the
+	// internet" into every port of the cluster's own machines.
+	f.Deny = nil
+	if g, err = f.generation(); err != nil {
+		t.Fatal(err)
+	}
+	for _, peer := range []string{"203.0.113.20/30", "203.0.113.24/29", "203.0.113.32/29"} {
+		if !slices.ContainsFunc(g.Out, func(e IPSet) bool { return e.CIDR == peer && e.NoMatch == 1 }) {
+			t.Fatalf("without a deny list the internet set admits the cluster's machines at %s: %+v", peer, g.Out)
+		}
+	}
 	for name, mod := range map[string]func(*SandboxFirewall){
 		"peers without the platform bridge": func(f *SandboxFirewall) { f.Bridge = "" },
 		"peers inside the sandbox range":    func(f *SandboxFirewall) { f.Peers = []string{"192.168.140.60-192.168.140.70"} },

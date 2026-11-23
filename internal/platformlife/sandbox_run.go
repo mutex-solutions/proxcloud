@@ -115,9 +115,10 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 		}
 	}
 	// The provider's sandbox network and pool before any sandbox machine exists: the next provider sync writes the
-	// isolation rules of the range, and fences each machine as soon as it is cloned. The identity its fence pass reads
-	// the Nodes with follows in stage register, once the sandbox chart has made it; until then every machine keeps
-	// its unsecured taint.
+	// isolation rules of the range. The fence pass itself starts once stage register has stored the identity it
+	// reads the Nodes with (the sandbox chart makes it); until then the sync writes no VM firewall and every machine
+	// keeps its unsecured taint, so no sandbox runs on one. On a later apply the identity is stored already, and a
+	// new machine is fenced by the next sync after its clone.
 	if err := x.sandboxSite(ctx, ""); err != nil {
 		return err
 	}

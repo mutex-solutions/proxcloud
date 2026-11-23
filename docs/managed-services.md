@@ -1015,9 +1015,10 @@ there:
 - **No egress address of its own.** Sandboxes leave under the site's public address: abuse from a
   sandbox is abuse from your address.
 - **What still holds:** the VM firewall of the machine (below) keeps the Proxmox API, the seed, the
-  management networks, tenant networks and every other address of the platform network closed to
-  it, and pins it to its own address. The portal's two identities on the cluster are narrowed by
-  admission policies (below).
+  management networks, tenant networks and every address of the platform network that is not a
+  machine of the cluster closed to it, and pins it to its own address. Of the cluster's own
+  machines it reaches the pod tunnel, the health port, ICMP and the Kubernetes API port, nothing
+  else. The portal's two identities on the cluster are narrowed by admission policies (below).
 - **The portal token.** It holds its platform role on the sandbox pool, so a stolen portal token
   reaches a node of the platform cluster through a sandbox machine's console, guest agent or disks,
   where on `proxcloud-system` it holds `NoAccess`.
@@ -1044,9 +1045,10 @@ exists, the run writes on the installation's Proxmox provider, in one write:
   `nodeRange`. `separate` adds `loadBalancers` and `proxy` (the proxy address, port 443).
 
 In stage `register` it adds `secret.sandboxKubeconfig` (sealed): the identity
-`proxcloud-sandbox-firewall` of the sandbox chart, which may read and patch Nodes and nothing
-else. Until then every sandbox machine keeps its `unsecured` taint, and the sync logs that the
-kubeconfig is missing.
+`proxcloud-sandbox-firewall` of the sandbox chart, which may read and patch Nodes, read the
+RuntimeClass and ask the API server one dry-run question as a node identity (the NodeRestriction
+gate), and nothing else. Until then the sync writes no VM firewall and logs that the kubeconfig is
+missing, and every sandbox machine keeps its `unsecured` taint.
 
 One provider fences one sandbox pool and one sandbox network. A `config.sandbox` that is not this
 installation's (the installer's sandbox cluster has no owner key) is never overwritten: the save
@@ -1105,7 +1107,8 @@ abuse check in `alert` mode, rotation off, no sandbox registry, `mode` and
 `proxmoxServiceId`. `spec.tenants.attach` is applied to it as to the two others, and recorded
 apart (`status.sandboxAttach`): "all projects" waits while the provider is disabled, and that wait
 does not make the next apply attach the two others again. A later apply adopts the row and keeps
-what you changed (name, status, templates, limits); it writes the kubeconfig again. The pinned
+what you changed (name, status, templates, limits); it writes the kubeconfig, `mode` and `domain`
+again, which follow the settings. The pinned
 images move with a ProxCloud release and no other way: the template update job of the installer
 path does not run here. The sandbox machines pull `base` and `code-interpreter` ahead; a first
 start of another template waits for its pull.
