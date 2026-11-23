@@ -1,14 +1,12 @@
 package platformlife
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -49,8 +47,8 @@ func machineFacts(t *testing.T, helm, chart, values string) map[string]any {
 	return facts
 }
 
-// clusterChart is a directory with the cluster chart at the version a BOM pins: the chart in this tree when that is
-// its version, else the published one, pulled from the registry.
+// clusterChart is the cluster chart at the version a BOM pins: the chart in this tree when that is its version, else
+// the published one, by the BOM's digest (pinnedChart: from the registry once, then from the test chart cache).
 func clusterChart(t *testing.T, helm string, c Chart) string {
 	t.Helper()
 	const local = "../../deploy/charts/proxmox-kamaji-cluster"
@@ -59,14 +57,7 @@ func clusterChart(t *testing.T, helm string, c Chart) string {
 			return local
 		}
 	}
-	dir := t.TempDir()
-	if out, err := exec.Command(helm, "pull", "oci://"+c.Repo+"/"+c.Name, "--version", c.Version, "--untar", "-d", dir).CombinedOutput(); err != nil {
-		if os.Getenv("CI") != "" {
-			t.Fatalf("helm pull %s %s: %v\n%s", c.Name, c.Version, err, out)
-		}
-		t.Skipf("chart %s %s is not the one in this tree and could not be pulled: %v", c.Name, c.Version, err)
-	}
-	return filepath.Join(dir, c.Name)
+	return pinnedChart(t, c)
 }
 
 // The check a release makes of its BOM pairs (docs/ci-release.md, "What a release checks about its BOM pairs"): for
@@ -307,29 +298,14 @@ func TestCertManagerMoveRenders(t *testing.T) {
 	}
 }
 
-// certManagerChart is the archive of cert-manager at version: from the chart mirror as a BOM pins it (the digest Helm
-// prints equal to the pin), else from upstream with its index digest in certManagerUpstream.
+// certManagerChart is the archive of cert-manager at version: from the chart mirror by the digest a BOM pins, else
+// from upstream with its index digest in certManagerUpstream. Either way once, then from the test chart cache.
 func certManagerChart(t *testing.T, helm string, boms []*BOM, version string) string {
 	t.Helper()
-	dir := t.TempDir()
-	pull := func(args ...string) string {
-		out, err := exec.Command(helm, append([]string{"pull", "-d", dir, "--version", version}, args...)...).CombinedOutput()
-		if err != nil {
-			if os.Getenv("CI") != "" {
-				t.Fatalf("helm pull cert-manager %s: %v\n%s", version, err, out)
-			}
-			t.Skipf("cert-manager %s could not be pulled: %v", version, err)
-		}
-		return string(out)
-	}
-	tgz := filepath.Join(dir, "cert-manager-"+version+".tgz")
 	for _, b := range boms {
 		for _, c := range b.Components {
 			if c.Name == "cert-manager" && c.Chart.Version == version {
-				if out := pull("oci://" + c.Chart.Repo + "/" + c.Chart.Name); !strings.Contains(out, "Digest: "+c.Chart.Digest) {
-					t.Fatalf("cert-manager %s: the release %s pins %s, and the registry answered:\n%s", version, b.Release, c.Chart.Digest, out)
-				}
-				return tgz
+				return pinnedChart(t, c.Chart)
 			}
 		}
 	}
@@ -337,15 +313,15 @@ func certManagerChart(t *testing.T, helm string, boms []*BOM, version string) st
 	if !ok {
 		t.Fatalf("no BOM pins cert-manager %s, and certManagerUpstream names no digest for it", version)
 	}
-	pull("cert-manager", "--repo", "https://charts.jetstack.io")
-	raw, err := os.ReadFile(tgz)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sum := sha256.Sum256(raw); "sha256:"+hex.EncodeToString(sum[:]) != digest {
-		t.Fatalf("cert-manager %s from upstream is not the archive of index digest %s", version, digest)
-	}
-	return tgz
+	path, _, err := cachedBlob(chartCacheDir(), digest, func() ([]byte, error) {
+		t.Logf("chart cache: pulling cert-manager %s (%s) from upstream", version, digest)
+		dir := t.TempDir()
+		if out, err := exec.Command(helm, "pull", "cert-manager", "--repo", "https://charts.jetstack.io", "--version", version, "-d", dir).CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("%v\n%s", err, out)
+		}
+		return os.ReadFile(filepath.Join(dir, "cert-manager-"+version+".tgz"))
+	})
+	return chartOrSkip(t, "cert-manager "+version, path, err)
 }
 
 // certManagerRender renders chart with values at Kubernetes version kube, by object (objectKey), and fails on a CRD
