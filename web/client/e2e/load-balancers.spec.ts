@@ -154,7 +154,13 @@ test("a UDP listener takes a UDP pool with its own checks, and the page says wha
   // A real check: a payload the service answers, and the reply required.
   await page.getByLabel("Payload (hex)").fill("70 69 6e 67")
   await page.getByLabel("Require a reply").click()
+  // "Down after" 1 is what the API refuses for a UDP pool: the form says why and does not send it.
+  await page.getByLabel("Down after").fill("1")
+  await expect(page.getByTestId("pool-fall-0")).toContainText("must be 2 to 10 for a UDP pool")
+  await expect(page.getByLabel("Down after")).toHaveAttribute("min", "2")
+  await expect(page.getByRole("button", { name: "Save configuration" })).toBeDisabled()
   await page.getByLabel("Down after").fill("2")
+  await expect(page.getByTestId("pool-fall-0")).toHaveCount(0)
   await page.getByRole("button", { name: "Save configuration" }).click()
   // (The note of the first save may still be on the page: wait for what was sent, not for the note.)
   await expect.poll(async () => (await page.evaluate(() => (globalThis as { __lbConfig?: Sent }).__lbConfig))?.pools[0].healthCheck)

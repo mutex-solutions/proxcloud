@@ -418,6 +418,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2 to 3 s apart are both live within the 15 s the layer 4 plan asks for. It looks once: a Service that keeps
   changing does not keep a pass running, and one pass at a time per cluster still holds. Found in the review of
   #439.
+- **The console took "Down after" 1 on a UDP pool, which the API refuses.** The save came back with the API's
+  reason. The load balancer page now holds the API's rule itself: for a UDP pool the field starts at 2, a 1 shows
+  why under the pool ("must be 2 to 10 for a UDP pool: the load balancer tries a failed check again at least
+  once"), and "Save configuration" waits until it is corrected. Found in the review of #433.
 - **Sandboxes worth less than half a cent each were invoiced 0.00.** Every sandbox is a bill item of its own, and a
   sent bill rounds each item to two decimals, so 10,000 one-minute sandboxes at 0.0002 accrued 2.00 and were
   invoiced nothing. At the send, what the sandbox items that round to 0.00 accrued is now summed per project and
