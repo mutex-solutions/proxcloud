@@ -429,6 +429,19 @@ func testLBClusterTLSFromSecret(t *testing.T) {
 	if kept, _, held, need, err := h.lbClusterTLS(ctx, c2, []lbgw.Service{shop(named(hashB))}, nil); err != nil || !slices.Equal(need, []string{hashB}) || len(kept) != 0 || held["shop"].State != lbgw.StateBuilding {
 		t.Fatalf("another cluster naming the same Secret content: need %v, kept %v, %+v %v", need, kept, held, err)
 	}
+	// A certificate past its last day is served, which is its owner's choice, and the Service says so.
+	expired := lbCertificate{ID: lbClusterCertID("c2", hashA), ProjectID: lbClusterCertOwner("c2"), SecretHash: hashA,
+		LBCertificate: pve.LBCertificate{File: strings.Repeat("e", 64), NotAfter: time.Now().Add(-48 * time.Hour)}}
+	if err := certStore.Upsert(ctx, expired.ID, &expired); err != nil {
+		t.Fatal(err)
+	}
+	if kept, _, held, need, err := h.lbClusterTLS(ctx, c2, []lbgw.Service{shop(named(hashA))}, nil); err != nil || len(need) != 0 || len(kept) != 1 || held["shop"].State != "" ||
+		!strings.Contains(event(held["shop"], lbgw.ReasonCertificateExpired), "expired on") {
+		t.Fatalf("an expired certificate: kept %v, %+v %v", kept, held, err)
+	}
+	if _, err := certStore.DeleteOne(ctx, pgdoc.M{"_id": expired.ID}); err != nil {
+		t.Fatal(err)
+	}
 	// 9. A portal without its key takes no certificate, asks for none, and gives such a Service no address.
 	noKey := &Handler{svc: h.svc, cloud: h.cloud, sdnLock: h.sdnLock, publicIPs: h.publicIPs, esSvc: h.esSvc, pveFlavors: h.pveFlavors, lbGW: store, pveFor: h.pveFor}
 	noKey.SetLBCertificates(certStore, nil)

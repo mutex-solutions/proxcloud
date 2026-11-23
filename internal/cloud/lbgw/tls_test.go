@@ -127,7 +127,7 @@ func TestTLSAnnotations(t *testing.T) {
 func TestCertProblem(t *testing.T) {
 	for code, want := range map[string]string{
 		CertNotFound: "Secret shop/web-tls does not exist", CertWrongType: "is not of type kubernetes.io/tls",
-		CertIncomplete: "tls.crt and tls.key", CertTooLarge: "more than 16 KiB", CertForbidden: "may not be read",
+		CertIncomplete: "tls.crt and tls.key", CertNotText: "PEM text", CertTooLarge: "more than 16 KiB", CertForbidden: "may not be read",
 		CertUnreadable: "could not be read", "<script>": "could not be read", CertBadNames: "by name, between commas",
 	} {
 		s := &Service{Namespace: "shop", Certificates: []CertRef{{Secret: "ok", SHA256: hashOf(0)}, {Secret: "web-tls", Problem: code}}}

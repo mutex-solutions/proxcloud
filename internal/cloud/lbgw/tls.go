@@ -62,6 +62,7 @@ const (
 	CertNotFound   = "NotFound"
 	CertWrongType  = "WrongType"
 	CertIncomplete = "Incomplete"
+	CertNotText    = "NotText"
 	CertTooLarge   = "TooLarge"
 	CertForbidden  = "Forbidden"
 	CertUnreadable = "Unreadable"
@@ -163,6 +164,8 @@ func CertProblem(s *Service) string {
 			return secret + " is not of type " + TLSSecretType
 		case CertIncomplete:
 			return secret + " does not hold tls.crt and tls.key"
+		case CertNotText:
+			return secret + " does not hold PEM text in tls.crt and tls.key"
 		case CertTooLarge:
 			return fmt.Sprintf("%s holds more than %d KiB of certificate and key", secret, MaxCertBundle>>10)
 		case CertForbidden:

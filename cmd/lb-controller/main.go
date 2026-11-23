@@ -33,6 +33,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
@@ -48,7 +49,9 @@ const (
 	excludeLabel    = "node.kubernetes.io/exclude-from-external-load-balancers"
 	// toBeDeletedTaint is the cluster autoscaler's mark on a node it is about to remove.
 	toBeDeletedTaint = "ToBeDeletedByClusterAutoscaler"
-	component        = "proxcloud-lb-controller"
+	// sentEvery is the least time between two sends of one Secret to the portal.
+	sentEvery = time.Minute
+	component = "proxcloud-lb-controller"
 )
 
 func main() {
@@ -218,6 +221,9 @@ type controller struct {
 	members map[string]bool
 	// hosts are the nodes last sent behind each Service (by UID), for the Event that says they changed.
 	hosts map[string]string
+	// sent is when the Secret of each hash was last sent to the portal (turn).
+	// ponytail: per process; a controller that starts may send a Secret the portal asks for once more.
+	sent map[string]time.Time
 }
 
 // service is what a turn reads of one Service.
@@ -286,9 +292,19 @@ func (c *controller) turn(ctx context.Context) error {
 	if err == nil && len(ans.NeedCertificates) > 0 {
 		// The portal holds no certificate for these hashes: a new Secret, or one that changed. Their Secrets are
 		// sent now, once, and only the ones a Service of this turn names: the portal cannot ask for another.
+		if c.sent == nil {
+			c.sent = map[string]time.Time{}
+		}
 		for _, hash := range ans.NeedCertificates {
-			if data, ok := secrets[hash]; ok {
-				req.CertificateData = append(req.CertificateData, data)
+			// Once, and not again within sentEvery whatever the portal answers: a portal that cannot keep what
+			// it was sent does not get a key at every turn.
+			if data, ok := secrets[hash]; ok && time.Since(c.sent[hash]) >= sentEvery {
+				req.CertificateData, c.sent[hash] = append(req.CertificateData, data), time.Now()
+			}
+		}
+		for hash := range c.sent { // a Secret that changed or went: its hash is not asked for again
+			if _, ok := secrets[hash]; !ok {
+				delete(c.sent, hash)
 			}
 		}
 		if len(req.CertificateData) > 0 {
@@ -467,6 +483,10 @@ func (c *controller) certificates(ctx context.Context, s *service, secrets map[s
 			ref.Problem = lbgw.CertIncomplete
 		case len(crt)+len(key) > lbgw.MaxCertBundle:
 			ref.Problem = lbgw.CertTooLarge
+		case !utf8.Valid(crt) || !utf8.Valid(key):
+			// PEM is text. Bytes that are none would not cross to the portal as they are, so the portal could
+			// never hold what this hash names and would ask for it at every turn.
+			ref.Problem = lbgw.CertNotText
 		default:
 			ref.SHA256 = lbgw.SecretHash(crt, key)
 			secrets[ref.SHA256] = lbgw.CertificateData{Certificate: string(crt), PrivateKey: string(key)}

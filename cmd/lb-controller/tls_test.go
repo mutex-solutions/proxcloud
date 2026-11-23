@@ -69,6 +69,7 @@ func TestTLSFromASecret(t *testing.T) {
 		"web/not-named":     tlsSecret("CERT-OTHER", keyOther),
 		"web/registry":      {typ: "kubernetes.io/dockerconfigjson", data: map[string][]byte{"tls.crt": []byte("CERT-OTHER"), "tls.key": []byte(keyOther)}},
 		"web/half":          {typ: "kubernetes.io/tls", data: map[string][]byte{"tls.crt": []byte("CERT-OTHER")}},
+		"web/binary":        tlsSecret("CERT-OTHER\xff\xfe", keyOther),
 		"kube-system/admin": tlsSecret("CERT-OTHER", keyOther),
 	}}
 	f.nodes = []map[string]any{node("w1", "10.0.0.11", nil)}
@@ -131,6 +132,15 @@ func TestTLSFromASecret(t *testing.T) {
 		t.Fatalf("a hash no Service names: %d requests, %d certificates sent", puts, len(uploads))
 	}
 	portal.also = ""
+	// A portal that lost what it was sent asks again: it gets the Secret once more, and not at every turn.
+	clear(portal.held)
+	if _, puts, uploads = turn(); puts != 1 || len(uploads) != 0 {
+		t.Fatalf("a Secret asked for again within the minute: %d requests, %d certificates sent", puts, len(uploads))
+	}
+	c.sent = nil // the minute has passed
+	if _, puts, uploads = turn(); puts != 2 || len(uploads) != 1 {
+		t.Fatalf("a Secret asked for again after the minute: %d requests, %d certificates sent", puts, len(uploads))
+	}
 
 	// What a Service cannot name, and what the controller says of a Secret it cannot use.
 	for _, tc := range []struct {
@@ -143,6 +153,7 @@ func TestTLSFromASecret(t *testing.T) {
 		{"a Secret that is gone", "gone-tls", lbgw.CertNotFound, []string{"web/gone-tls"}},
 		{"a Secret of another type", "registry", lbgw.CertWrongType, []string{"web/registry"}},
 		{"a Secret without its key", "half", lbgw.CertIncomplete, []string{"web/half"}},
+		{"a Secret that is not text", "binary", lbgw.CertNotText, []string{"web/binary"}},
 	} {
 		annotate(f.svc("web", "shop"), secret, tc.value)
 		c.events = map[string]string{} // an Event that says the same as the last one is not said again
