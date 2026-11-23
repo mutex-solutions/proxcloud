@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
 )
 
@@ -25,6 +26,27 @@ type fakeTenant struct {
 	nodesErr error // ListNodes fails with it
 	events   []map[string]any
 	rv       int
+	// secrets by namespace/name, and every read of one as "namespace/name". forbidden: the API server refuses the
+	// read, as it does for an identity without "get" on Secrets.
+	secrets   map[string]fakeSecret
+	reads     []string
+	forbidden bool
+}
+
+type fakeSecret struct {
+	typ  string
+	data map[string][]byte
+}
+
+// GetSecret answers as the API server does for a GET of one Secret: there is no other way to a Secret here, so a
+// controller that listed or watched them would not compile against the fake.
+func (f *fakeTenant) GetSecret(_ context.Context, ns, name string) (string, map[string][]byte, bool, error) {
+	f.reads = append(f.reads, ns+"/"+name)
+	if f.forbidden {
+		return "", nil, false, &kamajik8s.APIError{Status: http.StatusForbidden, Message: `secrets "` + name + `" is forbidden`}
+	}
+	s, ok := f.secrets[ns+"/"+name]
+	return s.typ, s.data, ok, nil
 }
 
 func (f *fakeTenant) ListServicesAllNamespaces(context.Context) ([]map[string]any, error) {

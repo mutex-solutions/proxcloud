@@ -149,7 +149,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 	nodes := []lbgw.Node{{Name: "w1", Address: worker1}, {Name: "w2", Address: worker2}, {Name: "metallb", Address: metallb}, {Name: "x", Address: "10.9.9.9"}}
 	state := func(services ...lbgw.Service) *lbgw.Answer {
 		t.Helper()
-		ans, err := h.LBClusterState(ctx, &cred, services, nodes)
+		ans, err := h.LBClusterState(ctx, &cred, services, nodes, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -516,7 +516,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 		t.Fatal(err)
 	}
 	vipsBefore := slices.Clone(read().VIPs)
-	ans, err = h.LBClusterState(ctx, &other, nil, nodes)
+	ans, err = h.LBClusterState(ctx, &other, nil, nodes, nil)
 	if err != nil || len(ans.Nodes) != len(nodes) {
 		t.Fatalf("another project's cluster: %+v %v", ans, err)
 	}
@@ -544,7 +544,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 		if _, err := db.C("project").SetByID(ctx, "p1", pgdoc.M{"status": status}, nil); err != nil {
 			t.Fatal(err)
 		}
-		_, err := h.LBClusterState(ctx, &cred, []lbgw.Service{svc("e", 80, 30080)}, nodes)
+		_, err := h.LBClusterState(ctx, &cred, []lbgw.Service{svc("e", 80, 30080)}, nodes, nil)
 		var rf *lbgw.Refusal
 		if !errors.As(err, &rf) || rf.Reason != lbgw.ReasonProjectNotEnabled || rf.Status != http.StatusConflict {
 			t.Fatalf("%s project: %v", status, err)
@@ -565,7 +565,7 @@ func TestLBClusterStateConverges(t *testing.T) {
 	if _, _, err := store.MintCredential(ctx, off); err != nil {
 		t.Fatal(err)
 	}
-	if ans, err := h.LBClusterState(ctx, &off, []lbgw.Service{svc("a", 80, 30080)}, nil); err != nil || ans.Services[0].Reason != lbgw.ReasonPublicNetworkUnavailable {
+	if ans, err := h.LBClusterState(ctx, &off, []lbgw.Service{svc("a", 80, 30080)}, nil, nil); err != nil || ans.Services[0].Reason != lbgw.ReasonPublicNetworkUnavailable {
 		t.Fatalf("no provider setting: %+v %v", ans, err)
 	}
 	if st, _ := store.State(ctx, "c2"); st != nil {
@@ -654,7 +654,7 @@ func (k *lbKube) ApplySecret(_ context.Context, ns, name string, data map[string
 
 type lbNoPortal struct{}
 
-func (lbNoPortal) LBClusterState(context.Context, *lbgw.Credential, []lbgw.Service, []lbgw.Node) (*lbgw.Answer, error) {
+func (lbNoPortal) LBClusterState(context.Context, *lbgw.Credential, []lbgw.Service, []lbgw.Node, []lbgw.CertificateData) (*lbgw.Answer, error) {
 	return &lbgw.Answer{Services: []lbgw.ServiceStatus{}}, nil
 }
 

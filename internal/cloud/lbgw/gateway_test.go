@@ -46,17 +46,19 @@ func (f *fakeReg) Seen(_ context.Context, id string, at time.Time) error {
 type fakePortal struct {
 	got     []Service
 	nodes   []Node
+	certs   []CertificateData
+	need    []string // what it asks for
 	refusal *Refusal
 	calls   int
 }
 
-func (p *fakePortal) LBClusterState(_ context.Context, cred *Credential, services []Service, nodes []Node) (*Answer, error) {
+func (p *fakePortal) LBClusterState(_ context.Context, cred *Credential, services []Service, nodes []Node, certs []CertificateData) (*Answer, error) {
 	p.calls++
 	if p.refusal != nil {
 		return nil, p.refusal
 	}
-	p.got, p.nodes = services, nodes
-	ans := &Answer{}
+	p.got, p.nodes, p.certs = services, nodes, certs
+	ans := &Answer{NeedCertificates: p.need}
 	for _, s := range services {
 		ans.Services = append(ans.Services, ServiceStatus{UID: s.UID, State: StateBuilding})
 	}

@@ -40,10 +40,13 @@ type Credential struct {
 // cluster id): the Services that passed the gateway's checks, and the addresses of the workers that are the cluster's
 // own. The PUT writes it, the converge reads it; neither waits on the other.
 type State struct {
-	ID        string     `json:"id"`
-	Services  []Service  `json:"services"`
-	Nodes     []string   `json:"nodes"`
-	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
+	ID       string    `json:"id"`
+	Services []Service `json:"services"`
+	Nodes    []string  `json:"nodes"`
+	// CertHashes are the hashes of the Secrets the cluster's Services name, in the last request and in Services:
+	// the certificates the portal keeps for the cluster. A hash, never a certificate.
+	CertHashes []string   `json:"certHashes,omitempty"`
+	UpdatedAt  *time.Time `json:"updatedAt,omitempty"`
 }
 
 // Store is the Postgres side of the gateway.

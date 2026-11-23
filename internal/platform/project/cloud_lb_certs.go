@@ -63,6 +63,11 @@ type lbCertificate struct {
 	pve.LBCertificate
 	KeyID  string `json:"keyId"`  // the portal key the blob is sealed with (public)
 	Sealed string `json:"sealed"` // base64 of the sealed chain and key
+	// A certificate of a Kubernetes cluster's Service (cloud_lb_cluster_tls.go): ProjectID is the cluster's owner
+	// name, not a project. SecretHash is the hash of the Secret it came from; Refused, when the check refused that
+	// Secret, is why, and such a row holds no certificate.
+	SecretHash string `json:"secretHash,omitempty"`
+	Refused    string `json:"refused,omitempty"`
 }
 
 // lbCertView is a certificate as the API answers it: everything but the blob.
@@ -161,7 +166,11 @@ func (h *Handler) lbResolveCerts(ctx context.Context, projectID string, spec *pv
 // lbApplyCerts is lbResolveCerts for an apply. ok false: a certificate is missing or cannot be opened, the row says
 // so, and the appliances keep the config they serve.
 func (h *Handler) lbApplyCerts(ctx context.Context, proj *Project, lb *loadBalancer) (files []pve.LBCertFile, ok bool) {
-	files, why, err := h.lbResolveCerts(ctx, proj.ID, &lb.LBSpec, true)
+	owner := proj.ID
+	if lb.Cluster != nil { // the certificates of a cluster's Services are the cluster's, not the project's
+		owner = lbClusterCertOwner(lb.Cluster.ID)
+	}
+	files, why, err := h.lbResolveCerts(ctx, owner, &lb.LBSpec, true)
 	switch {
 	case err != nil:
 		slog.Warn("load balancer: certificates", "project", proj.ID, "lb", lb.ID, "err", err)
