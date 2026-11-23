@@ -5,6 +5,12 @@ allowlist does not apply) and PUTs the cluster's Services of type LoadBalancer t
 own credential, from the Secret the portal writes (never in this document). The binary is the second one of the portal's
 proxcloud-api image (cmd/lb-controller). It reads objects the tenant writes from inside the cluster that also holds
 kamaji-etcd, so its NetworkPolicy lets it reach DNS, the control planes of its namespace and the gateway, nothing else.
+
+From chart 0.1.19 it runs with --watch: a watch of the tenant's Services, Nodes and the TLS Secrets its Services name
+tells it when to send, within a second of a change, where it sent every ten seconds before. The watches go to the same
+API server on the same port with the same kubeconfig, so nothing else of this document changes: no RBAC (the admin
+kubeconfig, as before) and no rule of the NetworkPolicy. An image older than the flag does not start with it: the
+chart is offered with the portal release that carries it.
 */ -}}
 {{- $lb := .Values.loadBalancer | default dict }}
 {{- if and $lb.secretName (not (include "pkc.kubeadm" .)) }}
@@ -44,7 +50,7 @@ spec:
           image: {{ required "loadBalancer.image is required with loadBalancer.secretName" $lb.image | quote }}
           command: ["/usr/local/bin/lb-controller"]
           args: [{{ printf "--gateway-url=%s" $lb.gatewayURL | quote }}, {{ printf "--default=%t" (eq (toString $lb.default) "true") | quote }},
-                 "--kubeconfig=/etc/tenant/kubeconfig", "--gateway-dir=/etc/lb-gateway"]
+                 "--kubeconfig=/etc/tenant/kubeconfig", "--gateway-dir=/etc/lb-gateway", "--watch=true"]
           securityContext: {{ toJson $sc }}
           resources: {requests: {cpu: 10m, memory: 32Mi}}
           volumeMounts:

@@ -4,6 +4,42 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: the load balancer controller watches Services, Nodes and the Secrets Services name
+
+**What changed:** when a cluster's load balancer controller takes a turn. No new container, listener, credential or
+data flow: the controller's requests to the tenant API server gain three long ones (watch streams), on the connection
+path and with the kubeconfig it already has, and its requests to the gateway become fewer. Cluster chart 0.1.19.
+
+- `internal/cloud/kamajik8s/watch.go` (new): `Client.WatchServices`, `WatchNodes`, `WatchSecret` over `watch` and
+  `stream`. A raw watch over HTTP, no `k8s.io` library: `?watch=1&allowWatchBookmarks=true&timeoutSeconds=300`, resume
+  at the last resourceVersion, a new start after `410 Gone` in either of its forms, a call to the caller for every
+  event that is not a bookmark and for every end of a stream, 1 s between streams and a wait that doubles to 30 s
+  while the API server says nothing. A client of its own without an overall time limit (the stream is the body), with
+  limits on the dial, the handshake and the first answer. Of an event only the type, the resourceVersion and a
+  Status code are decoded: a Secret's data passes through the decoder and is kept nowhere.
+- `cmd/lb-controller`: `controller.run` (a turn 1 s after a change, the unchanged state every 30 s, `-interval`
+  while a turn left something open or failed), `changed` (a watch asks for a turn; its failure is logged once),
+  `follow` (one watch per TLS Secret the Services of the turn name, by name, at most `lbgw.MaxClusterCerts`, ended
+  when nothing names the Secret). `turn` keeps the state the portal last answered and that answer: an equal state
+  is not sent again before the resync. New flag `-watch`, off by default, so the image behaves under charts 0.1.17
+  and 0.1.18 as before except that an unchanged state is sent every 30 s instead of every 10 s.
+- `deploy/charts/proxmox-kamaji-cluster` 0.1.19: `templates/lb-controller.yaml` starts the controller with
+  `--watch=true`. No RBAC (the tenant's admin kubeconfig, as before) and no NetworkPolicy rule (the same API server
+  and port). Not tagged and not pinned by the platform BOM in this change.
+
+**Why:** the plan for v0.11.1 wants a Service or node change live within 15 s on a built pair; the poll alone took up
+to 10 s before the portal heard of it, and sent the state of every cluster six times a minute whether it changed or
+not. A watch as a trigger for the existing full list keeps the property the controller was built on: a request
+never comes from a half-filled cache. client-go's informers would give a cache this design does not want and would
+be the first `k8s.io` library of the module.
+
+**Security:** the controller now holds a watch on each Secret an owned Service names. It is a watch of one name in
+the Service's namespace, never of a namespace's Secrets, so the rule of the TLS change holds: the controller reads
+only the Secrets Services name. The events of that watch carry the Secret, which is not decoded.
+
+**Diagrams updated:** none (no element or relation is new); `c4-code.md` gains the row of `controller.run` and the
+watch, and the controller's row says when a turn comes.
+
 ## 2026-11-23: TLS on a cluster's balancer from a Service's Secret
 
 **What changed:** a Kubernetes Service can end TLS on the cluster's balancer with the certificate of a Secret it

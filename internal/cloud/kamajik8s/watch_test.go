@@ -134,7 +134,10 @@ func TestWatchEventsBookmarksAndResume(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) {
 			event(w, "ADDED", "5")
 			bookmark(w, "9")
-			<-end // then the server's timeout: the handler returns, the answer ends as an answer does
+			select { // then the server's timeout: the handler returns, the answer ends as an answer does
+			case <-end:
+			case <-r.Context().Done():
+			}
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			event(w, "MODIFIED", "10")

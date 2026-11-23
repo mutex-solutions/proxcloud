@@ -101,6 +101,13 @@ Five charts live here:
   template; and `addons.sandbox` (the sandbox chart in mode separate, through CAAPH). Without them the render is what
   0.1.17 gave.
 
+  0.1.19 starts the load balancer controller with `--watch=true`: it watches the cluster's Services, Nodes and the TLS
+  Secrets its Services name, and sends a change within seconds where it polled every ten
+  ([managed-k8s.md](../../docs/managed-k8s.md)). One argument of one container is the whole change: no value, no RBAC
+  and no NetworkPolicy rule is new, and a cluster without `loadBalancer.secretName` renders what 0.1.18 gave. The
+  controller image must be the one of a portal that has the flag (v0.11.1 or later); an older image does not start
+  with it. Not published and not pinned by the platform BOM yet.
+
 ## Publishing
 
 `.github/workflows/helm.yml` gives each chart its own tag-driven release, because their
@@ -123,7 +130,7 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
-the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.18` (not published yet), platform
+the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.19` (not published yet; `0.1.18` is), platform
 `0.1.3` and sandbox `0.1.0` (not published yet). All three are published and pinned by the platform
 BOM (database `0.5.2`: no
 disruption budget for a PostgreSQL of one instance; Kubernetes `0.1.17` for new tenant clusters: the load

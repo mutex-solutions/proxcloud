@@ -454,6 +454,21 @@ func TestWatchedHeartbeatsAreNotSent(t *testing.T) {
 	}
 }
 
+// A cluster in which nothing happens: its state is sent at the resync, with no event to ask for the turn, so the
+// portal hears from a controller that is there and a change no watch told of is put right.
+func TestWatchedQuietStateIsSentAtTheResync(t *testing.T) {
+	a, p := newAPIServer(t), &portal{}
+	a.set("nodes//w1", readyNode("w1", "10.0.0.11"))
+	start(t, a, p, &controller{watching: true, interval: time.Hour, resync: 300 * time.Millisecond, debounce: 20 * time.Millisecond})
+	within(t, 2*time.Second, "the first state", func() bool { return p.sent() >= 1 })
+	time.Sleep(200 * time.Millisecond) // the watches' first events are turns of their own
+	sent := p.sent()
+	time.Sleep(1500 * time.Millisecond)
+	if got := p.sent() - sent; got < 3 || got > 6 {
+		t.Fatalf("%d requests in 1.5 quiet seconds with a resync every 300 ms, want 4 or 5", got)
+	}
+}
+
 // While the portal builds, its answer changes and nothing in the cluster does: the controller asks again after
 // -interval, with or without a watch, and stops asking when the Service is ready.
 func TestWatchedBuildingIsAskedAgain(t *testing.T) {
