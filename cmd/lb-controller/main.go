@@ -588,7 +588,8 @@ func (c *controller) turn(ctx context.Context) error {
 // asks for the hash, and dropped with the turn.
 //
 // What the controller may read of the tenant's Secrets is decided here, since its kubeconfig could read them all:
-// only a Secret an owned Service names, by a GET of that name (it never lists or watches Secrets), only in the
+// only a Secret an owned Service names, by a GET of that name (it never lists Secrets, and the one watch it has is
+// of that name and reads nothing: follow), only in the
 // Service's own namespace (a name with a namespace in it is no name: lbgw.TLSSecretNames), and only one of type
 // kubernetes.io/tls: a Secret of another type is not hashed, not kept and not sent. Nothing of a Secret is logged.
 //

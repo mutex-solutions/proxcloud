@@ -55,8 +55,8 @@ func (c *Client) WatchSecret(ctx context.Context, ns, name string, changed func(
 //
 // A stream starts at the resourceVersion the last one reached (events and bookmarks carry it), so nothing happens
 // unseen between two streams. Without one, at the start and after 410 Gone, the API server first sends every object
-// as ADDED. After a stream the next one waits minWait, and twice as long, up to maxWait, after each one that brought
-// nothing: an API server that is down, or answers and hangs up at once, is not asked in a loop.
+// as ADDED. After a stream the next one waits minWait, and twice as long, up to maxWait, after each one the server
+// said nothing in: an API server that is down, or answers and hangs up at once, is not asked in a loop.
 func (c *Client) watch(ctx context.Context, path, fieldSelector string, changed func(error), minWait, maxWait time.Duration) {
 	// A client of its own: the stream is the answer's body, so there is no time limit on the whole call as c.http
 	// has. The limits are on reaching the server and on its first answer; stream ends a silent one.
@@ -73,13 +73,13 @@ func (c *Client) watch(ctx context.Context, path, fieldSelector string, changed 
 	rv, wait := "", time.Duration(0)
 	for {
 		began := time.Now()
-		next, brought, err := c.stream(ctx, hc, path, fieldSelector, rv, changed)
+		next, alive, err := c.stream(ctx, hc, path, fieldSelector, rv, changed)
 		if ctx.Err() != nil {
 			return
 		}
 		rv = next
 		changed(err)
-		if brought || time.Since(began) > maxWait {
+		if alive || time.Since(began) > maxWait {
 			wait = minWait
 		} else {
 			wait = min(max(2*wait, minWait), maxWait)
@@ -94,9 +94,9 @@ func (c *Client) watch(ctx context.Context, path, fieldSelector string, changed 
 
 // stream is one watch request, read to its end. next is the resourceVersion the following stream starts at: the last
 // one seen, or none after 410 Gone, which the API server says with the answer's status or with an ERROR event,
-// depending on where it notices. brought says the stream delivered an event or a bookmark. err is nil when the server
-// ended the stream itself.
-func (c *Client) stream(ctx context.Context, hc *http.Client, path, fieldSelector, rv string, changed func(error)) (next string, brought bool, err error) {
+// depending on where it notices. alive says the server said something in it: an event, a bookmark, or 410 Gone. err
+// is nil when the server ended the stream itself.
+func (c *Client) stream(ctx context.Context, hc *http.Client, path, fieldSelector, rv string, changed func(error)) (next string, alive bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, watchSeconds*time.Second+watchSilence)
 	defer cancel()
 	q := url.Values{"watch": {"1"}, "allowWatchBookmarks": {"true"}, "timeoutSeconds": {strconv.Itoa(watchSeconds)}}
@@ -120,7 +120,7 @@ func (c *Client) stream(ctx context.Context, hc *http.Client, path, fieldSelecto
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusGone {
-		return "", false, nil
+		return "", true, nil
 	}
 	if res.StatusCode != http.StatusOK {
 		var status struct {
@@ -148,17 +148,17 @@ func (c *Client) stream(ctx context.Context, hc *http.Client, path, fieldSelecto
 		}
 		if err := dec.Decode(&ev); err != nil {
 			if err == io.EOF { // the server's own end; a stream cut off ends in another error
-				return rv, brought, nil
+				return rv, alive, nil
 			}
-			return rv, brought, fmt.Errorf("watch %s: %w", path, err)
+			return rv, alive, fmt.Errorf("watch %s: %w", path, err)
 		}
 		if ev.Type == "ERROR" {
 			if ev.Object.Code == http.StatusGone {
-				return "", brought, nil
+				return "", true, nil
 			}
-			return rv, brought, &APIError{Status: ev.Object.Code, Message: ev.Object.Message}
+			return rv, alive, &APIError{Status: ev.Object.Code, Message: ev.Object.Message}
 		}
-		brought = true
+		alive = true
 		if ev.Object.Metadata.ResourceVersion != "" {
 			rv = ev.Object.Metadata.ResourceVersion
 		}
