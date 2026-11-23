@@ -1110,10 +1110,10 @@ selector alone is read by the controller, which has the nodes' labels.
   `loadBalancerClass: proxcloud.io/internal` (MetalLB, default mode). A value that is neither true nor false is
   named in `InvalidAnnotation` and the Service is served.
 - **A request for an internal balancer written for OCCM gets a PUBLIC address here.** OCCM's own annotation for it
-  (its `service.beta.kubernetes.io/` name ending in `-internal-load-balancer`; the C4 change log has it in full) is
-  an annotation of another prefix: it is not read, not refused and not spoken of, and a Service that carries only
-  that one is served like any other, on a public address. Rename it to `proxcloud.io/lb-internal: "true"`, or set
-  `loadBalancerClass: proxcloud.io/internal`, **before** the manifest is applied to a cluster here.
+  (the C4 change log of 2026-11-23 has its name in full) is an annotation of another prefix: it is not read, not
+  refused and not spoken of, and a Service that carries only that one is served like any other, on a public
+  address. Rename it to `proxcloud.io/lb-internal: "true"`, or set `loadBalancerClass: proxcloud.io/internal`,
+  **before** the manifest is applied to a cluster here.
 - **An annotation that cannot be read never costs a Service its address.** A value of more than 256 characters is
   as if the annotation were not set, and the same Warning Event `InvalidAnnotation` names it. The controller sends
   such a value cut to 257 characters and does not obey a node selector that long either. The number of annotations
@@ -1195,6 +1195,10 @@ otherwise.
 | the network, subnet, port, floating network and subnet, member subnet, class, flavor, availability zone, tag and hostname keys | none | the provider's `config.cluster.loadBalancer` decides these; leave them out |
 
 A key with "none" written under the product's prefix all the same is named in `AnnotationNotSupported`.
+
+Not run on a lab: UDP from a Service, the affinity, the annotations, the Events and the step-down for an older
+portal are tested on fakes of the tenant cluster and of Proxmox, and against the HAProxy and keepalived of both
+appliance images in containers. The one lab figure in this section is the spike's, where it is named.
 
 Modes. A **new** cluster gets the controller in **default** mode when every gate holds: this portal has the gateway's
 store, a gateway URL (`PROXCLOUD_CSI_GATEWAY_URL`) and the controller image (`PROXCLOUD_LB_CONTROLLER_IMAGE`, the API's

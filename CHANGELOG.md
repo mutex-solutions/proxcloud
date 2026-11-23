@@ -83,6 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the refused one each turn.
   - The controller says the Events of Kubernetes' own service controller: `UpdatedLoadBalancer`,
     `UnAvailableLoadBalancer`, `SyncLoadBalancerFailed`, `DeletingLoadBalancer`, `DeletedLoadBalancer`.
+  - Not run on a lab: tested on fakes of the tenant cluster and of Proxmox, and against the HAProxy and keepalived
+    of both appliance images in containers.
 - **Managed platform: the sandbox provider, and the fence of its machines on the platform network (not offered yet:
   no BOM pins the sandbox chart).** With `spec.sandbox`, a run now does the portal side as well
   (`internal/platformlife/sandbox_provider.go`, `docs/managed-services.md`, "The sandbox provider"):
