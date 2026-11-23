@@ -405,6 +405,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before, a value that is no boolean (also an empty one, or one too long to read) with `InvalidAnnotation`, and the
   Event names the value. The cluster's controller follows the same rule for a portal that reads no annotations (one
   rolled back to `v0.11.0`): such a Service is not sent to it. Found in the review of #435.
+- **An empty `proxcloud.io/lb-tls-secret: ""` opened the Service's ports without TLS, and said nothing.** An
+  annotation that is there and empty, as a template that filled nothing in leaves it, was read as "no TLS". It
+  now asks for TLS like any other value and is held like a Secret that cannot be used: a Service that was never
+  served gets no address, one that is served stays exactly as it was, and one Warning Event `InvalidCertificate`
+  says that the annotation is empty. Removing the annotation is still the way to a plain port. The controller does
+  not send such a Service to a portal of protocol 1 either. Found in the review of #438.
 - **Sandboxes worth less than half a cent each were invoiced 0.00.** Every sandbox is a bill item of its own, and a
   sent bill rounds each item to two decimals, so 10,000 one-minute sandboxes at 0.0002 accrued 2.00 and were
   invoiced nothing. At the send, what the sandbox items that round to 0.00 accrued is now summed per project and

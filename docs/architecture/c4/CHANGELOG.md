@@ -14,9 +14,13 @@ container, listener, credential or wire field, and no chart change.
   `InternalNotSupported` for a true value, `InvalidAnnotation` with the value for one that is no boolean.
   `ServiceOptions` refuses with it, and `cmd/lb-controller` (`protocol1`, the Event of a Service that was not
   sent) follows through the same two functions.
+- `internal/cloud/lbgw/tls.go`: `WantsTLS` is true when `proxcloud.io/lb-tls-secret` is there, whatever it holds
+  (it was: when its value is not empty), and `CertProblem` answers an empty one first. `lbClusterTLS` therefore
+  holds such a Service as it holds one whose Secret cannot be used, and `protocol1` leaves it out.
 
 **Why:** the annotation guards an address, and `"yes"` put a Service that was meant to be internal on a public one
-with only a Warning (review of #435, finding 1).
+with only a Warning (review of #435, finding 1). An empty TLS annotation gave a plain port on a port meant for TLS,
+with no Event (review of #438, finding 4).
 
 **Diagrams:** none changed; `c4-code.md` (the load balancer gateway's rows) says the rule.
 

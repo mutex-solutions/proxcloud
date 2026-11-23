@@ -1348,8 +1348,12 @@ spec:
   the Secret and the reason. A Service that was never served gets no address and the same Event. A certificate
   the check refused is remembered by its hash and not sent again until the Secret changes. An expired certificate
   is served (that is the owner's choice) with a Warning Event `CertificateExpired`.
+- **An annotation that is there and empty** (`proxcloud.io/lb-tls-secret: ""`, as a template that filled nothing
+  in leaves it) is held the same way: the ports were meant for TLS, so they are not opened plain. A Service that
+  was never served gets no address, one that is served stays as it was, and `InvalidCertificate` says that the
+  annotation is empty.
 - **Removing the annotation** makes the port a plain TCP port again at the next turn. That is the owner's word; a
-  Secret that fails never does it.
+  Secret that fails never does it, and neither does an empty value.
 - **A portal rolled back to v0.11.0** ends no TLS and reads no annotation, so it would hand port 443 to the pods
   without TLS. The controller keeps a Service that asks for TLS out of what it sends to such a portal: the Service
   **loses its address** for as long as the portal is old (`TLSNotAvailable`) and gets a new one when the portal is

@@ -17,7 +17,8 @@ package lbgw
 // the appliances as a file named by its fingerprint) is internal/platform/project/cloud_lb_cluster_tls.go.
 //
 // A Service that asks for TLS is never served without it: with a Secret that cannot be used it stays as the balancer
-// last served it (the Event says why), and one the balancer never served is refused.
+// last served it (the Event says why), and one the balancer never served is refused. An annotation that is there
+// and empty asks for TLS too, and is held the same way.
 
 import (
 	"crypto/sha256"
@@ -103,9 +104,12 @@ func SecretHash(certificate, privateKey []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// WantsTLS: the Service asks for TLS on the balancer, by its annotation or by the certificates sent with it.
+// WantsTLS: the Service asks for TLS on the balancer, by its annotation or by the certificates sent with it. The
+// annotation counts when it is there, whatever it holds: an empty value (a template that filled nothing in) still
+// marks ports that are meant for TLS, and CertProblem holds such a Service back.
 func WantsTLS(s *Service) bool {
-	return len(s.Certificates) > 0 || strings.TrimSpace(s.Annotations[OwnPrefix+KnobTLSSecret]) != ""
+	_, set := s.Annotations[OwnPrefix+KnobTLSSecret]
+	return len(s.Certificates) > 0 || set
 }
 
 // TLSSecretNames reads the value of proxcloud.io/lb-tls-secret: one to MaxServiceCerts names of Secrets, between
@@ -146,6 +150,10 @@ func checkCertRefs(refs []CertRef) (reason, message string) {
 // Service asks for none.
 func CertProblem(s *Service) string {
 	name := OwnPrefix + KnobTLSSecret
+	mustName := fmt.Sprintf("must name one to %d Secrets of the Service's namespace, by name, between commas", MaxServiceCerts)
+	if v, set := s.Annotations[name]; set && strings.TrimSpace(v) == "" {
+		return name + " is empty: it " + mustName // whatever the controller sent with it
+	}
 	if len(s.Certificates) == 0 {
 		if !WantsTLS(s) {
 			return ""
@@ -157,7 +165,7 @@ func CertProblem(s *Service) string {
 		switch c.Problem {
 		case "":
 		case CertBadNames:
-			return fmt.Sprintf("%s must name one to %d Secrets of the Service's namespace, by name, between commas", name, MaxServiceCerts)
+			return name + " " + mustName
 		case CertNotFound:
 			return secret + " does not exist"
 		case CertWrongType:

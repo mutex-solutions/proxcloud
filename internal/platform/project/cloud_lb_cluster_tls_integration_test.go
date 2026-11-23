@@ -424,6 +424,22 @@ func testLBClusterTLSFromSecret(t *testing.T) {
 		slices.ContainsFunc(stored().Services, func(s lbgw.Service) bool { return s.UID == "fresh" }) {
 		t.Fatalf("a Service never served with a Secret of another type: %+v", st)
 	}
+	// An annotation that is there and empty (a template that filled nothing in) marks ports meant for TLS: they are
+	// not opened plain. A Service never served gets no address and one Event; one that is served stays as it was,
+	// with its certificate, and says so. Both were plain Services with no Event.
+	blank := lbgw.Service{UID: "blank", Namespace: "web", Name: "blank", ExternalTrafficPolicy: "Cluster", Ports: []lbgw.Port{{Protocol: "TCP", Port: 443, NodePort: 30445}},
+		Annotations: map[string]string{"proxcloud.io/lb-tls-secret": ""}}
+	emptied := shop()
+	emptied.Annotations["proxcloud.io/lb-tls-secret"] = " "
+	ans = put(lbgw.Request{Services: []lbgw.Service{emptied, plain, blank}})
+	if st := status(ans, "blank"); st.State != lbgw.StateRefused || st.Reason != lbgw.ReasonInvalidCertificate || st.Address != "" || len(st.Events) != 0 ||
+		!strings.Contains(st.Message, "proxcloud.io/lb-tls-secret is empty") || slices.ContainsFunc(stored().Services, func(s lbgw.Service) bool { return s.UID == "blank" }) {
+		t.Fatalf("a Service never served with an empty TLS annotation: %+v", st)
+	}
+	if st := status(ans, "shop"); st.Address != vip || len(st.Events) != 1 || !strings.Contains(event(st, lbgw.ReasonInvalidCertificate), "proxcloud.io/lb-tls-secret is empty") ||
+		!slices.Equal(stored().Services[0].Certificates, []lbgw.CertRef{named(hashB)}) || stored().Services[0].Annotations["proxcloud.io/lb-tls-secret"] != "shop-tls" {
+		t.Fatalf("a served Service whose TLS annotation was emptied: %+v, stored %+v", st, stored().Services[0])
+	}
 	addresses, _ := h.publicIPs.ForServer(ctx, "svc", LBAddressOwner(id))
 	if len(addresses) != 2 {
 		t.Fatalf("%d addresses: a refused Service took one", len(addresses))
