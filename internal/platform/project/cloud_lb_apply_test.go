@@ -595,4 +595,19 @@ func TestLBFirstApplianceServes(t *testing.T) {
 			t.Errorf("appliance %s: no VRRP rule from %s: %+v", app.ServerID, peer, f.rules[app.ServerID])
 		}
 	}
+
+	// A replace takes the standby out of the row and destroys its VM: the one that is left has no peer again. It is
+	// given the config of an appliance alone, keeps the address and its HAProxy, and lets no VRRP in any more.
+	f.mu.Lock()
+	delete(f.guests, "302")
+	f.mu.Unlock()
+	lbTakeOut(lb, "302")
+	a = &lb.Appliances[0]
+	reloads = f.count("301 haproxy reload")
+	apply()
+	if lb.Status != lbStatusDegraded || a.State != lbAppUp || a.Role != "MASTER" || !a.HoldsVIP || f.count("301 haproxy reload") != reloads ||
+		!strings.Contains(f.guests["301"].disk[lbGuestKeepalived], "unicast_peer {\n    127.0.0.1\n") ||
+		slices.ContainsFunc(f.rules["301"], func(r pve.FirewallRule) bool { return r.Proto == "vrrp" }) {
+		t.Fatalf("after a replace took its peer: %s %q, %+v, rules %+v\n%s", lb.Status, lb.StatusMessage, *a, f.rules["301"], f.guests["301"].disk[lbGuestKeepalived])
+	}
 }

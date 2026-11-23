@@ -76,8 +76,9 @@ systemd-run -q --unit=lb-tcp-m1 ip netns exec m1 socat TCP4-LISTEN:5000,fork,reu
 // kernel has IPVS); no VRRP packet leaves it meanwhile; the control of the order, a peer started before the first
 // appliance was told of it takes the address too; in the product's order the first appliance is told, reloads and
 // stays master with the address untouched, the peer starts as its standby, and a client that asks ten times a
-// second is answered every time; and the pair is one: when keepalived stops on the first, the peer takes the
-// address.
+// second is answered every time; the peer taken away again, as a replace does, and a new one put in, with no
+// change of state or address on the first; and the pair is one: when keepalived stops on the first, the peer
+// takes the address.
 func TestLBFirstApplianceServesAlone(t *testing.T) {
 	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
 		t.Run(image, func(t *testing.T) {
@@ -158,7 +159,7 @@ func TestLBFirstApplianceServesAlone(t *testing.T) {
 			}
 			// What a client on the public network hears: "" is no answer.
 			tcp := func() string {
-				_, out, _ := g.sh(ctx, "tcp", "sh", "-c", "ip netns exec pub socat -t2 - TCP4:"+vip+":5000,connect-timeout=2 </dev/null")
+				_, out, _ := g.sh(ctx, "tcp", "sh", "-c", "ip netns exec pub socat -u TCP4:"+vip+":5000,connect-timeout=2 -")
 				return strings.TrimSpace(out)
 			}
 			const answer = "m1 10.77.0.5" // the member's name, and the appliance's tenant address as the one that spoke to it
@@ -292,11 +293,13 @@ func TestLBFirstApplianceServesAlone(t *testing.T) {
 			entered := func() string { return g.run(ctx, "journalctl -u keepalived --no-pager | grep -c 'Entering' || true") }
 			before := entered()
 			g.run(ctx, `systemd-run -q --unit=lb-addr-watch sh -c 'exec ip monitor address dev pub0 > /root/addr.log 2>&1'
-systemd-run -q --unit=lb-client sh -c 'while :; do r=$(ip netns exec pub socat -t1 - TCP4:`+vip+`:5000,connect-timeout=1 </dev/null 2>/dev/null); [ "$r" = "`+answer+`" ] && echo ok || echo "fail $r"; sleep 0.1; done > /root/client.log'
+systemd-run -q --unit=lb-client sh -c 'while :; do r=$(ip netns exec pub socat -u TCP4:`+vip+`:5000,connect-timeout=2 - 2>/dev/null); [ "$r" = "`+answer+`" ] && echo "ok $(date +%s.%N)" || echo "fail $(date +%s.%N) $r"; sleep 0.1; done > /root/client.log'
 sleep 1`)
+			told := g.run(ctx, "date +%s.%N")
 			if err := ps.PushKeepalived(ctx, "n1", 100, paired, "pub0"); err != nil {
 				t.Fatalf("keepalived with its peer: %v\n%s", err, diag())
 			}
+			started := g.run(ctx, "date +%s.%N")
 			g.run(ctx, startPeer)
 			for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(500 * time.Millisecond) {
 				if role, _ := peer(); role == "BACKUP" {
@@ -317,9 +320,12 @@ sleep 1`)
 			if moved := g.run(ctx, "cat /root/addr.log"); moved != "" {
 				t.Fatalf("an address of the public NIC changed while the peer joined:\n%s", moved)
 			}
+			// The client reads the member's answer and closes after it. (One that closes its side first, as socat
+			// does with an empty input, loses about one answer in fifty to the member's own echo, whatever the
+			// appliance does.)
 			ok, _ := strconv.Atoi(g.run(ctx, "grep -c '^ok' /root/client.log || true"))
 			if failed := g.run(ctx, "grep -v '^ok' /root/client.log || true"); failed != "" || ok < 30 {
-				t.Fatalf("the client while the peer joined: %d answers, and these were not:\n%s", ok, failed)
+				t.Fatalf("the client while the peer joined: %d answers; the first appliance was told at %s and the peer started at %s; not answered:\n%s", ok, told, started, failed)
 			}
 			n, _ := vrrpOnTheWire()
 			if n == 0 {
@@ -327,7 +333,39 @@ sleep 1`)
 			}
 			t.Logf("the peer joined: %d answers of %d, no address change, no state change; %d adverts to the peer in 4 s", ok, ok, n)
 
-			// 6. And it is a pair: keepalived stops on the first appliance, the peer takes the address.
+			// 6. A replace takes the peer away, and the appliance that is left has no peer in the row again: its
+			// config goes back to the one of step 2 by a reload, and nothing moves. Then the new peer comes, in the
+			// product's order, as in step 5.
+			stopPeer := "kill $(cat /run/peer.pid); n=0; while [ -e /run/peer.pid ] && [ $n -lt 50 ]; do n=$((n+1)); sleep 0.1; done; rm -f /run/peer.state"
+			g.run(ctx, stopPeer)
+			g.run(ctx, "systemd-run -q --unit=lb-addr-watch2 sh -c 'exec ip monitor address dev pub0 > /root/addr2.log 2>&1'; sleep 1")
+			if err := ps.PushKeepalived(ctx, "n1", 100, alone, "pub0"); err != nil {
+				t.Fatalf("keepalived without its peer again: %v\n%s", err, diag())
+			}
+			time.Sleep(5 * time.Second)
+			if st := state(); st.State != "MASTER" || !st.HoldsVIP || st.KeepalivedSum != lbSum(alone) || entered() != before {
+				t.Fatalf("after the peer left: %+v, %s transitions, want %s\n%s", st, entered(), before, diag())
+			}
+			if err := ps.PushKeepalived(ctx, "n1", 100, paired, "pub0"); err != nil {
+				t.Fatalf("keepalived with the new peer: %v\n%s", err, diag())
+			}
+			g.run(ctx, startPeer)
+			for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+				if role, _ := peer(); role == "BACKUP" {
+					break
+				} else if time.Now().After(deadline) {
+					t.Fatalf("the new peer is %q, want BACKUP\n%s", role, diag())
+				}
+			}
+			time.Sleep(5 * time.Second)
+			g.run(ctx, "systemctl stop lb-addr-watch2")
+			role, holds = peer()
+			if st := state(); st.State != "MASTER" || !st.HoldsVIP || role != "BACKUP" || holds || entered() != before || g.run(ctx, "cat /root/addr2.log") != "" || tcp() != answer {
+				t.Fatalf("after the new peer joined: first appliance %+v, peer %q (holds the address: %v), %s transitions (want %s), address changes %q, a client hears %q\n%s",
+					st, role, holds, entered(), before, g.run(ctx, "cat /root/addr2.log"), tcp(), diag())
+			}
+
+			// 7. And it is a pair: keepalived stops on the first appliance, the peer takes the address.
 			g.run(ctx, "systemctl stop keepalived")
 			for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(300 * time.Millisecond) {
 				if role, holds := peer(); role == "MASTER" && holds {
