@@ -44,6 +44,10 @@ const helmChartLayer = "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
 // answer. The one failure a workstation without a network may skip a test for.
 var errChartUnreachable = errors.New("not in the chart cache, and its source could not be read")
 
+// errNotInRegistry: the registry was reached and answered that it has no content of that digest. The pin names
+// something that is not published, which fails the test everywhere: it is not errChartUnreachable.
+var errNotInRegistry = errors.New("the registry has no content of that digest")
+
 func chartCacheDir() string {
 	if dir := os.Getenv(chartCacheEnv); dir != "" {
 		return dir
@@ -73,6 +77,9 @@ func cachedBlob(dir, digest string, fetch func() ([]byte, error)) (string, []byt
 		return path, raw, nil
 	}
 	raw, err := fetch()
+	if errors.Is(err, errNotInRegistry) {
+		return "", nil, fmt.Errorf("%s: %w", digest, err)
+	}
 	if err != nil {
 		return "", nil, fmt.Errorf("%s: %w: %v", digest, errChartUnreachable, err)
 	}
@@ -122,6 +129,9 @@ func registryGet(repo name.Repository, kind, digest, accept string) ([]byte, err
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("GET %s: %w", url, errNotInRegistry)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
@@ -301,8 +311,15 @@ func TestPulledChartMustBeThePinnedOne(t *testing.T) {
 			}
 		})
 	}
+	// A pin the registry has no content for is an answer, not a registry that could not be reached: a workstation
+	// fails on it too (a BOM whose digest is wrong would else skip the release checks there).
+	r, dir := newFakeChartRegistry(t), t.TempDir()
+	unpublished := r.chart
+	unpublished.Digest = digestOf([]byte("never published"))
+	if path, err := ociChart(dir, unpublished, t.Logf); !errors.Is(err, errNotInRegistry) || errors.Is(err, errChartUnreachable) {
+		t.Fatalf("a pin the registry has no content for: %q, %v, want errNotInRegistry", path, err)
+	}
 	// A digest names a file: one that is not a sha256 digest reads no registry and writes nothing.
-	dir := t.TempDir()
 	if _, _, err := cachedBlob(dir, "sha256:../../etc/passwd", func() ([]byte, error) { t.Error("fetched"); return nil, nil }); err == nil {
 		t.Fatal("a digest that is not one was accepted")
 	}

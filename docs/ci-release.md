@@ -965,8 +965,9 @@ in a pair that changes no k3s, Kubernetes version or node image. `go test
   content: the OCI manifest a BOM pins by digest, and the chart archive that
   manifest names. Every use hashes both, so a cached file is trusted no more
   than a pulled one: a file that is not what its name says is pulled again, and
-  a registry that answers other content than the BOM pins fails the test,
-  workstation or CI, and nothing of it is kept. The charts are read by digest,
+  a registry that answers other content than the BOM pins, or that it has no
+  content of the pinned digest (404), fails the test, workstation or CI, and
+  nothing of it is kept. The charts are read by digest,
   not by tag; that a tag still serves the pinned digest is `bom_verify.py`'s
   check, which reads the registry at every run for that reason. Deleting the
   directory is safe: the next run pulls again.
