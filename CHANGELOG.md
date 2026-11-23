@@ -68,8 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     every 30 s.
   - **Fewer requests.** A state equal to the one the portal last answered is not sent again before those 30 s: a
     kubelet's heartbeat is a list on the cluster and nothing at the portal. While the portal is building, the
-    controller asks every 10 s as before. This part also holds for clusters on charts 0.1.17 and 0.1.18, which keep
-    polling every 10 s.
+    controller asks every 10 s as before, and a state that changed is sent once more 10 s later: the portal
+    answers a new state before its pass over the appliances, so the second request brings what the pass made of
+    it (the address of a Service that was refused and put right) and starts the pass a running one skipped. This
+    part also holds for clusters on charts 0.1.17 and 0.1.18, which keep polling every 10 s.
   - **No library.** A raw watch over HTTP on the product's own cluster client: streams of 5 minutes that go on
     from the last resourceVersion, a new start after `410 Gone`, a wait that grows to 30 s while the API server is
     down.

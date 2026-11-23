@@ -498,6 +498,51 @@ func TestWatchedBuildingIsAskedAgain(t *testing.T) {
 	}
 }
 
+// The portal answers a state it did not have with what its balancer served until then: the pass over the appliances
+// starts with the request and is done by the next one (project.LBClusterState answers from the row, then converges).
+// Here a Service the portal refused is put right. The request that carries the change is still answered "refused";
+// the controller sends the changed state once more after -interval, with or without a watch, writes the address
+// that answer has, and then leaves the state until the resync.
+func TestChangedStateIsAskedAgain(t *testing.T) {
+	for _, watching := range []bool{true, false} {
+		a := newAPIServer(t)
+		row := map[string]lbgw.ServiceStatus{} // the balancer's row: each Service as the last pass left it
+		p := &portal{answer: func(_ int, req *lbgw.Request) *lbgw.Answer {
+			ans := &lbgw.Answer{}
+			for _, s := range req.Services {
+				st, ok := row[s.UID]
+				if !ok {
+					st = lbgw.ServiceStatus{UID: s.UID, State: lbgw.StateBuilding}
+				}
+				ans.Services = append(ans.Services, st)
+				row[s.UID] = lbgw.ServiceStatus{UID: s.UID, State: lbgw.StateReady, Address: "203.0.113.10", IPMode: "VIP"}
+				if len(s.Ports) > 1 {
+					row[s.UID] = lbgw.ServiceStatus{UID: s.UID, State: lbgw.StateRefused, Reason: lbgw.ReasonInvalid, Message: "one port only"}
+				}
+			}
+			return ans
+		}}
+		a.set("nodes//w1", readyNode("w1", "10.0.0.11"))
+		a.set("services/shop/web", map[string]any{"spec": lbSpec(Class, tcp(80, 30080), tcp(443, 30443))})
+		start(t, a, p, &controller{watching: watching, interval: 50 * time.Millisecond, resync: time.Hour, debounce: 20 * time.Millisecond})
+		within(t, 2*time.Second, "the refusal heard", func() bool { return p.sent() >= 2 })
+		time.Sleep(200 * time.Millisecond)
+		if got := ingress(a.get("services/shop/web")); len(got) != 0 {
+			t.Fatalf("watching %v: a refused Service has an address: %v", watching, got)
+		}
+		svc := a.get("services/shop/web")
+		svc["spec"] = lbSpec(Class, tcp(80, 30080))
+		a.set("services/shop/web", svc)
+		within(t, 2*time.Second, "the address of the Service that was put right", func() bool { return len(ingress(a.get("services/shop/web"))) == 1 })
+		time.Sleep(300 * time.Millisecond)
+		sent := p.sent()
+		time.Sleep(300 * time.Millisecond)
+		if p.sent() != sent {
+			t.Fatalf("watching %v: %d requests for a state that was asked again and did not change", watching, p.sent()-sent)
+		}
+	}
+}
+
 // A Secret a Service names is watched, by its name, and a Secret that changes is at the portal at once; the
 // Secrets nobody names are not watched, and the watch ends when the Service stops naming the Secret.
 func TestWatchedSecret(t *testing.T) {
@@ -573,7 +618,7 @@ func TestPollsWithoutWatch(t *testing.T) {
 	within(t, 2*time.Second, "the first state", func() bool { return p.sent() >= 1 })
 	a.set("services/shop/web", map[string]any{"spec": lbSpec(Class, tcp(80, 30080))})
 	within(t, 2*time.Second, "the address", func() bool { return len(ingress(a.get("services/shop/web"))) == 1 })
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond) // the changed state is sent once more, one turn later
 	sent, lists := p.sent(), a.count(a.lists, "services")
 	time.Sleep(300 * time.Millisecond)
 	if got := a.count(a.lists, "services") - lists; got < 5 {

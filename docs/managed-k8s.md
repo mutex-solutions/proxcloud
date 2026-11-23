@@ -994,6 +994,12 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
     stands for the state until then. While that answer leaves something open (the portal is still building, it asked
     for a certificate, a status or a finalizer could not be written), and after a turn that failed, the controller
     asks again every 10 s (`-interval`), since the portal's answer changes without anything changing in the cluster.
+  - **A state that changed is sent twice:** at once, and once more 10 s later (`-interval`). The portal answers a
+    state it did not have before its pass over the appliances, which starts with the request: the first answer says
+    each Service as the balancer served it until then (a refused Service that was put right is still answered
+    refused), and a pass that was running leaves the new state to the next request. The second request brings the
+    answer of the pass, and that one stands until the 30 s. Under an older chart the turn after a change does the
+    same.
   - **A watch is a plain HTTP request** on the controller's own client, no informer and no cache
     (`internal/cloud/kamajik8s/watch.go`): the API server is asked to keep a stream for 5 minutes, and the next one
     starts at the resourceVersion the last one reached (events and bookmarks carry it), so nothing happens unseen

@@ -98,7 +98,8 @@ func main() {
 // What differs is when the next one comes.
 //
 // Watching: within debounce of a change of a Service, a Node or a Secret a Service names, and at the latest when the
-// state last sent is resync old. The watches say only that something changed (kamajik8s.WatchServices): an event
+// state last sent is due again (turn: resync after a state the portal had, interval after one it had not). The
+// watches say only that something changed (kamajik8s.WatchServices): an event
 // that is lost, a stream that is down or an API server that forbids the watch costs time, never a wrong state.
 // While a turn left something open (the portal is building, a certificate is asked for, a write failed), and after
 // a turn that failed, the next one comes after interval as without a watch: the portal's answer changes without
@@ -122,7 +123,7 @@ func (c *controller) run(ctx context.Context) {
 		}
 		wait := c.interval
 		if c.watching && err == nil && !c.open {
-			wait = max(time.Until(c.lastSent.Add(c.resync)), 0)
+			wait = max(time.Until(c.again), 0)
 		}
 		select {
 		case <-ctx.Done():
@@ -340,11 +341,11 @@ type controller struct {
 	ctx                        context.Context               // run's, for the watches
 	wake                       chan struct{}                 // a watch asks for a turn
 	secrets                    map[string]context.CancelFunc // the watches of Secrets, by namespace/name (follow)
-	// lastReq is the state the portal last answered, as it was sent without certificate data, lastAns its answer
-	// and lastSent when: an equal state is not sent again before resync, the answer stands for it (turn).
-	lastReq  []byte
-	lastAns  *lbgw.Answer
-	lastSent time.Time
+	// lastReq is the state the portal last answered, as it was sent without certificate data, and lastAns its
+	// answer: an equal state is not sent again before again, the answer stands for it until then (turn).
+	lastReq []byte
+	lastAns *lbgw.Answer
+	again   time.Time
 	// open: the last turn left something for the next one, which is therefore sent whatever its state.
 	open bool
 }
@@ -418,13 +419,23 @@ func (c *controller) turn(ctx context.Context) error {
 	// A state equal to the one the portal last answered is not sent again before the resync: a Node's heartbeat
 	// is a list and no request. The last answer then stands for it, and the rest of the turn runs as after a send,
 	// so a status or an Event that could not be written is written now. A turn the last one left open is sent.
+	//
+	// A state the portal did not have is answered before the portal's pass over the appliances, which starts
+	// with the request (project.LBClusterState): the answer says each Service as the balancer served it until
+	// then, a refused Service that was put right still refused, and a pass that was running leaves the new state
+	// to the next request. So a state that changed is sent once more after interval, as every state was before
+	// there was a watch, and the answer to that one stands until the resync.
 	state, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
 	ans := c.lastAns
-	if ans == nil || wasOpen || !bytes.Equal(state, c.lastReq) || time.Since(c.lastSent) >= c.resync {
-		c.lastAns, c.lastSent = nil, time.Now()
+	changed := !bytes.Equal(state, c.lastReq)
+	if now := time.Now(); ans == nil || wasOpen || changed || !now.Before(c.again) {
+		c.lastAns, c.again = nil, now.Add(c.resync)
+		if changed {
+			c.again = now.Add(min(c.interval, c.resync))
+		}
 		ans, err = c.put(ctx, req)
 	}
 	if err == nil && len(ans.NeedCertificates) > 0 {

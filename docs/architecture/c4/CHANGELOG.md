@@ -21,7 +21,8 @@ path and with the kubeconfig it already has, and its requests to the gateway bec
   while a turn left something open or failed), `changed` (a watch asks for a turn; its failure is logged once),
   `follow` (one watch per TLS Secret the Services of the turn name, by name, at most `lbgw.MaxClusterCerts`, ended
   when nothing names the Secret). `turn` keeps the state the portal last answered and that answer: an equal state
-  is not sent again before the resync. New flag `-watch`, off by default, so the image behaves under charts 0.1.17
+  is not sent again before the resync, except once, `-interval` after a state that changed (`controller.again`):
+  the portal answers a new state before its pass over the appliances, so only the second answer is the pass's. New flag `-watch`, off by default, so the image behaves under charts 0.1.17
   and 0.1.18 as before except that an unchanged state is sent every 30 s instead of every 10 s.
 - `deploy/charts/proxmox-kamaji-cluster` 0.1.19: `templates/lb-controller.yaml` starts the controller with
   `--watch=true`. No RBAC (the tenant's admin kubeconfig, as before) and no NetworkPolicy rule (the same API server
