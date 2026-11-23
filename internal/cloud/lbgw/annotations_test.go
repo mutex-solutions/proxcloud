@@ -54,8 +54,9 @@ func TestEveryAnnotationByItsName(t *testing.T) {
 		{KnobHealthTimeout, "3", Options{HealthTimeout: 3}},
 		{KnobHealthMaxRetries, "1", Options{HealthRise: 1}},
 		{KnobHealthMaxRetriesDown, "3", Options{HealthFall: 3}},
-		{KnobNodeSelector, "pool=edge, public", Options{}}, // the controller's to read: nothing here, and no Event
-		{KnobInternal, "false", Options{}},                 // "true" refuses: TestAnnotationsThatRefuseTheService
+		{KnobNodeSelector, "pool=edge, public", Options{}},    // the controller's to read: nothing here, and no Event
+		{KnobInternal, "false", Options{}},                    // "true" refuses: TestAnnotationsThatRefuseTheService
+		{KnobKeepAddress, "true", Options{KeepAddress: true}}, // served by the portal, and no Event: TestKeepAddressAndLoadBalancerIP
 	}
 	seen := map[string]bool{}
 	for _, c := range cases {
@@ -64,13 +65,6 @@ func TestEveryAnnotationByItsName(t *testing.T) {
 		if reason != "" || !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: %q = %+v (%s %s), want %+v", c.knob, c.value, got, reason, msg, c.want)
 		}
-	}
-	// keep-address is read and says that it is not served yet.
-	seen[KnobKeepAddress] = true
-	got, reason, _ := ServiceOptions(annotated(OwnPrefix+"keep-address", "true"))
-	if reason != "" || !got.KeepAddress || len(got.Events) != 1 || got.Events[0].Reason != ReasonKeepAddressNotServed ||
-		!strings.Contains(got.Events[0].Message, OwnPrefix+"keep-address") {
-		t.Errorf("keep-address: %+v %s", got, reason)
 	}
 	for _, knob := range knobs {
 		if !seen[knob] {
@@ -417,5 +411,51 @@ func TestForwardedForNextToProxyKeepsTheAddress(t *testing.T) {
 	if w.Code != http.StatusOK || len(r.portal.got) != 1 || ans.Services[0].State == StateRefused || ans.Services[0].IPMode != "Proxy" ||
 		len(ans.Services[0].Events) != 1 {
 		t.Fatalf("gateway: %d %+v, the portal got %d", w.Code, ans, len(r.portal.got))
+	}
+}
+
+// keep-address is a boolean like the other flags, read the same way by ServiceOptions and by KeepsAddress, which the
+// portal asks when a Service leaves the state. spec.loadBalancerIP reaches the portal as an IPv4 address or not at
+// all, and only from a controller of protocol 2: a text that is none is dropped with one Event that does not repeat
+// it, and the Service is served.
+func TestKeepAddressAndLoadBalancerIP(t *testing.T) {
+	for value, want := range map[string]bool{"true": true, " True ": true, "1": true, "false": false, "": false, "yes": false,
+		strings.Repeat("t", MaxAnnotationValue+1): false} {
+		s := annotated(OwnPrefix+KnobKeepAddress, value)
+		o, reason, _ := ServiceOptions(s)
+		if reason != "" || o.KeepAddress != want || KeepsAddress(s) != want {
+			t.Errorf("keep-address %q: options %v, KeepsAddress %v, want %v (%s)", value, o.KeepAddress, KeepsAddress(s), want, reason)
+		}
+		if slices.ContainsFunc(o.Events, func(ev Event) bool { return ev.Reason == ReasonKeepAddressLimit }) {
+			t.Errorf("keep-address %q: the gateway knows no cluster's kept addresses: %+v", value, o.Events)
+		}
+	}
+	if KeepsAddress(annotated("example.org/lb-keep-address", "true")) || KeepsAddress(&Service{}) {
+		t.Error("keep-address is read under the load balancer's own name only")
+	}
+
+	r := newRig()
+	r.protocol = "2"
+	asked := func(ip string) Service {
+		s := web("u-" + strconv.Itoa(len(ip)))
+		s.LoadBalancerIP = ip
+		return s
+	}
+	for ip, want := range map[string]string{"203.0.113.7": "203.0.113.7", "": "", "2001:db8::1": "", "203.0.113.007": "", "203.0.113.7/32": "",
+		"kept-address <script>": "", "203.0.113.7 ": ""} {
+		w, ans := r.put(t, v2, Request{Services: []Service{asked(ip)}})
+		if w.Code != http.StatusOK || len(r.portal.got) != 1 || r.portal.got[0].LoadBalancerIP != want || ans.Services[0].State != StateBuilding {
+			t.Fatalf("loadBalancerIP %q: %d %s, the portal got %+v, want %q", ip, w.Code, w.Body, r.portal.got, want)
+		}
+		said := slices.ContainsFunc(ans.Services[0].Events, func(ev Event) bool { return ev.Reason == ReasonLoadBalancerIPIgnored })
+		if said != (ip != want) || (ip != "" && ip != want && strings.Contains(w.Body.String(), ip)) {
+			t.Errorf("loadBalancerIP %q: answer %s", ip, w.Body)
+		}
+	}
+	// A controller of protocol 1 never sent the field; one that did is not obeyed, and told nothing new.
+	r.protocol = "1"
+	w, _ := r.put(t, v2, Request{Services: []Service{asked("203.0.113.7")}})
+	if w.Code != http.StatusOK || r.portal.got[0].LoadBalancerIP != "" || strings.Contains(w.Body.String(), "events") {
+		t.Fatalf("protocol 1: %d %s, the portal got %+v", w.Code, w.Body, r.portal.got)
 	}
 }

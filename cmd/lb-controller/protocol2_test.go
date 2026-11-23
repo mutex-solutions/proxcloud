@@ -546,3 +546,51 @@ func TestParseSelector(t *testing.T) {
 		}
 	}
 }
+
+// spec.loadBalancerIP is sent to a portal of protocol 2, which decides: the controller says nothing of its own about
+// it, and says what the portal says, once. A portal of protocol 1 is not sent the field (it would refuse the whole
+// request), and the controller then says what it always said (TestTurn). A text too long for an address is not sent
+// as it is.
+func TestLoadBalancerIPOfProtocol2(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTenant{services: map[string]map[string]any{}}
+	kept := lbSpec(Class, tcp(80, 30080))
+	kept["loadBalancerIP"] = "203.0.113.5"
+	f.add("web", "kept", "u-1", "2026-11-23T10:00:00Z", kept)
+	other := lbSpec(Class, tcp(80, 30081))
+	other["loadBalancerIP"] = "203.0.113.99"
+	f.add("web", "other", "u-2", "2026-11-23T10:01:00Z", other)
+	long := lbSpec(Class, tcp(80, 30082))
+	long["loadBalancerIP"] = strings.Repeat("9", 4000)
+	f.add("web", "long", "u-3", "2026-11-23T10:02:00Z", long)
+	f.nodes = []map[string]any{node("w1", "10.0.0.11", nil)}
+	ignored := lbgw.Event{Type: "Warning", Reason: lbgw.ReasonLoadBalancerIPIgnored, Message: "spec.loadBalancerIP 203.0.113.99 is not an address this cluster keeps"}
+	g := &gatewayFake{answer: func(s lbgw.Service) lbgw.ServiceStatus {
+		st := lbgw.ServiceStatus{UID: s.UID, State: lbgw.StateReady, Address: "203.0.113.5", IPMode: "VIP"}
+		if s.UID != "u-1" {
+			st.Address, st.Events = "203.0.113.6", []lbgw.Event{ignored}
+		}
+		return st
+	}}
+	c := &controller{api: f, put: g.put, log: quiet()}
+	for range 2 {
+		if err := c.turn(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := []string{g.last.Services[0].LoadBalancerIP, g.last.Services[1].LoadBalancerIP, g.last.Services[2].LoadBalancerIP}; !slices.Equal(got, []string{"203.0.113.5", "203.0.113.99", "invalid"}) {
+		t.Fatalf("sent %q", got)
+	}
+	want := []string{"kept:EnsuredLoadBalancer", "other:EnsuredLoadBalancer", "other:LoadBalancerIPIgnored", "long:EnsuredLoadBalancer", "long:LoadBalancerIPIgnored"}
+	if got := reasons(f.events); !slices.Equal(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	if msg := f.events[2]["message"]; msg != ignored.Message {
+		t.Fatalf("the Service is told %q, want the portal's words", msg)
+	}
+	// What a portal of protocol 1 is sent holds nothing of it.
+	raw, err := json.Marshal(protocol1(g.last))
+	if err != nil || strings.Contains(string(raw), "loadBalancerIP") || len(protocol1(g.last).Services) != 3 {
+		t.Fatalf("protocol 1 request: %s, %v", raw, err)
+	}
+}

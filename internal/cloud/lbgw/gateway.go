@@ -36,8 +36,8 @@ import (
 // older than MinProtocol, so a change that needs a newer controller says "bump the cluster" instead of failing
 // silently. /lb/v1 stays backward compatible within a minor release (C12).
 //
-// Protocol 2 (v0.11.1) only adds: a Service's annotations, session affinity, own nodes and certificates in the
-// request, and the certificates the portal asked for; its ipMode and Events in the answer, and the certificates the
+// Protocol 2 (v0.11.1) only adds: a Service's annotations, session affinity, own nodes, certificates and the address
+// it asks for (loadBalancerIP) in the request, and the certificates the portal asked for; its ipMode and Events in the answer, and the certificates the
 // portal asks for (tls.go). A protocol 1 controller sends none of them and is served as before, with one thing kept
 // back: its UDP Services stay refused (ProtocolUDP), so that upgrading the portal alone never hands a Service that
 // stood pending a public address, which is billed. The cluster's owner gets UDP by upgrading the cluster.
@@ -128,6 +128,10 @@ type Service struct {
 	// Certificates are the Secrets the Service's proxcloud.io/lb-tls-secret names, in its order: each one's name
 	// and the hash of its content, never the content (tls.go). The first one answers a client that asks for no name.
 	Certificates []CertRef `json:"certificates,omitempty"`
+	// LoadBalancerIP is the Service's spec.loadBalancerIP: the address it asks for. It is obeyed for an address its
+	// own cluster keeps, when the Service gets its address, and for no other (ServiceOptions; the portal's
+	// lbClusterDesired).
+	LoadBalancerIP string `json:"loadBalancerIP,omitempty"`
 }
 
 // Port is one port of a Service.
@@ -432,7 +436,7 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		if protocol < 2 { // no controller of protocol 1 sends them, and they are read for none
-			s.Certificates = nil
+			s.Certificates, s.LoadBalancerIP = nil, ""
 		}
 		more := 0
 		for j, c := range s.Certificates {

@@ -214,7 +214,7 @@ func protocol1(req *lbgw.Request) *lbgw.Request {
 		if lbgw.Internal(s.Annotations) || lbgw.WantsTLS(&s) {
 			continue
 		}
-		s.Annotations, s.SessionAffinity, s.SessionAffinityTimeout, s.Nodes = nil, "", 0, nil
+		s.Annotations, s.SessionAffinity, s.SessionAffinityTimeout, s.Nodes, s.LoadBalancerIP = nil, "", 0, nil, ""
 		out.Services = append(out.Services, s)
 	}
 	return out
@@ -533,8 +533,11 @@ func (c *controller) turn(ctx context.Context) error {
 			c.report(ctx, s, "state", "Normal", "EnsuringLoadBalancer", msg)
 			c.open = true // the portal says ready in an answer to come
 		}
-		if s.loadBalancerIP != "" {
-			c.report(ctx, s, "ip", "Warning", "LoadBalancerIPIgnored",
+		// A portal of protocol 2 reads spec.loadBalancerIP: it gives the Service that address when the cluster
+		// keeps it, and says so itself when it does not (its Events, below). A portal of protocol 1 was not sent
+		// the field and obeys none.
+		if s.loadBalancerIP != "" && st.IPMode == "" && st.State != lbgw.StateRefused {
+			c.report(ctx, s, "ip", "Warning", lbgw.ReasonLoadBalancerIPIgnored,
 				"spec.loadBalancerIP is ignored: the portal gives each Service an address of its own")
 		}
 		// What the Service's annotations raised, one Event per reason while it stands; a reason that is gone may
@@ -653,6 +656,16 @@ func (c *controller) certificates(ctx context.Context, s *service, secrets map[s
 	return refs
 }
 
+// loadBalancerIP is spec.loadBalancerIP as it is sent: the API server takes any text there, and one that cannot be
+// an address is sent as a short text that is none either, so the portal says that it is not obeyed and the request
+// stays small.
+func loadBalancerIP(v string) string {
+	if len(v) > 45 { // the longest address there is, an IPv6 one that ends in an IPv4 one
+		return "invalid"
+	}
+	return v
+}
+
 // readService reads one Service. Owned: type LoadBalancer and class proxcloud.io/lb, or no class in default mode.
 func readService(obj map[string]any, defaultClass bool) *service {
 	meta, _ := obj["metadata"].(map[string]any)
@@ -675,7 +688,7 @@ func readService(obj map[string]any, defaultClass bool) *service {
 	}
 	w := lbgw.Service{UID: s.uid, Namespace: s.ns, Name: s.name, ProxyProtocol: s.proxy,
 		ExternalTrafficPolicy: str(spec["externalTrafficPolicy"]), HealthCheckNodePort: num(spec["healthCheckNodePort"]),
-		SessionAffinity: str(spec["sessionAffinity"])}
+		SessionAffinity: str(spec["sessionAffinity"]), LoadBalancerIP: loadBalancerIP(str(spec["loadBalancerIP"]))}
 	if w.SessionAffinity == "None" {
 		w.SessionAffinity = "" // the API server's default: nothing to say
 	}

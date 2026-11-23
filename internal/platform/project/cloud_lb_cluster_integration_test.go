@@ -623,6 +623,8 @@ func TestLBClusterStateConverges(t *testing.T) {
 	// The Services that end TLS with a Secret, on a database and a pair of their own
 	// (cloud_lb_cluster_tls_integration_test.go).
 	t.Run("TLSFromSecret", testLBClusterTLSFromSecret)
+	// A Service's address kept for its cluster, and spec.loadBalancerIP (cloud_lb_cluster_keep_integration_test.go).
+	t.Run("KeepAddress", testLBClusterKeepAddress)
 }
 
 // lbKube is a management cluster holding one tenant cluster's Application and the Secrets written next to it.

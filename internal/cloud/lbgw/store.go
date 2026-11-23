@@ -45,8 +45,13 @@ type State struct {
 	Nodes    []string  `json:"nodes"`
 	// CertHashes are the hashes of the Secrets the cluster's Services name, in the last request and in Services:
 	// the certificates the portal keeps for the cluster. A hash, never a certificate.
-	CertHashes []string   `json:"certHashes,omitempty"`
-	UpdatedAt  *time.Time `json:"updatedAt,omitempty"`
+	CertHashes []string `json:"certHashes,omitempty"`
+	// KeepGone are the UIDs of Services that left the state while they asked to keep their address
+	// (proxcloud.io/lb-keep-address) and whose address the balancer still holds for them: the converge keeps it for
+	// the cluster instead of giving it back. The PUT that drops a Service is the last word of it the portal gets,
+	// so what the Service asked is carried here, from one state to the next, until the converge has seen it.
+	KeepGone  []string   `json:"keepGone,omitempty"`
+	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
 }
 
 // Store is the Postgres side of the gateway.
