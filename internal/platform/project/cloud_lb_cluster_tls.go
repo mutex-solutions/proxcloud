@@ -5,7 +5,7 @@ package project
 //
 // The cluster's controller sends the hash of each Secret a Service names. A hash this portal holds no certificate
 // for is asked for in the answer, and the controller sends that Secret once. What arrives is checked exactly as a
-// certificate a tenant uploads (pve.CheckLBCertificate: the key fits the certificate, RSA of 2048 bits or more or
+// certificate a tenant uploads (pve.CheckLBCertificate: the key fits the certificate, RSA of 2048 to 8192 bits or
 // ECDSA P-256 / P-384, a chain of five at most that signs in order, 16 KiB, no passphrase) and stored as a row of
 // lb_certificates, sealed with the portal's key. The row belongs to the cluster's balancer and to no project
 // (lbClusterCertOwner): its blob opens for that cluster and that row alone, no route of a project lists, names or
@@ -201,14 +201,22 @@ func (h *Handler) lbClusterTakeCerts(ctx context.Context, cred *lbgw.Credential,
 			continue
 		}
 		if len(rows) >= lbClusterCertRows {
-			// Rows nothing names any more, of Secrets that changed faster than the passes cleared up after them.
+			// Rows nothing names any more, of Secrets that changed faster than the passes cleared up after them. A
+			// row the stored state names stays: a Service that is held as it was served (lbClusterTLS) is not in
+			// this request with the certificate it is served with, and without the row its port would leave the
+			// balancer at the next pass.
+			last, err := h.lbGW.State(ctx, cred.ID)
+			if err != nil {
+				return err
+			}
 			for have, row := range rows {
-				if _, ok := named[have]; !ok {
-					if _, err := h.lbCerts.DeleteOne(ctx, pgdoc.M{"_id": row.ID, "projectId": owner}); err != nil {
-						return err
-					}
-					delete(rows, have)
+				if _, ok := named[have]; ok || (last != nil && slices.Contains(last.CertHashes, have)) {
+					continue
 				}
+				if _, err := h.lbCerts.DeleteOne(ctx, pgdoc.M{"_id": row.ID, "projectId": owner}); err != nil {
+					return err
+				}
+				delete(rows, have)
 			}
 		}
 		now := time.Now().UTC()

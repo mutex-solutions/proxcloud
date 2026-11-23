@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -507,6 +508,41 @@ func testLBClusterTLSFromSecret(t *testing.T) {
 		}
 	}
 	wireMu.Unlock()
+
+	// A cluster whose Secrets changed faster than its passes cleared up: the rows nothing names go when one more
+	// certificate arrives, and the row of a Service that is held as it was served stays, though the request names
+	// that Service with a Secret that is gone.
+	c3 := &lbgw.Credential{ID: "c3", ProjectID: "p1", ComputeServiceID: "svc", KubernetesServiceID: "k8s", NetworkID: "net-1", Vnet: "v1"}
+	if err := store.PutState(ctx, &lbgw.State{ID: "c3", Services: []lbgw.Service{shop(named(hashA))}, CertHashes: []string{hashA}}); err != nil {
+		t.Fatal(err)
+	}
+	leftovers := []lbCertificate{{ID: lbClusterCertID("c3", hashA), ProjectID: lbClusterCertOwner("c3"), SecretHash: hashA,
+		LBCertificate: pve.LBCertificate{File: strings.Repeat("a", 64), NotAfter: until}}}
+	for i := range lbClusterCertRows {
+		gone := fmt.Sprintf("%064x", i)
+		leftovers = append(leftovers, lbCertificate{ID: lbClusterCertID("c3", gone), ProjectID: lbClusterCertOwner("c3"), SecretHash: gone})
+	}
+	for i := range leftovers {
+		if err := certStore.Upsert(ctx, leftovers[i].ID, &leftovers[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := lbgw.Service{UID: "api", Namespace: "web", Name: "api", ExternalTrafficPolicy: "Cluster", Certificates: []lbgw.CertRef{{Secret: "api-tls", SHA256: hashB}},
+		Ports: []lbgw.Port{{Protocol: "TCP", Port: 8443, NodePort: 30843}}, Annotations: map[string]string{"proxcloud.io/lb-tls-secret": "api-tls"}}
+	kept, _, held, _, err = h.lbClusterTLS(ctx, c3, []lbgw.Service{shop(lbgw.CertRef{Secret: "shop-tls", Problem: lbgw.CertNotFound}), api}, []lbgw.CertificateData{data(second)})
+	var left []string
+	for _, row := range certRows(lbClusterCertOwner("c3")) {
+		left = append(left, row.SecretHash)
+	}
+	slices.Sort(left)
+	want := []string{hashA, hashB}
+	slices.Sort(want)
+	if err != nil || len(kept) != 2 || !slices.Equal(kept[0].Certificates, []lbgw.CertRef{named(hashA)}) || event(held["shop"], lbgw.ReasonInvalidCertificate) == "" || !slices.Equal(left, want) {
+		t.Fatalf("more rows than a cluster may leave: %d rows left, kept %+v, %+v %v", len(left), kept, held, err)
+	}
+	if err := h.lbDropState(ctx, "c3"); err != nil {
+		t.Fatal(err)
+	}
 
 	// 11. The certificates go with the cluster: the last step of its release (LBReleaseCluster, whose appliances'
 	// part TestLBClusterStateConverges runs) drops them with the state.

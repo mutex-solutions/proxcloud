@@ -1250,7 +1250,7 @@ spec:
   the portal cannot ask for a Secret no Service names. The request's 64 KiB is the state's; certificates that
   were asked for come on top.
 - **What the portal does with it.** It checks the Secret exactly as a certificate uploaded to a project (the key
-  fits the certificate; RSA of 2048 bits or more, or ECDSA P-256 or P-384; at most five certificates that sign
+  fits the certificate; RSA of 2048 to 8192 bits, or ECDSA P-256 or P-384; at most five certificates that sign
   each other in order; no passphrase), seals chain and key with its encryption key into a row that belongs to the
   cluster's balancer (`lb_certificates`, owner `lbc:<clusterId>`; no project lists, names or deletes it, and
   another cluster with the same Secret has a row of its own), and keeps only the hash in the cluster's state
