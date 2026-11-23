@@ -851,7 +851,7 @@ call for its own cluster, and minting it again rotates it.
 
 - Each Service is checked on its own, and a refused one gets a reason the controller turns into an Event: a UDP port
   from a controller that speaks protocol 1 refuses the whole Service (`UDPNotSupported`), a port that is neither TCP
-  nor UDP too (`ProtocolNotSupported`), the annotation `service.beta.kubernetes.io/openstack-internal-load-balancer` (`InternalNotSupported`),
+  nor UDP too (`ProtocolNotSupported`), the annotation `proxcloud.io/lb-internal: "true"` (`InternalNotSupported`),
   IPv6 or dual stack
   (`IPFamilyNotSupported`), node port 0,
   a node port outside 30000-32767 or policy Local without a health port (`NoNodePort`), source ranges that do not fit
@@ -1009,8 +1009,8 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   allocated, minutes before a cluster's first Service answered; Kubernetes' own service controller also patches the
   status only with what a provider returns once its balancer is provisioned). An address already written stays while
   a later change is building and goes when the portal names none. `ipMode: Proxy` when the TCP ports' members get
-  the PROXY header (the annotation `proxcloud.io/lb-proxy-protocol` or OCCM's name for it; the portal says
-  which mode, a portal of v0.11.0 leaves it to the own annotation's `"true"`) and `VIP` otherwise. **With `VIP`, a client inside the cluster never
+  the PROXY header (the annotation `proxcloud.io/lb-proxy-protocol`; the portal says
+  which mode, a portal of v0.11.0 leaves it to the annotation's `"true"`) and `VIP` otherwise. **With `VIP`, a client inside the cluster never
   reaches the balancer**: kube-proxy treats an address with that mode as one of the Service's own and sends a pod's or
   a node's connection to it straight to an endpoint. Such a client does not see an outage of the pair or a switch
   between its appliances, never meets the appliance's firewall, which is what holds clients from outside to
@@ -1045,9 +1045,13 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   release's image runs under chart 0.1.17.
 
 **Load balancers of a cluster's Services: UDP, affinity, annotations, and how it differs from OCCM.** OCCM is
-the cloud controller manager whose annotations are named `loadbalancer.openstack.org/...`: the one tenants' charts for
-load balancer Services are mostly written for. From v0.11.1 the gateway speaks protocol 2, which only adds to protocol 1: per Service its annotations of the load
-balancer's names, its `sessionAffinity` with the timeout, and the nodes its node selector picks; in the answer the
+the upstream cloud controller manager that tenants' charts for load balancer Services on a private cloud are mostly
+written for (its repository is named in [the C4 change log](architecture/c4/CHANGELOG.md), 2026-11-23). A Service
+is meant to behave here as it does with OCCM, under the product's own annotation names (the differences are listed
+below): OCCM's names are **not** read, so a manifest written for it has its annotations renamed first (the table of
+names closes this section). From v0.11.1 the
+gateway speaks protocol 2, which only adds to protocol 1: per Service its annotations of the prefix
+`proxcloud.io/lb-`, its `sessionAffinity` with the timeout, and the nodes its node selector picks; in the answer the
 `ipMode` of the address and the Events to say on the Service. A controller of v0.11.0 sends none of this and is
 served as before.
 
@@ -1074,70 +1078,77 @@ served as before.
   traffic (the node rate-limits its ICMP answers); a dead node is out in 10 to 12 s (the lab spike of 2026-11-22). A connection limit on a UDP port
   holds per node, not for the listener.
 
-Annotations. The own name is `proxcloud.io/lb-<knob>`; `loadbalancer.openstack.org/<alias>` is obeyed where it means
-the same as in OCCM (v1.37.1, `loadbalancer.go`:61-107; the repository and the lines are named in
-[the C4 change log](architecture/c4/CHANGELOG.md), 2026-11-23), so a chart or manifest moved from a cluster that runs OCCM behaves the same
-without an edit. With both set the own name wins. The portal reads them (`internal/cloud/lbgw/annotations.go`), so a
-new knob ships with the portal and needs no new controller; the node selector alone is read by the controller, which
-has the nodes' labels.
+Annotations. A knob has one name, `proxcloud.io/lb-<knob>`, and no other name is read: the product defines its own.
+What a knob does follows OCCM (v1.37.1, `loadbalancer.go`:61-107; the repository and the lines are named in
+[the C4 change log](architecture/c4/CHANGELOG.md), 2026-11-23). The portal reads them
+(`internal/cloud/lbgw/annotations.go`), so a new knob ships with the portal and needs no new controller; the node
+selector alone is read by the controller, which has the nodes' labels.
 
-| `proxcloud.io/lb-` | `loadbalancer.openstack.org/` | Values | Effect |
-|---|---|---|---|
-| `proxy-protocol` | `proxy-protocol` | own name: `true` or `v2` = version 2, `v1`; OCCM's: `true` or `v1` = version 1, `v2`; `false` | PROXY header to the members of the TCP ports; `ipMode: Proxy` |
-| `method` | `lb-method` | `roundrobin`, `leastconn`, `source`, or `ROUND_ROBIN`, `LEAST_CONNECTIONS`, `SOURCE_IP` (either spelling under either name) | the algorithm; anything else (`SOURCE_IP_PORT`) raises `LoadBalancerLbMethodUnknown` and balances round robin |
-| `connection-limit` | `connection-limit` | 1 to 20000, `-1` = none | open connections per listener; per node on a UDP port |
-| `timeout-client-data`, `timeout-member-connect`, `timeout-member-data` | the same | 1000 to 86400000 ms | the three timeouts of the TCP ports; unset, the cluster balancer's hour of idle time holds |
-| `x-forwarded-for` | `x-forwarded-for` | `true` | the TCP ports become HTTP listeners that add `X-Forwarded-For`; not added when the PROXY header is asked for too: the PROXY header holds and `InvalidAnnotation` says so (OCCM fails such a Service's sync) |
-| `enable-health-monitor` | `enable-health-monitor` | `true`, `false` | `false` = no health check; not obeyed, with an Event, for policy Local |
-| `health-monitor-delay`, `-timeout`, `-max-retries`, `-max-retries-down` | the same | 1 to 300 s, 1 to 300 s, 1 to 10, 1 to 10 | the check's interval, timeout, good checks to come up, bad checks to go down. A UDP port takes no "up" count (keepalived brings a node back at its first good check) and goes down after 2 bad checks at least |
-| `node-selector` | `node-selector` | `key=value, key` | only the nodes with every one of these labels are behind the Service; none = no member and `UnAvailableLoadBalancer`. Spaces around a term and around `=` are dropped |
-| `keep-address` | `keep-floatingip` | `true` | read, and not served yet: the Event `KeepAddressNotServed` says that the address is given back with the Service |
+| `proxcloud.io/lb-` | Values | Effect |
+|---|---|---|
+| `proxy-protocol` | `true` or `v2` = version 2, `v1` = version 1, `false` | PROXY header to the members of the TCP ports; `ipMode: Proxy` |
+| `method` | `roundrobin`, `leastconn`, `source`, or `ROUND_ROBIN`, `LEAST_CONNECTIONS`, `SOURCE_IP` | the algorithm; anything else (`SOURCE_IP_PORT`) raises `LoadBalancerLbMethodUnknown` and balances round robin |
+| `connection-limit` | 1 to 20000, `-1` = none | open connections per listener; per node on a UDP port |
+| `timeout-client-data`, `timeout-member-connect`, `timeout-member-data` | 1000 to 86400000 ms | the three timeouts of the TCP ports; unset, the cluster balancer's hour of idle time holds |
+| `x-forwarded-for` | `true` | the TCP ports become HTTP listeners that add `X-Forwarded-For`; not added when the PROXY header is asked for too: the PROXY header holds and `InvalidAnnotation` says so (OCCM fails such a Service's sync) |
+| `enable-health-monitor` | `true`, `false` | `false` = no health check; not obeyed, with an Event, for policy Local |
+| `health-monitor-delay`, `-timeout`, `-max-retries`, `-max-retries-down` | 1 to 300 s, 1 to 300 s, 1 to 10, 1 to 10 | the check's interval, timeout, good checks to come up, bad checks to go down. A UDP port takes no "up" count (keepalived brings a node back at its first good check) and goes down after 2 bad checks at least |
+| `node-selector` | `key=value, key` | only the nodes with every one of these labels are behind the Service; none = no member and `UnAvailableLoadBalancer`. Spaces around a term and around `=` are dropped |
+| `keep-address` | `true` | read, and not served yet: the Event `KeepAddressNotServed` says that the address is given back with the Service |
+| `internal` | `true`, `false` | `true` **refuses** the Service (`InternalNotSupported`): it never gets a public address |
 
 - A value that is not understood is not obeyed and named in a Warning Event `InvalidAnnotation`; the Service is
   served with the default. Refusing it would give its address back over a typing mistake.
-- Every other annotation of the two prefixes is named in **one** Warning Event `AnnotationNotSupported`: the network,
-  subnet, port, class, flavor, availability zone, tag and hostname annotations, `load-balancer-id`,
-  `load-balancer-address`, `default-tls-container-ref`, `timeout-tcp-inspect` when it is not 0, and a
-  `proxcloud.io/lb-` name this portal does not know. A tenant's annotation never picks a network or a flavor: the
-  provider's `config.cluster.loadBalancer` does.
-- `service.beta.kubernetes.io/openstack-internal-load-balancer: "true"` **refuses** the Service
-  (`InternalNotSupported`), so it never gets a public address: every address of the pair is public. For an address of
-  the tenant network use `loadBalancerClass: proxcloud.io/internal` (MetalLB, default mode).
+- Every other annotation of the prefix `proxcloud.io/lb-` is named in **one** Warning Event `AnnotationNotSupported`:
+  a name this portal does not know, such as `proxcloud.io/lb-flavor-id` or a knob of a later release. A tenant's
+  annotation never picks a network or a flavor: the provider's `config.cluster.loadBalancer` does.
+- **An annotation of any other prefix is not the load balancer's.** The controller does not send it, it counts
+  toward no limit, and no Event speaks of it, whatever it is and however large. That holds for the annotations
+  written for OCCM too: they are not obeyed and nothing says so.
+- `proxcloud.io/lb-internal: "true"` **refuses** the Service (`InternalNotSupported`), so it never gets a public
+  address: every address of the pair is public. For an address of the tenant network use
+  `loadBalancerClass: proxcloud.io/internal` (MetalLB, default mode). A value that is neither true nor false is
+  named in `InvalidAnnotation` and the Service is served.
+- **A request for an internal balancer written for OCCM gets a PUBLIC address here.** OCCM's own annotation for it
+  (its `service.beta.kubernetes.io/` name ending in `-internal-load-balancer`; the C4 change log has it in full) is
+  an annotation of another prefix: it is not read, not refused and not spoken of, and a Service that carries only
+  that one is served like any other, on a public address. Rename it to `proxcloud.io/lb-internal: "true"`, or set
+  `loadBalancerClass: proxcloud.io/internal`, **before** the manifest is applied to a cluster here.
 - **An annotation that cannot be read never costs a Service its address.** A value of more than 256 characters is
-  as if the annotation were not set (when the own name's value is too long, its alias is the one read), and the same
-  Warning Event `InvalidAnnotation` names it. The controller sends such a value cut to 257 characters and does not
-  obey a node selector that long either. The number of annotations is no limit: the ones the table knows are obeyed
-  however many others there are, and `AnnotationNotSupported` names the first 32 of the others by name and counts
-  the rest. So a Service that v0.11.0 served with such annotations left on it is served as before after the
-  cluster's upgrade. The one annotation that takes an address back is the internal one, above.
+  as if the annotation were not set, and the same Warning Event `InvalidAnnotation` names it. The controller sends
+  such a value cut to 257 characters and does not obey a node selector that long either. The number of annotations
+  is no limit: the ones the table knows are obeyed however many others there are, and `AnnotationNotSupported` names
+  the first 32 of the others by name and counts the rest. So a Service that v0.11.0 served with such annotations
+  left on it is served as before after the cluster's upgrade. The one annotation that takes an address back is the
+  internal one, above.
 - The same holds for two annotations that contradict each other: the forwarded-for header asked for next to the
   PROXY header. The Service is served and keeps its address, the PROXY header holds (v0.11.0 served it for
   `proxcloud.io/lb-proxy-protocol: "true"`), the forwarded-for header is not added, and `InvalidAnnotation` names
   the annotation. A value with more than 256 characters only because of the spaces around it is read without them.
-- Only annotations of the two prefixes and the internal one are sent to the portal. Any other annotation of a
-  Service, however large, is not in the request.
+- Only annotations of the prefix `proxcloud.io/lb-` are sent to the portal. Any other annotation of a Service,
+  however large, is not in the request.
 
-The fifteen places where a Service behaves differently than with OCCM, on
+The seventeen places where a Service behaves differently than with OCCM, on
 purpose:
 
 1. **One pair per cluster.** All Services of a cluster share one appliance pair; each still has an address of its
    own, so a user sees what OCCM shows, one external IP per Service.
 2. **No objects of OCCM's load balancer.** Names, ids, tags, flavors and zones of load balancers, listeners and pools do not exist,
-   so the annotations about them have nothing to act on.
+   so there is no annotation about them.
 3. **Which Services are owned.** Class `proxcloud.io/lb`, and in default mode also no class; OCCM owns only
    Services without a class.
 4. **The health check is on by default**; OCCM's is off (`create-monitor` false) unless asked for.
 5. **Other defaults.** A check every 3 s, 2 good checks up, 2 bad ones down, and an idle timeout of an hour;
    OCCM: 5 s, 3 s timeout, 1 up, 3 down, and 50 s. The annotations set OCCM's figures.
-6. **TLS.** `default-tls-container-ref` names a container of OCCM's secret store and is not obeyed. OCCM turns every port of
+6. **TLS.** OCCM's `default-tls-container-ref` names a container of its secret store and has no counterpart. OCCM turns every port of
    such a Service, UDP too, into a listener that ends TLS; here TLS from a Service's `kubernetes.io/tls` Secret is
    a change of its own, for TCP ports only. Until then a Service's TLS passes through a TCP port.
-7. **`proxcloud.io/lb-proxy-protocol: "true"` is version 2**, as v0.11.0 shipped it;
-   `loadbalancer.openstack.org/proxy-protocol: "true"` is version 1, as OCCM reads it.
+7. **`proxy-protocol: "true"` is version 2**, as v0.11.0 shipped it; OCCM's `"true"` is version 1. A manifest that
+   is renamed says `v1` to keep version 1.
 8. **A port without a node port refuses the Service** (`NoNodePort`); OCCM makes a pool without members.
 9. **`spec.loadBalancerIP` is not obeyed** (`LoadBalancerIPIgnored`); OCCM takes any free floating IP of the
    project.
-10. **No shared balancer**: `load-balancer-id` is not obeyed, each Service has its own address.
+10. **No shared balancer**: OCCM's `load-balancer-id` has no counterpart, each Service has its own address.
 11. **`SOURCE_IP_PORT` balances round robin**, with the Event OCCM raises for a method it cannot set.
 12. **The finalizer is `proxcloud.io/load-balancer`**; `service.kubernetes.io/load-balancer-cleanup` belongs to a
     cloud controller manager.
@@ -1150,6 +1161,40 @@ purpose:
     Service's sync: a balancer that exists stays as it was, a new Service gets none. Here a refused Service leaves
     the cluster's state and its address goes back, so the Service is served with the PROXY header alone and a
     Warning Event; a new Service with both annotations gets an address too.
+16. **The annotations have the product's names.** Only `proxcloud.io/lb-<knob>` is read. OCCM's annotations are
+    not aliases: on a Service here they do nothing and raise no Event, so a manifest written for OCCM is renamed
+    by the table below before it is applied.
+17. **OCCM's request for an internal balancer is not recognised.** A Service that carries only OCCM's
+    internal-load-balancer annotation gets a **public** address here. The request has the product's name,
+    `proxcloud.io/lb-internal: "true"`, which refuses the Service.
+
+Renaming a manifest written for OCCM. The left column is OCCM's short key, the part of its annotation's name after
+the `/`; the right column is the annotation to write instead. Values stay as they are unless the note says
+otherwise.
+
+| OCCM short key | Write instead | Note |
+|---|---|---|
+| `proxy-protocol` | `proxcloud.io/lb-proxy-protocol` | OCCM's `true` is version 1: write `v1` to keep it (`true` is version 2 here) |
+| `lb-method` | `proxcloud.io/lb-method` | `ROUND_ROBIN`, `LEAST_CONNECTIONS` and `SOURCE_IP` are read as they are |
+| `connection-limit` | `proxcloud.io/lb-connection-limit` | `-1` is no limit; otherwise 1 to 20000 |
+| `timeout-client-data` | `proxcloud.io/lb-timeout-client-data` | |
+| `timeout-member-connect` | `proxcloud.io/lb-timeout-member-connect` | |
+| `timeout-member-data` | `proxcloud.io/lb-timeout-member-data` | |
+| `x-forwarded-for` | `proxcloud.io/lb-x-forwarded-for` | |
+| `enable-health-monitor` | `proxcloud.io/lb-enable-health-monitor` | the check is on by default here |
+| `health-monitor-delay` | `proxcloud.io/lb-health-monitor-delay` | |
+| `health-monitor-timeout` | `proxcloud.io/lb-health-monitor-timeout` | |
+| `health-monitor-max-retries` | `proxcloud.io/lb-health-monitor-max-retries` | |
+| `health-monitor-max-retries-down` | `proxcloud.io/lb-health-monitor-max-retries-down` | |
+| `node-selector` | `proxcloud.io/lb-node-selector` | |
+| `keep-floatingip` | `proxcloud.io/lb-keep-address` | read, not served yet |
+| the internal-load-balancer annotation | `proxcloud.io/lb-internal` | `"true"` refuses the Service; left under OCCM's name the Service gets a public address |
+| `timeout-tcp-inspect` | none | nothing of a TCP stream is inspected here: leave it out |
+| `default-tls-container-ref` | none | see difference 6 |
+| `load-balancer-id`, `load-balancer-address` | none | no shared balancer; `spec.loadBalancerIP` is not obeyed either |
+| the network, subnet, port, floating network and subnet, member subnet, class, flavor, availability zone, tag and hostname keys | none | the provider's `config.cluster.loadBalancer` decides these; leave them out |
+
+A key with "none" written under the product's prefix all the same is named in `AnnotationNotSupported`.
 
 Modes. A **new** cluster gets the controller in **default** mode when every gate holds: this portal has the gateway's
 store, a gateway URL (`PROXCLOUD_CSI_GATEWAY_URL`) and the controller image (`PROXCLOUD_LB_CONTROLLER_IMAGE`, the API's

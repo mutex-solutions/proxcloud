@@ -4,6 +4,53 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: only the product's own annotation names are read
+
+**What changed:** the owner decided on 2026-11-23 that the product defines its own annotation names and keeps no
+upstream alias. This supersedes, in the two entries below, everything that speaks of an alias, of "the two prefixes"
+and of "either name". No container, no trust relation, no field of the protocol changed; the same pull request.
+
+- `internal/cloud/lbgw/annotations.go`: the table reads `proxcloud.io/lb-<knob>` and nothing else. `AliasPrefix`
+  (`loadbalancer.openstack.org/`), the `aliases` map and the rule "the own name wins" are gone; `knobs` lists the
+  fifteen names that are read. `SentAnnotation` is the prefix `proxcloud.io/lb-` alone. `InternalAnnotation` is
+  `proxcloud.io/lb-internal` (it was `service.beta.kubernetes.io/openstack-internal-load-balancer`): `"true"` refuses
+  the Service (`InternalNotSupported`, text `InternalMessage`), a value that is no boolean is named in
+  `InvalidAnnotation`. `proxy-protocol`: `true` is version 2, `v1` and `v2` pick one; the second meaning of `true`
+  went with the alias. The special case for `timeout-tcp-inspect: "0"` went too: under the product's prefix that
+  name is one more unknown name.
+- `cmd/lb-controller`: `readService` sends a Service's annotations of the prefix `proxcloud.io/lb-` and no other;
+  `protocol1` and the turn's Event for a Service that was not sent read the internal request under its new name.
+- Tests: `TestEveryAnnotationByItsName`, `TestOnlyTheOwnPrefixIsRead` (lbgw), and in the controller's tests a
+  Service with annotations of another prefix through the real gateway handler: nothing of them is in the request,
+  no Event, and the Service keeps its public address. The two golden files are unchanged: the Services that render
+  them carry the same options under the product's names (`proxy-protocol: v1` where the alias's `true` stood).
+- Diagrams: none. `c4-code.md` (the `lbgw` and `cmd/lb-controller` rows) says the same.
+
+**Why:**
+
+- *One name per knob.* An alias is a second public interface to keep for ever: its meaning is set by another
+  project's release notes, and one value already meant something else under it (`proxy-protocol: "true"`, version 1
+  upstream, version 2 here since v0.11.0). The product is not that cloud's controller and does not carry its names;
+  what it keeps is the behaviour (the knobs, their values, the Events), which is what the owner asked for.
+- *Other prefixes are not the load balancer's business.* With no alias there is no reason to send, count or name an
+  annotation of another prefix: nothing of a Service leaves the cluster but what the table can read, and a Service
+  that carries another controller's annotations gets no Event about them every time it changes.
+- *The internal request moves to the product's name, and the upstream one is not recognised.* This is the one
+  consequence with a cost, and the guide says it in so many words (differences 16 and 17, and the bullet in bold): a
+  manifest that carries only `service.beta.kubernetes.io/openstack-internal-load-balancer: "true"` is served with a
+  **public** address here. Recognising that single upstream name "for safety" would be an alias again, and the
+  decision was none. v0.11.0 did not read it either, so no cluster that exists changes behaviour; what changes is
+  against this pull request's earlier state, which was never released.
+- *The values keep upstream's spellings.* `ROUND_ROBIN`, `LEAST_CONNECTIONS`, `SOURCE_IP` and `-1` are still read
+  under the product's names, so renaming a manifest is a change of keys by the guide's table and of one value
+  (`proxy-protocol: "true"` becomes `v1`).
+- *A table by short key.* The guide maps upstream's short key (the part after the `/`) to the product's name. The
+  upstream prefix is written out only in this file.
+
+**Files:** `internal/cloud/lbgw/annotations.go`, `annotations_test.go`; `cmd/lb-controller/main.go`,
+`protocol2_test.go`; `internal/platform/project/cloud_lb_cluster_pve_test.go`,
+`cloud_lb_cluster_integration_test.go`; `docs/managed-k8s.md`, `docs/architecture/c4/c4-code.md`, `CHANGELOG.md`.
+
 ## 2026-11-23: annotations that cannot be read, the step-down per request, a selector's spaces
 
 **What changed:** three findings of the review of the change below, in its own pull request. No container, no trust

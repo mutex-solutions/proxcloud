@@ -56,19 +56,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Annotations, read by the portal: `proxcloud.io/lb-proxy-protocol` (now also `v1`, `v2`), `lb-method`,
     `lb-connection-limit`, `lb-timeout-client-data`, `lb-timeout-member-connect`, `lb-timeout-member-data`,
     `lb-x-forwarded-for`, `lb-enable-health-monitor`, `lb-health-monitor-delay`, `-timeout`, `-max-retries`,
-    `-max-retries-down`, `lb-node-selector`. The `loadbalancer.openstack.org/` annotations of the same meaning are
-    obeyed as aliases, so a manifest from a cluster that runs OCCM needs no edit. Every other annotation of the two
-    prefixes is named in one Warning Event `AnnotationNotSupported`; a value that is not understood is named in
-    `InvalidAnnotation` and the default holds; `service.beta.kubernetes.io/openstack-internal-load-balancer: "true"`
-    refuses the Service (`InternalNotSupported`), so it never gets a public address. `lb-keep-address`
-    (`keep-floatingip`) is read and not served yet, and says so (`KeepAddressNotServed`).
+    `-max-retries-down`, `lb-node-selector`. Every other annotation of the prefix `proxcloud.io/lb-` is named in
+    one Warning Event `AnnotationNotSupported`; a value that is not understood is named in `InvalidAnnotation` and
+    the default holds; `proxcloud.io/lb-internal: "true"` refuses the Service (`InternalNotSupported`), so it never
+    gets a public address. `lb-keep-address` is read and not served yet, and says so (`KeepAddressNotServed`).
+  - **Only `proxcloud.io/lb-*` is read: the product defines its own annotation names.** What a knob does follows
+    OCCM, but OCCM's annotation names are not aliases: on a Service here they do nothing, are not sent to the portal
+    and raise no Event. A manifest written for OCCM is renamed first; the guide has the table by OCCM's short key.
+    **A Service that asks for an internal balancer with OCCM's annotation alone gets a public address** until the
+    annotation is renamed to `proxcloud.io/lb-internal`. `proxcloud.io/lb-proxy-protocol: "true"` is version 2, as
+    in `v0.11.0` (OCCM's `true` is version 1: write `v1`).
   - An annotation that cannot be read never refuses a Service, so a Service that `v0.11.0` served keeps its address
     over the cluster's upgrade whatever annotations were left on it: a value over 256 characters is not obeyed and
     named in `InvalidAnnotation`, and any number of annotations the table does not know is named (the first 32) and
     counted in `AnnotationNotSupported`. The forwarded-for header asked for next to the PROXY header is not added
     and named in `InvalidAnnotation`; the PROXY header holds. The internal annotation is the one that takes an
-    address back. The controller sends only the annotations of the two prefixes and the internal one, a value over
-    256 characters cut.
+    address back. The controller sends only the annotations of the prefix `proxcloud.io/lb-`, a value over 256
+    characters cut.
   - A state over the gateway's 64 KiB is refused as a whole and changes nothing: the balancer and every address stay
     as they are until the state fits, and each Service gets a Warning Event `TooLarge` that says so.
   - A node selector's terms may have spaces around `=` (`pool = edge`); OCCM drops them around a term only and
