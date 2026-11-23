@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,6 +50,12 @@ type lbGuest struct {
 	lvs      bool
 	lvsFails string
 }
+
+// lbGuestKeepalived is the VRRP keepalived's config on a guest, and lbGuestBind finds a config's first bind of an
+// address of its own.
+const lbGuestKeepalived = "/etc/keepalived/keepalived.conf"
+
+var lbGuestBind = regexp.MustCompile(`(?m)^\s*bind ([1-9][0-9.]*:[0-9]+)`)
 
 // The UDP service's files, in the order the guest sums them (pve's lvssum).
 var lbGuestLVSFiles = []string{"/etc/keepalived/lvs.conf", "/etc/proxcloud-lb/lvs.nft", "/etc/proxcloud-lb/lvs.sysctl", "/usr/local/sbin/proxcloud-lvs-net",
@@ -219,10 +226,23 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 	case strings.Contains(cmd, "keepalived -t"):
 		f.log = append(f.log, vm+" keepalived reload")
 		g.keepalived = true
-		g.disk["/etc/keepalived/keepalived.conf"] = g.disk["/etc/keepalived/keepalived.conf.new"]
-		delete(g.disk, "/etc/keepalived/keepalived.conf.new")
+		g.disk[lbGuestKeepalived] = g.disk[lbGuestKeepalived+".new"]
+		delete(g.disk, lbGuestKeepalived+".new")
+		// The election, as far as the order of an apply shows in it (the lab's Q0b-1, and the real guests of
+		// test/integration/lb_lone_test.go): a keepalived that starts takes the addresses unless a master's adverts
+		// reach it, and a master sends them to the peer its own config names. One that runs keeps its state over
+		// a reload.
 		if g.role == "" {
-			g.role = "BACKUP"
+			self := ""
+			if _, rest, ok := strings.Cut(g.disk[lbGuestKeepalived], "unicast_src_ip "); ok {
+				self, _, _ = strings.Cut(rest, "\n")
+			}
+			g.role, g.holds = "MASTER", true
+			for id, o := range f.guests {
+				if id != vm && o.keepalived && o.role == "MASTER" && strings.Contains(o.disk[lbGuestKeepalived], "    "+self+"\n") {
+					g.role, g.holds = "BACKUP", false
+				}
+			}
 		}
 		return lbRun{}
 	case strings.Contains(cmd, "haproxy -c"):
@@ -236,6 +256,11 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		}
 		if g.applyFails != "" {
 			return lbRun{exit: 1, err: g.applyFails}
+		}
+		// HAProxy binds an address the guest does not hold only where keepalived's sysctl file let it (the lab's
+		// Q0b-1: the first appliance of a pair had no keepalived, and refused its config).
+		if m := lbGuestBind.FindStringSubmatch(g.pending); m != nil && !strings.Contains(g.disk["/etc/sysctl.d/90-proxcloud-lb.conf"], "ip_nonlocal_bind = 1") {
+			return lbRun{exit: 1, err: "[ALERT] (8464) : Binding [/etc/haproxy/haproxy.cfg:17] for frontend l" + m[1] + ": protocol tcpv4: cannot bind socket (Cannot assign requested address) for [" + m[1] + "]"}
 		}
 		g.load(g.pending)
 		return lbRun{}
@@ -262,7 +287,7 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 			l = 1
 		}
 		// The files as they are on the guest, which is not always what the product wrote last.
-		return lbRun{out: fmt.Sprintf("%s %d %d %d %s %s %s %d", role, h, v, c, lbHash(g.file), g.sum("/etc/keepalived/keepalived.conf"), g.lvsSum(), l)}
+		return lbRun{out: fmt.Sprintf("%s %d %d %d %s %s %s %d", role, h, v, c, lbHash(g.file), g.sum(lbGuestKeepalived), g.lvsSum(), l)}
 	case strings.Contains(cmd, "show stat"): // what the running HAProxy holds, not what the file says
 		if !g.haproxy {
 			return lbRun{exit: 1, err: "socat: /run/haproxy/admin.sock: Connection refused"}

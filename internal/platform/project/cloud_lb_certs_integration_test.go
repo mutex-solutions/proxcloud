@@ -68,18 +68,21 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 	var wire []call
 	var wireMu sync.Mutex
 	f := newPairWire(t, "")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		parts := strings.Split(r.URL.Path, "/")
-		c := call{what: r.Method + " " + parts[len(parts)-1], file: r.Form.Get("file"), body: r.URL.RawQuery + "\n" + r.Form.Encode() + "\n" + strings.Join(r.Form["command"], " ") + "\n" + r.Form.Get("content")}
-		if i := slices.Index(parts, "qemu"); i >= 0 && i+1 < len(parts) {
-			c.vm = parts[i+1]
-		}
-		wireMu.Lock()
-		wire = append(wire, c)
-		wireMu.Unlock()
-		f.ServeHTTP(w, r)
-	}))
+	record := func(f *pairWire) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseForm()
+			parts := strings.Split(r.URL.Path, "/")
+			c := call{what: r.Method + " " + parts[len(parts)-1], file: r.Form.Get("file"), body: r.URL.RawQuery + "\n" + r.Form.Encode() + "\n" + strings.Join(r.Form["command"], " ") + "\n" + r.Form.Get("content")}
+			if i := slices.Index(parts, "qemu"); i >= 0 && i+1 < len(parts) {
+				c.vm = parts[i+1]
+			}
+			wireMu.Lock()
+			wire = append(wire, c)
+			wireMu.Unlock()
+			f.ServeHTTP(w, r)
+		})
+	}
+	srv := httptest.NewServer(record(f))
 	defer srv.Close()
 	ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
 	if err != nil {
@@ -305,6 +308,66 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 	if got := saved(); err != nil || len(events(mark)) != 0 || !strings.Contains(got.StatusMessage, "names a certificate that is not a certificate of this project") ||
 		!slices.Equal(got.Listeners[0].CertFiles, []string{c2.File}) { // the row still renders the config the appliances serve
 		t.Errorf("apply with a certificate gone: %s %v %q, wrote %v", status, err, got.StatusMessage, events(mark))
+	}
+
+	// A pair with one appliance (drill Q0b-1 of v0.11.1), on a second Proxmox of its own: a replace whose new clone
+	// failed leaves a tenant's pair so. The certificate follows the config: it goes to the one appliance after
+	// keepalived, which is what lets HAProxy bind the address, and that appliance serves alone; when the second
+	// appliance comes it gets the certificate with its config, and the first is given nothing again.
+	alone := newPairWire(t, "")
+	delete(alone.guests, "302")
+	*alone.guests["301"] = lbGuest{packages: "installed", haproxy: true}
+	srv2 := httptest.NewServer(record(alone))
+	defer srv2.Close()
+	ps2, err := pve.NewService(pve.Config{APIURL: srv2.URL, TokenID: "t", Secret: "s"}, "svc2", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2 := &Handler{cloud: h.cloud, sdnLock: h.sdnLock, publicIPs: h.publicIPs, pveFor: func(*externalservice.ExternalService) (*pve.Service, error) { return ps2, nil }}
+	h2.SetLBCertificates(db.C("lb_certificates"), keys)
+	es2 := &externalservice.ExternalService{ID: "svc2", Config: es.Config}
+	row2 := &cloud.CloudResource{ExternalID: "lb-abc", ServiceID: "svc2", ProjectID: "p1", Type: cloud.TypeLoadBalancer}
+	if err := setLBRow(row2, &loadBalancer{ID: "abc", Name: "web", Status: lbStatusDegraded, NetworkID: "v1", PublicNetworkID: "vmbr1", HA: true,
+		ServerID: "301", PrivateIP: "10.0.0.31", PrivatePrefix: 24, PublicIP: "203.0.113.11", VIPs: []string{"203.0.113.11"},
+		Appliances: []lbAppliance{{ServerID: "301", PrivateIP: "10.0.0.31"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h2.cloud.Insert(ctx, row2); err != nil {
+		t.Fatal(err)
+	}
+	third := lbcerttest.New(t, lbcerttest.RSA(t, 2048), until, "alone.example.org")
+	c3, _, err := h.lbCertStore(ctx, "p1", "sub", "alone", third.Chain, third.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h2.pveLBUpdateConfig(ctx, es2, proj, row2, map[string]any{
+		"listeners": []any{map[string]any{"port": 443, "protocol": "https", "pool": "web", "certificates": []string{c3.ID}}},
+		"pools":     []any{map[string]any{"name": "web", "protocol": "http"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mark = len(wire)
+	if status, err := h2.pveLBApply(ctx, es2, proj, "lb-abc"); err != nil || status != lbStatusDegraded {
+		t.Fatalf("one appliance with a certificate: %s %v\n%s", status, err, strings.Join(alone.log, "\n"))
+	}
+	cr2, _ := h2.cloud.FindByServiceIDAndExternalID(ctx, "svc2", "lb-abc")
+	one, _ := lbOfRow(cr2)
+	if a := one.Appliances[0]; a.State != lbAppUp || a.Role != "MASTER" || !a.HoldsVIP || !strings.Contains(one.StatusMessage, "One appliance carries the traffic") ||
+		!alone.guests["301"].serving() || !slices.Equal(events(mark), steps("301", c3.File)) {
+		t.Fatalf("one appliance with a certificate: %q, %+v, wrote\n%s", one.StatusMessage, a, strings.Join(events(mark), "\n"))
+	}
+	if k, c := alone.first("301 keepalived reload"), alone.first("301 write /etc/haproxy/certs/"+c3.File+".pem.new"); k < 0 || k > c {
+		t.Fatalf("the certificate reached the appliance before keepalived:\n%s", strings.Join(alone.log, "\n"))
+	}
+	alone.mu.Lock()
+	alone.guests["302"] = &lbGuest{packages: "installed", haproxy: true}
+	alone.mu.Unlock()
+	if _, err := h2.lbEdit(ctx, es2, "lb-abc", func(lb *loadBalancer) { lbPutIn(lb, lbAppliance{ServerID: "302", PrivateIP: "10.0.0.32"}) }); err != nil {
+		t.Fatal(err)
+	}
+	mark = len(wire)
+	if status, err := h2.pveLBApply(ctx, es2, proj, "lb-abc"); err != nil || status != lbStatusActive || !slices.Equal(events(mark), steps("302", c3.File)) {
+		t.Fatalf("the second appliance with a certificate: %s %v, wrote\n%s", status, err, strings.Join(events(mark), "\n"))
 	}
 
 	// Where the key went: into certificate files on the two appliances, and nowhere else on the wire.

@@ -217,8 +217,8 @@ func TestLBApplianceUDP(t *testing.T) {
 				t.Fatalf("the IPVS table after the push: %q\n%s", got, diag())
 			}
 			st := state()
-			if !st.LVS || st.LVSSum != pve.LVSHash(lvs, "ten0") || st.HAProxySum != before.HAProxySum || st.KeepalivedSum != before.KeepalivedSum {
-				t.Fatalf("after the first UDP push: %+v, want LVS serving with files %s and the other two files as they were", st, pve.LVSHash(lvs, "ten0"))
+			if !st.LVS || st.LVSSum != pve.LVSHash(lvs, "ten0") || st.HAProxySum != before.HAProxySum || st.KeepalivedSum != before.KeepalivedSum || !st.HoldsVIP {
+				t.Fatalf("after the first UDP push: %+v, want LVS serving with files %s, the other two files as they were and the address still read as held", st, pve.LVSHash(lvs, "ten0"))
 			}
 			if got := g.run(ctx, "cat /proc/sys/net/ipv4/ip_forward /proc/sys/net/ipv4/vs/conntrack /proc/sys/net/ipv4/vs/snat_reroute /proc/sys/net/ipv4/conf/all/send_redirects /proc/sys/net/ipv4/conf/ten0/send_redirects | tr '\\n' ' '"); got != "1 1 1 0 0" {
 				t.Fatalf("sysctls after the push: %q", got)

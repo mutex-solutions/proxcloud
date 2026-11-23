@@ -84,6 +84,8 @@ What a public address costs: the cluster's first Service with one builds its loa
 
 The cluster page shows the load balancer once it exists: its two VMs and which one holds the addresses, and each Service with its address, its ports and their protocol (`443/HTTPS`, `53/UDP`), how many workers answer it and its state. A port that ends TLS names the Secret its certificate came from and when that certificate expires, with a warning from 30 days before. The page also says when the cluster last reported to the platform, and lists the addresses the cluster keeps. **Open the load balancer** shows the Services on the load balancer's own page, which you cannot edit or delete: the cluster's Services make it.
 
+Your project's dashboard lists every public address in use under **Quota & usage**, with what holds it: each Service by its name and cluster, each address a cluster keeps, each load balancer and each server with a public IP. That is the list to read when a Service is refused with `QuotaExceeded`.
+
 The address shows in `kubectl get service` once it is ready, and `kubectl describe service` lists Events: a Service the platform refuses says why there, for example `QuotaExceeded` (no public address left in your quota), `ProtocolNotSupported` (an SCTP port), `NoNodePort` or `TooManySourceRanges`. Idle connections are closed after an hour unless you set a timeout. A Service deleted gives its address back at once, unless it asks to keep it.
 
 ### A cluster made before v0.11.1

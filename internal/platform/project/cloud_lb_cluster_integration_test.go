@@ -692,6 +692,8 @@ func TestLBClusterStateConverges(t *testing.T) {
 	t.Run("TLSFromSecret", testLBClusterTLSFromSecret)
 	// A Service's address kept for its cluster, and spec.loadBalancerIP (cloud_lb_cluster_keep_integration_test.go).
 	t.Run("KeepAddress", testLBClusterKeepAddress)
+	// The pair while it has one appliance, and the second one's arrival (cloud_lb_cluster_first_integration_test.go).
+	t.Run("FirstAppliance", testLBClusterFirstAppliance)
 }
 
 // lbKube is a management cluster holding one tenant cluster's Application and the Secrets written next to it.

@@ -463,6 +463,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The first appliance of a pair could not serve until the second existed.** A cluster's appliance pair is built
+  one appliance per attempt, and an attempt that fails (no room on a node, a failed clone) is tried again five
+  minutes later. keepalived was pushed only to an appliance that had a peer, and keepalived's files are what let
+  HAProxy bind an address and what hold it: the appliance that was alone refused its HAProxy config ("cannot bind
+  socket"), the row read `ERROR` for a pass, the refusal was in no log, and the Services showed an address that
+  answered nobody until the second appliance had joined (9 min 14 s after the Services were made on the lab; without
+  end where no node has room). The same held for a tenant's pair left with one appliance by a replace whose new
+  clone failed. Now an appliance with no peer gets keepalived too and is its own master: it holds the addresses
+  and serves TCP, TLS and UDP alone, follows every change of the row, and the row reads `DEGRADED` with no standby
+  (a cluster's pair says that the platform builds the second one). Its adverts meanwhile are addressed to
+  `127.0.0.1` and reach no other appliance: one a second goes to the tenant network's gateway alone, which
+  drops it. When the second appliance comes, the one that served is told of its peer first and keeps the
+  addresses, and the new one starts as its standby: no address moves. HAProxy is never pushed before keepalived,
+  and a push an appliance refuses is logged at WARN with the balancer and the appliance (the reason stays in the
+  row's message). The config of a pair that has both appliances did not change by a byte, so no existing pair is
+  pushed because of this. Found by the drill of v0.11.1-rc.1 (Q0b-1). In a real guest of both appliance images
+  and in the wire fake; not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "One appliance of a
+  pair").
+- **A project could not see which public addresses its quota counts.** The `floatingIps` quota counts every
+  public address of a project: a server's public NIC, a load balancer's address, each Service address of a
+  Kubernetes cluster and each address a cluster keeps. `GET /api/v1/project/{id}/quota-usage` gave the limit with
+  no figure in use, and no list showed the addresses of balancers and Services, so a project at its limit read
+  "Quota exceeded for floatingIps: 5 in use" and could not tell which five. The quota read now answers `network`:
+  `floatingIps` and `networks` as used and limit, by the count the quota check itself uses, and `addresses`, one
+  row per address with what holds it (the server, the balancer, the Service with its cluster, a kept address, one
+  being given back). The tenant dashboard's **Quota & usage** card shows a "Public addresses" tile and the list
+  under it. Found by the drill of v0.11.1-rc.1 (Q0b-2) ([api.md](docs/api.md), "Quota usage").
+- **A pair with a UDP listener never read as holding its address.** The state read of an appliance lost "holds the
+  address" to a variable of the UDP service's check, on every appliance whose UDP config has a listener. Such a
+  pair read `DEGRADED` "Neither appliance holds the address yet" while it served, and a cluster whose pair has a
+  UDP Service never called any of its Services ready, since a Service is ready by the appliance that holds the
+  addresses. In v0.11.1-rc.1 only (v0.11.0 has no UDP). Found by the container test of the fix above, which reads
+  the state of an appliance that serves UDP; the UDP container test asserts it too now.
 - **`proxcloud.io/lb-internal` with a value that is no boolean gave the Service a public address.** A value such as
   `"yes"` was named in `InvalidAnnotation` and the Service was served, so the one annotation that guards an address
   failed open over a typing mistake. It fails closed now: a Service gets a public address only when the annotation

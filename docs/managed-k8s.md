@@ -912,7 +912,9 @@ call for its own cluster, and minting it again rotates it.
   caps the cluster's Services**: a project's public addresses count together (its servers', its own load balancers',
   each Service's), and the quota the seed gives a provider is 5 (`deploy/seed`, `floatingIps`), so a cluster in
   default mode gets at most five Services of type LoadBalancer, each NGINX Gateway Fabric Gateway included; the next
-  one stays `<pending>` with a Warning `QuotaExceeded`. Raise it for one project on its admin **Quota** tab
+  one stays `<pending>` with a Warning `QuotaExceeded`. Which addresses count is on the tenant's dashboard ("Public
+  addresses in use": each Service by its name and cluster, each kept address, each balancer and server) and in
+  `GET /api/v1/project/{id}/quota-usage` (`network`). Raise it for one project on its admin **Quota** tab
   (`PUT /api/v1/admin/project/{id}/quota`), or for every project without a quota of its own in the compute
   provider's default quota (`config.provisioning.quota`, `PUT /api/v1/admin/service/{id}/quota`); the refused Service
   gets its address within about a minute. What HA means is
@@ -1204,7 +1206,11 @@ The seventeen places where a Service behaves differently than with OCCM, on
 purpose:
 
 1. **One pair per cluster.** All Services of a cluster share one appliance pair; each still has an address of its
-   own, so a user sees what OCCM shows, one external IP per Service.
+   own, so a user sees what OCCM shows, one external IP per Service. The pair is built one appliance at a time, and
+   the first one serves as soon as it is ready: an address a Service shows answers, also while the second appliance
+   is still being built or could not be built yet (the platform tries again every five minutes; the balancer reads
+   `DEGRADED` meanwhile, with no standby). See "One appliance of a pair" in
+   [cloud-integration.md](cloud-integration.md).
 2. **No objects of OCCM's load balancer.** Names, ids, tags, flavors and zones of load balancers, listeners and pools do not exist,
    so there is no annotation about them.
 3. **Which Services are owned.** Class `proxcloud.io/lb`, and in default mode also no class; OCCM owns only

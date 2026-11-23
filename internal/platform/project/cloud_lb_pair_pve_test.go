@@ -82,6 +82,16 @@ func TestLBPushOrder(t *testing.T) {
 	if got := lbPushOrder([]*lbAppliance{b, a}); got[0] != b {
 		t.Fatal("order depends on the input")
 	}
+	// One that served alone and the appliance built beside it: the one keepalived runs on first, so the new one
+	// starts as a standby that hears a master (drill Q0b-1). A complete pair keeps the standby first.
+	alone, fresh := &lbAppliance{ServerID: "1", HoldsVIP: true, KeepalivedHash: "k"}, &lbAppliance{ServerID: "2"}
+	if got := lbPushOrder([]*lbAppliance{fresh, alone}); got[0] != alone {
+		t.Fatal("a new appliance's keepalived starts before the one that serves knows of it")
+	}
+	standby := &lbAppliance{ServerID: "2", KeepalivedHash: "k"}
+	if got := lbPushOrder([]*lbAppliance{alone, standby}); got[0] != standby {
+		t.Fatal("a complete pair: the holder before the standby")
+	}
 }
 
 // A pair asks the quota for two servers of its size and one address, checked before anything is built.
