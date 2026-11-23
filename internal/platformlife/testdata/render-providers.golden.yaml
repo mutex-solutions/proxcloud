@@ -48,7 +48,7 @@ kubernetes:
     argocd:
       chartName: proxmox-kamaji-cluster
       chartRepo: ghcr.io/mutex-solutions/charts
-      chartVersion: 0.1.17
+      chartVersion: 0.1.19
       namespace: argocd
       project: proxcloud-k8s
     attachToNewProjects: false

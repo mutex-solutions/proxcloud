@@ -186,12 +186,19 @@ func TestLBClusterStateConverges(t *testing.T) {
 
 	// What the consoles show next to the cluster: the balancer row and the controller's last call, never the secret;
 	// the operator reads it through the cluster's own Kubernetes provider only.
-	if err := store.Seen(ctx, "c1", time.Now().UTC()); err != nil {
+	if view, err := h.lbClusterView(ctx, "c1"); err != nil || view == nil || view.ControllerProtocol != 0 || view.ControllerLastSeen != nil {
+		t.Fatalf("view before the controller's first call: %+v, %v", view, err)
+	}
+	if err := store.Seen(ctx, "c1", time.Now().UTC(), 1); err != nil {
 		t.Fatal(err)
 	}
 	view, err := h.lbClusterView(ctx, "c1")
 	if err != nil || view == nil || view.ControllerLastSeen == nil || view.ControllerSince == nil || view.projectID != "p1" {
 		t.Fatalf("view: %+v, %v", view, err)
+	}
+	// The controller's protocol next to the portal's: the consoles name an older controller by it.
+	if view.ControllerProtocol != 1 || view.Protocol != lbgw.Protocol || len(view.Certificates) != 0 {
+		t.Fatalf("view says protocol %d of %d and certificates %+v", view.ControllerProtocol, view.Protocol, view.Certificates)
 	}
 	if cr, _ := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", ext); view.BalancerID != cr.ID {
 		t.Fatalf("view names row %q, want %q", view.BalancerID, cr.ID)

@@ -34,7 +34,9 @@ A load balancer made before high availability existed, or with it turned off, ru
 
 ## A Kubernetes cluster's load balancer
 
-A load balancer named `k8s-…` whose row names a Kubernetes cluster belongs to that cluster: its Services of type `LoadBalancer` make it ([Kubernetes clusters](/docs/guides/kubernetes)). Its page lists those Services with their addresses and links to the cluster. It has no listeners, pools or **Delete** for you to change: change the cluster's Services instead, and it is deleted with the cluster. **Replace appliances** works as on any load balancer.
+A load balancer named `k8s-…` whose row names a Kubernetes cluster belongs to that cluster: its Services of type `LoadBalancer` make it ([Kubernetes clusters](/docs/guides/kubernetes)). Its page lists those Services with their addresses, each port with its protocol (TCP, UDP, or TLS and HTTPS for a port that ends TLS) and how many workers answer, and links to the cluster. It has no listeners, pools or **Delete** for you to change: change the cluster's Services instead, and it is deleted with the cluster. **Replace appliances** works as on any load balancer.
+
+What this page says about UDP, TLS and health checks holds for a cluster's Services too, with three differences. The options are set on the Service, with annotations ([Options](/docs/guides/kubernetes#options)). A certificate comes from a Secret of the cluster, not from the **Certificates** page, and is renewed by changing the Secret ([TLS from a Secret](/docs/guides/kubernetes#tls-from-a-secret)). And a UDP port of a Service has no payload and no required reply: its check is the datagram of random bytes with a ping, or the Service's health port with `externalTrafficPolicy: Local`.
 
 ## Add listeners, pools and servers
 
@@ -46,7 +48,7 @@ A load balancer named `k8s-…` whose row names a Kubernetes cluster belongs to 
 - **PROXY protocol** on a pool passes the client's address to your servers in a PROXY header, version 1 (a text line) or 2 (binary). Turn it on only when your servers expect that header, in that version.
 - A pool's **connect timeout** is how long a server may take to accept a connection before the next server is tried (2 seconds when empty), and its **server idle timeout** closes a connection after that many seconds without data from the server (60 when empty). For long-lived connections such as a database or a websocket, raise both idle timeouts.
 
-TLS termination on the load balancer is not available yet. UDP has a section of its own below.
+TLS and UDP have sections of their own below.
 
 Press **Save configuration**. The change reaches the load balancer within seconds. If HAProxy refuses it, the page shows why and the load balancer keeps running the last configuration that worked.
 

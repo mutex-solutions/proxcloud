@@ -493,8 +493,10 @@ type KamajiCluster = { id: string; name?: string; projectId?: string; chartVersi
 // A cluster's load balancer mode, read off its values: which Services of type LoadBalancer get the product balancer.
 const LB_MODES: Record<string, string> = { "": "MetalLB only", default: "Default", "class-only": "Class only" }
 
+// controllerProtocol: the protocol of /lb/v1 the controller named at its last call (none before it); protocol: the
+// portal's. A controller below the portal's is the image of an earlier release.
 type ClusterLBView = {
-  controllerSince?: string; controllerLastSeen?: string; balancerId?: string
+  controllerSince?: string; controllerLastSeen?: string; controllerProtocol?: number; protocol?: number; balancerId?: string
   balancer?: {
     status?: string; statusMessage?: string
     appliances?: { serverId: string; node?: string; role?: string; holdsVip?: boolean; state?: string }[]
@@ -551,6 +553,16 @@ function ClusterLoadBalancerDialog({ serviceId, cluster, pin, onClose, onChanged
                   ? `The controller last called the gateway ${timeAgo(v.controllerLastSeen)}.`
                   : "The controller has not called the gateway yet."}
                 {v.controllerSince ? ` Credential minted ${timeAgo(v.controllerSince)}.` : ""}
+                {v.controllerProtocol ? ` It speaks protocol ${v.controllerProtocol}${v.protocol ? ` of ${v.protocol}` : ""}.` : ""}
+              </p>
+            )}
+            {!!v?.controllerProtocol && !!v.protocol && v.controllerProtocol < v.protocol && (
+              <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3" data-testid="lb-controller-old">
+                This controller is the image of an earlier release. A Service with a UDP port is refused (<code>UDPNotSupported</code>),
+                and its <code>proxcloud.io/lb-*</code> annotations other than <code>lb-proxy-protocol</code> are not read: no TLS
+                from a Secret, no kept address. Bump the cluster to the provider's chart{pin ? <> (<span className="font-mono">{pin}</span>)</> : ""} on
+                its row, or rotate the credential below: either sets the controller's image to the portal's. The tenant can do
+                the same with the platform update on the cluster's page. Nothing that is served today changes.
               </p>
             )}
             {lb ? (

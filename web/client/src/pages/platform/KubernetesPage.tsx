@@ -38,7 +38,7 @@ import {
 import { gpuCapacityViolations, serverQuotaViolations } from "@/lib/quota"
 import type { CloudResource, Location } from "@/lib/types"
 import { isPrivateNetwork, networkName } from "../network/NetworksPage"
-import { ApplianceList, ClusterServices, type Health, type LB } from "../network/LoadBalancersPage"
+import { ApplianceList, type ClusterCertificate, ClusterServices, type Health, type LB } from "../network/LoadBalancersPage"
 import { serverName, serverStatus, serverIPs } from "../servers/serverFields"
 
 type Cluster = Record<string, any>
@@ -837,7 +837,12 @@ export function KubernetesClusterDetailPage() {
 }
 
 // What GET_LOAD_BALANCER answers: the controller's last call and the balancer the cluster's first Service built.
-type ClusterLBView = { controllerSince?: string; controllerLastSeen?: string; balancerId?: string; balancer?: LB } | null
+// controllerProtocol: the protocol the cluster's controller named at its last call, protocol the platform's own. A
+// controller below the platform's is the one of an earlier release. certificates: what the Services end TLS with.
+type ClusterLBView = {
+  controllerSince?: string; controllerLastSeen?: string; controllerProtocol?: number; protocol?: number
+  balancerId?: string; balancer?: LB; certificates?: ClusterCertificate[] | null
+} | null
 
 // ClusterLoadBalancer — which Services of type LoadBalancer get a public address (the cluster's mode, read off its
 // values), what that costs, and the cluster's load balancer once a Service built it. The balancer is a row of the
@@ -904,6 +909,15 @@ function ClusterLoadBalancer({ pid, mode, gatewayFabric, view, release, resource
             : "The cluster's load balancer controller has not reported yet."}
         </p>
       )}
+      {mode && !!v?.controllerProtocol && !!v.protocol && v.controllerProtocol < v.protocol && (
+        <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3" data-testid="k8s-lb-old-controller">
+          This cluster's load balancer controller is older than the platform (protocol {v.controllerProtocol} of {v.protocol}). A
+          Service with a UDP port is refused, and the <code>proxcloud.io/lb-*</code> annotations other than{" "}
+          <code>proxcloud.io/lb-proxy-protocol</code> are not read, so no TLS from a Secret and no kept address. Apply the
+          platform update on this page to get them: it moves the cluster to chart 0.1.19 or later and changes no Service that
+          is served today. If the page offers no update, ask your operator.
+        </p>
+      )}
       {lb ? (
         <>
           <div className="flex flex-wrap items-center gap-3">
@@ -914,7 +928,7 @@ function ClusterLoadBalancer({ pid, mode, gatewayFabric, view, release, resource
             </Button>
           </div>
           <ApplianceList appliances={lb.appliances ?? []} />
-          <ClusterServices lb={lb} health={health.data} />
+          <ClusterServices lb={lb} health={health.data} certificates={v?.certificates ?? []} />
           {kept.length > 0 && (
             <div className="grid gap-2" data-testid="k8s-lb-kept">
               <div className="font-medium">Kept addresses</div>

@@ -130,11 +130,11 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
-the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.19` (not published yet; `0.1.18` is), platform
+the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.19`, platform
 `0.1.3` and sandbox `0.1.0` (not published yet). All three are published and pinned by the platform
 BOM (database `0.5.2`: no
-disruption budget for a PostgreSQL of one instance; Kubernetes `0.1.17` for new tenant clusters: the load
-balancer controller, and `0.1.16` for the platform cluster: the node deletion
+disruption budget for a PostgreSQL of one instance; Kubernetes `0.1.19` for new tenant clusters: the load
+balancer controller with its watch, and `0.1.16` for the platform cluster: the node deletion
 timeout of the control plane's and the node groups' machines, on top of the version and the
 delete-first rollout per node of a node group of `0.1.15`, on top of the node groups' MachineHealthCheck, the
 VLAN tag and the control plane count of the platform cluster of `0.1.14`; platform `0.1.3`: `delete`

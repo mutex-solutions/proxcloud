@@ -943,10 +943,30 @@ func (h *Handler) lbDropState(ctx context.Context, clusterID string) error {
 type LBClusterView struct {
 	ControllerSince    *time.Time `json:"controllerSince,omitempty"`
 	ControllerLastSeen *time.Time `json:"controllerLastSeen,omitempty"`
-	BalancerID         string     `json:"balancerId,omitempty"` // the LOAD_BALANCER row
-	Balancer           any        `json:"balancer,omitempty"`   // its data.loadbalancer, as the tenant's list has it
-	projectID          string
-	kubernetesID       string
+	// ControllerProtocol is the protocol of /lb/v1 the controller named at its last call (0 before the first one),
+	// Protocol the portal's own. A controller below the portal's is the one of an earlier release: below
+	// lbgw.ProtocolUDP its UDP ports are refused and none of its annotations is read, so no TLS from a Secret either.
+	// A chart bump sets the controller's image to the portal's (kamaji.Service.SetChartVersion).
+	ControllerProtocol int    `json:"controllerProtocol,omitempty"`
+	Protocol           int    `json:"protocol"`
+	BalancerID         string `json:"balancerId,omitempty"` // the LOAD_BALANCER row
+	Balancer           any    `json:"balancer,omitempty"`   // its data.loadbalancer, as the tenant's list has it
+	// Certificates are the certificates the cluster's Services end TLS with, by the id a listener of the balancer
+	// names: the Secret each came from and what it says in public. Nothing of a key, and not the Secret's hash.
+	Certificates []LBClusterCertView `json:"certificates,omitempty"`
+	projectID    string
+	kubernetesID string
+}
+
+// LBClusterCertView is one certificate of a cluster's Services as the consoles show it.
+type LBClusterCertView struct {
+	ID          string    `json:"id"`
+	Secret      string    `json:"secret"` // the Secret it came from, as namespace/name
+	Subject     string    `json:"subject"`
+	DNSNames    []string  `json:"dnsNames"`
+	NotBefore   time.Time `json:"notBefore"`
+	NotAfter    time.Time `json:"notAfter"`
+	Fingerprint string    `json:"fingerprint"`
 }
 
 // lbClusterView reads cluster clusterID's view; nil when it has no controller (never minted, or released).
@@ -958,13 +978,26 @@ func (h *Handler) lbClusterView(ctx context.Context, clusterID string) (*LBClust
 	if err != nil || cred == nil || cred.RevokedAt != nil {
 		return nil, err
 	}
-	v := &LBClusterView{ControllerSince: cred.CreatedAt, ControllerLastSeen: cred.LastSeenAt, projectID: cred.ProjectID,
-		kubernetesID: cred.KubernetesServiceID}
+	v := &LBClusterView{ControllerSince: cred.CreatedAt, ControllerLastSeen: cred.LastSeenAt, ControllerProtocol: cred.Protocol,
+		Protocol: lbgw.Protocol, projectID: cred.ProjectID, kubernetesID: cred.KubernetesServiceID}
 	row, err := h.cloud.FindByServiceIDAndExternalID(ctx, cred.ComputeServiceID, lbClusterExternalID(clusterID))
 	if err != nil || row == nil {
 		return v, err
 	}
 	v.BalancerID, v.Balancer = row.ID, row.Data[lbDataKey]
+	certs, err := h.lbClusterCertRowsOf(ctx, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range certs {
+		if c.Refused == "" && c.File != "" { // a refused Secret holds no certificate: its Service says why
+			v.Certificates = append(v.Certificates, LBClusterCertView{ID: c.ID, Secret: c.Name, Subject: c.Subject, DNSNames: c.DNSNames,
+				NotBefore: c.NotBefore, NotAfter: c.NotAfter, Fingerprint: c.Fingerprint})
+		}
+	}
+	slices.SortFunc(v.Certificates, func(a, b LBClusterCertView) int {
+		return cmp.Or(cmp.Compare(a.Secret, b.Secret), cmp.Compare(a.ID, b.ID))
+	})
 	return v, nil
 }
 

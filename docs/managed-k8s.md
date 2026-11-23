@@ -694,8 +694,8 @@ What it does not do:
 - **Existing clusters are untouched** until an operator sets the provider's `chartVersion` to 0.1.13 and bumps each
   cluster (**Bump** on the provider page, or the tenant's *Apply platform update*). A cluster on an older chart gets
   no `machinePlacement` and no check, exactly as before. After the bump its render is the same until its node groups
-  change. The platform BOM pins chart 0.1.17 for tenant clusters, which keeps the placement of 0.1.13: a managed-services platform
-  installed from this release registers its Kubernetes provider with `chartVersion` 0.1.17, and an installer-built
+  change. The platform BOM pins chart 0.1.19 for tenant clusters, which keeps the placement of 0.1.13: a managed-services platform
+  installed from this release registers its Kubernetes provider with `chartVersion` 0.1.19, and an installer-built
   site registers the chart's source version. A platform installed from an earlier BOM keeps the `chartVersion` it
   was registered with until the operator sets it on the provider, or until an upgrade to this release's BOM writes
   the new one (an apply on a platform of a BOM this build does not carry is refused, `bom_unsupported`).
@@ -839,7 +839,7 @@ A PersistentVolume on a node-local store (`zfspool`, `lvmthin`) carries its PVE 
 workers of that node; on a shared store (NFS, RBD) it follows the pod to any worker.
 
 **Load balancers of a cluster's Services: the gateway side.** The same listener serves one more call, for a cluster's
-load balancer controller (below; chart 0.1.17, which the platform BOM pins for new tenant clusters from v0.11.0). `PUT /lb/v1/state` (`internal/cloud/lbgw`, `cmd/api` sends `/lb/v1/` there and every
+load balancer controller (below; chart 0.1.17, which the platform BOM pins for new tenant clusters from v0.11.0, and 0.1.19 from v0.11.1). `PUT /lb/v1/state` (`internal/cloud/lbgw`, `cmd/api` sends `/lb/v1/` there and every
 other path to the CSI gateway, unchanged) takes `Authorization: PVEAPIToken=lb@proxcloud!<clusterId>=<secret>`, the
 header `ProxCloud-LB-Protocol` (1, or 2 from v0.11.1: below) and a body of at most 64 KiB: the Services of type
 LoadBalancer the controller owns (uid, ports with protocol, port and node port, `externalTrafficPolicy`,
@@ -1402,17 +1402,57 @@ operator's list (`GET /admin/service/{id}/k8s-clusters`). The tenant's cluster p
 address, what the pair and each address cost, and in default mode that NGINX Gateway Fabric takes one address per
 Gateway (the add-on dialog says so too); its cluster action `GET_LOAD_BALANCER` and the operator's
 `GET /admin/service/{id}/k8s-clusters/{clusterId}/load-balancer` (`admin:service:read`) answer when the controller's
-credential was minted and last used (`lastSeenAt`, written at most once a minute) and the cluster's balancer row
+credential was minted and last used (`lastSeenAt`, written at most once a minute), the protocol of `/lb/v1` the
+controller named at that call next to the portal's own (`controllerProtocol`, `protocol`; the gateway writes a
+changed one at once, so a bumped cluster reads right with its first call), the certificates the cluster's Services
+end TLS with (`certificates`: per row the id a listener names, the Secret, the subject, the names, both dates and
+the public fingerprint; nothing of a key and not the Secret's hash) and the cluster's balancer row
 (status, appliances, each Service's address and state, and the addresses the cluster keeps in `cluster.kept`;
 none before the first Service), `null` without a controller. The tenant's page lists the kept addresses with a
 "Release" button each (the cluster action `RELEASE_LOAD_BALANCER_ADDRESS`, after a confirmation); the operator's
 dialog shows them and releases none.
-No token is in it. The tenant's page reads the balancer's member health as the load balancer page does. On the load
+No token is in it. The tenant's page reads the balancer's member health as the load balancer page does, shows each
+port with its protocol (`443/HTTPS`, `53/UDP`), names the Secret of a port that ends TLS and when its certificate
+expires (a warning from 30 days before), says under a UDP port what its check does not see, and, when
+`controllerProtocol` is below `protocol`, says that the controller is the one of an earlier release, what it does not
+serve and that the platform update on the page replaces it. The operator's dialog names the protocol and, for an older
+controller, the bump or the rotation that replaces it. On the load
 balancer pages the cluster's balancer is read-only: no listener, pool or **Delete**, a link to its cluster, and
 **Replace appliances**. The operator's **Load balancer** dialog on the provider's clusters card runs the enable action
 above, or a rotation on a cluster that has a controller.
 
-The platform BOM pins chart 0.1.17 from v0.11.0 (`tenantCharts.kubernetes`, record only on an installed platform: the
+**Upgrade note for v0.11.1: UDP and TLS from Services need the cluster on chart 0.1.19.** The platform BOM pins
+chart 0.1.19 for new tenant clusters from v0.11.1 (`tenantCharts.kubernetes`, digest
+`sha256:476950b5e841c9460c47960b1841ceac17998b5c06c7358c9966585f6602d5fa`, published by the tag
+`proxmox-kamaji-cluster-v0.1.19`; the platform cluster `pc-platform` stays on 0.1.16, so no machine of the platform
+moves). On an installed platform the move is **record only** from every previous BOM the build carries: the upgrade
+run writes the version on the Kubernetes provider and touches no cluster, VM or balancer
+(`TestPreviousBOMsMoveCertManager` names the rows: from 0.11.0 and its two candidates the release and
+`tenantCharts.kubernetes` 0.1.17 to 0.1.19, nothing else). What follows from it:
+
+- **A cluster created after the upgrade** is on 0.1.19 with the portal's own controller image
+  (`PROXCLOUD_LB_CONTROLLER_IMAGE`, which Compose and the installer chart set to the API's image of the same
+  release): protocol 2 and the watch. It serves UDP ports, TLS from a Secret, the annotations and kept addresses
+  from its first Service.
+- **A cluster made before v0.11.1 changes in nothing by the portal's upgrade.** It keeps the controller image it
+  was made with (protocol 1, a turn every 10 s): a Service with a UDP port stays `UDPNotSupported`, and no
+  annotation but `proxcloud.io/lb-proxy-protocol` is read, so no TLS from a Secret and no kept address. Nothing
+  that stood pending gets a public address, a bill and a place in the quota without its owner's action (K12 of the
+  layer 4 plan).
+- **It gets all of it by a move to the provider's chart**: the tenant's platform update on the cluster page, the
+  operator's **Bump**, or "Enable load balancer controller" again (a rotation). Each sets the controller's image to
+  the portal's in the same apply (`kamaji.Service.SetChartVersion`, `EnableLBController`), so the cluster is never
+  on chart 0.1.19 with an image that does not know `--watch`. What actually serves UDP and TLS is that image
+  (protocol 2); chart 0.1.19 adds the watch. A cluster moved to the provider's chart while the provider still
+  names 0.1.17 or 0.1.18 (the upgrade run has not written the BOM yet) therefore serves them too, polling.
+- **The bump rolls no machine and changes no balancer config**: 0.1.19 differs from 0.1.17 in the controller's
+  argument, and in the keys of 0.1.18 (a node group's own pool and range, the sandbox add-on) that a tenant cluster
+  does not set (the chart goldens of every values fixture, `internal/cloud/kamaji`). Not run on a lab.
+- **Do not bump or re-enable a cluster while the portal is rolled back to v0.11.0**: its image exits at
+  `--watch=true` (the upgrade notes of the change log).
+- **Both consoles say which controller a cluster has** (`controllerProtocol` below).
+
+The platform BOM pinned chart 0.1.17 from v0.11.0 (`tenantCharts.kubernetes`, record only on an installed platform: the
 upgrade run writes it on the provider, so clusters created after it get the controller when every gate holds; the
 platform cluster `pc-platform` stays on 0.1.16). On one lab that run took 39.6 s from the BOM `0.10.2-rc.1` to
 `0.11.0-rc.1` (two record-only rows, nothing written on Proxmox), and a cluster created after it got chart 0.1.17

@@ -427,14 +427,20 @@ func TestGatewayPutStepsDownForOneRequestOnly(t *testing.T) {
 
 // oneCluster is the gateway's credential side for the test's cluster, readyPortal its project side: every Service
 // the gateway lets through is served at one address.
-type oneCluster struct{}
+// named, when set, receives the protocol the controller named at its last call, as the gateway's store keeps it.
+type oneCluster struct{ named *int }
 
 func (oneCluster) Credential(_ context.Context, id string) (*lbgw.Credential, error) {
 	sum, now := sha256.Sum256([]byte("s3cr3t")), time.Now()
 	return &lbgw.Credential{ID: id, ProjectID: "p1", SecretSHA256: hex.EncodeToString(sum[:]), LastSeenAt: &now}, nil
 }
 
-func (oneCluster) Seen(context.Context, string, time.Time) error { return nil }
+func (c oneCluster) Seen(_ context.Context, _ string, _ time.Time, protocol int) error {
+	if c.named != nil {
+		*c.named = protocol
+	}
+	return nil
+}
 
 type readyPortal struct {
 	calls int
@@ -448,6 +454,31 @@ func (p *readyPortal) LBClusterState(_ context.Context, _ *lbgw.Credential, serv
 		ans.Services = append(ans.Services, lbgw.ServiceStatus{UID: s.UID, State: lbgw.StateReady, Address: "203.0.113.5"})
 	}
 	return ans, nil
+}
+
+// The controller of this image names the portal's own protocol at the gateway, which is what the consoles read to
+// tell a controller of an earlier release, and it is one that gets UDP ports served. The portal names this image for
+// every cluster it makes, enables or bumps (PROXCLOUD_LB_CONTROLLER_IMAGE: deploy/tests/test_compose_production.py and
+// the API's Deployment), so a cluster on the provider's chart is never left with an older one.
+func TestControllerNamesThePortalsProtocol(t *testing.T) {
+	f := &fakeTenant{services: map[string]map[string]any{}}
+	f.add("dns", "infra", "u-1", "2026-11-23T10:00:00Z", lbSpec(Class, udp(53, 30053)))
+	f.nodes = []map[string]any{node("w1", "10.0.0.11", nil)}
+	named, portal := 0, &readyPortal{}
+	ts := httptest.NewTLSServer(&lbgw.Handler{Reg: oneCluster{named: &named}, Portal: portal, Log: quiet()})
+	defer ts.Close()
+	g := &gateway{url: ts.URL, dir: gatewayDir(t, ts)}
+	c := &controller{api: f, put: g.put, log: quiet()}
+	if err := c.turn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if named != lbgw.Protocol || named < lbgw.ProtocolUDP {
+		t.Fatalf("the controller named protocol %d, the portal speaks %d and serves UDP from %d", named, lbgw.Protocol, lbgw.ProtocolUDP)
+	}
+	// And the gateway, told so, lets the UDP Service through to the portal.
+	if len(portal.got) != 1 || len(portal.got[0].Ports) != 1 || portal.got[0].Ports[0].Protocol != "UDP" || !hasIngress(ingress(f.svc("dns", "infra")), "203.0.113.5") {
+		t.Fatalf("the UDP Service: the portal got %+v", portal.got)
+	}
 }
 
 // The controller against the gateway itself (lbgw.Handler over TLS). A Service that v0.11.0 served with annotations

@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test"
 
-// A cluster's load balancer (v0.11.0) on the mock app: prj-aurora's prod runs the controller in default mode with
-// NGINX Gateway Fabric on; its balancer, on two appliances, carries two Services and refuses a third. staging has no
-// controller.
+// A cluster's load balancer on the mock app: prj-aurora's prod runs the controller in default mode with NGINX Gateway
+// Fabric on; its balancer, on two appliances, carries three Services (one ends TLS with a Secret's certificate, one
+// is UDP) and refuses a fourth. staging has no controller.
 const SITE = "/p/prj-aurora"
 
 test("the cluster page says which Services get a public address, what it costs, and shows the balancer", async ({ page }) => {
@@ -17,15 +17,37 @@ test("the cluster page says which Services get a public address, what it costs, 
   await expect(block.getByText("holds the address")).toHaveCount(1)
   const web = block.getByRole("row").filter({ hasText: "shop/web" })
   await expect(web).toContainText("203.0.113.21")
-  await expect(web).toContainText("443")
+  await expect(web).toContainText("443/HTTPS")
   await expect(web).toContainText("3 of 3 up")
+  // A port that ends TLS names the Secret its certificate came from, and when that certificate expires.
+  await expect(web.getByTestId("k8s-lb-cert")).toContainText("Secret shop/shop-tls (shop.example.com), expires")
+  await expect(web.getByTestId("k8s-lb-cert")).toContainText("Expires in 1")
   // Policy Local: only the worker with a pod answers the health port.
   await expect(block.getByRole("row").filter({ hasText: "nginx-gateway/public-gateway-nginx" })).toContainText("1 of 3 up")
-  await expect(block.getByRole("row").filter({ hasText: "infra/dns" })).toContainText("UDPNotSupported")
+  const gw = block.getByRole("row").filter({ hasText: "nginx-gateway/public-gateway-nginx" })
+  await expect(gw).toContainText("80/TCP, 443/UDP")
+  await expect(gw.getByTestId("k8s-lb-cert")).toHaveCount(0)
+  // Its UDP port is checked on the Service's health port (policy Local): the note on the datagram check is not for it.
+  await expect(gw.getByTestId("k8s-lb-udp-check")).toHaveCount(0)
+  // A UDP port is served, its workers are checked, and the row says what the check cannot see.
+  const dns = block.getByRole("row").filter({ hasText: "infra/dns" })
+  await expect(dns).toContainText("203.0.113.23")
+  await expect(dns).toContainText("53/UDP")
+  await expect(dns).toContainText("2 of 3 up")
+  await expect(dns.getByTestId("k8s-lb-udp-check")).toContainText("a closed port may not be seen under traffic")
+  await expect(block.getByRole("row").filter({ hasText: "infra/sigtran" })).toContainText("ProtocolNotSupported")
+  // The controller speaks the platform's protocol: nothing asks for an update.
+  await expect(block.getByTestId("k8s-lb-old-controller")).toHaveCount(0)
 
   await block.getByRole("button", { name: "Open the load balancer" }).click()
   await expect(page.getByTestId("lb-cluster")).toContainText("Services of Kubernetes cluster pc-c-healthy")
   await expect(page.getByTestId("lb-cluster").getByRole("row").filter({ hasText: "shop/web" })).toContainText("203.0.113.21")
+  // The balancer's own page reads the same members: the UDP Service's workers and their health, the port that ends
+  // TLS by its protocol. The certificate's Secret is the cluster page's to name.
+  await expect(page.getByTestId("lb-cluster").getByRole("row").filter({ hasText: "infra/dns" })).toContainText("53/UDP")
+  await expect(page.getByTestId("lb-cluster").getByRole("row").filter({ hasText: "infra/dns" })).toContainText("2 of 3 up")
+  await expect(page.getByTestId("lb-cluster").getByRole("row").filter({ hasText: "shop/web" })).toContainText("443/HTTPS")
+  await expect(page.getByTestId("lb-cluster").getByTestId("k8s-lb-cert")).toHaveCount(0)
   // Made by the cluster: nothing here edits or deletes it; the appliances can still be replaced.
   await expect(page.getByRole("button", { name: "Delete" })).toHaveCount(0)
   await expect(page.getByRole("button", { name: "Save configuration" })).toHaveCount(0)
@@ -34,6 +56,20 @@ test("the cluster page says which Services get a public address, what it costs, 
 
   await page.getByRole("link", { name: "cluster pc-c-healthy" }).click()
   await expect(page.getByTestId("k8s-lb")).toBeVisible()
+})
+
+test("a cluster whose controller is the one of an earlier release says what it does not serve and how to get it", async ({ page }) => {
+  await page.addInitScript(() => {
+    ;(globalThis as { __mockLBControllerProtocol?: number }).__mockLBControllerProtocol = 1
+  })
+  await page.goto(`${SITE}/kubernetes/res-pc-c-healthy`)
+  const old = page.getByTestId("k8s-lb-old-controller")
+  await expect(old).toContainText("protocol 1 of 2")
+  await expect(old).toContainText("A Service with a UDP port is refused")
+  await expect(old).toContainText("no TLS from a Secret")
+  await expect(old).toContainText("Apply the platform update on this page")
+  await expect(old).toContainText("chart 0.1.19 or later")
+  await expect(old).toContainText("If the page offers no update, ask your operator")
 })
 
 test("the cluster page lists the addresses the cluster keeps and releases one after a confirmation", async ({ page }) => {

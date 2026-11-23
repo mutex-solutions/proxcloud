@@ -1,25 +1,27 @@
 import { expect, test } from "@playwright/test"
 import { calls, navigate, recordCalls } from "./mock-calls.ts"
 
-// The operator's side of a cluster's load balancer (v0.11.0): the provider's config.cluster.loadBalancer fields, each
-// cluster's mode in the list, and the Load balancer dialog with "Enable load balancer controller".
+// The operator's side of a cluster's load balancer: the provider's config.cluster.loadBalancer fields, each cluster's
+// mode in the list, and the Load balancer dialog with "Enable load balancer controller" and the controller's protocol.
+// The provider pins chart 0.1.19 (v0.11.1); prod was made on it, staging before the controller existed.
 const svc = {
   id: "svc-k8s-01", name: "Managed Kubernetes AZ1", type: "CLOUD", status: "ACTIVE",
   config: {
     provider: "kamaji", region: "az1", regions: { az1: { name: "az1" } }, services: { kubernetes: { az1: true } },
-    argocd: { namespace: "argocd", project: "proxcloud-k8s", chartRepo: "ghcr.io/mutex-solutions/charts", chartName: "proxmox-kamaji-cluster", chartVersion: "0.1.17" },
+    argocd: { namespace: "argocd", project: "proxcloud-k8s", chartRepo: "ghcr.io/mutex-solutions/charts", chartName: "proxmox-kamaji-cluster", chartVersion: "0.1.19" },
     cluster: { versions: { "1.36.6": "pve1=9001" }, loadBalancer: { publicNetworkId: "vmbr1", flavorId: "lb-small" }, workerFirewall: true },
   },
 }
 const clusters = {
-  providerChartVersion: "0.1.17",
+  providerChartVersion: "0.1.19",
   clusters: [
-    { id: "pc-c-new", name: "prod", projectId: "prj-1", chartVersion: "0.1.17", loadBalancer: "default" },
+    { id: "pc-c-new", name: "prod", projectId: "prj-1", chartVersion: "0.1.19", loadBalancer: "default" },
     { id: "pc-c-old", name: "staging", projectId: "prj-1", chartVersion: "0.1.16" },
   ],
 }
 const view = {
-  controllerSince: "2026-11-20T08:00:00Z", controllerLastSeen: new Date(Date.now() - 30000).toISOString(), balancerId: "res-lb-1",
+  controllerSince: "2026-11-20T08:00:00Z", controllerLastSeen: new Date(Date.now() - 30000).toISOString(), controllerProtocol: 2, protocol: 2,
+  balancerId: "res-lb-1",
   balancer: {
     status: "ACTIVE",
     appliances: [{ serverId: "311", node: "pve2", role: "MASTER", holdsVip: true, state: "up" }, { serverId: "312", node: "pve3", role: "BACKUP", state: "up" }],
@@ -68,6 +70,9 @@ test("a cluster with a controller shows its mode, last call and balancer; Run ag
   const dialog = page.getByRole("dialog")
   await expect(dialog).toContainText("Default mode")
   await expect(dialog.getByTestId("lb-controller-seen")).toContainText("last called the gateway")
+  // The controller speaks the portal's protocol: nothing to bump.
+  await expect(dialog.getByTestId("lb-controller-seen")).toContainText("It speaks protocol 2 of 2.")
+  await expect(dialog.getByTestId("lb-controller-old")).toHaveCount(0)
   await expect(dialog).toContainText("holds the addresses")
   await expect(dialog.getByRole("row").filter({ hasText: "shop/web" })).toContainText("203.0.113.21")
   // An address a Service left behind: shown, with no action here (the tenant releases it).
@@ -76,6 +81,30 @@ test("a cluster with a controller shows its mode, last call and balancer; Run ag
   await dialog.getByRole("button", { name: "Rotate the controller's credential" }).click()
   await expect.poll(() => calls(page, "POST", lbPath("pc-c-new"))).toHaveLength(1)
   await expect(page.getByText("A new credential was minted")).toBeVisible()
+})
+
+test("a controller of an earlier release is named, with what it does not serve and the bump that replaces it", async ({ page }) => {
+  // A cluster made by v0.11.0: chart 0.1.17, whose controller speaks protocol 1 until the cluster is bumped.
+  const old = { ...clusters, clusters: [{ id: "pc-c-new", name: "prod", projectId: "prj-1", chartVersion: "0.1.17", loadBalancer: "default" }] }
+  await open(page, { "GET /admin/service/svc-k8s-01/k8s-clusters": old, [`GET ${lbPath("pc-c-new")}`]: { ...view, controllerProtocol: 1 } })
+  await expect(page.getByRole("row").filter({ hasText: "prod" }).getByRole("button", { name: "Bump to 0.1.19" })).toBeVisible()
+  await page.getByRole("button", { name: "Load balancer of prod" }).click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog.getByTestId("lb-controller-seen")).toContainText("It speaks protocol 1 of 2.")
+  const hint = dialog.getByTestId("lb-controller-old")
+  await expect(hint).toContainText("UDPNotSupported")
+  await expect(hint).toContainText("no TLS from a Secret")
+  await expect(hint).toContainText("Bump the cluster to the provider's chart (0.1.19)")
+  await expect(hint).toContainText("sets the controller's image to the portal's")
+})
+
+test("a controller that has not called yet names no protocol", async ({ page }) => {
+  await open(page, { [`GET ${lbPath("pc-c-new")}`]: { ...view, controllerLastSeen: undefined, controllerProtocol: undefined } })
+  await page.getByRole("button", { name: "Load balancer of prod" }).click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog.getByTestId("lb-controller-seen")).toContainText("has not called the gateway yet")
+  await expect(dialog.getByTestId("lb-controller-seen")).not.toContainText("protocol")
+  await expect(dialog.getByTestId("lb-controller-old")).toHaveCount(0)
 })
 
 test("Enable load balancer controller on an existing cluster, and a gate that does not hold", async ({ page }) => {

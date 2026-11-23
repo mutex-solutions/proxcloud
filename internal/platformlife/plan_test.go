@@ -114,9 +114,12 @@ func TestPreviousBOMsMoveAsTheirPinsDiffer(t *testing.T) {
 // The answer for each previous BOM by name, now that this build's BOM moves cert-manager v1.20.2 -> v1.21.3 (the test
 // above skips refused pairs): a BOM on this build's Kubernetes, k3s and node image plans exactly the rows named here,
 // cert-manager as class chart on both clusters (none from 0.10.2-rc.1, 0.10.2, 0.11.0-rc.1, 0.11.0-rc.2 or 0.11.0,
-// which pin v1.21.3 already), and the tenant chart 0.1.16 -> 0.1.17 record only (none from 0.11.0-rc.1, 0.11.0-rc.2
-// or 0.11.0, which pin 0.1.17 already); every BOM on Kubernetes 1.35.10 is refused by the pair gate on both
-// cert-manager rows, because that pair also moves k3s, Kubernetes and the node image. A newly kept BOM needs its line.
+// which pin v1.21.3 already), and the tenant chart to 0.1.19 record only from every one of them (from 0.1.17 for
+// 0.11.0-rc.1, 0.11.0-rc.2 and 0.11.0, from 0.1.16 for the four before them, from 0.1.15 for 0.10.1-rc.1): the run
+// writes it on the Kubernetes provider and touches no cluster. pc-platform's own chart stays where 0.11.0 has it, so
+// only 0.10.1-rc.1, which pins 0.1.15 for it, has a seed/pc-platform row. Every BOM on Kubernetes 1.35.10 is refused
+// by the pair gate on both cert-manager rows, because that pair also moves k3s, Kubernetes and the node image. A newly
+// kept BOM needs its line.
 func TestPreviousBOMsMoveCertManager(t *testing.T) {
 	cur := embedded(t)
 	prev, err := Previous()
@@ -129,9 +132,9 @@ func TestPreviousBOMsMoveCertManager(t *testing.T) {
 		"0.10.1":      {"/release", "/tenantCharts.kubernetes", "seed/cert-manager", "workload/cert-manager"},
 		"0.10.2-rc.1": {"/release", "/tenantCharts.kubernetes"},
 		"0.10.2":      {"/release", "/tenantCharts.kubernetes"},
-		"0.11.0-rc.1": {"/release"},
-		"0.11.0-rc.2": {"/release"},
-		"0.11.0":      {"/release"},
+		"0.11.0-rc.1": {"/release", "/tenantCharts.kubernetes"},
+		"0.11.0-rc.2": {"/release", "/tenantCharts.kubernetes"},
+		"0.11.0":      {"/release", "/tenantCharts.kubernetes"},
 	}
 	gate := "not supported by this release: a third-party chart moves only in an upgrade that changes no k3s, Kubernetes " +
 		"version or node image, and this one also changes kubernetes.version, kubernetes.nodeImage, seed.k3s. First finish an " +
@@ -154,6 +157,10 @@ func TestPreviousBOMsMoveCertManager(t *testing.T) {
 			}
 			if c.Name == "cert-manager" && c.Blocking == "" && c.Class != ClassChart {
 				t.Errorf("%s: %s is class %s, want chart", b.Release, row, c.Class)
+			}
+			if from := b.TenantCharts.Kubernetes.Version; c.Name == "tenantCharts.kubernetes" && (c.Class != ClassRecordOnly ||
+				!strings.Contains(c.From, "/proxmox-kamaji-cluster:"+from+"@") || !strings.Contains(c.To, "/proxmox-kamaji-cluster:0.1.19@")) {
+				t.Errorf("%s: %s is class %s and moves %s to %s, want record only from %s to 0.1.19", b.Release, row, c.Class, c.From, c.To, from)
 			}
 		}
 		if want, ok := allowed[b.Release]; ok {

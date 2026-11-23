@@ -2233,7 +2233,7 @@ its documentation as remembered, and was not checked in its code or on a node.
   serves the listener of the clusters' controllers on `<address>:8444` only, with an ECDSA key and a
   self-signed certificate for the address that the API makes on its first start, in its own volume
   ([compose README](../deploy/compose/README.md#optional-features)). It is for the clusters' load balancer
-  controller (cluster chart 0.1.17, which the BOM of v0.11.0 pins for new tenant clusters). A Kubernetes cluster gets
+  controller (cluster chart 0.1.17, which the BOM of v0.11.0 pins for new tenant clusters; 0.1.19 from v0.11.1). A Kubernetes cluster gets
   one only with the listener on, the controller image the flag sets, and `config.cluster.loadBalancer` on the
   Kubernetes provider (a public network and a flavor; [managed-k8s.md](managed-k8s.md)). **A new route:** the platform
   cluster's nodes, on the platform network, must reach the portal host on `<address>:8444`; without it no controller
@@ -2427,6 +2427,18 @@ BOM on Kubernetes 1.35.10 it is refused as above. The run writes chart 0.1.17 on
 provider, so clusters created after it can get the load balancer controller
 ([managed-k8s.md](managed-k8s.md)); it changes no existing cluster. No move to 0.11.0 itself has run on
 a lab: the two candidates' runs, with these pins, did.
+
+The BOM of v0.11.1 (on `main` as `0.12.0-dev` until the release names it) has the pins of 0.11.0 but
+`tenantCharts.kubernetes`: cluster chart `proxmox-kamaji-cluster` 0.1.19, whose load balancer controller
+watches the tenant's Services, nodes and TLS Secrets ([managed-k8s.md](managed-k8s.md), "Upgrade note for
+v0.11.1"); the platform cluster stays on 0.1.16, and no component of the sandbox feature is in it. From
+0.11.0, 0.11.0-rc.1 and 0.11.0-rc.2 the plan has two rows, the release and `tenantCharts.kubernetes`
+0.1.17 to 0.1.19, both record only, with no part and no seed, machines or site row; from 0.10.2 and
+0.10.2-rc.1 the same two rows (the chart from 0.1.16); from 0.10.1 and 0.10.1-rc.2 also the two
+cert-manager rows (four), from 0.10.1-rc.1 `pc-platform` 0.1.15 to 0.1.16 as well (five); from every
+BOM on Kubernetes 1.35.10 it is refused as above (`TestPreviousBOMsMoveCertManager`). The run writes
+chart 0.1.19 on the Kubernetes provider and changes no existing cluster: a cluster made earlier gets UDP
+and TLS from its Services when it is moved to the provider's chart. No move to this BOM has run on a lab.
 
 "Moves" means that the Application's target is the new chart version and ArgoCD has compared the
 cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is

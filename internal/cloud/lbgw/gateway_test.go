@@ -34,11 +34,11 @@ func (f *fakeReg) Credential(_ context.Context, id string) (*Credential, error) 
 	return nil, nil
 }
 
-func (f *fakeReg) Seen(_ context.Context, id string, at time.Time) error {
+func (f *fakeReg) Seen(_ context.Context, id string, at time.Time, protocol int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seen++
-	f.creds[id].LastSeenAt = &at
+	f.creds[id].LastSeenAt, f.creds[id].Protocol = &at, protocol
 	return nil
 }
 
@@ -135,6 +135,36 @@ func TestAuthentication(t *testing.T) {
 	r.put(t, "PVEAPIToken lb@proxcloud!c1=s1", body)
 	if r.reg.seen != 1 {
 		t.Fatalf("last seen written %d times", r.reg.seen)
+	}
+}
+
+// The protocol a controller names is kept with its last call, which is how the consoles tell an old controller: it is
+// written with the first call, at once when it changes (a cluster bumped to the portal's chart), and not again within
+// the minute while it stays. A credential that is refused leaves it alone.
+func TestControllerProtocolIsRecorded(t *testing.T) {
+	r := newRig()
+	const own = "PVEAPIToken=lb@proxcloud!c1=s1"
+	body := Request{Services: []Service{web("u1")}}
+	for i, c := range []struct {
+		protocol, auth string
+		want, writes   int
+	}{
+		{"1", own, 1, 1},
+		{"1", own, 1, 1},
+		{"2", "PVEAPIToken=lb@proxcloud!c1=nope", 1, 1},
+		{"2", own, 2, 2},
+		{"2", own, 2, 2},
+		{"0", own, 0, 3}, // refused as too old, and shown as it named itself
+		// A header that is no protocol is 0 too, so nothing is written for it: out of range, negative, not a number.
+		{"99999999999999999999", own, 0, 3},
+		{"-1", own, 0, 3},
+		{"two", own, 0, 3},
+	} {
+		r.protocol = c.protocol
+		r.put(t, c.auth, body)
+		if got := r.reg.creds["c1"].Protocol; got != c.want || r.reg.seen != c.writes {
+			t.Fatalf("call %d (protocol %s): the credential says protocol %d after %d writes, want %d after %d", i, c.protocol, got, r.reg.seen, c.want, c.writes)
+		}
 	}
 }
 

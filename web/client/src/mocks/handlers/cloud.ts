@@ -210,9 +210,14 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
   if (r?.type === "KUBERNETES_CLUSTER" && action === "GET_LOAD_BALANCER") {
     if (!r.data?.cluster?.load_balancer) return ok(null)
     const lb = db.cloud.find((x) => x.type === "LOAD_BALANCER" && x.data?.loadbalancer?.cluster?.id === r.externalId)
+    // __mockLBControllerProtocol: an e2e spec's stand-in for a cluster whose controller is the one of v0.11.0.
     return ok({
       controllerSince: "2026-11-20T08:00:00Z", controllerLastSeen: new Date(Date.now() - 20000).toISOString(),
-      ...(lb ? { balancerId: lb.id, balancer: lb.data?.loadbalancer } : {}),
+      controllerProtocol: (globalThis as { __mockLBControllerProtocol?: number }).__mockLBControllerProtocol ?? 2, protocol: 2,
+      ...(lb ? { balancerId: lb.id, balancer: lb.data?.loadbalancer, certificates: [{
+        id: "cert-shop", secret: "shop/shop-tls", subject: "CN=shop.example.com", dnsNames: ["shop.example.com"],
+        notBefore: "2026-09-01T00:00:00Z", notAfter: new Date(Date.now() + 12 * 86_400_000).toISOString(), fingerprint: "9f".repeat(32),
+      }] } : {}),
     })
   }
 
@@ -273,10 +278,11 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     // Load balancers: the members as the appliance holding the address sees them, and a replace that starts.
     case "GET_HEALTH":
       return { data: {
-        // A pool checked over HTTP on a cluster's health port (policy Local) has one worker with a pod.
+        // A pool checked over HTTP on a cluster's health port (policy Local) has one worker with a pod; a cluster's UDP
+        // pool with its own check has its last worker down.
         result: (r?.data?.loadbalancer?.pools ?? []).flatMap((p: any) => (p.members ?? []).map((m: any, i: number) => ({
           pool: p.name, serverId: m.serverId, address: m.address, port: m.port,
-          status: p.healthCheck?.type === "none" ? "no check" : m.node && p.healthCheck?.type === "http" && i > 0 ? "DOWN" : "UP",
+          status: p.healthCheck?.type === "none" ? "no check" : m.node && (p.healthCheck?.type === "http" ? i > 0 : p.protocol === "udp" && i === 2) ? "DOWN" : "UP",
         }))),
         appliances: r?.data?.loadbalancer?.appliances ?? [],
       } }

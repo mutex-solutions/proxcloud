@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **UDP and TLS from Services need the cluster on chart 0.1.19.** The platform BOM now pins cluster chart
+  `proxmox-kamaji-cluster` 0.1.19 for new tenant clusters. On an installed platform that is a record-only step of
+  the upgrade run, from every previous BOM: it writes the version on the Kubernetes provider and touches no cluster,
+  VM or balancer. A cluster created afterwards serves UDP ports, TLS from a Secret, the `proxcloud.io/lb-*`
+  annotations and kept addresses from its first Service. A cluster made before v0.11.1 keeps the controller it was
+  made with until it is moved to the provider's chart (the tenant's platform update, the operator's **Bump**, or
+  "Enable load balancer controller" again): until then its UDP Services stay `UDPNotSupported` and no annotation
+  but `proxcloud.io/lb-proxy-protocol` is read. Both consoles now say which controller a cluster has. The move sets
+  the controller's image to the portal's, rolls no machine and changes no balancer config
+  ([managed-k8s.md](docs/managed-k8s.md), "Upgrade note for v0.11.1"). Not run on a lab.
 - **Chart 0.1.19 of a Kubernetes cluster needs the controller image of this release.** The chart starts the
   cluster's load balancer controller with `--watch=true`, which the image of v0.11.0 does not know and exits at.
   Moving a cluster to the chart sets the controller's image to the portal's, so an upgrade is safe. The one way
@@ -62,6 +72,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   UID>-<node port>`, in the row and in `GET_HEALTH`. Nothing reads them but people.
 
 ### Added
+
+- **The consoles show a cluster's UDP and TLS Services, and which controller the cluster has**
+  (`internal/cloud/lbgw`, `internal/platform/project/cloud_lb_cluster_pve.go`, both consoles).
+  - **The tenant's cluster page** shows each port of a Service with its protocol (`443/HTTPS`, `53/UDP`), under a
+    port that ends TLS the Secret its certificate came from, the names it holds and when it expires (a warning from
+    30 days before), and under a UDP port what its health check does not see. The cluster balancer's own page shows
+    the protocols and the UDP workers' health too.
+  - **A controller of an earlier release is named.** The gateway keeps the protocol a controller names with its
+    last call (written at once when it changes), and the cluster's load balancer view answers it next to the
+    portal's own (`controllerProtocol`, `protocol`). The tenant's page then says what is not served (UDP ports, the
+    annotations, TLS from a Secret, kept addresses) and that the platform update on the page brings it; the
+    operator's **Load balancer** dialog says "It speaks protocol 1 of 2" and names the bump or the rotation.
+  - **The view lists the cluster's certificates** (`certificates`: id, Secret, subject, names, both dates, public
+    fingerprint). They are rows of the cluster's balancer that no project's **Certificates** page lists. Nothing
+    of a key and not the hash of a Secret is in it.
+  - **The guides.** The tenant's Kubernetes guide no longer says that UDP is refused: it covers UDP ports and their
+    health check, the options (the annotation table), TLS from a Secret and where the key rests, keeping an
+    address, the seventeen deliberate differences from the upstream cloud controller manager and how to rename a
+    manifest written for it. The load balancer guide no longer says that TLS termination is not available. The
+    operator's guide has "UDP, TLS and the controller of an earlier release".
+  - Tested: the gateway's record (`TestControllerProtocolIsRecorded`), this image's controller naming the portal's
+    protocol against the real gateway handler (`TestControllerNamesThePortalsProtocol`), the view against Postgres
+    (`TestLBClusterStateConverges` and its `TLSFromSecret`: the protocol, the certificate, and nothing of a key in the
+    JSON), and the pages on
+    the mock apps (Playwright). Not run on a lab.
 
 - **A Service can leave its public address to its cluster, and a Service can ask for a kept address**
   (`internal/cloud/lbgw`, `internal/platform/project/cloud_lb_cluster_pve.go`, `cmd/lb-controller`; "Keeping a
@@ -376,6 +411,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **New tenant clusters get cluster chart `proxmox-kamaji-cluster` 0.1.19** (`tenantCharts.kubernetes`, digest
+  `sha256:476950b5e841c9460c47960b1841ceac17998b5c06c7358c9966585f6602d5fa`, published by the tag
+  `proxmox-kamaji-cluster-v0.1.19` and compared with the registry by `bom_verify.py`), and with it the load
+  balancer controller that watches. The platform cluster `pc-platform` stays on 0.1.16: the plan did not ask for
+  its move, and nothing it would gain (a node group's own pool, the sandbox add-on) is used by this release. No
+  component of the sandbox feature is in the BOM (`TestSandboxIsDark`, unchanged). The upgrade plan from 0.11.0,
+  0.11.0-rc.1 and 0.11.0-rc.2 has two rows, the release and `tenantCharts.kubernetes` 0.1.17 to 0.1.19, both record
+  only; from 0.10.2 and 0.10.2-rc.1 the same two; from 0.10.1 and 0.10.1-rc.2 four, from 0.10.1-rc.1 five, as
+  before; every BOM on Kubernetes 1.35.10 stays refused (`TestPreviousBOMsMoveCertManager`, which now also asserts
+  the row's class and both versions). The goldens of every previous BOM are byte for byte what they were;
+  `render-providers.golden.yaml` names 0.1.19. The controller image a new, re-enabled or bumped cluster gets is the
+  portal's own, as before (`PROXCLOUD_LB_CONTROLLER_IMAGE`): the one that speaks protocol 2 and knows `--watch`.
 - **Which nodes are behind a cluster's Services follows Kubernetes' own rule** (`cmd/lb-controller`, `readNodes`;
   `k8s.io/cloud-provider` `stableNodeSetPredicates`). The label
   `node.kubernetes.io/exclude-from-external-load-balancers` is read as a boolean: `false` (and `0`, `f`) now keeps
@@ -391,9 +438,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.0.yaml`, sha256
   `d8e37db2fd204a6a58a4d6357f4c54bb6dccc82de52430340f2c8c7ca0e0d7ff`, the file of the tag byte for byte). The `v0.11.0`
   release commit left the BOM at `0.11.0`, and the release gate refuses only `-dev`. A platform installed by `v0.11.0`
-  or moved to its BOM is not refused (`bom_unsupported`) under a later build while the file is carried. Its pins are
-  those of `main`, so the plan from it has one change, the release, record only. `TestPreviousBOMsMoveCertManager`
-  states that answer, and `TestUpgradeRollsNoMachine` compares eight of the seventeen previous BOMs with the BOM on
+  or moved to its BOM is not refused (`bom_unsupported`) under a later build while the file is carried. Its pins were
+  those of `main` then; with the tenant chart at 0.1.19 (above) the plan from it has two changes, the release and
+  that chart, both record only. `TestPreviousBOMsMoveCertManager` states that answer, and `TestUpgradeRollsNoMachine` compares eight of the seventeen previous BOMs with the BOM on
   `main`, none of them rolling. No apply on such a platform was run on a lab by this change.
 
 ### Fixed

@@ -307,7 +307,8 @@ In `docker compose` commands the Traefik service is named after the TLS mode:
 `./proxcloud-up.sh backup` writes `backups/proxcloud-<UTC time>.sql.gz` (a `pg_dumpall` of both
 databases: the portal and Keycloak with its users) and `backups/env-<UTC time>` (a copy of `.env`).
 Both hold secrets, and **together they open every secret the portal stores**: the dump holds provider
-credentials and your tenants' TLS private keys (the certificates of their load balancers) encrypted,
+credentials and your tenants' TLS private keys (the certificates of their load balancers, and those their
+Kubernetes clusters' Services end TLS with, read from the clusters' Secrets) encrypted,
 and the copy of `.env` holds `ENCRYPTION_KEY`, which decrypts them. Whoever can read `backups/` can
 read every tenant's private key. Keep the directory readable by root alone, encrypt what you copy off
 the host, and store the two files apart if your tooling allows it. Every `upgrade` writes a backup
