@@ -266,17 +266,24 @@ const lbReasonPaused = "its VM is paused"
 
 // lbPushOrder is the order configs reach a pair: the standby first, the one holding the address last, so a config
 // that breaks HAProxy shows on the standby before it can reach the traffic.
+//
+// An appliance keepalived never ran on comes after one it runs on. The one that served alone (the first of a pair,
+// or the one a replace left) is told of its new peer first and sends it its adverts from then on, so the new one
+// starts as a standby that hears a master. The other way round the new one would hear nothing, take the addresses
+// too, and the election that follows could move them (drill Q0b-1 of v0.11.1).
 func lbPushOrder(apps []*lbAppliance) []*lbAppliance {
-	out := slices.Clone(apps)
-	slices.SortStableFunc(out, func(a, b *lbAppliance) int {
-		switch {
-		case a.HoldsVIP == b.HoldsVIP:
-			return 0
-		case a.HoldsVIP:
-			return 1
+	rank := func(a *lbAppliance) int {
+		n := 0
+		if a.KeepalivedHash == "" {
+			n = 2
 		}
-		return -1
-	})
+		if a.HoldsVIP {
+			n++
+		}
+		return n
+	}
+	out := slices.Clone(apps)
+	slices.SortStableFunc(out, func(a, b *lbAppliance) int { return rank(a) - rank(b) })
 	return out
 }
 
@@ -452,6 +459,12 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	}
 	pushed := map[*lbAppliance]bool{}
 	keepalivedCurrent := map[*lbAppliance]bool{}
+	// refuse records a push an appliance did not take. The reason is the guest's own words, which may quote a line
+	// of a config: it goes into the row's message for the tenant and not into the log.
+	refuse := func(a *lbAppliance, what string, err error) {
+		refused = err
+		slog.Warn("load balancer: an appliance did not take a push; the reason is in the load balancer's status message", "lb", lb.ID, "vm", a.ServerID, "push", what)
+	}
 	for _, a := range lbPushOrder(running) {
 		vmid, _ := strconv.Atoi(a.ServerID)
 		st, known := seen[a]
@@ -465,10 +478,16 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 				"keepalived", st.State, "haproxyServing", st.Serving, "haproxyFile", !differs(st.HAProxySum, a.HAProxyHash),
 				"udpServing", st.LVS || a.LVSHash == "", "udpFiles", !differs(st.LVSSum, a.LVSHash))
 		}
-		// keepalived needs the peer; an appliance whose peer left keeps the config it has, and the address.
-		if peer := lbPeerOf(lb, a); peer != nil && pn != nil {
-			conf, kerr := pve.RenderKeepalived(pve.LBKeepalived{RouterID: lbRouterID(lb.ID), Self: a.PrivateIP, Peer: peer.PrivateIP,
-				TenantIface: a.TenantIface, PublicIface: a.PublicIface, VIPs: lb.VIPs, Prefix: pveNetworkPrefix(pn), Gateway: pn.Gateway})
+		// keepalived on every appliance, with a peer or without: it is what holds the addresses and what lets HAProxy
+		// bind them (ip_nonlocal_bind is one of its files). An appliance with no peer in the row, the first of a
+		// pair until the second is built or the one a replace left, is its own master and serves (pve's lbNoPeer).
+		if pn != nil {
+			k := pve.LBKeepalived{RouterID: lbRouterID(lb.ID), Self: a.PrivateIP, TenantIface: a.TenantIface, PublicIface: a.PublicIface,
+				VIPs: lb.VIPs, Prefix: pveNetworkPrefix(pn), Gateway: pn.Gateway}
+			if peer := lbPeerOf(lb, a); peer != nil {
+				k.Peer = peer.PrivateIP
+			}
+			conf, kerr := pve.RenderKeepalived(k)
 			if kerr != nil {
 				return kerr
 			}
@@ -492,7 +511,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 						a.State, a.Reason = lbAppBuilding, "it is installing HAProxy and keepalived"
 						continue
 					}
-					refused = err
+					refuse(a, "keepalived", err)
 					continue
 				}
 				a.KeepalivedHash, a.KeepalivedConfHash = khash, lbHash(conf)
@@ -501,6 +520,13 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 				}
 			}
 			keepalivedCurrent[a] = true
+		}
+		// HAProxy binds the addresses, and without keepalived's files it cannot bind one the appliance does not hold:
+		// it would refuse its config (drill Q0b-1). keepalived is there on every pass but one whose public network
+		// this project may no longer use.
+		if a.KeepalivedHash == "" {
+			a.State, a.Reason = lbAppBuilding, "its public network is not available to this project"
+			continue
 		}
 		// A config an appliance refused goes to no other one in this pass: the standby comes first (lbPushOrder), so
 		// what HAProxy does not take there never reaches the appliance that holds the address. One that does not
@@ -512,7 +538,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 					a.State, a.Reason = lbAppBuilding, "it is installing HAProxy and keepalived"
 					continue
 				}
-				refused = err
+				refuse(a, "haproxy", err)
 				continue
 			}
 			a.HAProxyHash = hhash
@@ -529,7 +555,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		case want == "":
 			pushed[a] = true
 			if err := ps.RemoveLVS(ctx, a.Node, vmid); err != nil {
-				refused = err
+				refuse(a, "udp", err)
 				continue
 			}
 			a.LVSHash = ""
@@ -540,7 +566,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 					a.State, a.Reason = lbAppBuilding, "it is installing what its UDP listeners need"
 					continue
 				}
-				refused = err
+				refuse(a, "udp", err)
 				continue
 			}
 			a.LVSHash = want

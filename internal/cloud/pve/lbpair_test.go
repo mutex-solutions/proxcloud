@@ -140,8 +140,20 @@ func TestRenderKeepalived(t *testing.T) {
 	if strings.Count(conf, "table 100 preference 100") != 50 {
 		t.Errorf("50 VIPs need 50 rules with a preference:\n%s", conf)
 	}
+	// An appliance with no peer (drill Q0b-1): the pair's config with the peer's line naming nobody, and nothing
+	// else. The goldens above are a pair's with a peer, byte for byte what v0.11.0 rendered.
+	for _, n := range []int{0, 1, 2} {
+		k := keepalivedFor(n)
+		pair, _ := RenderKeepalived(k)
+		k.Peer = ""
+		alone, err := RenderKeepalived(k)
+		if err != nil || alone != strings.Replace(pair, "  unicast_peer {\n    10.0.0.6\n", "  unicast_peer {\n    127.0.0.1\n", 1) || alone == pair {
+			t.Errorf("%d VIPs, no peer (%v):\n%s", n, err, alone)
+		}
+	}
 	for name, k := range map[string]LBKeepalived{
 		"self is peer":     {RouterID: 1, Self: "10.0.0.5", Peer: "10.0.0.5", TenantIface: "a", PublicIface: "b"},
+		"alone, loopback":  {RouterID: 1, Self: "127.0.0.1", TenantIface: "a", PublicIface: "b"},
 		"iface injection":  {RouterID: 1, Self: "10.0.0.5", Peer: "10.0.0.6", TenantIface: "a\n}\nglobal_defs {", PublicIface: "b"},
 		"same iface":       {RouterID: 1, Self: "10.0.0.5", Peer: "10.0.0.6", TenantIface: "a", PublicIface: "a"},
 		"router id":        {RouterID: 256, Self: "10.0.0.5", Peer: "10.0.0.6", TenantIface: "a", PublicIface: "b"},

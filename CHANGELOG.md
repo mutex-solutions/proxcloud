@@ -78,7 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the first services sync, or the controller's next call for a cluster's pair) gives each appliance of a pair
   those five files and one `systemctl reload keepalived`, the standby first. A reload keeps keepalived's state, so
   no address moves (the same reload at the upgrade to rc.1 made no VRRP transition on the lab). A single appliance
-  runs no keepalived and gets nothing. Upgrading from v0.11.0, this is part of the one push described above. A
+  runs no keepalived and gets nothing. A pair that has one appliance at the upgrade is the other case: that
+  appliance gets keepalived's files as its own master, for the first time where it never had them (see Fixed,
+  "The first appliance of a pair"). Upgrading from v0.11.0, this is part of the one push described above. A
   pair with a UDP listener that read `DEGRADED` "Neither appliance holds the address yet" under rc.1 reads `ACTIVE`
   after that pass, and its cluster's pending Services become ready (see Fixed). Not run on a lab.
 - **Until its push, `GET_HEALTH` of a balancer lists its members as `NOT LOADED`**: the stored config names its
@@ -475,6 +477,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The first appliance of a pair could not serve until the second existed.** A cluster's appliance pair is built
+  one appliance per attempt, and an attempt that fails (no room on a node, a failed clone) is tried again five
+  minutes later. keepalived was pushed only to an appliance that had a peer, and keepalived's files are what let
+  HAProxy bind an address and what hold it: the appliance that was alone refused its HAProxy config ("cannot bind
+  socket"), the row read `ERROR` for a pass, the refusal was in no log, and the Services showed an address that
+  answered nobody until the second appliance had joined (9 min 14 s after the Services were made on the lab; without
+  end where no node has room). The same held for a tenant's pair left with one appliance by a replace whose new
+  clone failed. Now an appliance with no peer gets keepalived too and is its own master: it holds the addresses
+  and serves TCP, TLS and UDP alone, follows every change of the row, and the row reads `DEGRADED` with no standby
+  (a cluster's pair says that the platform builds the second one). Its adverts meanwhile are addressed to
+  `127.0.0.1` and reach no other appliance: one a second goes to the tenant network's gateway alone, which
+  drops it. When the second appliance comes, the one that served is told of its peer first and keeps the
+  addresses, and the new one starts as its standby: no address moves. HAProxy is never pushed before keepalived,
+  and a push an appliance refuses is logged at WARN with the balancer and the appliance (the reason stays in the
+  row's message). The config of a pair that has both appliances did not change by a byte, so no existing pair is
+  pushed because of this. Found by the drill of v0.11.1-rc.1 (Q0b-1). In a real guest of both appliance images
+  and in the wire fake; not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "One appliance of a
+  pair").
+- **A project could not see which public addresses its quota counts.** The `floatingIps` quota counts every
+  public address of a project: a server's public NIC, a load balancer's address, each Service address of a
+  Kubernetes cluster and each address a cluster keeps. `GET /api/v1/project/{id}/quota-usage` gave the limit with
+  no figure in use, and no list showed the addresses of balancers and Services, so a project at its limit read
+  "Quota exceeded for floatingIps: 5 in use" and could not tell which five. The quota read now answers `network`:
+  `floatingIps` and `networks` as used and limit, by the count the quota check itself uses, and `addresses`, one
+  row per address with what holds it (the server, the balancer, the Service with its cluster, a kept address, one
+  being given back). The tenant dashboard's **Quota & usage** card shows a "Public addresses" tile and the list
+  under it. Found by the drill of v0.11.1-rc.1 (Q0b-2) ([api.md](docs/api.md), "Quota usage").
 - **`proxcloud.io/lb-internal` with a value that is no boolean gave the Service a public address.** A value such as
   `"yes"` was named in `InvalidAnnotation` and the Service was served, so the one annotation that guards an address
   failed open over a typing mistake. It fails closed now: a Service gets a public address only when the annotation
@@ -603,8 +632,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   orders its pushes by what the appliances say at that pass, not by what the row said at the pass before. **A pair
   that reads `DEGRADED` by this heals at the first pass after the upgrade**, with nothing to do: the script of the
   read is sent with every read, so the first pass names the holder, the row is `ACTIVE` and its Services are
-  ready, and the controller writes their address into their status at its next call after that pass. Found by the
-  drill of v0.11.1-rc.1 (Q1-2). The
+  ready, and the controller writes their address into their status at its next call after that pass. In
+  v0.11.1-rc.1 only: v0.11.0 has no UDP listener. Found by the drill of v0.11.1-rc.1 (Q1-2), and by the container
+  test of the first-appliance fix above, which reads the state of an appliance that serves UDP. The
   tests that let it through answered the read from what it should say; now the script's text is run, in dash and
   bash, with and without UDP listeners (`TestVRRPStateScriptWithAndWithoutUDP`), the wire fake of every apply test
   runs it too, and the real-guest test reads the holder, the push order and the members' health while a UDP

@@ -61,6 +61,18 @@ export const quotaUsage = {
       },
     },
   },
+  // At the limit, and only one of the five is a server's: the rest are a balancer's and a cluster's.
+  network: {
+    networks: { used: 2, reserved: 0, limit: 10 },
+    floatingIps: { used: 5, reserved: 0, limit: 5 },
+    addresses: [
+      { ip: "203.0.113.10", networkId: "vmbr1", kind: "service", name: "default/web", resourceId: "lb-8fecab82de11", cluster: "pc-c-618d4578", clusterName: "prod" },
+      { ip: "203.0.113.11", networkId: "vmbr1", kind: "service", name: "default/dns", resourceId: "lb-8fecab82de11", cluster: "pc-c-618d4578", clusterName: "prod" },
+      { ip: "203.0.113.12", networkId: "vmbr1", kind: "kept", resourceId: "lb-8fecab82de11", cluster: "pc-c-618d4578", clusterName: "prod" },
+      { ip: "203.0.113.14", networkId: "vmbr1", kind: "loadBalancer", name: "shop", resourceId: "lb-fcbd5b7d328f" },
+      { ip: "203.0.113.20", networkId: "vmbr1", kind: "server", name: "bastion", resourceId: "130" },
+    ],
+  },
   gpu: {
     limits: { "nvidia-a10": 1 },
     usage: { "nvidia-a10": 1, "nvidia-l40s": 2 },

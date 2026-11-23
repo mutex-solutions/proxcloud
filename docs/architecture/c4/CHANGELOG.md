@@ -52,6 +52,50 @@ first, at its first pass. `haproxy.cfg`, `keepalived.conf` and the UDP service's
 track and notify scripts are the two files that changed.
 
 **Diagrams:** none changed.
+## 2026-11-23: the public addresses in use, in the quota read (#446)
+
+**What changed:** no new component, container, listener or relation; no architecture impact. One read gains a
+leg.
+
+- `internal/platform/project/quota_usage.go`: `GET /project/{id}/quota-usage` answers `network` for a Proxmox
+  project: `networks` and `floatingIps` as `{used, limit}`, and `addresses`, one row per public address with what
+  holds it (`quotaAddresses`: a server, a balancer, a Service of a cluster with the cluster's name, a kept
+  address, one being given back). `publicip_pve.go`: `PublicIPRepo.PublicForProject` lists what `CountForProject`
+  counts, by the one filter both use.
+- Tenant console: `QuotaOverview` (`quota-overview.tsx`, on the dashboard) shows a "Public addresses" tile and
+  the list "Public addresses in use".
+
+**Why:** drill Q0b of v0.11.1-rc.1 (Q0b-2). The `floatingIps` quota counts a balancer's address and every
+Service address of a cluster, the quota read gave the limit with no figure in use, and the `FLOATING_IP` list was
+empty: a project at five of five read "Quota exceeded for floatingIps: 5 in use" and had no page that showed the
+five.
+
+**Diagrams updated:** none.
+
+## 2026-11-23: the first appliance of a pair serves (#446)
+
+**What changed:** no new component, container, listener or relation. One appliance of a pair now runs keepalived
+without a peer.
+
+- `internal/cloud/pve/lbpair.go`: `RenderKeepalived` takes no `Peer` and renders `lbNoPeer` (`127.0.0.1`) in
+  `unicast_peer`: the appliance is its own master, and its adverts, addressed to a loopback address, reach no
+  other appliance (one a second goes to the tenant gateway alone, which drops it). A config with a peer is byte for
+  byte what it was. `ReadVRRPState` runs the two "serving" checks in a subshell: the UDP check's loop variable was
+  the one that held "holds the address".
+- `internal/platform/project/cloud_lb_pair_pve.go`: `lbApplyPair` pushes keepalived to every running appliance,
+  with its peer or none, and HAProxy only where keepalived is; a refused push is logged at WARN (balancer,
+  appliance, which push; never the guest's words). `lbPushOrder`: an appliance keepalived never ran on comes after
+  one it runs on.
+- `internal/platform/project/cloud_lb_cluster_pve.go`: `lbClusterApply` states, for a cluster's pair with one
+  appliance, that the platform builds the second one.
+
+**Why:** drill Q0b of v0.11.1-rc.1. A cluster's pair is built one appliance per attempt, and the first one could
+not serve until the second existed: keepalived was pushed only with a peer, and keepalived's files are what let
+HAProxy bind an address. The Services showed an address that answered nobody for as long as the second appliance
+took (9 min 14 s on the lab, without end where a node has no room).
+
+**Diagrams updated:** none (no element or relation changed); `c4-code.md`, rows `lbApplyPair` and
+`RenderKeepalived`.
 
 ## 2026-11-23: chart 0.1.19 offered to new tenant clusters, and the consoles' layer 4 view
 
