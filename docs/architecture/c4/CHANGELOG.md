@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-23: the public addresses in use, in the quota read
+## 2026-11-23: the public addresses in use, in the quota read (#446)
 
 **What changed:** no new component, container, listener or relation; no architecture impact. One read gains a
 leg.
@@ -24,7 +24,7 @@ five.
 
 **Diagrams updated:** none.
 
-## 2026-11-23: the first appliance of a pair serves
+## 2026-11-23: the first appliance of a pair serves (#446)
 
 **What changed:** no new component, container, listener or relation. One appliance of a pair now runs keepalived
 without a peer.
