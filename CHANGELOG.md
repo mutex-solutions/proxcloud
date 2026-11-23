@@ -611,6 +611,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address had been named too late. It is one Warning now, in the same words before and after, and it names no
   address the Service has. The second text stays for the case it is true of: an address the cluster does keep,
   named by a Service that already has another. Found by the drill of v0.11.1-rc.1 (Q1-3).
+- **The log said "an appliance's keepalived config is not the one its row records" at every planned change.** A
+  pass compared the file on the appliance with the config it was about to push, so each Service that came or went
+  on a cluster's pair, and each address a tenant's pair gained or lost, was logged at WARN as a config changed
+  behind the product (16 lines in 18 minutes on the lab). The file is now compared with the config the row records
+  (a pair's row keeps the hash of `keepalived.conf` itself, `keepalivedConfHash`, beside the one of the config with
+  its support files): the line means a hand edit or a lost file, and only that, and such a config is pushed again as
+  before. A row of before this release needs nothing: its hash is filled in by its next pass. Log only: no push
+  was added or left out. Found by the drill of v0.11.1-rc.1 (Q1-4).
 
 ## [0.11.1-rc.1] - 2026-11-23
 

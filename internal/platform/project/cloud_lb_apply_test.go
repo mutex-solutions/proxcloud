@@ -1,9 +1,11 @@
 package project
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http/httptest"
 	"slices"
@@ -482,5 +484,73 @@ func TestLBHealthOfAStoppedHAProxy(t *testing.T) {
 	f.set("301", func(g *lbGuest) { g.agentDown = true })
 	if _, _, err := ps.LBHealth(ctx, "n1", 301, lb.LBSpec); err == nil || errors.Is(err, pve.ErrLBNoHAProxy) {
 		t.Fatalf("the VM does not answer: %v", err)
+	}
+}
+
+// Drill Q1-4 of v0.11.1-rc.1: "an appliance's keepalived config is not the one its row records" was logged at every
+// planned change of a pair's address list, since the file on the appliance was compared with the config the pass was
+// about to push. It is compared with the config the row records: the line means a file changed behind the product,
+// and only that. Both are shown, for a row that records the config's own hash and for one of before that field.
+func TestLBKeepalivedWarnMeansAHandEdit(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	var logged bytes.Buffer
+	before := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	defer slog.SetDefault(before)
+	const line = "keepalived config is not the one its row records"
+	// pass runs an apply and answers how often the line was logged and how often keepalived was reloaded in it.
+	pass := func() (warned, reloads int) {
+		t.Helper()
+		logged.Reset()
+		was := f.count("301 keepalived reload") + f.count("302 keepalived reload")
+		if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+			t.Fatal(err)
+		}
+		if lb.Status != lbStatusActive {
+			t.Fatalf("after the pass: %s %q", lb.Status, lb.StatusMessage)
+		}
+		return strings.Count(logged.String(), line), f.count("301 keepalived reload") + f.count("302 keepalived reload") - was
+	}
+	const conf = "/etc/keepalived/keepalived.conf"
+	if warned, reloads := pass(); warned != 0 || reloads != 2 {
+		t.Fatalf("the first apply: %d warnings, %d keepalived reloads", warned, reloads)
+	}
+	for _, a := range lb.Appliances {
+		if a.KeepalivedConfHash != lbHash(f.guests[a.ServerID].disk[conf]) || a.KeepalivedConfHash == a.KeepalivedHash {
+			t.Fatalf("appliance %s records %q for its config file", a.ServerID, a.KeepalivedConfHash)
+		}
+	}
+	for _, legacy := range []bool{false, true} {
+		forget := func() {
+			if legacy { // a row written before the field existed
+				for i := range lb.Appliances {
+					lb.Appliances[i].KeepalivedConfHash = ""
+				}
+			}
+		}
+		// A planned change: the balancer gains an address, then loses it. Both appliances get the new config, and
+		// nothing is said of a config that is not the row's.
+		for _, vips := range [][]string{{"203.0.113.10", "203.0.113.11"}, {"203.0.113.10"}} {
+			forget()
+			lb.VIPs = vips
+			if warned, reloads := pass(); warned != 0 || reloads != 2 {
+				t.Fatalf("legacy row %v, the address list became %v: %d warnings, %d keepalived reloads, want none and 2\n%s", legacy, vips, warned, reloads, logged.String())
+			}
+		}
+		if warned, reloads := pass(); warned != 0 || reloads != 0 {
+			t.Fatalf("legacy row %v, nothing changed: %d warnings, %d keepalived reloads", legacy, warned, reloads)
+		}
+		// A file changed behind the product: named once, for that appliance, and put back.
+		forget()
+		good := f.guests["301"].disk[conf]
+		f.set("301", func(g *lbGuest) { g.disk[conf] = good + "# edited by hand\n" })
+		if warned, reloads := pass(); warned != 1 || reloads != 1 || !strings.Contains(logged.String(), "vm=301") || f.guests["301"].disk[conf] != good {
+			t.Fatalf("legacy row %v, a config edited by hand: %d warnings, %d keepalived reloads, want one of each for vm 301\n%s", legacy, warned, reloads, logged.String())
+		}
+		if warned, reloads := pass(); warned != 0 || reloads != 0 {
+			t.Fatalf("legacy row %v, after the repair: %d warnings, %d keepalived reloads", legacy, warned, reloads)
+		}
 	}
 }

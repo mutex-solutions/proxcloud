@@ -51,6 +51,10 @@ type lbAppliance struct {
 	// What the appliance runs, by hash of the rendered file.
 	HAProxyHash    string `json:"haproxyHash,omitempty"`
 	KeepalivedHash string `json:"keepalivedHash,omitempty"`
+	// KeepalivedConfHash is keepalived.conf alone, as the appliance sums the file (KeepalivedHash is the config with
+	// its support files, which no read answers). A pass compares it with the file's sum to tell a config changed
+	// behind the product from one the product is about to change itself.
+	KeepalivedConfHash string `json:"keepalivedConfHash,omitempty"`
 	// LVSHash: the UDP listeners' files (pve.LVSHash). Empty on a pair that never had a UDP listener, whose
 	// appliances hold nothing of them.
 	LVSHash  string `json:"lvsHash,omitempty"`
@@ -468,11 +472,20 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			if kerr != nil {
 				return kerr
 			}
-			editedKeepalived := known && a.KeepalivedHash != "" && differs(st.KeepalivedSum, lbHash(conf))
+			khash := lbHash(conf + pve.LBPairFilesDigest(a.PublicIface))
+			// A row of before KeepalivedConfHash whose keepalived is current: the config rendered now is the one it
+			// records.
+			if a.KeepalivedConfHash == "" && khash == a.KeepalivedHash {
+				a.KeepalivedConfHash = lbHash(conf)
+			}
+			// The file on the appliance against the config the row records, not against the one this pass renders:
+			// compared with that one, every planned change of the address list (a Service that came or went) read as
+			// a config changed by hand, 16 times in 18 minutes on the lab (drill Q1-4 of v0.11.1).
+			editedKeepalived := known && differs(st.KeepalivedSum, a.KeepalivedConfHash)
 			if editedKeepalived {
 				slog.Warn("load balancer: an appliance's keepalived config is not the one its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID)
 			}
-			if khash := lbHash(conf + pve.LBPairFilesDigest(a.PublicIface)); khash != a.KeepalivedHash || restartKeepalived || editedKeepalived {
+			if khash != a.KeepalivedHash || restartKeepalived || editedKeepalived {
 				pushed[a] = true
 				if err := ps.PushKeepalived(ctx, a.Node, vmid, conf, a.PublicIface); err != nil {
 					if errors.Is(err, pve.ErrLBNotReady) {
@@ -482,7 +495,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 					refused = err
 					continue
 				}
-				a.KeepalivedHash = khash
+				a.KeepalivedHash, a.KeepalivedConfHash = khash, lbHash(conf)
 				if restartKeepalived {
 					started[a] = "keepalived"
 				}

@@ -24,6 +24,11 @@ to a load balancer appliance, how a pass reads a pair, and how the tests run tha
   two kinds of Service the cluster's update changes. Text only.
 - *One Warning for a named address that is not kept (Q1-3).* `lbClusterAddressEvents` asks "does the cluster keep
   it" before "does the Service have an address": the same text before and after the Service gets its pool address.
+- *The WARN of a keepalived config changed by hand (Q1-4).* A pair's appliance row gains `keepalivedConfHash`, the
+  hash of `keepalived.conf` alone as the appliance sums it (`keepalivedHash` stays the config with its support
+  files). `lbApplyPair` compares the file's sum with it, not with the config it is about to push, and fills it in
+  for a row of before the field whose keepalived is current. The field is in the row's JSON, as the other two
+  hashes are.
 
 **Why:** the drill's pair served and read `DEGRADED` for ever, and no Service made after its first UDP listener got
 its address in its status. Every test read `ACTIVE`, because every fake wrote the read's answer itself: the one
