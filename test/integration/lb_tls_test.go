@@ -197,7 +197,7 @@ func TestLBApplianceTLS(t *testing.T) {
 			if out := g.run(ctx, "haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 || true"); strings.Contains(out, "WARNING") || strings.Contains(out, "ALERT") {
 				t.Errorf("haproxy -c on the pushed config:\n%s", out)
 			}
-			for _, name := range []string{"haproxy-tls.cfg", "haproxy-tls-pair.cfg"} {
+			for _, name := range []string{"haproxy-tls.cfg", "haproxy-tls-pair.cfg", "haproxy-tls-k8s.cfg"} {
 				golden, err := os.ReadFile("../../internal/cloud/pve/testdata/" + name)
 				if err != nil {
 					t.Fatal(err)
