@@ -467,7 +467,8 @@ func TestLBApplianceTLS(t *testing.T) {
 			// use would not start again: HAProxy refuses the whole file. The state read with the config's certificate
 			// files says what is wrong, in words that name a file and hold nothing of it; the push that follows such
 			// an answer puts the file right with the one reload of a push, and no handshake made meanwhile fails. A
-			// file or a directory somebody opened up is found and closed the same way.
+			// file or a directory somebody opened up is found and closed the same way. Each of these pushes writes the
+			// one file that was not in order and no other.
 			certs := []pve.LBCertFile{fileA2, fileB}
 			asked := func() (bool, string) {
 				t.Helper()
@@ -518,14 +519,24 @@ func TestLBApplianceTLS(t *testing.T) {
 				}
 			}()
 			pathA2, pathB := "/etc/haproxy/certs/"+fileA2.Name+".pem", "/etc/haproxy/certs/"+fileB.Name+".pem"
+			// A push with nothing out of order writes the config and no certificate file (drill Q3-o2: every push
+			// wrote every file again, 0.6 s each on the lab).
+			_, mark := g.writtenSince(0)
+			if err := ps.PushHAProxy(ctx, "n1", 100, rotated, certs...); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := g.writtenSince(mark); !slices.Equal(got, []string{"/etc/haproxy/haproxy.cfg.new"}) {
+				t.Errorf("a push whose certificate files are all in place wrote %v", got)
+			}
 			for _, c := range []struct {
 				what, damage, why string
 				startable         bool
+				written           []string // the one file that was not in order, then the config
 			}{
-				{"a truncated file", "truncate -s 0 " + pathA2, "Certificate file " + fileA2.Name[:12] + " is not the file that was written", false},
-				{"a deleted file", "rm " + pathB, "Certificate file " + fileB.Name[:12] + " is missing", false},
-				{"a file anybody reads", "chmod 0644 " + pathA2, "Certificate file " + fileA2.Name[:12] + " is not root's alone", true},
-				{"a directory anybody enters", "chmod 0755 /etc/haproxy/certs", "The certificate directory is missing or is not root's alone", true},
+				{"a truncated file", "truncate -s 0 " + pathA2, "Certificate file " + fileA2.Name[:12] + " is not the file that was written", false, []string{pathA2 + ".new", "/etc/haproxy/haproxy.cfg.new"}},
+				{"a deleted file", "rm " + pathB, "Certificate file " + fileB.Name[:12] + " is missing", false, []string{pathB + ".new", "/etc/haproxy/haproxy.cfg.new"}},
+				{"a file anybody reads", "chmod 0644 " + pathA2, "Certificate file " + fileA2.Name[:12] + " is not root's alone", true, []string{pathA2 + ".new", "/etc/haproxy/haproxy.cfg.new"}},
+				{"a directory anybody enters", "chmod 0755 /etc/haproxy/certs", "The certificate directory is missing or is not root's alone", true, []string{"/etc/haproxy/haproxy.cfg.new"}},
 			} {
 				g.run(ctx, c.damage)
 				if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, lbSum(rotated)); err != nil || !ok {
@@ -538,11 +549,15 @@ func TestLBApplianceTLS(t *testing.T) {
 					t.Fatalf("%s: the state read with the certificate files: serving %v, %q; want %q", c.what, ok, why, c.why)
 				}
 				before := reloads()
+				_, mark := g.writtenSince(0)
 				if err := ps.PushHAProxy(ctx, "n1", 100, rotated, certs...); err != nil {
 					t.Fatalf("%s: the push that follows: %v", c.what, err)
 				}
 				if got := reloads(); got != before+1 {
 					t.Errorf("%s: %d reloads for one push", c.what, got-before)
+				}
+				if got, _ := g.writtenSince(mark); !slices.Equal(got, c.written) {
+					t.Errorf("%s: the push wrote %v, want %v", c.what, got, c.written)
 				}
 				if got := certDir(); got != holds(fileA2, fileB) || !onDisk(fileA2) || !onDisk(fileB) {
 					t.Errorf("%s: the certificate directory after the push (the files are the certificates' %v %v):\n%s", c.what, onDisk(fileA2), onDisk(fileB), got)

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,15 @@ type guestAgent struct {
 	c    testcontainers.Container
 	mu   sync.Mutex
 	runs map[int]*guestRun
+	// written lists the files the product wrote through the agent, in order.
+	written []string
+}
+
+// writtenSince answers the files written through the agent after the first n, and how many there are now.
+func (g *guestAgent) writtenSince(n int) ([]string, int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.written[n:]), len(g.written)
 }
 
 type guestRun struct {
@@ -95,6 +105,9 @@ func (g *guestAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		write(map[string]any{"exited": 1, "exitcode": run.code, "out-data": run.out, "err-data": run.err})
 	case "POST file-write":
+		g.mu.Lock()
+		g.written = append(g.written, r.Form.Get("file"))
+		g.mu.Unlock()
 		if err := g.c.CopyToContainer(r.Context(), []byte(r.Form.Get("content")), r.Form.Get("file"), 0o666); err != nil {
 			g.t.Errorf("file-write %s: %v", r.Form.Get("file"), err)
 			w.WriteHeader(http.StatusInternalServerError)

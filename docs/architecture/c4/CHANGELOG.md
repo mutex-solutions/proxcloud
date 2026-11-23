@@ -20,6 +20,11 @@ answers one thing more, and a push writes fewer files.
   balancer in line whose certificate files are not as a push leaves them takes the existing branch that pushes
   again; on a pair only the appliance concerned, the standby first.
 
+- `lbtls.go` (`pushCertificates`): the command that makes the directory private ends in `certstate`, and the push
+  writes only the files `lbCertFaults` names. The order (certificates, then the config, then its check, swap and
+  roll back) is as it was. Drill Q3-o2: every push wrote every file, about 0.6 s each through the guest agent,
+  13.5 s for a change of a balancer with eleven certificates.
+
 **Why:** drill Q3 of v0.11.1-rc.1 (Q3-1). HAProxy serves a certificate from memory, so a file truncated on the
 appliance changed nothing: the row read `ACTIVE`, nothing pushed, and `haproxy -c` on the config in use answered 1.
 HAProxy refuses the whole config at its next start, so a reboot would have taken every listener of the balancer

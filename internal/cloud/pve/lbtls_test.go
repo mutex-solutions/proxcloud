@@ -10,6 +10,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -197,6 +199,27 @@ type certGuest struct {
 	cmds []string
 	out  string
 	outs map[int]string
+	// modes holds what stat says of a certificate file that is not root's alone; the install command clears it.
+	modes map[string]string
+}
+
+// certState is what certstate prints of the guest's certificate directory: the files the install command moved in
+// place, as they are now.
+func (g *certGuest) certState() string {
+	out, sums := "crtdir 700:root:root:directory\n", ""
+	for _, path := range slices.Sorted(maps.Keys(g.files)) {
+		if !strings.HasPrefix(path, lbCertDir+"/") || !strings.HasSuffix(path, ".pem") {
+			continue
+		}
+		mode := "600:root:root"
+		if m := g.modes[path]; m != "" {
+			mode = m
+		}
+		sum := sha256.Sum256([]byte(g.files[path]))
+		out += "crt " + path + " " + mode + "\n"
+		sums += hex.EncodeToString(sum[:]) + "  " + path + "\n"
+	}
+	return out + sums
 }
 
 func (g *certGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -225,6 +248,17 @@ func (g *certGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			g.outs = map[int]string{}
 		}
 		g.outs[pid] = g.out
+		switch {
+		case what == "certificate directory" && g.runs[pid] == 0:
+			g.outs[pid] = g.certState()
+		case strings.HasPrefix(what, "certificate install") && g.runs[pid] == 0:
+			for _, name := range r.Form["command"][4:] {
+				path := lbCertDir + "/" + name + ".pem"
+				g.files[path] = g.files[path+".new"]
+				delete(g.files, path+".new")
+				delete(g.modes, path)
+			}
+		}
 		write(map[string]any{"pid": pid})
 	case "GET exec-status":
 		pid, _ := strconv.Atoi(r.Form.Get("pid"))
@@ -266,7 +300,7 @@ func TestCertificatesReachAnApplianceBeforeItsConfig(t *testing.T) {
 	if !slices.Equal(g.log, want) {
 		t.Errorf("order of a push:\n%s\nwant\n%s", strings.Join(g.log, "\n"), strings.Join(want, "\n"))
 	}
-	if g.files["/etc/haproxy/certs/"+a+".pem.new"] != "PEM-A" || len(g.files) != 3 {
+	if g.files["/etc/haproxy/certs/"+a+".pem"] != "PEM-A" || len(g.files) != 3 {
 		t.Errorf("files written: %v", g.log)
 	}
 	// A single appliance: the same order.
@@ -311,6 +345,78 @@ func TestCertificatesReachAnApplianceBeforeItsConfig(t *testing.T) {
 	}
 	if s := (LBCertFile{Name: a, PEM: "PEM-A"}); strings.Contains(s.String()+s.LogValue().String(), "PEM-A") {
 		t.Error("a certificate file prints its content")
+	}
+}
+
+// A push writes the certificate files the appliance does not hold as the portal would write them, and no other
+// (drill Q3-o2 of v0.11.1-rc.1: every push wrote every file again, about 0.6 s each through the guest agent, inside
+// the tenant's request: 13.5 s with eleven). The directory's command, which a push sends anyway, answers what is
+// there; the order stays certificates before config, and the config's check, swap and roll back are as they were.
+func TestPushWritesOnlyTheCertificateFilesThatDiffer(t *testing.T) {
+	ctx := context.Background()
+	g := &certGuest{exits: map[string]int{}, runs: map[int]int{}, files: map[string]string{}, modes: map[string]string{}}
+	srv := httptest.NewServer(g)
+	t.Cleanup(srv.Close)
+	ps, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var certs []LBCertFile
+	for i := range 11 { // the drill's balancer: eleven certificates
+		certs = append(certs, LBCertFile{Name: strings.Repeat(fmt.Sprintf("%02x", 0xa0+i), 32), PEM: fmt.Sprintf("PEM-%d", i)})
+	}
+	path := func(c LBCertFile) string { return "/etc/haproxy/certs/" + c.Name + ".pem" }
+	push := func(what string, certs []LBCertFile, written ...LBCertFile) {
+		t.Helper()
+		g.mu.Lock()
+		g.log = nil
+		g.mu.Unlock()
+		if err := ps.PushHAProxy(ctx, "n1", 100, "config", certs...); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		want := []string{"ready", "certificate directory"}
+		var names []string
+		for _, c := range written {
+			want = append(want, "write "+path(c)+".new")
+			names = append(names, c.Name)
+		}
+		if len(written) > 0 {
+			want = append(want, "certificate install "+strings.Join(names, ","))
+		}
+		want = append(want, "write /etc/haproxy/haproxy.cfg.new", "reload")
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if !slices.Equal(g.log, want) {
+			t.Errorf("%s: the guest got\n%s\nwant\n%s", what, strings.Join(g.log, "\n"), strings.Join(want, "\n"))
+		}
+		for _, c := range certs {
+			if g.files[path(c)] != c.PEM || g.modes[path(c)] != "" {
+				t.Errorf("%s: file %s after the push is not the certificate's, or not root's alone", what, c.Name[:12])
+			}
+		}
+	}
+	damage := func(change func()) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		change()
+	}
+	push("the first push: every file", certs[:10], certs[:10]...)
+	// The same certificates again, as with any change of a member or a limit: 4 calls where there were 15.
+	push("nothing differs: no file", certs[:10])
+	push("an eleventh certificate: that file alone", certs, certs[10])
+	damage(func() { g.files[path(certs[3])] = "" })
+	push("a truncated file: that file alone", certs, certs[3])
+	damage(func() { delete(g.files, path(certs[0])); g.files[path(certs[7])] = certs[8].PEM })
+	push("a file gone and one with another certificate's bytes", certs, certs[0], certs[7])
+	damage(func() { g.modes[path(certs[5])] = "644:root:root" })
+	push("a file anybody reads is written again, not only closed", certs, certs[5])
+	push("and nothing after it", certs)
+	// A file the config no longer names is not looked at: the apply prunes it once the new config is served.
+	push("fewer certificates", certs[:2])
+	// A directory that cannot be made private still stops the push before any file, and before the config.
+	damage(func() { g.exits["certificate directory"] = 1; delete(g.files, path(certs[0])) })
+	if err := ps.PushHAProxy(ctx, "n1", 100, "config", certs[:2]...); err == nil || !strings.Contains(err.Error(), "nothing was written") || g.files[path(certs[0])] != "" {
+		t.Errorf("a directory that is not private: %v", err)
 	}
 }
 

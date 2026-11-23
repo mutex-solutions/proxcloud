@@ -248,7 +248,7 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 				delete(g.disk, path)
 			}
 		}
-		return lbRun{}
+		return lbRun{out: g.certState()} // what is there: the push writes the files that are not
 	case strings.Contains(cmd, "a certificate file is not root's alone"): // owner, mode and the move in place, per name
 		words := strings.Fields(cmd)
 		for i := len(words) - 1; i >= 0 && len(words[i]) == 64; i-- {

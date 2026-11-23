@@ -267,7 +267,8 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 		t.Errorf("who uses what: %v %v", used, err)
 	}
 
-	// The certificate is changed: the listeners name the new one. One push, the new file before the config.
+	// The certificate is changed: the listeners name the new one. One push, the new file before the config. The
+	// certificate that stays is on each appliance already and is not written again (drill Q3-o2 of v0.11.1-rc.1).
 	applied := saved().AppliedHash
 	mark = len(wire)
 	if err := update(c2.ID, c1.ID); err != nil {
@@ -282,8 +283,7 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 	got := events(mark)
 	want := []string{}
 	for _, vm := range []string{"301", "302"} {
-		want = append(want, vm+" certificate directory", vm+" write /etc/haproxy/certs/"+c2.File+".pem.new", vm+" write /etc/haproxy/certs/"+c1.File+".pem.new",
-			vm+" certificate install", vm+" write config", vm+" reload")
+		want = append(want, vm+" certificate directory", vm+" write /etc/haproxy/certs/"+c2.File+".pem.new", vm+" certificate install", vm+" write config", vm+" reload")
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("order of the push of a changed certificate:\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -296,7 +296,8 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 	// row read ACTIVE, nothing pushed, and HAProxy would have refused its whole config at its next start). The state
 	// read of the pass asks for the files of the config in the command it already sent; the appliance whose files
 	// are not as a push leaves them is pushed again, the other is not, and with both the standby comes first. HAProxy
-	// is never stopped for it: what a heal costs is the one reload of a push.
+	// is never stopped for it: what a heal costs is the one reload of a push, and the write of the one file that
+	// was not in order (none for a directory somebody opened up: the push's first command closes it).
 	file1, err := h.lbCertOpen(c1)
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +312,10 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 		for _, file := range files {
 			out = append(out, vm+" write "+certPath(file)+".new")
 		}
-		return append(out, vm+" certificate install", vm+" write config", vm+" reload")
+		if len(files) > 0 {
+			out = append(out, vm+" certificate install")
+		}
+		return append(out, vm+" write config", vm+" reload")
 	}
 	for _, c := range []struct {
 		what   string
@@ -320,15 +324,15 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 		logged string
 	}{
 		{"a file truncated on the appliance that holds the address", map[string]func(g *lbGuest){"302": func(g *lbGuest) { g.disk[certPath(c1.File)] = "" }},
-			pushOf("302", c2.File, c1.File), "Certificate file " + c1.File[:12] + " is not the file that was written"},
+			pushOf("302", c1.File), "Certificate file " + c1.File[:12] + " is not the file that was written"},
 		{"a file deleted on the standby", map[string]func(g *lbGuest){"301": func(g *lbGuest) { delete(g.disk, certPath(c2.File)) }},
-			pushOf("301", c2.File, c1.File), "Certificate file " + c2.File[:12] + " is missing"},
+			pushOf("301", c2.File), "Certificate file " + c2.File[:12] + " is missing"},
 		{"a file anybody reads on one, a file gone on the other", map[string]func(g *lbGuest){
 			"301": func(g *lbGuest) { g.certMode = map[string]string{certPath(c1.File): "644:root:root"} },
 			"302": func(g *lbGuest) { delete(g.disk, certPath(c1.File)) }},
-			append(pushOf("301", c2.File, c1.File), pushOf("302", c2.File, c1.File)...), "Certificate file " + c1.File[:12] + " is not root's alone"},
+			append(pushOf("301", c1.File), pushOf("302", c1.File)...), "Certificate file " + c1.File[:12] + " is not root's alone"},
 		{"a directory anybody enters", map[string]func(g *lbGuest){"301": func(g *lbGuest) { g.certMode = map[string]string{lbGuestCertDir: "755:root:root:directory"} }},
-			pushOf("301", c2.File, c1.File), "The certificate directory is missing or is not root's alone"},
+			pushOf("301"), "The certificate directory is missing or is not root's alone"},
 	} {
 		for vm, change := range c.damage {
 			f.set(vm, change)

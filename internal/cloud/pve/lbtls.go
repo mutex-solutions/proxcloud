@@ -244,15 +244,16 @@ const (
 	// lbCertDirScript makes lbCertDir a directory only root can enter, and proves it, before anything is written
 	// into it: the guest agent creates a file with mode 0666 whatever the umask, so a key is only ever written
 	// inside a directory nobody else reaches, under its temporary name too. A leftover of a push that did not end
-	// goes.
-	lbCertDirScript = `set -e
+	// goes. It ends in certstate: the push writes only the files that are not there as it would write them.
+	lbCertDirScript = lbCertStateFn + `set -e
 D=` + lbCertDir + `
 [ ! -L $D ] || { echo "$D is a link" >&2; exit 1; }
 mkdir -p $D
 chown root:root $D
 chmod 0700 $D
 [ "$(stat -c %a:%U:%G:%F $D)" = "700:root:root:directory" ] || { echo "$D is not a directory of root alone" >&2; exit 1; }
-rm -f $D/*.new`
+rm -f $D/*.new
+certstate`
 	// lbCertInstallScript gives each file written as <name>.pem.new to root with mode 0600, proves it, and moves it
 	// in place. Its arguments are the names.
 	lbCertInstallScript = `set -e
@@ -311,31 +312,37 @@ func lbCertFaults(out string, certs []LBCertFile) (stale []LBCertFile, why strin
 	return stale, why
 }
 
-// pushCertificates writes the certificate files a config names, before the config: the directory first, made and
-// proven private, then each file under a temporary name inside it, then mode, owner and the move in place. A file
-// that is there already is written again: it costs one call, and a file changed by hand is put right.
+// pushCertificates brings the certificate files a config names in place, before the config: the directory first,
+// made and proven private, then each file the appliance does not hold as the portal would write it (missing,
+// other bytes, another mode or owner: the directory's command says what is there) under a temporary name inside
+// it, then mode, owner and the move in place. A file that is there already, byte for byte and root's alone, is not
+// written again: a write is one call through the guest agent, about 0.6 s, inside the tenant's own request.
 func (s *Service) pushCertificates(ctx context.Context, node string, vmid int, certs []LBCertFile) error {
 	if len(certs) == 0 {
 		return nil
 	}
-	names := make([]string, len(certs))
 	for i, c := range certs {
 		if !lbCertFileRe.MatchString(c.Name) {
 			return fmt.Errorf("certificate file %d has no valid name", i+1)
 		}
-		names[i] = c.Name
 	}
-	exit, _, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbCertDirScript)
+	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbCertDirScript)
 	if err != nil {
 		return err
 	}
 	if exit != 0 {
 		return fmt.Errorf("the appliance's certificate directory could not be made private, nothing was written: %s", strings.TrimSpace(stderr))
 	}
-	for _, c := range certs {
+	stale, _ := lbCertFaults(out, certs)
+	if len(stale) == 0 {
+		return nil
+	}
+	names := make([]string, len(stale))
+	for i, c := range stale {
 		if err := s.C.GuestWriteFile(ctx, node, vmid, lbCertDir+"/"+c.Name+".pem.new", c.PEM); err != nil {
 			return fmt.Errorf("write certificate file %s: %w", c.Name[:12], err)
 		}
+		names[i] = c.Name
 	}
 	exit, _, stderr, err = s.C.GuestRun(ctx, node, vmid, guestTimeout, append([]string{"sh", "-c", lbCertInstallScript, "sh"}, names...)...)
 	if err != nil {

@@ -498,6 +498,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Q3-1). In a real guest of both appliance images (a file truncated, deleted and opened to all, then a restart
   of HAProxy) and in the wire fake; not run on a lab ([cloud-integration.md](docs/cloud-integration.md), "The
   files are proven on every pass").
+- **Every change of a load balancer with TLS wrote every certificate file again.** A write through the guest
+  agent took about 0.6 s on the lab and happens inside the tenant's request, so a change of anything (a member, a
+  limit) answered after 8.8 s on a balancer with two certificates and after 13.5 s on one with eleven. A push now
+  asks the appliance what its certificate directory holds, in the command that makes the directory private, and
+  writes only the files that are missing, hold other bytes or are not root's alone: none for a change that
+  touches no certificate, the new file alone for a change of certificate. Certificates still reach an appliance
+  before the config that names them, and the config's check, swap and roll back are unchanged. Found by the
+  drill of v0.11.1-rc.1 (Q3-o2). The calls are counted against the wire fake and in a real guest of both
+  appliance images; the time saved was not measured on a lab.
 - **A project could not see which public addresses its quota counts.** The `floatingIps` quota counts every
   public address of a project: a server's public NIC, a load balancer's address, each Service address of a
   Kubernetes cluster and each address a cluster keeps. `GET /api/v1/project/{id}/quota-usage` gave the limit with
