@@ -4,6 +4,54 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-23: what the upgrade drill of v0.11.1-rc.1 found in a pair's scripts
+
+**What changed:** no new component, container, listener, credential, wire field or chart. The shell the portal sends
+to a load balancer appliance, how a pass reads a pair, and how the tests run that shell.
+
+- *The holder of a pair with a UDP listener (Q1-2).* `internal/cloud/pve`: `lbServingFn`, `lvsServingFn` and
+  `lbWorkerFn` define `serving`, `lvsserving` and `worker` with a subshell as their body, and `ReadVRRPState` calls
+  the first two in one: `lvsserving`'s loop variable `v` was the read's own answer to "holds the address", so a pair
+  with a UDP listener read as held by neither appliance. `lvsApply` no longer ends at a failed
+  `systemctl reset-failed` under `set -e`. `internal/platform/project/cloud_lb_pair_pve.go`: `lbApplyPair` sets an
+  appliance's role and holder from the read it makes before the pushes, so `lbPushOrder` works on this pass's reads;
+  `LBPushOrder` is that order for a caller that holds reads and no row (the real-guest test). New test support
+  `internal/cloud/pve/lbguesttest`: a guest made of a directory and stub commands, on which a script of the
+  product's runs as the text it is, and the guest agent API in front of it (`Guest`, `Agent`). The pair fake of the
+  apply tests (`pairWire.stateRead`) answers the state read by running its script there.
+- *The consoles' promise (Q1-1).* The hint for a cluster on an older controller (`ClusterLoadBalancer` in
+  `KubernetesPage.tsx`, `ClusterLoadBalancerDialog` in `CloudProviderDetailPage.tsx`) and the tenant guide name the
+  two kinds of Service the cluster's update changes. Text only.
+- *One Warning for a named address that is not kept (Q1-3).* `lbClusterAddressEvents` asks "does the cluster keep
+  it" before "does the Service have an address": the same text before and after the Service gets its pool address.
+- *The WARN of a keepalived config changed by hand (Q1-4).* A pair's appliance row gains `keepalivedConfHash`, the
+  hash of `keepalived.conf` alone as the appliance sums it (`keepalivedHash` stays the config with its support
+  files). `lbApplyPair` compares the file's sum with it, not with the config it is about to push, and fills it in
+  for a row of before the field whose keepalived is current. The field is in the row's JSON, as the other two
+  hashes are.
+- *A reload is no failed run of the track script (Q1-o1).* `lbPairFiles`: the track script asks HAProxy's master up
+  to `lbWorkerTries` (4) times, 0.2 s apart, before a run fails; at a reload the master's socket refuses connections
+  for a moment. The script is one of keepalived's support files, so their digest changes and every pair gets one
+  keepalived push at the upgrade.
+- *Files reach their place by a rename (Q1-o2).* `PushKeepalived` and `PushLVS` write every file as `<path>.new`;
+  `lbKeepalivedApply` and `lvsApply` set owner and mode there and move each in (`lvsRemove` clears what a push left
+  beside). The notify script writes `/run/proxcloud-lb.state` by a rename. `testdata/lb-pair-files.txt` is the
+  golden of keepalived's support files: a change to it is a keepalived push to every pair.
+
+**Why:** the drill's pair served and read `DEGRADED` for ever, and no Service made after its first UDP listener got
+its address in its status. Every test read `ACTIVE`, because every fake wrote the read's answer itself: the one
+place the script's text ran was the real-guest test, which read the holder before the first UDP push and after the
+last one only. A row that is wrong by this is put right by the first pass that reads it, since the script is sent
+with every read.
+The other five are what the same drill saw beside it: a promise in both consoles that the upgrade notes
+contradict, a Warning said twice in two wordings, a WARN line at every planned change, one failed run of the track
+script at a reload on the appliance that holds the address, and a script file read empty.
+
+**Upgrade:** an existing pair gets keepalived's five files and one reload of keepalived per appliance, the standby
+first, at its first pass. `haproxy.cfg`, `keepalived.conf` and the UDP service's files are the same to the byte; the
+track and notify scripts are the two files that changed.
+
+**Diagrams:** none changed.
 ## 2026-11-23: the public addresses in use, in the quota read (#446)
 
 **What changed:** no new component, container, listener or relation; no architecture impact. One read gains a

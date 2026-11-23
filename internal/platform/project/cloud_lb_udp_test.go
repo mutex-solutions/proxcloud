@@ -173,6 +173,101 @@ func TestLBPairUDPListeners(t *testing.T) {
 	}
 }
 
+// Drill Q1-2 of v0.11.1-rc.1: once a pair had a UDP listener the state read answered "holds nothing" for both
+// appliances (pve's lvsserving() reused the script's variable). The row stayed DEGRADED "Neither appliance holds the
+// address yet", the pushes went to the appliances in the row's order, which may be the holder first, and GET_HEALTH
+// found no appliance to ask. The fake runs the read's script (pairWire.stateRead), so this is the product's own
+// answer: with a UDP listener the pair is ACTIVE and knows its holder, GET_HEALTH answers both pools' members, a
+// change goes to the standby first, and a row rc.1 left DEGRADED is put right by the first pass that reads it, which
+// pushes keepalived's files alone (the track script is a new one), the standby first, and leaves HAProxy and the UDP
+// service as they are.
+func TestLBPairWithUDPKnowsItsHolder(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	apply := func() {
+		t.Helper()
+		if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// since is what the fake logged after mark, of the lines that contain part.
+	since := func(mark int, part string) []string {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		var out []string
+		for _, l := range f.log[mark:] {
+			if strings.Contains(l, part) {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	mark := func() int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.log)
+	}
+	// The holder is the first appliance of the row: the row's order is not the push order.
+	f.set("301", func(g *lbGuest) { g.role, g.holds = "MASTER", true })
+	f.set("302", func(g *lbGuest) { g.role, g.holds = "BACKUP", false })
+	lb.Appliances[1].HoldsVIP = false
+	lb.Pools[0].Members = []pve.LBMember{{Node: true, Port: 8080, Weight: 1, Address: "10.0.0.11"}}
+	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 53, Protocol: "udp", Pool: "dns"})
+	lb.Pools = append(lb.Pools, pve.LBPool{Name: "dns", Protocol: "udp", Algorithm: "roundrobin",
+		Members: []pve.LBMember{{Node: true, Port: 53, Weight: 1, Address: "10.0.0.11"}, {Node: true, Port: 53, Weight: 1, Address: "10.0.0.12"}}})
+	apply()
+	served := func(when string) {
+		t.Helper()
+		if lb.Status != lbStatusActive || !lb.Appliances[0].HoldsVIP || lb.Appliances[1].HoldsVIP || lb.Appliances[0].Role != "MASTER" ||
+			lb.Appliances[0].LVSHash == "" || lb.AppliedHash != lbAppliedHash(lb) {
+			t.Fatalf("%s: %s %q, appliances %+v", when, lb.Status, lb.StatusMessage, lb.Appliances)
+		}
+		out, herr := h.lbPairHealth(ctx, es, proj, lb)
+		if herr != nil {
+			t.Fatalf("%s: GET_HEALTH: %v", when, herr)
+		}
+		health, _ := out["result"].([]pve.LBMemberHealth)
+		var got []string
+		for _, m := range health {
+			got = append(got, m.Pool+" "+m.Address+" "+m.Status)
+		}
+		if want := []string{"web 10.0.0.11 UP", "dns 10.0.0.11 UP", "dns 10.0.0.12 UP"}; !slices.Equal(got, want) {
+			t.Fatalf("%s: GET_HEALTH says %q, want %q", when, got, want)
+		}
+	}
+	served("a pair with a UDP listener")
+
+	// A change while the UDP listener is served: the standby first, HAProxy and the UDP service alike.
+	m := mark()
+	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 81, Pool: "web"}, pve.LBListener{Port: 54, Protocol: "udp", Pool: "dns"})
+	apply()
+	if got, want := since(m, " reload"), []string{"302 haproxy reload", "302 lvs reload", "301 haproxy reload", "301 lvs reload"}; !slices.Equal(got, want) {
+		t.Fatalf("a change with a UDP listener served went %q, want the standby first: %q", got, want)
+	}
+	served("after the change")
+
+	// The row as v0.11.1-rc.1 left it, and the appliances as they are: serving, with the keepalived files of rc.1.
+	for i := range lb.Appliances {
+		lb.Appliances[i].HoldsVIP, lb.Appliances[i].KeepalivedHash = false, "the-hash-of-rc.1's-files"
+	}
+	lb.Status, lb.StatusMessage, lb.AppliedHash = lbStatusDegraded, "Neither appliance holds the address yet: they are choosing which one does.", ""
+	m = mark()
+	apply()
+	if got, want := since(m, " reload"), []string{"302 keepalived reload", "301 keepalived reload"}; !slices.Equal(got, want) {
+		t.Fatalf("the first pass after the upgrade reloaded %q, want keepalived alone, the standby first: %q", got, want)
+	}
+	if got := append(since(m, "haproxy.cfg"), since(m, "proxcloud-lb/")...); len(got) != 0 {
+		t.Fatalf("the first pass after the upgrade wrote %q: HAProxy's config and the UDP service's files have not changed", got)
+	}
+	served("the first pass after the upgrade")
+	m = mark()
+	apply()
+	if got := since(m, ""); len(got) != 0 {
+		t.Fatalf("the pass after that wrote %q", got)
+	}
+}
+
 // UDP is a pair's: a single appliance has no keepalived, and says so by name when asked for a UDP listener.
 func TestLBSingleRefusesUDP(t *testing.T) {
 	spec, err := lbSpecOfRequest(map[string]any{

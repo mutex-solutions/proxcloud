@@ -51,6 +51,10 @@ type lbAppliance struct {
 	// What the appliance runs, by hash of the rendered file.
 	HAProxyHash    string `json:"haproxyHash,omitempty"`
 	KeepalivedHash string `json:"keepalivedHash,omitempty"`
+	// KeepalivedConfHash is keepalived.conf alone, as the appliance sums the file (KeepalivedHash is the config with
+	// its support files, which no read answers). A pass compares it with the file's sum to tell a config changed
+	// behind the product from one the product is about to change itself.
+	KeepalivedConfHash string `json:"keepalivedConfHash,omitempty"`
 	// LVSHash: the UDP listeners' files (pve.LVSHash). Empty on a pair that never had a UDP listener, whose
 	// appliances hold nothing of them.
 	LVSHash  string `json:"lvsHash,omitempty"`
@@ -293,6 +297,21 @@ func lbPeerOf(lb *loadBalancer, a *lbAppliance) *lbAppliance {
 	return nil
 }
 
+// LBPushOrder is lbPushOrder for a caller that holds a pair's state reads and no row: the indexes of states in the
+// order a pass's pushes reach their appliances. The real-guest test asks it with a real appliance's own read
+// (test/integration/lb_udp_test.go): the order is only as good as that read (drill Q1-2 of v0.11.1).
+func LBPushOrder(states []pve.VRRPState) []int {
+	apps := make([]*lbAppliance, len(states))
+	for i, st := range states {
+		apps[i] = &lbAppliance{ServerID: strconv.Itoa(i), KeepalivedHash: st.KeepalivedSum, HoldsVIP: st.HoldsVIP}
+	}
+	out := make([]int, len(apps))
+	for i, a := range lbPushOrder(apps) {
+		out[i], _ = strconv.Atoi(a.ServerID)
+	}
+	return out
+}
+
 // lbApplyPair brings a pair in line with its row. Order (C14): firewall and new VIPs in the ip filter sets on every
 // running appliance first, so a VIP is in both sets before keepalived can take it; then per appliance, standby first,
 // keepalived and HAProxy; then a VIP no longer served leaves the sets, once keepalived let go of it; then each one's
@@ -424,6 +443,10 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		vmid, _ := strconv.Atoi(a.ServerID)
 		if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip); err == nil {
 			seen[a] = st
+			// The pushes below go to the standby first by what the appliance says now, not by what the row said at
+			// the pass before: the address may have moved since, and a row v0.11.1-rc.1 wrote for a pair with a UDP
+			// listener says that neither appliance holds it (drill Q1-2).
+			a.Role, a.HoldsVIP = st.State, st.HoldsVIP || (vip == "" && st.State == "MASTER")
 		}
 	}
 	// differs: the appliance said what its file hashes to, and it is not what the row records for it.
@@ -468,11 +491,20 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			if kerr != nil {
 				return kerr
 			}
-			editedKeepalived := known && a.KeepalivedHash != "" && differs(st.KeepalivedSum, lbHash(conf))
+			khash := lbHash(conf + pve.LBPairFilesDigest(a.PublicIface))
+			// A row of before KeepalivedConfHash whose keepalived is current: the config rendered now is the one it
+			// records.
+			if a.KeepalivedConfHash == "" && khash == a.KeepalivedHash {
+				a.KeepalivedConfHash = lbHash(conf)
+			}
+			// The file on the appliance against the config the row records, not against the one this pass renders:
+			// compared with that one, every planned change of the address list (a Service that came or went) read as
+			// a config changed by hand, 16 times in 18 minutes on the lab (drill Q1-4 of v0.11.1).
+			editedKeepalived := known && differs(st.KeepalivedSum, a.KeepalivedConfHash)
 			if editedKeepalived {
 				slog.Warn("load balancer: an appliance's keepalived config is not the one its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID)
 			}
-			if khash := lbHash(conf + pve.LBPairFilesDigest(a.PublicIface)); khash != a.KeepalivedHash || restartKeepalived || editedKeepalived {
+			if khash != a.KeepalivedHash || restartKeepalived || editedKeepalived {
 				pushed[a] = true
 				if err := ps.PushKeepalived(ctx, a.Node, vmid, conf, a.PublicIface); err != nil {
 					if errors.Is(err, pve.ErrLBNotReady) {
@@ -482,7 +514,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 					refuse(a, "keepalived", err)
 					continue
 				}
-				a.KeepalivedHash = khash
+				a.KeepalivedHash, a.KeepalivedConfHash = khash, lbHash(conf)
 				if restartKeepalived {
 					started[a] = "keepalived"
 				}

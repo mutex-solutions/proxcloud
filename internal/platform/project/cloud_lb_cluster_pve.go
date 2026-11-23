@@ -341,14 +341,19 @@ func lbClusterAddressEvents(kept []string, s *lbgw.Service, status lbgw.ServiceS
 	}
 	const how = `Only an address this cluster keeps can be named: one a Service left behind with ` + lbgw.OwnPrefix + lbgw.KnobKeepAddress + `: "true"`
 	var out []lbgw.Event
+	// "Not kept" is asked first, and its text names no address the Service has: a Service that names such an address
+	// hears the same words before it has its pool address and after, which is one Warning on the Service. Asked the
+	// other way round it heard a second one once it had its address, "an address is taken when the Service gets its
+	// address, not after", as if it had named the address too late (drill Q1-3 of v0.11.1). That text is for the
+	// one case it is true of: an address the cluster keeps, named by a Service that already has another.
 	switch want := s.LoadBalancerIP; {
 	case want == "" || want == status.Address:
+	case !slices.Contains(kept, want):
+		out = append(out, lbgw.Event{Type: "Warning", Reason: lbgw.ReasonLoadBalancerIPIgnored, Message: "spec.loadBalancerIP " + want +
+			" is not an address this cluster keeps: the Service is served on an address of the pool. " + how})
 	case status.Address != "":
 		out = append(out, lbgw.Event{Type: "Warning", Reason: lbgw.ReasonLoadBalancerIPIgnored, Message: "spec.loadBalancerIP " + want +
 			" is not obeyed: the Service has " + status.Address + ". An address is taken when the Service gets its address, not after. " + how})
-	case !slices.Contains(kept, want):
-		out = append(out, lbgw.Event{Type: "Warning", Reason: lbgw.ReasonLoadBalancerIPIgnored, Message: "spec.loadBalancerIP " + want +
-			" is not an address this cluster keeps: the Service gets an address of the pool. " + how})
 	}
 	if lbgw.KeepsAddress(s) && len(kept) >= lbgw.MaxKeptAddresses {
 		out = append(out, lbgw.Event{Type: "Warning", Reason: lbgw.ReasonKeepAddressLimit, Message: fmt.Sprintf(

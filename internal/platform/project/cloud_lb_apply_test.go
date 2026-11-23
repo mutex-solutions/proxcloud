@@ -487,6 +487,122 @@ func TestLBHealthOfAStoppedHAProxy(t *testing.T) {
 	}
 }
 
+// Drill Q1-4 of v0.11.1-rc.1: "an appliance's keepalived config is not the one its row records" was logged at every
+// planned change of a pair's address list, since the file on the appliance was compared with the config the pass was
+// about to push. It is compared with the config the row records: the line means a file changed behind the product,
+// and only that. Both are shown, for a row that records the config's own hash and for one of before that field.
+func TestLBKeepalivedWarnMeansAHandEdit(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	var logged bytes.Buffer
+	before := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	defer slog.SetDefault(before)
+	const line = "keepalived config is not the one its row records"
+	// pass runs an apply and answers how often the line was logged and how often keepalived was reloaded in it.
+	pass := func() (warned, reloads int) {
+		t.Helper()
+		logged.Reset()
+		was := f.count("301 keepalived reload") + f.count("302 keepalived reload")
+		if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+			t.Fatal(err)
+		}
+		if lb.Status != lbStatusActive {
+			t.Fatalf("after the pass: %s %q", lb.Status, lb.StatusMessage)
+		}
+		return strings.Count(logged.String(), line), f.count("301 keepalived reload") + f.count("302 keepalived reload") - was
+	}
+	const conf = "/etc/keepalived/keepalived.conf"
+	if warned, reloads := pass(); warned != 0 || reloads != 2 {
+		t.Fatalf("the first apply: %d warnings, %d keepalived reloads", warned, reloads)
+	}
+	for _, a := range lb.Appliances {
+		if a.KeepalivedConfHash != lbHash(f.guests[a.ServerID].disk[conf]) || a.KeepalivedConfHash == a.KeepalivedHash {
+			t.Fatalf("appliance %s records %q for its config file", a.ServerID, a.KeepalivedConfHash)
+		}
+	}
+	for _, legacy := range []bool{false, true} {
+		forget := func() {
+			if legacy { // a row written before the field existed
+				for i := range lb.Appliances {
+					lb.Appliances[i].KeepalivedConfHash = ""
+				}
+			}
+		}
+		// A planned change: the balancer gains an address, then loses it. Both appliances get the new config, and
+		// nothing is said of a config that is not the row's.
+		for _, vips := range [][]string{{"203.0.113.10", "203.0.113.11"}, {"203.0.113.10"}} {
+			forget()
+			lb.VIPs = vips
+			if warned, reloads := pass(); warned != 0 || reloads != 2 {
+				t.Fatalf("legacy row %v, the address list became %v: %d warnings, %d keepalived reloads, want none and 2\n%s", legacy, vips, warned, reloads, logged.String())
+			}
+		}
+		if warned, reloads := pass(); warned != 0 || reloads != 0 {
+			t.Fatalf("legacy row %v, nothing changed: %d warnings, %d keepalived reloads", legacy, warned, reloads)
+		}
+		// A file changed behind the product: named once, for that appliance, and put back.
+		forget()
+		good := f.guests["301"].disk[conf]
+		f.set("301", func(g *lbGuest) { g.disk[conf] = good + "# edited by hand\n" })
+		if warned, reloads := pass(); warned != 1 || reloads != 1 || !strings.Contains(logged.String(), "vm=301") || f.guests["301"].disk[conf] != good {
+			t.Fatalf("legacy row %v, a config edited by hand: %d warnings, %d keepalived reloads, want one of each for vm 301\n%s", legacy, warned, reloads, logged.String())
+		}
+		if warned, reloads := pass(); warned != 0 || reloads != 0 {
+			t.Fatalf("legacy row %v, after the repair: %d warnings, %d keepalived reloads", legacy, warned, reloads)
+		}
+	}
+}
+
+// The upgrade to v0.11.1-rc.2 changes two of keepalived's support files (the track and the notify script) and
+// nothing else an existing pair runs: its row records another hash for keepalived's files, so the first pass gives
+// each appliance keepalived's files and one reload of keepalived, the standby first, and no HAProxy config: that
+// one is the same to the byte, and HAProxy is not reloaded. A pair without a UDP listener is asked nothing of the
+// UDP service. (TestLBPairWithUDPKnowsItsHolder shows the same pass for a pair with one.)
+func TestLBUpgradePushesKeepalivedAlone(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || lb.Status != lbStatusActive {
+		t.Fatalf("first apply: %s %v", lb.Status, err)
+	}
+	config, applied := f.guests["302"].file, lb.AppliedHash
+	// The row as the release before left it: keepalived's files hashed with that release's support files.
+	for i := range lb.Appliances {
+		lb.Appliances[i].KeepalivedHash, lb.Appliances[i].KeepalivedConfHash = "the-hash-of-the-release-before", ""
+	}
+	f.mu.Lock()
+	mark := len(f.log)
+	f.mu.Unlock()
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || lb.Status != lbStatusActive || lb.AppliedHash != applied {
+		t.Fatalf("the first pass after the upgrade: %s %q %v", lb.Status, lb.StatusMessage, err)
+	}
+	var did []string
+	for _, l := range f.log[mark:] {
+		if !strings.Contains(l, " write ") {
+			did = append(did, l)
+		} else if !strings.HasPrefix(strings.SplitN(l, " write ", 2)[1], "/etc/keepalived/") && !slices.Contains(lbGuestPairFiles, strings.TrimSuffix(strings.SplitN(l, " write ", 2)[1], ".new")) {
+			t.Errorf("the first pass after the upgrade wrote %q: only keepalived's config and support files change", l)
+		}
+	}
+	if want := []string{"301 keepalived reload", "302 keepalived reload"}; !slices.Equal(did, want) {
+		t.Fatalf("the first pass after the upgrade did %q, want one keepalived reload per appliance, the standby first: %q", did, want)
+	}
+	if f.guests["301"].file != config || f.guests["302"].file != config || lbHash(lbRender(lb)) != lbHash(config) {
+		t.Fatal("HAProxy's config changed at the upgrade")
+	}
+	for _, a := range lb.Appliances {
+		if a.KeepalivedHash == "the-hash-of-the-release-before" || a.KeepalivedConfHash == "" {
+			t.Fatalf("appliance %s after the pass: %+v", a.ServerID, a)
+		}
+	}
+	mark = len(f.log)
+	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil || len(f.log) != mark {
+		t.Fatalf("the pass after that wrote %q (%v)", f.log[mark:], err)
+	}
+}
+
 // Drill Q0b-1 of v0.11.1: the first appliance of a pair got no keepalived until the second existed, so nothing let
 // its HAProxy bind the address: it refused its config, the row read ERROR, and an address that was shown answered
 // nobody for as long as the second appliance took (9 min 14 s on the lab). One appliance in the row is a state the
