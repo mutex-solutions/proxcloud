@@ -561,6 +561,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no standby", with the healthy standby as the one listed up: it reads "The appliance that holds the address is
   the one that is not in order (...); the other one is ready, as its standby".
 
+## [0.11.1-rc.1] - 2026-11-23
+
+The first release candidate of 0.11.1, published as a prerelease and never as `latest`. It is not the release:
+`v0.11.0` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
+still name it. It holds what is under Unreleased above: the complete layer 4 load balancer (#430, #431, #433, #434),
+its Kubernetes side (#435, #438, #439, #440, #441, #442) and, switched off, the sandbox platform work of 0.12.0
+(#422, #423, #432, #436). It exists so that the lab can run the drill of this code: nothing of it had run on a lab
+when it was tagged. The entries above are not repeated here. Not for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.11.1-rc.1`** (`deploy/platform/platform-bom.yaml`), with the pins of `0.11.0`
+  but `tenantCharts.kubernetes`, cluster chart `proxmox-kamaji-cluster` 0.1.19
+  (`sha256:476950b5e841c9460c47960b1841ceac17998b5c06c7358c9966585f6602d5fa`). No chart of the product differs from
+  its newest tag (`git diff proxmox-kamaji-cluster-v0.1.19 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster`,
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` and
+  `git diff proxcloud-sandbox-v0.1.0 -- deploy/charts/proxcloud-sandbox` print nothing), so no chart tag is needed.
+  It is a release BOM, and the release gate passes on it and on the seventeen previous BOMs.
+- **No component of the sandbox feature is in this BOM** (`TestSandboxIsDark`). The sandbox code of #422, #423, #432
+  and #436 is in the build and cannot be turned on: an installation that asks for the block is refused, and no run
+  installs the sandbox chart.
+- **The plan from each previous BOM** (`PlanFor`, one control plane machine and one machine per group). From 0.11.0,
+  0.11.0-rc.1 and 0.11.0-rc.2 two changes, the release and `tenantCharts.kubernetes` 0.1.17 to 0.1.19, both record
+  only, allowed, with no part, no seed row and no machine replaced; phrase `upgrade <name> to 0.11.1-rc.1`. From
+  0.10.2 and 0.10.2-rc.1 the same two rows (the chart from 0.1.16); four from 0.10.1 and 0.10.1-rc.2 (those and
+  `cert-manager` on the seed and on the platform cluster); five from 0.10.1-rc.1 (also `pc-platform` 0.1.15 to
+  0.1.16); and a refusal by the pair gate from the nine BOMs on Kubernetes 1.35.10 (21, 22 or 25 changes). This BOM
+  carries no unfinished replacement (`TestRollTowardAKeptCandidateGoesOn` passes under it unchanged).
+- **What the portal's upgrade does to the balancers.** The HAProxy config rendered for a balancer of `v0.11.0` is not
+  the one this build renders (the state file, `retries` and `option redispatch`, `timeout connect 2s`, backends named
+  by pool: #430), and a pair's keepalived track script changed, so the recorded hashes differ and every balancer is
+  pushed once at its next pass, the standby first (`lbPushOrder`); a config the standby refuses reaches no other
+  appliance in that pass. Read again from the code for the move from 0.11.0 on this commit.
+- **What the platform's upgrade does not do.** It moves no cluster. A cluster made before this release keeps its
+  controller (gateway protocol 1) until it is moved to chart 0.1.19: its UDP Services stay `UDPNotSupported`, so no
+  Service gets an address and a bill without its owner's action.
+- **A candidate moves nothing a final moves.** The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION`
+  stay on `v0.11.0`.
+
+### Verified on a lab
+
+Nothing of this code. Before the code was written, the method was tried by hand on the lab's two Ubuntu 26.04
+appliances (the spike of 2026-11-22): UDP through IPVS with a masquerade, a second keepalived for the UDP service
+(20 reloads, no switch of the address, 0 of 415 datagrams lost), the UDP check with a ping beside it, and two
+certificates on one HAProxy bind. It is a spike of the method, not a test of this code.
+
+### Not verified
+
+- Everything of this candidate, until its drill: UDP and TLS by the product on a lab pair, on either appliance image
+  (Debian 13 was not in the spike); the layer 4 options on a lab; the Kubernetes side on a real cluster (UDP and
+  mixed Services, the annotations, TLS from a Secret, kept addresses, the watch); the consoles.
+- The one push of every balancer at the upgrade, and the fix for requests lost at a reload (#430), on a lab.
+- An existing cluster across the upgrade, its move to chart 0.1.19, and a rollback of the portal to `v0.11.0`.
+- Any move to the BOM `0.11.1-rc.1` (plans read, not run), and the candidate's images and its tag's workflows: they
+  do not exist before the tag.
+- The sandbox invoice line on a sent bill, and anything of the sandbox platform code.
+
+### Known issues
+
+- UDP is served on a pair only. A UDP server sees the appliance's address, never the client's. The default UDP check
+  pings the server (it needs ICMP from the appliance), sends random bytes without a payload, and does not see a
+  closed port under traffic without a required reply.
+- Private keys of certificates rest encrypted in the database, in `backups/` next to the copy of `.env` that opens
+  them, and in clear on each appliance's disk.
+- Only `proxcloud.io/lb-*` annotations are read. A Service that asks for an internal balancer under another cloud's
+  annotation name gets a public address until the annotation is renamed to `proxcloud.io/lb-internal`.
+- Chart 0.1.19 with the controller image of `v0.11.0` does not run (`--watch=true`): do not enable the controller
+  again or set the chart version on such a cluster while the portal is rolled back to `v0.11.0`.
+- A bill with sandbox items that round to 0.00 gets one summed item, "Sandbox runs below 0.005 each (n)".
+- The full list is in `docs/releases/v0.11.1-rc.1.md`.
+
 ## [0.11.0] - 2026-11-22
 
 The release after `v0.10.2`. It brings highly available load balancers: a load balancer runs on a pair of appliance
