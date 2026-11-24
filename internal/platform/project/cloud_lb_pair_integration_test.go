@@ -150,6 +150,41 @@ func TestLBPairApplyOrderAndStatus(t *testing.T) {
 	writes = len(f.log)
 	f.mu.Unlock()
 
+	// A failover the row does not know of yet: the master's VM is stopped and the standby holds the address. The
+	// health read lists what is so now, and puts it into the row (drill R2b-o2 of v0.11.1-rc.2: the row and
+	// GET_HEALTH were wrong until the next pass, about 70 s).
+	f.set("302", func(g *lbGuest) { g.stopped = true })
+	f.set("301", func(g *lbGuest) { g.role, g.holds = "MASTER", true })
+	health, herr := h.lbPairHealth(ctx, es, proj, got)
+	if herr != nil {
+		t.Fatalf("GET_HEALTH after a failover: %v", herr)
+	}
+	if apps := health["appliances"].([]lbAppliance); !apps[0].HoldsVIP || apps[0].Role != "MASTER" || apps[1].HoldsVIP || apps[1].Role != "" || apps[1].State != lbAppDown {
+		t.Fatalf("GET_HEALTH after a failover lists %+v", apps)
+	}
+	saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
+	got, _ = lbOfRow(saved)
+	if a, b := got.Appliances[0], got.Appliances[1]; !a.HoldsVIP || a.Role != "MASTER" || b.HoldsVIP || b.Role != "" || b.State != lbAppDown ||
+		got.Status != lbStatusDegraded || !strings.Contains(got.StatusMessage, "appliance 302: "+lbReasonUnreachable) {
+		t.Fatalf("the row after the health read: %s %q %+v", got.Status, got.StatusMessage, got.Appliances)
+	}
+	// A read that finds the row right writes nothing.
+	stamp := saved.UpdatedAt
+	if _, herr := h.lbPairHealth(ctx, es, proj, got); herr != nil {
+		t.Fatal(herr)
+	}
+	if again, _ := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc"); !again.UpdatedAt.Equal(*stamp) {
+		t.Fatal("a health read that found the row right wrote it again")
+	}
+	f.set("302", func(g *lbGuest) { g.stopped = false })
+	f.set("301", func(g *lbGuest) { g.role, g.holds = "BACKUP", false })
+	if status, err := h.pveLBApply(ctx, es, proj, "lb-abc"); err != nil || status != lbStatusActive {
+		t.Fatalf("the pass after the appliances are back: %s %v", status, err)
+	}
+	f.mu.Lock()
+	writes = len(f.log)
+	f.mu.Unlock()
+
 	// Both hold the address: DEGRADED, said so, nothing done about it.
 	f.mu.Lock()
 	f.guests["301"].role, f.guests["301"].holds = "MASTER", true

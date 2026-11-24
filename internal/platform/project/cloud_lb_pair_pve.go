@@ -888,24 +888,39 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 		vip = lb.VIPs[0]
 	}
 	type seen struct {
-		app lbAppliance
-		vm  *pve.ClusterResource
+		app  lbAppliance
+		vm   *pve.ClusterResource
+		read bool // the appliance answered the state read of this call
 	}
+	// Each appliance's role is read at the call, and an appliance that cannot be read is listed as that: not with the
+	// role and the address the row had for it. Until v0.11.1-rc.2 it kept them, so after a failover the stopped
+	// appliance was listed as the master beside the real one, and it was the one asked for the members: 409 "did
+	// not answer" (drill R2b-o2 and R3: six of six failovers, for about 70 s each, until the next pass).
 	var apps []seen
 	for _, a := range lb.Appliances {
 		vm, err := ps.ResolveVM(ctx, proj.ID, a.ServerID)
 		if err != nil || vm == nil || vm.NodeDown || pve.LBOfTags(vm.Tags) != lb.ID {
 			a.Role, a.HoldsVIP = "", false
+			if a.State == lbAppUp {
+				a.State, a.Reason = lbAppDown, lbReasonUnreachable
+			}
 			apps = append(apps, seen{app: a})
 			continue
 		}
-		if st, err := ps.ReadVRRPState(ctx, vm.Node, vm.VMID, vip); err == nil {
-			a.Role, a.HoldsVIP = st.State, st.HoldsVIP
-			if a.State == lbAppUp && !st.Serving { // the row's word is older than this read
-				a.State, a.Reason = lbAppDown, "HAProxy does not serve its configuration"
+		st, err := ps.ReadVRRPState(ctx, vm.Node, vm.VMID, vip)
+		if err != nil {
+			a.Role, a.HoldsVIP = "", false
+			if a.State == lbAppUp {
+				a.State, a.Reason = lbAppDown, lbReasonUnreachable
 			}
+			apps = append(apps, seen{app: a, vm: vm})
+			continue
 		}
-		apps = append(apps, seen{app: a, vm: vm})
+		a.Role, a.HoldsVIP = st.State, st.HoldsVIP || (vip == "" && st.State == "MASTER")
+		if a.State == lbAppUp && !st.Serving { // the row's word is older than this read
+			a.State, a.Reason = lbAppDown, "HAProxy does not serve its configuration"
+		}
+		apps = append(apps, seen{app: a, vm: vm, read: true})
 	}
 	out := map[string]any{"result": []pve.LBMemberHealth{}}
 	var list []lbAppliance
@@ -913,30 +928,89 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 		list = append(list, s.app)
 	}
 	out["appliances"] = list
-	for _, s := range apps {
-		if s.vm != nil && s.app.HoldsVIP && s.app.HAProxyHash != "" {
-			health, notLoaded, err := ps.LBHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec)
-			if errors.Is(err, pve.ErrLBNoHAProxy) {
-				return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, lbNoHAProxyMsg)
-			}
+	h.lbCorrectRoles(ctx, es, lb, list)
+	// The members are asked of the appliance that holds the address now. While none does (the seconds of a
+	// failover), any appliance that answered says the same of them: both run the same config and the same checks.
+	ask := slices.IndexFunc(apps, func(s seen) bool { return s.read && s.app.HoldsVIP && s.app.HAProxyHash != "" })
+	if ask < 0 {
+		ask = slices.IndexFunc(apps, func(s seen) bool { return s.read && s.app.HAProxyHash != "" })
+	}
+	if ask >= 0 {
+		s := apps[ask]
+		health, notLoaded, err := ps.LBHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec)
+		if errors.Is(err, pve.ErrLBNoHAProxy) {
+			return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, lbNoHAProxyMsg)
+		}
+		if err != nil {
+			slog.Warn("load balancer: health", "project", proj.ID, "lb", lb.ID, "err", err)
+			return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's active appliance did not answer")
+		}
+		if lb.HasUDP() { // the UDP pools' members are in the kernel's table, not in HAProxy
+			udp, udpNotLoaded, err := ps.LVSHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec, lb.VIPs)
 			if err != nil {
-				slog.Warn("load balancer: health", "project", proj.ID, "lb", lb.ID, "err", err)
+				slog.Warn("load balancer: udp health", "project", proj.ID, "lb", lb.ID, "err", err)
 				return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's active appliance did not answer")
 			}
-			if lb.HasUDP() { // the UDP pools' members are in the kernel's table, not in HAProxy
-				udp, udpNotLoaded, err := ps.LVSHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec, lb.VIPs)
-				if err != nil {
-					slog.Warn("load balancer: udp health", "project", proj.ID, "lb", lb.ID, "err", err)
-					return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's active appliance did not answer")
-				}
-				health, notLoaded = append(health, udp...), append(notLoaded, udpNotLoaded...)
-			}
-			out["result"] = health
-			lbHealthNotLoaded(out, notLoaded)
-			break
+			health, notLoaded = append(health, udp...), append(notLoaded, udpNotLoaded...)
 		}
+		out["result"] = health
+		lbHealthNotLoaded(out, notLoaded)
 	}
 	return out, nil
+}
+
+// lbReasonUnreachable is the reason of an appliance a health read could not reach.
+const lbReasonUnreachable = "it cannot be reached"
+
+// lbCorrectRoles writes into the row what a health read just saw of the appliances' roles, when the row says
+// otherwise: who holds the address, and an appliance that cannot be reached. The row had it right only from the next
+// pass on, about 70 s after a failover on a cluster's pair (drill R2b-o2). Only that is written, and the status the
+// appliances add up to: what an appliance runs is the pass's to say. A balancer that is being changed is left to the
+// change, which reads the appliances itself.
+func (h *Handler) lbCorrectRoles(ctx context.Context, es *externalservice.ExternalService, lb *loadBalancer, read []lbAppliance) {
+	differs := func(row []lbAppliance) bool {
+		for _, a := range row {
+			i := slices.IndexFunc(read, func(r lbAppliance) bool { return r.ServerID == a.ServerID })
+			if i >= 0 && (read[i].Role != a.Role || read[i].HoldsVIP != a.HoldsVIP) {
+				return true
+			}
+		}
+		return false
+	}
+	if h.sdnLock == nil || !differs(lb.Appliances) {
+		return
+	}
+	ext := "lb-" + lb.ID
+	release, ok, err := h.lbLock(ctx, ext, 0)
+	if err != nil || !ok {
+		return
+	}
+	defer release()
+	cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, ext)
+	if err != nil || cr == nil {
+		return
+	}
+	row, err := lbOfRow(cr)
+	if err != nil || !differs(row.Appliances) {
+		return
+	}
+	for i := range row.Appliances {
+		a := &row.Appliances[i]
+		j := slices.IndexFunc(read, func(r lbAppliance) bool { return r.ServerID == a.ServerID })
+		if j < 0 || a.State == lbAppGone || a.State == lbAppBuilding {
+			continue
+		}
+		a.Role, a.HoldsVIP = read[j].Role, read[j].HoldsVIP
+		if a.State == lbAppUp && read[j].State == lbAppDown {
+			a.State, a.Reason = lbAppDown, read[j].Reason
+		}
+	}
+	if row.Status == lbStatusActive || row.Status == lbStatusDegraded || row.Status == lbStatusDown {
+		row.Status, row.StatusMessage = lbPairStatus(row.Appliances, false, lbReplacing(row, time.Now().UTC()))
+	}
+	if err := h.lbSave(ctx, cr, row); err != nil {
+		slog.Warn("load balancer: correct the roles after a health read", "lb", lb.ID, "err", err)
+	}
 }
 
 // lbHealthNotLoaded adds to a GET_HEALTH answer the listeners the appliance does not run, and says so: member states
