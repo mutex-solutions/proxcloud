@@ -99,6 +99,57 @@ func TestLBPairApplyOrderAndStatus(t *testing.T) {
 		t.Fatalf("second apply: %s %v, writes %v", status, err, f.log[writes:])
 	}
 
+	// A tenant's change while dpkg is at work on HAProxy's own package on the appliance that holds the address (drill
+	// R3-F1 of v0.11.1-rc.2: answered 200, not served for 3 min 28 s, nothing tried again). The call is answered,
+	// the row says what waits, and the platform's own retry loads it: no second call, no services sync.
+	every, tries := lbRetryEvery, lbRetryTries
+	lbRetryEvery, lbRetryTries = 200*time.Millisecond, 100
+	f.set("302", func(g *lbGuest) { g.upgrading = true })
+	if _, err := h.lbEdit(ctx, es, "lb-abc", func(lb *loadBalancer) { lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 81, Pool: "web"}) }); err != nil {
+		t.Fatal(err)
+	}
+	status, err = h.pveLBApply(ctx, es, proj, "lb-abc")
+	saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
+	got, _ = lbOfRow(saved)
+	if err != nil || status != lbStatusActive || got.HeldSince == "" || !strings.Contains(got.StatusMessage, "A change waits (appliance 302: ") {
+		t.Fatalf("a change the holder cannot take now: %s %v %q", status, err, got.StatusMessage)
+	}
+	holderHas := func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.guests["302"].loaded, ":81")
+	}
+	if holderHas() || !strings.Contains(f.guests["301"].loaded, ":81") {
+		t.Fatal("the standby does not have the change, or the holder has it already")
+	}
+	f.set("302", func(g *lbGuest) { g.upgrading = false })
+	for deadline := time.Now().Add(10 * time.Second); !holderHas(); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("nothing tried the change again on the holder")
+		}
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
+		if got, _ = lbOfRow(saved); got.Status == lbStatusActive && got.StatusMessage == "" && got.HeldSince == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the row after the retry: %s %q", got.Status, got.StatusMessage)
+		}
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) { // the retries are over
+		if _, running := h.lbRetries.Load("lb-abc"); !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the retries went on after the change was loaded")
+		}
+	}
+	lbRetryEvery, lbRetryTries = every, tries
+	f.mu.Lock()
+	writes = len(f.log)
+	f.mu.Unlock()
+
 	// Both hold the address: DEGRADED, said so, nothing done about it.
 	f.mu.Lock()
 	f.guests["301"].role, f.guests["301"].holds = "MASTER", true

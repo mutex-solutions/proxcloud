@@ -56,21 +56,31 @@ type Guest struct {
 // stubs are the guest's commands. Each answers from a file of the guest's "stub" directory, which a test writes
 // with Stub: no file is the command failing (a stopped service, a socket that refuses, a table that is not loaded).
 var stubs = map[string]string{
-	// "is-active": the units listed in stub/active are. Every other verb succeeds and does nothing.
+	// "is-active": the units listed in stub/active are. Every other verb succeeds, does nothing and is listed in
+	// stub/systemctl-calls.
 	"systemctl": `for a; do u=$a; done
-case " $* " in *" is-active "*) grep -qxF -e "$u" "$R/stub/active" 2>/dev/null ;; esac`,
-	// What an apply asks besides: the owner cannot be root's here, so chown does nothing and stat says root; no
-	// package manager runs and every package is installed; sysctl does nothing; keepalived -t takes every config
-	// unless stub/keepalived-refuses holds what it says of one it refuses.
+case " $* " in *" is-active "*) grep -qxF -e "$u" "$R/stub/active" 2>/dev/null ;; *) echo "$*" >> "$R/stub/systemctl-calls" ;; esac`,
+	// What an apply asks besides: the owner cannot be root's here, so chown does nothing and stat says root for
+	// what is this user's; sysctl does nothing; keepalived -t and haproxy -c take every config unless
+	// stub/keepalived-refuses or stub/haproxy-refuses holds what they say of one they refuse.
 	"chown":      `:`,
 	"sysctl":     `:`,
-	"pgrep":      `exit 1`,
-	"dpkg-query": `printf 'install ok installed'`,
 	"keepalived": `[ ! -e "$R/stub/keepalived-refuses" ] || { cat "$R/stub/keepalived-refuses" >&2; exit 1; }`,
-	"stat":       `case "$2" in %a:%U:%G) echo "$(PATH=/usr/bin:/bin stat -c %a "$3"):root:root" ;; *) PATH=/usr/bin:/bin exec stat "$@" ;; esac`,
-	"ss":         `cat "$R/stub/ss" 2>/dev/null`,
-	"ip":         `cat "$R/stub/ip" 2>/dev/null`,
-	"nft":        `cat "$R/stub/nft" 2>/dev/null`,
+	"haproxy":    `[ ! -e "$R/stub/haproxy-refuses" ] || { cat "$R/stub/haproxy-refuses" >&2; exit 1; }`,
+	"stat":       `PATH=/usr/bin:/bin stat "$@" | sed "s/:$(id -un):$(id -gn)/:root:root/"`,
+	// The package manager. pgrep finds one at work while stub/pgrep exists. dpkg-query says "install ok installed"
+	// of every package but one with a file stub/dpkg-<package>, whose lines are what it says of that package, one
+	// line per question and the last one from then on: a package dpkg is at work on changes its state between two
+	// questions of one script.
+	"pgrep": `[ -e "$R/stub/pgrep" ]`,
+	"dpkg-query": `for a; do p=$a; done
+f="$R/stub/dpkg-$p"
+[ -e "$f" ] || { printf 'install ok installed'; exit 0; }
+head -n1 "$f" | tr -d '\n'
+[ "$(wc -l < "$f")" -le 1 ] || sed -i 1d "$f"`,
+	"ss":  `cat "$R/stub/ss" 2>/dev/null`,
+	"ip":  `cat "$R/stub/ip" 2>/dev/null`,
+	"nft": `cat "$R/stub/nft" 2>/dev/null`,
 	// HAProxy's master socket. stub/socat-refuses holds how many more connections it refuses first: a reload.
 	"socat": `cat >/dev/null
 n=$(cat "$R/stub/socat-refuses" 2>/dev/null || echo 0)
@@ -80,13 +90,16 @@ cat "$R/stub/socat" 2>/dev/null`,
 }
 
 // Agent is the guest agent API of the guest, as far as the product's pushes and reads use it: exec runs the command
-// here (sh is Shell), file-write puts the file, exec-status answers at once. Writes lists the paths written, in order.
+// here (sh is Shell), file-write puts the file, exec-status answers at once. Writes lists the paths written, in order,
+// and Modes the mode each of them had when its write ended. A file the agent creates gets mode 0666 and one that
+// exists keeps its own, as qemu-ga's guest-file-open has it.
 type Agent struct {
 	Guest  *Guest
 	Shell  string
 	mu     sync.Mutex
 	runs   []map[string]any
 	Writes []string
+	Modes  []os.FileMode
 }
 
 func (a *Agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -113,9 +126,17 @@ func (a *Agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		pid, _ := strconv.Atoi(r.Form.Get("pid"))
 		write(a.runs[pid-1])
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent/file-write"):
-		a.Writes = append(a.Writes, r.Form.Get("file"))
-		a.Guest.Write(r.Form.Get("file"), r.Form.Get("content"))
-		_ = os.Chmod(a.Guest.Path(r.Form.Get("file")), 0o666) // as the real agent creates a file
+		path := a.Guest.Path(r.Form.Get("file"))
+		_, statErr := os.Stat(path)
+		a.Guest.Write(r.Form.Get("file"), r.Form.Get("content")) // truncates and fills: an existing file keeps its mode
+		if statErr != nil {
+			_ = os.Chmod(path, 0o666) // as the real agent creates a file
+		}
+		mode := os.FileMode(0)
+		if fi, err := os.Stat(path); err == nil {
+			mode = fi.Mode().Perm()
+		}
+		a.Writes, a.Modes = append(a.Writes, r.Form.Get("file")), append(a.Modes, mode)
 		write(nil)
 	default:
 		a.Guest.tb.Errorf("reached PVE: %s %s", r.Method, r.URL.Path)

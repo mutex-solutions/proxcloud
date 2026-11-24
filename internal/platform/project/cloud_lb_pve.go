@@ -84,8 +84,14 @@ type loadBalancer struct {
 	// built from the state the cluster's controller sends; the tenant cannot change or delete it.
 	Cluster *lbCluster `json:"cluster,omitempty"`
 	pve.LBSpec
+	// HeldSince is when a pass first found an appliance that could not take a change, RFC 3339; "" when none waits.
+	// The appliances after it in the push order wait with it for lbHoldWindow from then (lbApplyPair).
+	HeldSince string `json:"heldSince,omitempty"`
 	// settled is the last pair apply's word that no appliance holds a VIP the row no longer lists.
 	settled bool
+	// waiting is the last apply's word that a change is still to reach an appliance that could not take it now: the
+	// platform tries again by itself (lbRetry).
+	waiting bool
 }
 
 // lbRender is the HAProxy config of the balancer: a cluster's gets the cluster's idle timeout (C5).
@@ -472,26 +478,49 @@ func lbHash(config string) string {
 }
 
 // pveLBApply brings one balancer in line with its row, and returns the status it ends on ("" = no such
-// row). It is the only writer of what an appliance runs, one at a time per balancer.
+// row). It is the only writer of what an appliance runs, one at a time per balancer. A change an appliance could not
+// take now is tried again by the platform itself, within half a minute and for two minutes (lbRetry): the caller is
+// answered at once, and the row says what waits.
 func (h *Handler) pveLBApply(ctx context.Context, es *externalservice.ExternalService, proj *Project, externalID string) (string, error) {
+	status, waiting, err := h.lbApplyOnce(ctx, es, proj, externalID)
+	if waiting {
+		h.lbRetry(externalID, func(ctx context.Context) bool {
+			// A project suspended or deleted meanwhile: the sync's reconcile takes over after the resume.
+			if h.svc != nil {
+				if cur, err := h.svc.GetProjectByID(ctx, proj.ID); err != nil || cur.Deleting() || cur.Status != StatusEnabled {
+					return false
+				}
+			}
+			_, waiting, err := h.lbApplyOnce(ctx, es, proj, externalID)
+			if err != nil {
+				slog.Warn("load balancer: retry of a change that waits", "project", proj.ID, "lb", externalID, "err", err)
+			}
+			return waiting
+		})
+	}
+	return status, err
+}
+
+// lbApplyOnce is one apply under the balancer's lock. waiting: it left a change an appliance could not take now.
+func (h *Handler) lbApplyOnce(ctx context.Context, es *externalservice.ExternalService, proj *Project, externalID string) (status string, waiting bool, err error) {
 	release, ok, err := h.lbLock(ctx, externalID, lbLockWait)
 	if err != nil {
-		return lbStatusBuild, err
+		return lbStatusBuild, false, err
 	}
 	if !ok {
-		return lbStatusBuild, nil // another apply is on it
+		return lbStatusBuild, false, nil // another apply is on it
 	}
 	defer release()
 	cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, externalID)
 	if err != nil {
-		return lbStatusBuild, err
+		return lbStatusBuild, false, err
 	}
 	if cr == nil || cr.Type != cloud.TypeLoadBalancer || cr.ProjectID != proj.ID {
-		return "", nil
+		return "", false, nil
 	}
 	lb, err := lbOfRow(cr)
 	if err != nil {
-		return lbStatusError, err
+		return lbStatusError, false, err
 	}
 	before, _ := json.Marshal(lb)
 	err = h.lbApplyLocked(ctx, es, proj, cr, lb)
@@ -500,13 +529,14 @@ func (h *Handler) pveLBApply(ctx context.Context, es *externalservice.ExternalSe
 			err = serr
 		}
 	}
-	return lb.Status, err
+	return lb.Status, lb.waiting, err
 }
 
 func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, lb *loadBalancer) error {
 	if lb.HA {
 		return h.lbApplyPair(ctx, es, proj, cr, lb)
 	}
+	lb.waiting = false
 	ps, err := h.pveFor(es)
 	if err != nil {
 		return err
@@ -593,15 +623,19 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 		return err
 	}
 	if err := ps.PushHAProxy(ctx, vm.Node, vm.VMID, config, certs...); err != nil {
+		held := errors.Is(err, pve.ErrLBNotReady)
 		switch {
-		case !errors.Is(err, pve.ErrLBNotReady):
+		case !held:
 			lb.Status, lb.StatusMessage = lbStatusError, err.Error()
 		case lbStuck(cr) && lb.AppliedHash == "":
 			lb.Status, lb.StatusMessage = lbStatusError, "The load balancer's VM did not become ready. Its image needs the guest agent, and HAProxy and socat installed or reachable from its repositories."
 		case lb.AppliedHash == "":
 			lb.Status, lb.StatusMessage = lbStatusBuild, ""
 		case hash != lb.AppliedHash: // the last config is served meanwhile; one found not served keeps its message
-			lb.StatusMessage = "A change is waiting for the load balancer's VM"
+			lb.StatusMessage = "A change waits for the load balancer's VM: " + lbHeldWhy(err) + ". The configuration of before the change is served meanwhile; the platform tries again within half a minute, by itself."
+			lb.waiting = true
+		default: // the config was found not served and cannot be loaded now: tried again too
+			lb.waiting = true
 		}
 		return nil
 	}

@@ -335,6 +335,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		return err // nothing is known, so nothing changes
 	}
 	pool := ps.PoolFor(proj.ID)
+	lb.waiting = false
 	var running []*lbAppliance
 	for i := range lb.Appliances {
 		a := &lb.Appliances[i]
@@ -469,13 +470,40 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	keepalivedCurrent := map[*lbAppliance]bool{}
 	// refuse records a push an appliance did not take. The reason is the guest's own words, which may quote a line
 	// of a config: it goes into the row's message for the tenant and not into the log.
+	var refusedBy *lbAppliance
 	refuse := func(a *lbAppliance, what string, err error) {
-		refused = err
+		refused, refusedBy = err, a
 		slog.Warn("load balancer: an appliance did not take a push; the reason is in the load balancer's status message", "lb", lb.ID, "vm", a.ServerID, "push", what)
 	}
-	for _, a := range lbPushOrder(running) {
+	// An appliance that cannot take a push now (pve.ErrLBNotReady: its guest agent does not answer, or dpkg is at
+	// work on one of its own packages) holds it, and the appliances after it in the order wait with it: the standby
+	// takes every change first, so the one that holds the address is not given a change the standby has not shown
+	// to work (drill R2b-1 of v0.11.1-rc.2: the holder was pushed 21 s before the standby). They wait for one retry
+	// window (lbHoldWindow, counted from the row's HeldSince); a standby that still cannot take it then is one that
+	// is out of order, and the holder goes ahead as it does beside a standby that is down.
+	order := lbPushOrder(running)
+	held := map[*lbAppliance]string{} // why, for the row
+	var waitFor *lbAppliance          // the first appliance in the order that holds a push
+	since, _ := time.Parse(time.RFC3339, lb.HeldSince)
+	inWindow := lb.HeldSince == "" || time.Since(since) < lbHoldWindow()
+	hold := func(a *lbAppliance, err error) {
+		// "building" is for an appliance no config ever reached, which is its first install: nothing waits behind
+		// that one, and the pass of before v0.11.1-rc.3 is unchanged for it. What the others are, the state read
+		// below says.
+		a.State, a.Reason = lbAppBuilding, lbHeldWhy(err)
+		if a.HAProxyHash != "" || a.KeepalivedHash != "" {
+			held[a] = a.Reason
+			if waitFor == nil {
+				waitFor = a
+			}
+		}
+	}
+	for _, a := range order {
 		vmid, _ := strconv.Atoi(a.ServerID)
 		st, known := seen[a]
+		// behind: an appliance before this one holds a push, and the window is open: this one takes no change now.
+		// What it does not serve as its row records is loaded again all the same: that is no change.
+		behind := waitFor != nil && inWindow
 		// keepalived stopped by a replace's planned switch may be started again here before its VM goes: it comes
 		// back as BACKUP and stays so (nopreempt), the address has moved already.
 		restartKeepalived := known && a.KeepalivedHash != "" && st.State == "STOPPED"
@@ -515,11 +543,11 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			if editedKeepalived {
 				slog.Warn("load balancer: an appliance's keepalived config is not the one its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID)
 			}
-			if khash != a.KeepalivedHash || restartKeepalived || editedKeepalived {
+			if (khash != a.KeepalivedHash && !behind) || restartKeepalived || editedKeepalived {
 				pushed[a] = true
 				if err := ps.PushKeepalived(ctx, a.Node, vmid, conf, a.PublicIface); err != nil {
 					if errors.Is(err, pve.ErrLBNotReady) {
-						a.State, a.Reason = lbAppBuilding, "it is installing HAProxy and keepalived"
+						hold(a, err)
 						continue
 					}
 					refuse(a, "keepalived", err)
@@ -530,23 +558,26 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 					started[a] = "keepalived"
 				}
 			}
-			keepalivedCurrent[a] = true
+			keepalivedCurrent[a] = a.KeepalivedHash == khash
 		}
 		// HAProxy binds the addresses, and without keepalived's files it cannot bind one the appliance does not hold:
 		// it would refuse its config (drill Q0b-1). keepalived is there on every pass but one whose public network
-		// this project may no longer use.
+		// this project may no longer use, and one that waits behind the other appliance.
 		if a.KeepalivedHash == "" {
 			a.State, a.Reason = lbAppBuilding, "its public network is not available to this project"
+			if behind {
+				a.Reason = "it waits for appliance " + waitFor.ServerID + ", which takes every change first"
+			}
 			continue
 		}
 		// A config an appliance refused goes to no other one in this pass: the standby comes first (lbPushOrder), so
 		// what HAProxy does not take there never reaches the appliance that holds the address. One that does not
 		// serve at all has nothing to lose and is pushed.
-		if (hhash != a.HAProxyHash && refused == nil) || reloadHAProxy {
+		if (hhash != a.HAProxyHash && refused == nil && !behind) || reloadHAProxy {
 			pushed[a] = true
 			if err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...); err != nil {
 				if errors.Is(err, pve.ErrLBNotReady) {
-					a.State, a.Reason = lbAppBuilding, "it is installing HAProxy and keepalived"
+					hold(a, err)
 					continue
 				}
 				refuse(a, "haproxy", err)
@@ -563,6 +594,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		stray := known && a.LVSHash == "" && st.LVSSum != "" && st.LVSSum != "-"
 		switch want := lvsWant(a); {
 		case want == "" && a.LVSHash == "" && !stray: // never had a UDP listener: nothing of it is on the appliance
+		case behind && !reloadLVS: // a change of the UDP listeners waits as every other
 		case want == "":
 			pushed[a] = true
 			if err := ps.RemoveLVS(ctx, a.Node, vmid); err != nil {
@@ -574,7 +606,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			pushed[a] = true
 			if err := ps.PushLVS(ctx, a.Node, vmid, lvs, a.TenantIface); err != nil {
 				if errors.Is(err, pve.ErrLBNotReady) {
-					a.State, a.Reason = lbAppBuilding, "it is installing what its UDP listeners need"
+					hold(a, err)
 					continue
 				}
 				refuse(a, "udp", err)
@@ -620,6 +652,8 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		if vip == "" { // a cluster's pair before its first Service, or after its last: the master holds the placeholder
 			a.HoldsVIP = st.State == "MASTER"
 		}
+		// current: the appliance has every file of this pass.
+		current := a.HAProxyHash == hhash && a.LVSHash == lvsWant(a) && (pn == nil || keepalivedCurrent[a])
 		switch {
 		case !st.HAProxy:
 			a.State, a.Reason = lbAppDown, "HAProxy is not running"
@@ -627,12 +661,24 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			a.State, a.Reason = lbAppDown, "HAProxy does not serve its configuration"
 		case st.State != "MASTER" && st.State != "BACKUP":
 			a.State, a.Reason = lbAppDown, "keepalived is "+strings.ToLower(st.State)
-		case a.HAProxyHash != hhash:
-			a.State, a.Reason = lbAppDown, "it runs an older configuration"
-		case a.LVSHash != lvsWant(a):
-			a.State, a.Reason = lbAppDown, "its UDP listeners are not loaded yet"
-		case lvs != "" && !st.LVS:
+		case a.LVSHash != "" && lvs != "" && !st.LVS:
 			a.State, a.Reason = lbAppDown, "its UDP listeners are not served"
+		case !current:
+			// It serves the config its row records and has a change still to take: that is an appliance in order,
+			// and the row says what waits and why. It read "down" until v0.11.1-rc.2, and a pair whose two
+			// appliances both waited read DOWN "No appliance answers" while it served (drill R2b-1).
+			a.State, a.Reason = lbAppUp, lbWaitsPrefix+"it is loaded at the next pass"
+			switch {
+			case held[a] != "":
+				a.Reason = lbWaitsPrefix + held[a]
+			case waitFor != nil && waitFor != a:
+				a.Reason = lbWaitsPrefix + "appliance " + waitFor.ServerID + " takes every change first and cannot take one now"
+			case refusedBy == a:
+				a.Reason = lbWaitsPrefix + "it did not take it"
+			case refused != nil:
+				a.Reason = lbWaitsPrefix + "appliance " + refusedBy.ServerID + " did not take it"
+			}
+			lb.waiting = lb.waiting || refused == nil
 		default:
 			a.State, a.Reason = lbAppUp, ""
 		}
@@ -640,17 +686,81 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			a.Reason += "; " + what + " did not run its configuration and the platform loaded it again"
 		}
 	}
+	// A push that is held is tried again by the platform itself (lbRetry), and the appliances behind it wait from
+	// the first pass that held one.
+	lb.waiting = lb.waiting || (len(held) > 0 && refused == nil)
+	switch {
+	case !lb.waiting:
+		lb.HeldSince = ""
+	case lb.HeldSince == "":
+		lb.HeldSince = time.Now().UTC().Format(time.RFC3339)
+	}
 	lb.Status, lb.StatusMessage = lbPairStatus(lb.Appliances, lbStuck(cr), lbReplacing(lb, time.Now().UTC()))
 	if refused != nil {
 		lb.Status, lb.StatusMessage = lbStatusError, refused.Error()
 	}
 	// The row's hash says that an appliance serves this config (a cluster's Services are ready by it). The status
-	// alone does not: both appliances holding the address is DEGRADED whatever they run.
-	serves := slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.State == lbAppUp })
+	// alone does not: both appliances holding the address is DEGRADED whatever they run, and an appliance that is up
+	// may still wait for a change.
+	serves := slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.State == lbAppUp && !lbAppWaits(a) })
 	if serves && (lb.Status == lbStatusActive || lb.Status == lbStatusDegraded) {
 		lb.AppliedHash = lbAppliedHash(lb)
 	}
 	return nil
+}
+
+// lbWaitsPrefix opens the reason of an appliance that is up, serves the config its row records, and has a change
+// still to take (lbAppWaits).
+const lbWaitsPrefix = "a change is not loaded on it yet: "
+
+// lbAppWaits says that an appliance is up on the config of before a change.
+func lbAppWaits(a lbAppliance) bool {
+	return a.State == lbAppUp && strings.HasPrefix(a.Reason, lbWaitsPrefix)
+}
+
+// lbHeldWhy is, for the row, why an appliance could not take a push now.
+func lbHeldWhy(err error) string {
+	switch pve.LBHoldClass(err) {
+	case "package-manager":
+		return "its package manager is at work on a package the load balancer runs"
+	case "installing":
+		return "it is installing what the load balancer runs"
+	}
+	return "its guest agent does not answer"
+}
+
+var (
+	// lbRetryEvery and lbRetryTries are the platform's own retries of a change an appliance could not take: the
+	// first about 20 s after the pass that was held, the last two minutes after it. Until v0.11.1-rc.2 nothing tried
+	// again before the next services sync, or the tenant's next change (drill R3-F1: 3 min 28 s, and only because
+	// the tenant sent the config again).
+	lbRetryEvery = 20 * time.Second
+	lbRetryTries = 6
+)
+
+// lbHoldWindow is how long the appliances after a held one wait with it (lbApplyPair): up to the last retry, which
+// then finds the window over and pushes them.
+func lbHoldWindow() time.Duration { return time.Duration(lbRetryTries-1) * lbRetryEvery }
+
+// lbRetry queues the platform's own retries of a balancer's apply, by key one loop at a time: pass runs the apply
+// and says whether a change still waits. It ends with the first pass that leaves nothing waiting, after lbRetryTries
+// of them, or with the process; the services sync stays the backstop, as for everything else a pass leaves.
+func (h *Handler) lbRetry(key string, pass func(ctx context.Context) (waiting bool)) {
+	if _, running := h.lbRetries.LoadOrStore(key, struct{}{}); running {
+		return
+	}
+	go func() {
+		defer h.lbRetries.Delete(key)
+		for range lbRetryTries {
+			time.Sleep(lbRetryEvery)
+			ctx, cancel := context.WithTimeout(context.Background(), lbLockMaxFor)
+			waiting := pass(ctx)
+			cancel()
+			if !waiting {
+				return
+			}
+		}
+	}()
 }
 
 // lbPairStatus sums the appliances up. ACTIVE: both answer and one holds the address. DEGRADED: one answers, or both
@@ -680,7 +790,7 @@ func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 		if a.HAProxyHash != "" {
 			applied = true
 		}
-		if a.State != lbAppUp && a.Reason != "" {
+		if a.Reason != "" { // of an appliance that is not up, or of one that is and waits for a change (lbAppWaits)
 			reasons = append(reasons, fmt.Sprintf("appliance %s: %s", a.ServerID, a.Reason))
 		}
 	}
@@ -693,6 +803,10 @@ func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 	case holders > 1:
 		return lbStatusDegraded, "Both appliances hold the address: they cannot hear each other. Traffic may reach either one until they do; nothing is changed automatically."
 	case up == 2 && holders == 1 && len(apps) == 2:
+		if why != "" {
+			// Both serve, and a change waits on one or both: what waits, why, and that nobody has to do anything.
+			return lbStatusActive, "A change waits (" + why + "). The load balancer serves meanwhile, with the configuration of before the change where it is not loaded; the platform tries again within half a minute, by itself."
+		}
 		return lbStatusActive, ""
 	case up == 2:
 		return lbStatusDegraded, "Neither appliance holds the address yet: they are choosing which one does."
@@ -702,9 +816,8 @@ func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 		}
 		switch {
 		case holders == 1 && !holderUp:
-			// The one that holds the address is the one that is not right (it runs the config of before a change
-			// it could not take yet, and serves that), and the standby is: "no standby" would be the wrong way
-			// round (drill N3-4).
+			// The one that holds the address is the one that is not right, and the standby is: "no standby" would
+			// be the wrong way round (drill N3-4).
 			return lbStatusDegraded, "The appliance that holds the address is the one that is not in order" + why + "; the other one is ready, as its standby. The platform puts it right at its next pass."
 		case replacing:
 			return lbStatusDegraded, "One appliance carries the traffic while the other is being replaced" + why + "."

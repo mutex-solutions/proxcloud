@@ -67,8 +67,16 @@ func TestLBPairUDPListeners(t *testing.T) {
 	}
 	f.set("301", func(g *lbGuest) { g.noNft = true })
 	apply()
-	if got := logged("301 install"); len(got) != 1 || lb.Appliances[0].LVSHash != "" || lb.Appliances[0].State == lbAppUp {
+	// It serves the TCP listeners its row records meanwhile, so it is up, with what waits and why; the appliance
+	// that holds the address is not given the UDP listeners ahead of it; and the row's hash stays the config that
+	// is served (R2b-1 of v0.11.1-rc.2: such an appliance read "down").
+	if got := logged("301 install"); len(got) != 1 || lb.Appliances[0].LVSHash != "" || !lbAppWaits(lb.Appliances[0]) ||
+		!strings.Contains(lb.Appliances[0].Reason, "it is installing what the load balancer runs") {
 		t.Fatalf("a standby without nftables: installs %q, appliance %+v", got, lb.Appliances[0])
+	}
+	if lb.Appliances[1].LVSHash != "" || !lbAppWaits(lb.Appliances[1]) || lb.Status != lbStatusActive || lb.AppliedHash != tcpHash ||
+		!strings.Contains(lb.StatusMessage, "A change waits (appliance 301: ") || !lb.waiting || lb.HeldSince == "" {
+		t.Fatalf("while the standby installs: %s %q, applied moved %v, holder %+v", lb.Status, lb.StatusMessage, lb.AppliedHash != tcpHash, lb.Appliances[1])
 	}
 	apply()
 	want := pve.LVSHash(lvs, "ens18")
@@ -133,8 +141,11 @@ func TestLBPairUDPListeners(t *testing.T) {
 	if a, b := f.count("301 lvs reload"), f.count("302 lvs reload"); a != 3 || b != 2 || lb.Appliances[0].LVSHash != want || lb.Appliances[1].LVSHash != want {
 		t.Fatalf("a refused UDP config: %d and %d loads, hashes %s and %s", a, b, lb.Appliances[0].LVSHash, lb.Appliances[1].LVSHash)
 	}
-	if lb.Appliances[0].State == lbAppUp || lb.AppliedHash == lbAppliedHash(lb) {
-		t.Fatalf("a refused UDP config reads as applied: %+v, applied %s", lb.Appliances[0], lb.AppliedHash)
+	// The appliance serves the listeners of before, and is up as that: with the change it did not take, in a row
+	// that reads ERROR with the refusal, and never as one that runs the new config.
+	if !lbAppWaits(lb.Appliances[0]) || !strings.Contains(lb.Appliances[0].Reason, "it did not take it") || lb.Status != lbStatusError ||
+		lb.AppliedHash == lbAppliedHash(lb) || lb.waiting {
+		t.Fatalf("a refused UDP config reads as applied: %+v, %s, applied %s", lb.Appliances[0], lb.Status, lb.AppliedHash)
 	}
 	f.set("301", func(g *lbGuest) { g.lvsFails = "" })
 	apply()

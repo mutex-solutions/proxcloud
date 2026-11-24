@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve/lbguesttest"
@@ -30,7 +31,8 @@ type lbGuest struct {
 	paused     bool   // the VM is paused: Proxmox lists it as "paused", its qmpstatus says so, no agent answers
 	agentDown  bool   // the VM runs and its agent does not answer
 	packages   string // "unpacked": the binaries exist, dpkg is not done; "installed"
-	aptRunning bool   // a package manager runs in the guest
+	aptRunning bool   // a package manager runs in the guest: the image's own apt timer, on packages that are not the appliance's
+	upgrading  bool   // dpkg is at work on HAProxy's own package: its status is not "installed", and dpkg runs
 	haproxy    bool   // the unit is active: the master answers and has a worker
 	file       string // haproxy.cfg
 	pending    string // haproxy.cfg.new
@@ -266,6 +268,8 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 			}
 		}
 		return lbRun{out: g.certState()} // what is there: the push writes the files that are not
+	case strings.Contains(cmd, "a certificate file could not be made root's alone"): // each file made, empty and 0600, before its write
+		return lbRun{}
 	case strings.Contains(cmd, "a certificate file is not root's alone"): // owner, mode and the move in place, per name
 		words := strings.Fields(cmd)
 		for i := len(words) - 1; i >= 0 && len(words[i]) == 64; i-- {
@@ -281,14 +285,8 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 			g.noNft = false
 		}
 		return lbRun{}
-	case strings.Contains(cmd, "dpkg-query"): // the ready check
-		switch {
-		case g.aptRunning:
-			return lbRun{exit: 3}
-		case g.packages != "installed", g.noNft && strings.Contains(cmd, "nftables"):
-			return lbRun{exit: 1}
-		}
-		return lbRun{}
+	case strings.Contains(cmd, "command -v ss"): // the ready check
+		return f.readyCheck(g, cmd)
 	case strings.Contains(cmd, "systemctl enable -q proxcloud-lvs"): // the UDP service's apply: check, swap, (re)load, prove
 		f.log = append(f.log, vm+" lvs reload")
 		if g.lvsFails != "" {
@@ -390,6 +388,49 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 	}
 	return lbRun{}
 }
+
+// readyCheck answers the ready check. Whether an appliance takes a push while a package manager runs is the script's
+// own decision (drill R3-F1 and R2b-1 of v0.11.1-rc.2: it answered "busy" on appliances installed long ago), so the
+// script runs as the text it is (lbguesttest) on what the guest is: which packages dpkg has installed, and whether
+// apt or dpkg runs. On a machine that cannot run it the fake answers as the script does.
+func (f *pairWire) readyCheck(g *lbGuest, cmd string) lbRun {
+	missing := g.packages != "installed"
+	if !lbguesttest.Available() {
+		switch {
+		case !missing && !g.upgrading && (!g.noNft || !strings.Contains(cmd, "nftables")):
+			return lbRun{}
+		case g.aptRunning || g.upgrading:
+			return lbRun{exit: 75}
+		}
+		return lbRun{exit: 1}
+	}
+	if g.box == nil {
+		g.box = lbguesttest.New(f.t)
+	}
+	b := g.box
+	b.Unstub("pgrep")
+	if g.aptRunning || g.upgrading {
+		b.Stub("pgrep", "dpkg\n")
+	}
+	for _, p := range []string{"haproxy", "socat", "keepalived", "nftables"} {
+		b.Unstub("dpkg-" + p)
+		if missing && p != "nftables" {
+			b.Stub("dpkg-"+p, "install ok unpacked\n")
+		}
+	}
+	if g.upgrading {
+		b.Stub("dpkg-haproxy", "install ok half-configured\n")
+	}
+	if g.noNft {
+		b.Stub("dpkg-nftables", "\n")
+	}
+	exit, out, stderr := b.Run("sh", strings.TrimPrefix(cmd, "sh -c "))
+	return lbRun{exit: exit, out: out, err: stderr}
+}
+
+// The platform's own retries of a change that waits (lbRetry) are a test's to start: one that does not ask for them
+// must not meet a pass of theirs in the middle of its own.
+func init() { lbRetryEvery = time.Hour }
 
 // lbHoldsRe finds, in the state read's script, the address it asks the guest for.
 var lbHoldsRe = regexp.MustCompile(`grep -qF ' ([0-9.]+)/'`)

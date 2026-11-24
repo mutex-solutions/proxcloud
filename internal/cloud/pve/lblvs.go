@@ -345,7 +345,7 @@ const (
 	// switches forwarding off. Every file is written beside its place, as <path>.new, and moved in here by a rename
 	// with its owner and mode set, as keepalived's own are (lbKeepalivedApply): the unit reads the table's file and
 	// runs the script at every start, also one systemd makes by itself, and never meets one that is half written.
-	lvsApply = `set -e
+	lvsApply = lbPkgGateKeepalived + `set -e
 F=` + lvsConfig + `
 U=` + lvsUnit + `
 chown root:root ` + lvsNft + `.new ` + lvsSysctl + `.new ` + lvsNet + `.new $F.new $U.new
@@ -423,6 +423,9 @@ func (s *Service) PushLVS(ctx context.Context, node string, vmid int, config, te
 	exit, _, stderr, err = s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lvsApply)
 	if err != nil {
 		return err
+	}
+	if exit == lbBusyExit {
+		return ErrLBPackageBusy
 	}
 	if exit != 0 {
 		return fmt.Errorf("the appliance did not take the UDP listeners, the last ones stay in use: %s", strings.TrimSpace(stderr))

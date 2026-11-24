@@ -220,7 +220,10 @@ const (
 	// moment at every push (seen empty twice by a read every 4 s on the lab, drill Q1-o2 of v0.11.1), and writable
 	// by anyone until the chmod. A reader now sees the file of before or the new one. Nothing reads a name that
 	// ends in .new: systemd and sysctl take *.conf only.
-	lbKeepalivedApply = `set -e
+	//
+	// It opens as HAProxy's apply does: nothing is touched while dpkg is at work on keepalived's own package
+	// (lbPkgGateKeepalived).
+	lbKeepalivedApply = lbPkgGateKeepalived + `set -e
 F=/etc/keepalived/keepalived.conf
 chown root:root ` + lbCheckScript + `.new ` + lbNotifyScript + `.new ` + lbSysctlFile + `.new ` + lbDropIn + `.new $F.new
 chmod 0755 ` + lbCheckScript + `.new ` + lbNotifyScript + `.new
@@ -277,10 +280,12 @@ func (s *Service) PushKeepalived(ctx context.Context, node string, vmid int, con
 		}
 	}
 	exit, _, stderr, err = s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbKeepalivedApply)
-	if err != nil {
+	switch {
+	case err != nil:
 		return err
-	}
-	if exit != 0 {
+	case exit == lbBusyExit:
+		return ErrLBPackageBusy
+	case exit != 0:
 		return fmt.Errorf("keepalived did not take the change: %s", strings.TrimSpace(stderr))
 	}
 	return nil

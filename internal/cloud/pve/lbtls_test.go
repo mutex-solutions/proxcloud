@@ -235,7 +235,7 @@ func (g *certGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			what = "certificate directory"
 		case strings.Contains(cmd, "a certificate file is not root's alone"):
 			what = "certificate install " + strings.Join(r.Form["command"][4:], ",")
-		case strings.Contains(cmd, "dpkg-query"):
+		case strings.Contains(cmd, "command -v ss"):
 			what = "ready"
 		case strings.Contains(cmd, "haproxy -c"):
 			what = "reload"

@@ -707,6 +707,28 @@ func lbMemberAddr(m LBMember) (netip.Addr, bool) {
 // ErrLBNotReady: the appliance is still booting or installing HAProxy. It clears by itself.
 var ErrLBNotReady = errors.New("the appliance is not ready yet")
 
+// The reasons an appliance holds a push back, each an ErrLBNotReady. ErrLBPackageBusy: the guest's package manager
+// is at work on a package the appliance runs (its first install, or an upgrade of that very package).
+// ErrLBInstalling: a package is missing and the install was started.
+var (
+	ErrLBPackageBusy = fmt.Errorf("%w: its package manager is at work on a package the load balancer runs", ErrLBNotReady)
+	ErrLBInstalling  = fmt.Errorf("%w: it is installing what the load balancer runs", ErrLBNotReady)
+)
+
+// LBHoldClass names why a push was not taken, for a log line: "package-manager", "installing" and "guest-agent" are
+// an appliance that could not take it now (ErrLBNotReady), "refused" is one that would not.
+func LBHoldClass(err error) string {
+	switch {
+	case errors.Is(err, ErrLBPackageBusy):
+		return "package-manager"
+	case errors.Is(err, ErrLBInstalling):
+		return "installing"
+	case errors.Is(err, ErrLBNotReady):
+		return "guest-agent"
+	}
+	return "refused"
+}
+
 const (
 	haproxyConfig = "/etc/haproxy/haproxy.cfg"
 	// haproxyState is where an apply saves what every member is (UP, DOWN) for the reload that follows. It stays on
@@ -742,12 +764,15 @@ const (
 	// The agent creates a file with mode 0666, so the mode is set here. Nothing a tenant wrote is in this
 	// command. sshd goes first: nobody logs in to an appliance, and a listener may want its port.
 	//
+	// Then the one thing of the package manager's a swap waits for (lbPkgGateHAProxy): dpkg at work on HAProxy's own
+	// package. A swap that failed while dpkg was at it lost to the package's own restart: the old file is back and
+	// the answer is lbBusyExit, held and tried again, not a config HAProxy refused.
+	//
 	// Before the check, the members' state is saved for the reload (haproxyGlobal). A HAProxy that does not answer
 	// has no state to keep: the file goes, and HAProxy starts every member UP, as it does without one (a missing
 	// file is a notice to it, src/server_state.c). The save can never fail the apply. The file's time is set when
 	// it goes in: a pair's track script does not ask for its listeners while HAProxy loads it (lbpair.go).
-	haproxyReload = `systemctl disable --now ssh ssh.socket 2>/dev/null
-set -e
+	haproxyReload = "systemctl disable --now ssh ssh.socket 2>/dev/null\n" + lbPkgGateHAProxy + `set -e
 F=` + haproxyConfig + `
 S=` + haproxyState + `
 if echo "show servers state" | socat -t5 - /run/haproxy/admin.sock > $S.new 2>/dev/null && [ "$(head -n1 $S.new)" = 1 ]; then mv $S.new $S; else rm -f $S $S.new; fi
@@ -773,24 +798,51 @@ mv $F.new $F
     sleep 0.5
   done
 }
-swap || { mv $F.old $F; swap; exit 1; }
+swap || { mv $F.old $F; swap || :; pkgsettled haproxy || exit ` + lbBusyExitText + `; exit 1; }
 ` + lbCertPrune + `chmod 0644 $F $F.old
 [ "$(stat -c %a:%U:%G $F)" = 644:root:root ]`
 	// haproxyInstall prepares a stock image from its repositories, over the public NIC.
 	// ponytail: a site with no egress bakes haproxy and socat into the image config.lbImage names.
 	haproxyInstall = "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat iproute2; }"
 	guestTimeout   = 30 * time.Second
-	// lbBusyExit is a ready check's answer while the guest's package manager runs: wait, and start no install.
-	lbBusyExit = 3
+	// lbBusyExit is the answer of a ready check, and of an apply, that waits for the guest's package manager: wait,
+	// and start no install. EX_TEMPFAIL, a code nothing an apply runs under "set -e" answers (keepalived -t exits 3
+	// on a fatal error, which is a config it refuses and not a wait).
+	lbBusyExit     = 75
+	lbBusyExitText = "75"
+	// lbPkgSettledFn defines pkgsettled(): dpkg has each package named installed and configured. Any other state of
+	// a package that was installed is dpkg at work on that very package (unpacked, half-configured), which ends
+	// with the package's own restart of its service.
+	lbPkgSettledFn = "pkgsettled() { for p in \"$@\"; do [ \"$(dpkg-query -W -f='${Status}' $p 2>/dev/null)\" = 'install ok installed' ] || return 1; done; }\n"
+	// lbPkgGateHAProxy and lbPkgGateKeepalived open an apply: it answers lbBusyExit, before anything is touched,
+	// while dpkg is at work on the package the apply's service comes from. It is the question the ready check asked
+	// a moment ago (lbReadyScript), asked again by the command that makes the change, so that the two are not
+	// seconds apart.
+	lbPkgGateHAProxy    = lbPkgSettledFn + "pkgsettled haproxy || exit " + lbBusyExitText + "\n"
+	lbPkgGateKeepalived = lbPkgSettledFn + "pkgsettled keepalived || exit " + lbBusyExitText + "\n"
 )
 
-// lbReadyScript answers 0 when an appliance can take a config: dpkg has every package installed and configured,
-// no apt or dpkg runs, and the units exist. That the binaries exist is not enough: they do from the moment apt
-// unpacks them, while dpkg still configures the package and starts its service (drill N2-2).
+// lbReadyScript answers 0 when an appliance can take a config: dpkg has every package installed and configured, and
+// the units exist. That the binaries exist is not enough: they do from the moment apt unpacks them, while dpkg
+// still configures the package and starts its service (drill N2-2).
+//
+// "Installed" is asked before "the package manager runs", and an installed appliance is ready while it does: a
+// config check, a swap and a reload need nothing of apt or dpkg. Asked the other way round, every run of the image's
+// own apt timers held every change (drill R3-F1 and R2b-1 of v0.11.1-rc.2: Ubuntu's apt-daily and apt-daily-upgrade
+// ran 2 to 6.5 minutes on each appliance, minutes after its first boot and then every day; a tenant's change
+// answered 200 was not served for 3 min 28 s).
+//
+// What a running dpkg can do to a swap: nothing, unless the package it is at work on is one of the appliance's own.
+// An upgrade of haproxy or keepalived (unattended-upgrades) unpacks the new binary and then restarts the service
+// from the package's postinst; a reload in between would run the new binary under the old master, and a swap that
+// meets the restart cannot prove what is served. dpkg says so itself: from the unpack to the end of the postinst the
+// package's status is not "install ok installed". That one case answers lbBusyExit and waits; it lasts seconds. The
+// same answer covers the first install (nothing installed yet, apt at work), where no second apt is started.
+// Without a package manager at work a package that is not installed is installed (the answer 1).
 func lbReadyScript(packages, units string) string {
-	return "pgrep -x 'apt-get|apt|dpkg' >/dev/null && exit " + strconv.Itoa(lbBusyExit) + "\n" +
-		"for p in " + packages + "; do [ \"$(dpkg-query -W -f='${Status}' $p 2>/dev/null)\" = 'install ok installed' ] || exit 1; done\n" +
-		"command -v ss >/dev/null && systemctl cat " + units + " >/dev/null 2>&1"
+	return lbPkgSettledFn +
+		"pkgsettled " + packages + " && command -v ss >/dev/null && systemctl cat " + units + " >/dev/null 2>&1 && exit 0\n" +
+		"pgrep -x 'apt-get|apt|dpkg' >/dev/null && exit " + strconv.Itoa(lbBusyExit) + "\nexit 1"
 }
 
 var haproxyReady = lbReadyScript("haproxy socat", "haproxy.service")
@@ -819,12 +871,12 @@ func (s *Service) lbReady(ctx context.Context, node string, vmid int, ready, ins
 	case 0:
 		return nil
 	case lbBusyExit:
-		return fmt.Errorf("%w: its package manager is running", ErrLBNotReady)
+		return ErrLBPackageBusy
 	}
 	if _, err := s.C.GuestStart(ctx, node, vmid, "sh", "-c", install); err != nil {
 		return fmt.Errorf("%w: %v", ErrLBNotReady, err)
 	}
-	return ErrLBNotReady
+	return ErrLBInstalling
 }
 
 // swapHAProxy writes the certificate files config names (certs), then config, and makes HAProxy run it. The files
@@ -837,10 +889,12 @@ func (s *Service) swapHAProxy(ctx context.Context, node string, vmid int, config
 		return err
 	}
 	exit, _, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", haproxyReload)
-	if err != nil {
+	switch {
+	case err != nil:
 		return err
-	}
-	if exit != 0 {
+	case exit == lbBusyExit: // dpkg is at work on HAProxy's own package: nothing changed, or the old file is back
+		return ErrLBPackageBusy
+	case exit != 0:
 		return fmt.Errorf("HAProxy did not take the change, the last config stays in use: %s", strings.TrimSpace(stderr))
 	}
 	return nil
