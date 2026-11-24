@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **From v0.11.1-rc.2, a pair with a UDP listener gets two files and one reload of its UDP service on each
+  appliance; every other balancer gets nothing.** This is what the change "a changed UDP connection limit is
+  applied, and UDP changes are taken quicker" does to a balancer that exists.
+  - *A balancer without a UDP listener* (a tenant's pair or single VM, a cluster's pair with TCP Services only): no
+    file is written and nothing is reloaded. Its HAProxy config, `keepalived.conf` and keepalived's support files
+    are the same to the byte, and nothing of the UDP service is on it.
+  - *A pair with a UDP listener*, a tenant's or a cluster's, at its first pass after the upgrade (a cluster's
+    controller's next request, the provider sync, or the next change), the standby first and then the appliance that
+    holds the address. **Written:** `/etc/keepalived/lvs.conf`, which gains one line, `warmup 0`, in every virtual
+    server that has a health check, and the new `/etc/systemd/system/proxcloud-lvs.service.d/nftables.conf`. **Not
+    written:** `lvs.nft`, `lvs.sysctl`, `proxcloud-lvs-net` and `proxcloud-lvs.service`, which are the same to the
+    byte and are no longer written when they are. **Reloaded:** systemd's unit files (`daemon-reload`, for the
+    drop-in) and `proxcloud-lvs.service`, once: its script loads the nftables table again in one transaction and
+    keepalived's check process reads the config again. Members that are up stay in the kernel's table through it
+    (measured on both images: 3 of 3 at every sample), no connection entry is dropped, the unit is **not**
+    restarted, and HAProxy and the VRRP keepalived are not touched, so no address moves.
+  - *The same push puts the kernel's connection limits right.* A UDP listener whose `connectionLimit` was added,
+    changed or removed while its members were in the table has had the old figure in the kernel since (R3-F2
+    below). At this push each member gets the limit the listener shows: a limit that was never enforced is
+    enforced from then on, and a removed one stops refusing flows. A listener whose limit never changed is not
+    edited.
+  - *nftables.service.* The drop-in does nothing at the upgrade. From then on a restart or a stop of
+    `nftables.service` on such an appliance restarts or stops its UDP service with it, forwarding off first; UDP
+    on that appliance is unanswered for the second or two until the members have passed a first check again.
+  - No row gets a new field. A portal rolled back to v0.11.1-rc.2 writes its own `lvs.conf` back at its first pass
+    (all five files, one reload); the drop-in stays on the appliance, where that portal neither sums nor removes
+    it, and keeps doing what it does.
 - **From v0.11.1-rc.2: the upgrade pushes no file to a load balancer and reloads none because of the change "a
   load balancer takes a change while the image's package manager runs".** Nothing an appliance holds changed: the
   HAProxy config the platform renders, `keepalived.conf`, keepalived's track and notify scripts, the sysctl file,
@@ -529,6 +556,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A changed connection limit of a UDP listener reaches the kernel.** A `connectionLimit` added to, raised on or
+  removed from a UDP listener that already served was written to `lvs.conf` on both appliances, the row read
+  `ACTIVE`, and the kernel kept the figure of before: keepalived 2.3.x rewrites a member at a reload only when its
+  weight changed. On the lab a limit of 5 that was added limited nothing (40 of 40 flows answered), a raise to 50
+  left 5, and after its removal 20 of 30 new flows got no answer. The UDP apply now compares the kernel's table
+  with the file after the reload and edits what differs with `ipvsadm`, which keeps every flow; and the state read
+  compares each member's limit and weight and each listener's algorithm and persistence timeout with the file, so
+  a table that differs is "not served" and is pushed again, not `ACTIVE`. Weight, algorithm and persistence were
+  checked for the same fault on both images: keepalived writes those itself. Run in real guests of Debian 13 and
+  Ubuntu 26.04 on the CI runner's kernel; not run on a lab.
+- **A UDP change is live sooner.** On the lab a change was live after 14 to 44 s where the plan aims at 15 s: a UDP
+  port added with a TCP port answered after 33 s, changes that followed each other after up to 44 s. Four waits
+  are gone. A push of the UDP service writes the files that differ, which for a member change is one where it was
+  five. A new member's first check is made at once: it waited a random time of up to the check interval, 4 to 6 s
+  measured, and is now in the table 0.6 to 0.8 s after the push that names it; one whose port is closed still
+  never enters. On each appliance HAProxy's push and the UDP push are made at once, and the two appliances are
+  read at once; the standby still takes every change before the appliance that holds the address. And a Service
+  change that arrives while the portal is at the last pass of a converge starts the next converge when that one
+  ends, where it waited for the controller's next send. Counted without a lab: guest calls and file writes of a
+  change. The times are the lab's to show: HAProxy's own reload, 4 to 5 s on each appliance there, is unchanged.
+- **A replace does not move the address to an appliance without UDP members.** The new appliance took the address
+  as soon as its UDP service held the listeners, before a member had passed a first check: UDP was lost for 2.4 s
+  where TCP was lost for 0.8 s, and one port had no member for 5.2 s. The planned switch now waits until the
+  appliance that takes the address holds every UDP member the other one holds, 30 s at most, after which it
+  switches all the same and the API log says so. Tested against the fake pair; not run on a lab.
+- **A restart of nftables.service does not leave an appliance forwarding without its filter.** `nftables.service`
+  empties the whole ruleset, and with it the table that lets an appliance with a UDP listener forward only the
+  answers of its own flows; forwarding stayed on until the next pass put the table back. The UDP unit is now part
+  of `nftables.service`: it stops before it, forwarding off first, and starts after it with the table loaded
+  before forwarding; a reload of `nftables.service` is followed by the unit's own. A start of a stopped
+  `nftables.service` by hand is still seen by the next pass only. Run in real guests of both images.
 - **A load balancer takes a change while the image's package manager runs.** An appliance answered "busy" to every
   change whenever a process named `apt-get`, `apt` or `dpkg` ran in it, also long after its own packages were
   installed, and Ubuntu's own timers run on every appliance: on the lab 4 to 7 minutes after first boot, for 2 to
