@@ -233,6 +233,8 @@ func (g *certGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.Contains(cmd, "is not a directory of root alone"):
 			what = "certificate directory"
+		case strings.Contains(cmd, "a certificate file could not be made root's alone"):
+			what = "certificate prepare " + strings.Join(r.Form["command"][4:], ",")
 		case strings.Contains(cmd, "a certificate file is not root's alone"):
 			what = "certificate install " + strings.Join(r.Form["command"][4:], ",")
 		case strings.Contains(cmd, "command -v ss"):
@@ -295,8 +297,8 @@ func TestCertificatesReachAnApplianceBeforeItsConfig(t *testing.T) {
 	if _, err := ps.PushPairHAProxy(ctx, "n1", 100, "config", certs...); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"ready", "certificate directory", "write /etc/haproxy/certs/" + a + ".pem.new", "write /etc/haproxy/certs/" + b + ".pem.new",
-		"certificate install " + a + "," + b, "write /etc/haproxy/haproxy.cfg.new", "reload"}
+	want := []string{"ready", "certificate directory", "certificate prepare " + a + "," + b, "write /etc/haproxy/certs/" + a + ".pem.new",
+		"write /etc/haproxy/certs/" + b + ".pem.new", "certificate install " + a + "," + b, "write /etc/haproxy/haproxy.cfg.new", "reload"}
 	if !slices.Equal(g.log, want) {
 		t.Errorf("order of a push:\n%s\nwant\n%s", strings.Join(g.log, "\n"), strings.Join(want, "\n"))
 	}
@@ -305,7 +307,7 @@ func TestCertificatesReachAnApplianceBeforeItsConfig(t *testing.T) {
 	}
 	// A single appliance: the same order.
 	g, ps = guest()
-	if _, err := ps.PushHAProxy(ctx, "n1", 100, "config", certs[:1]...); err != nil || !slices.Equal(g.log, []string{"ready", "certificate directory",
+	if _, err := ps.PushHAProxy(ctx, "n1", 100, "config", certs[:1]...); err != nil || !slices.Equal(g.log, []string{"ready", "certificate directory", "certificate prepare " + a,
 		"write /etc/haproxy/certs/" + a + ".pem.new", "certificate install " + a, "write /etc/haproxy/haproxy.cfg.new", "reload"}) {
 		t.Errorf("single appliance: %v\n%s", err, strings.Join(g.log, "\n"))
 	}
@@ -377,8 +379,13 @@ func TestPushWritesOnlyTheCertificateFilesThatDiffer(t *testing.T) {
 		want := []string{"ready", "certificate directory"}
 		var names []string
 		for _, c := range written {
-			want = append(want, "write "+path(c)+".new")
 			names = append(names, c.Name)
+		}
+		if len(written) > 0 { // each file is made, empty and with mode 0600, before the agent writes into it
+			want = append(want, "certificate prepare "+strings.Join(names, ","))
+		}
+		for _, c := range written {
+			want = append(want, "write "+path(c)+".new")
 		}
 		if len(written) > 0 {
 			want = append(want, "certificate install "+strings.Join(names, ","))

@@ -145,6 +145,12 @@ func TestLBApplianceTLS(t *testing.T) {
 				return strings.Join(append(lines, "dir 700:root:root:directory"), "\n")
 			}
 
+			// A watcher on the mode of every file a push writes into the certificate directory, as fast as the guest
+			// runs it, for the whole test: a file that holds a key never has a mode wider than 0600, not for the moment
+			// between the agent's write and the chmod either (drill R3-o4 of v0.11.1-rc.2: the agent created it 0666).
+			g.run(ctx, `printf '%s\n' 'while :; do stat -c "%a %n" /etc/haproxy/certs/*.new 2>/dev/null | grep -v "^600 " >> /root/cert-modes; done' > /root/cert-watch.sh
+: > /root/cert-modes; systemd-run --quiet --unit=cert-watch sh /root/cert-watch.sh`)
+
 			// 1. The first push, through the product's own install: the directory and the files before the config.
 			config := pve.RenderHAProxy(spec(fileA))
 			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(time.Second) {
@@ -155,6 +161,17 @@ func TestLBApplianceTLS(t *testing.T) {
 				if !errors.Is(err, pve.ErrLBNotReady) || time.Now().After(deadline) {
 					t.Fatalf("first push: %v", err)
 				}
+			}
+			// The control: a file the agent creates in that directory by itself, as every certificate file was
+			// created until v0.11.1-rc.2, is 0666 and the watcher sees it. It is all the watcher has seen: the two
+			// files of the first push were never wider than 0600.
+			const control = "/etc/haproxy/certs/control.pem.new"
+			if err := ps.C.GuestWriteFile(ctx, "n1", 100, control, "x"); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(300 * time.Millisecond)
+			if got := g.run(ctx, "rm -f "+control+"; sort -u /root/cert-modes"); got != "666 "+control {
+				t.Fatalf("the watcher after the first push and the control saw %q, want the control's file alone, with mode 666", got)
 			}
 			t.Log(g.run(ctx, "haproxy -v | head -n1; openssl version"))
 			// The members come up after HAProxy (socat came with the product's install): wait for their checks.
@@ -631,6 +648,11 @@ func TestLBApplianceTLS(t *testing.T) {
 			}
 			if got := keyFiles(); got != "" {
 				t.Errorf("files of the guest that still hold a key after the last TLS listener went:\n%s", got)
+			}
+			// Over every push of this test, rotations and repairs included, the watcher saw no file of a push with
+			// a mode wider than 0600 but the control's.
+			if got := g.run(ctx, "systemctl stop cert-watch; sort -u /root/cert-modes"); got != "666 /etc/haproxy/certs/control.pem.new" {
+				t.Errorf("a certificate file had a mode wider than 0600 while it was written:\n%s", got)
 			}
 		})
 	}

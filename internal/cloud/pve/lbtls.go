@@ -254,8 +254,24 @@ chmod 0700 $D
 [ "$(stat -c %a:%U:%G:%F $D)" = "700:root:root:directory" ] || { echo "$D is not a directory of root alone" >&2; exit 1; }
 rm -f $D/*.new
 certstate`
+	// lbCertPrepareScript makes each file the push is about to write, empty, root's alone and with mode 0600, and
+	// proves it, before a byte of a key is in it. The guest agent gives mode 0666 to a file it creates and leaves
+	// the mode of one that exists (qemu-ga's guest-file-open: it creates with O_EXCL and sets the mode then, and
+	// only opens a file that is there; measured in the spike of v0.11.1, "an overwrite keeps 0600", and held on a
+	// real guest's file system by the watcher of test/integration/lb_tls_test.go). Until v0.11.1-rc.2 the agent
+	// created the file and the chmod came a command later: a key was in a 0666 file for that moment, behind the
+	// 0700 directory alone (drill R3-o4). Its arguments are the names.
+	lbCertPrepareScript = `set -e
+umask 077
+D=` + lbCertDir + `
+for n in "$@"; do
+  rm -f $D/$n.pem.new
+  : > $D/$n.pem.new
+  [ "$(stat -c %a:%U:%G $D/$n.pem.new)" = 600:root:root ] || { echo "a certificate file could not be made root's alone" >&2; exit 1; }
+done`
 	// lbCertInstallScript gives each file written as <name>.pem.new to root with mode 0600, proves it, and moves it
-	// in place. Its arguments are the names.
+	// in place. Its arguments are the names. The chown and chmod change nothing on a file that is as it was made
+	// (lbCertPrepareScript); they stay for a guest agent that would not leave a file's mode alone.
 	lbCertInstallScript = `set -e
 D=` + lbCertDir + `
 for n in "$@"; do
@@ -316,8 +332,9 @@ func lbCertFaults(out string, certs []LBCertFile) (stale []LBCertFile, why strin
 // made and proven private, then each file the appliance does not hold as the portal would write it (missing,
 // other bytes, another mode or owner: the directory's command says what is there) under a temporary name inside
 // it, then mode, owner and the move in place. A file that is there already, byte for byte and root's alone, is not
-// written again: a write is one call through the guest agent, about 0.6 s, inside the tenant's own request. written
-// is how many files the push wrote.
+// written again: a write is one call through the guest agent, about 0.6 s, inside the tenant's own request. A file
+// that is written is made first, empty and with mode 0600 (lbCertPrepareScript): the agent's write fills it and
+// leaves its mode. written is how many files the push wrote.
 func (s *Service) pushCertificates(ctx context.Context, node string, vmid int, certs []LBCertFile) (written int, err error) {
 	if len(certs) == 0 {
 		return 0, nil
@@ -340,10 +357,19 @@ func (s *Service) pushCertificates(ctx context.Context, node string, vmid int, c
 	}
 	names := make([]string, len(stale))
 	for i, c := range stale {
+		names[i] = c.Name
+	}
+	exit, _, stderr, err = s.C.GuestRun(ctx, node, vmid, guestTimeout, append([]string{"sh", "-c", lbCertPrepareScript, "sh"}, names...)...)
+	if err != nil {
+		return 0, err
+	}
+	if exit != 0 {
+		return 0, fmt.Errorf("the certificate files could not be made private, nothing was written: %s", strings.TrimSpace(stderr))
+	}
+	for _, c := range stale {
 		if err := s.C.GuestWriteFile(ctx, node, vmid, lbCertDir+"/"+c.Name+".pem.new", c.PEM); err != nil {
 			return 0, fmt.Errorf("write certificate file %s: %w", c.Name[:12], err)
 		}
-		names[i] = c.Name
 	}
 	exit, _, stderr, err = s.C.GuestRun(ctx, node, vmid, guestTimeout, append([]string{"sh", "-c", lbCertInstallScript, "sh"}, names...)...)
 	if err != nil {
