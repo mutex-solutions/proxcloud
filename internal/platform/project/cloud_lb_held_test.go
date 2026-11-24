@@ -192,12 +192,24 @@ func TestLBRetryIsBoundedAndSingle(t *testing.T) {
 		t.Fatalf("the retries of %s did not end", key)
 	}
 	var passes atomic.Int32
-	still := func(context.Context) bool { passes.Add(1); return true }
+	var bound atomic.Bool
+	still := func(ctx context.Context) bool {
+		if _, has := ctx.Deadline(); has {
+			bound.Store(true)
+		}
+		passes.Add(1)
+		return true
+	}
 	h.lbRetry("lb-a", still)
 	h.lbRetry("lb-a", still) // one loop per balancer
 	idle("lb-a")
 	if got := passes.Load(); got != 3 {
 		t.Fatalf("a change that keeps waiting was tried %d times, want %d", got, 3)
+	}
+	// A cluster's pass may build an appliance, which takes longer than any bound a retry would set, and a build that
+	// is cut off cannot remove its VM: the retry's pass has no deadline, as the sync's and the controller's have none.
+	if bound.Load() {
+		t.Fatal("a retry's pass was given a deadline")
 	}
 	passes.Store(0)
 	h.lbRetry("lb-a", func(context.Context) bool { return passes.Add(1) < 2 })

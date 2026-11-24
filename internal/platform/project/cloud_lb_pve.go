@@ -485,6 +485,9 @@ func (h *Handler) pveLBApply(ctx context.Context, es *externalservice.ExternalSe
 	status, waiting, err := h.lbApplyOnce(ctx, es, proj, externalID)
 	if waiting {
 		h.lbRetry(externalID, func(ctx context.Context) bool {
+			// It builds nothing, so it is bound as an apply's lock is.
+			ctx, cancel := context.WithTimeout(ctx, lbLockMaxFor)
+			defer cancel()
 			// A project suspended or deleted meanwhile: the sync's reconcile takes over after the resume.
 			if h.svc != nil {
 				if cur, err := h.svc.GetProjectByID(ctx, proj.ID); err != nil || cur.Deleting() || cur.Status != StatusEnabled {

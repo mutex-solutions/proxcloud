@@ -766,6 +766,10 @@ func lbHoldWindow() time.Duration { return time.Duration(lbRetryTries-1) * lbRet
 // lbRetry queues the platform's own retries of a balancer's apply, by key one loop at a time: pass runs the apply
 // and says whether a change still waits. It ends with the first pass that leaves nothing waiting, after lbRetryTries
 // of them, or with the process; the services sync stays the backstop, as for everything else a pass leaves.
+//
+// A pass gets a context with no deadline, as the passes of the sync and of the controller's sends have: a cluster's
+// pass may build an appliance (lbClusterBuild, up to lbBuildTimeout), and a build a deadline cuts off cannot remove
+// the VM it made, since the removal runs on the same context. A pass that wants a bound sets its own (pveLBApply).
 func (h *Handler) lbRetry(key string, pass func(ctx context.Context) (waiting bool)) {
 	if _, running := h.lbRetries.LoadOrStore(key, struct{}{}); running {
 		return
@@ -774,10 +778,7 @@ func (h *Handler) lbRetry(key string, pass func(ctx context.Context) (waiting bo
 		defer h.lbRetries.Delete(key)
 		for range lbRetryTries {
 			time.Sleep(lbRetryEvery)
-			ctx, cancel := context.WithTimeout(context.Background(), lbLockMaxFor)
-			waiting := pass(ctx)
-			cancel()
-			if !waiting {
+			if !pass(context.Background()) {
 				return
 			}
 		}
