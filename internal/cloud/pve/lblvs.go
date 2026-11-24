@@ -21,6 +21,13 @@ package pve
 // in no sysctl.d file, where the boot would set it long before the table exists, and it goes off when the unit
 // stops or fails to start.
 //
+// A datagram for an address the appliance holds that IPVS does not take (no virtual server for its port: the listener
+// is not there yet, the unit is starting, the address came before its listener) is dropped in the input chain, after
+// IPVS and before its connection entry is confirmed. Delivered, it left a confirmed entry without the masquerade,
+// which is decided once per tracked flow and which every later datagram of that flow refreshed: a client that kept
+// sending from one port was never answered once its listener was there, since the member's answer went to the
+// client's address by the tenant gateway (lab finding T2-F1 of v0.11.1-rc.3: 0 of 2584 datagrams in 8 minutes).
+//
 // Nothing here reaches an appliance of a pair without a UDP listener: RenderLVS answers "" for it, and the caller
 // then writes no file, installs no package and asks the guest nothing.
 
@@ -49,6 +56,7 @@ const (
 	// (spike, nft 1.1.6: "unexpected fwd, expecting string").
 	lvsTable   = "ip proxcloud-lb"
 	lvsForward = "lb-forward"
+	lvsInput   = "lb-input"
 	// lvsConntrackMax is the least the connection table holds once UDP flows are tracked (the upstream reference
 	// sizes it too). A larger value of the image's stays.
 	lvsConntrackMax = 262144
@@ -76,7 +84,8 @@ func lvsKey(a netip.Addr, port int) string {
 // lvsServers lists what the LVS config serves, for the renderer and for the health read alike: every UDP listener
 // with a UDP pool that has a member, on its own address (a Service's) or on each of the balancer's. It works from a
 // stored row, so anything a validation would have caught is left out. A listener without a member gets no virtual
-// server: keepalived takes none without a real server, and the appliance then answers "port unreachable" itself.
+// server: keepalived takes none without a real server, and a datagram for it is dropped as one for a port without a
+// listener is (the input chain of lvsFiles).
 func lvsServers(s LBSpec, vips []string) []lvsServer {
 	var binds []netip.Addr
 	for _, v := range vips {
@@ -246,6 +255,22 @@ func lvsFiles(tenantIface string) [][2]string {
 	return [][2]string{
 		// One statement a line: nft refuses a one-line chain without a semicolon before its brace (spike). The first
 		// two lines make the load replace the table in one transaction.
+		//
+		// lb-input: no connection entry for a datagram IPVS did not take (the file's header). IPVS takes its own in
+		// the same hook at priority 98 and 99 and steals them, so the chain at 150 sees only what it left: a first
+		// datagram ("new": no answer was seen yet) from outside, to this host. The drop comes before the entry is
+		// confirmed (the hook's last step), so the entry is never made, and the first datagram after the virtual
+		// server is there is tracked afresh and masqueraded. Real guests of both images: a one-socket sender that
+		// began before its virtual server was unanswered for 62 s and more without the chain, and answered by the
+		// first datagram with it; a flow on another listener lost nothing.
+		// Weighed against it there: a set of the listeners' address and port with "notrack", or a drop, for what is
+		// not in it works only if the set follows the kernel's table and not the config (a port in the set before
+		// its virtual server exists is the same defect: 0 answered), and costs the flows of a starting unit a
+		// datagram or two; removing the entries needs conntrack(8), which neither image has.
+		// A drop and no reject: it needs no kernel module the table did not load before.
+		// ponytail: the appliance itself hears no UDP that was not asked for (nothing on it listens for any: DNS
+		// and NTP are answers, VRRP is no UDP), and a client gets no "port unreachable" for a port without a
+		// listener. Give the chain a set of ports to let through if an appliance ever runs a UDP service of its own.
 		{lvsNft, "table " + lvsTable + "\ndelete table " + lvsTable + "\ntable " + lvsTable + ` {
   chain lb-prerouting {
     type filter hook prerouting priority -300;
@@ -258,6 +283,10 @@ func lvsFiles(tenantIface string) [][2]string {
   chain lb-masquerade {
     type nat hook postrouting priority 100;
     oifname "` + tenantIface + `" meta l4proto udp counter masquerade
+  }
+  chain ` + lvsInput + ` {
+    type filter hook input priority 150;
+    iifname != "lo" meta pkttype host meta l4proto udp ct state new counter drop
   }
   chain ` + lvsForward + ` {
     type filter hook forward priority 0; policy drop;
@@ -395,7 +424,9 @@ const (
 	//
 	// It answers 1 for a service that does not serve a listener, and 2 for one that serves them all with a figure
 	// the config has differently: that appliance answers UDP, with the limit of before a change, and the state read
-	// says so apart (VRRPState.LVSDiffers), since "not served" puts an appliance down in the row.
+	// says so apart (VRRPState.LVSDiffers), since "not served" puts an appliance down in the row. 2 as well for a
+	// table without the input chain's drop (lvsFiles): the table of a release before, or one changed by hand. It
+	// serves, and a client that sends before its listener is there is not answered; the pass loads the file again.
 	lvsServingFn = lvsDriftFn + `lvsserving() (
   systemctl is-active -q ` + lvsService + ` || { echo "the UDP service is not running"; return 1; }
   [ "$(cat /proc/sys/net/ipv4/vs/conntrack 2>/dev/null)" = 1 ] && [ "$(cat /proc/sys/net/ipv4/vs/snat_reroute 2>/dev/null)" = 1 ] || { echo "IPVS does not track and reroute its connections"; return 1; }
@@ -405,6 +436,7 @@ const (
   for v in $(awk '$1=="virtual_server"{split($2,a,"."); printf "%02X%02X%02X%02X:%04X/%s:%s\n",a[1],a[2],a[3],a[4],$3,$2,$3}' ` + lvsConfig + `); do
     echo "$have" | grep -qxF -e "${v%%/*}" || { echo "the UDP listener ${v#*/} is not in the IPVS table"; return 1; }
   done
+  nft list chain ` + lvsTable + ` ` + lvsInput + ` 2>/dev/null | grep -q 'ct state new .*drop' || { echo "the nftables table is not the one of the UDP service's file"; return 2; }
   [ -z "$(lvsdrift)" ] || { echo "the IPVS table does not hold a connection limit, a weight, an algorithm or a persistence as the UDP configuration has it"; return 2; }
 )
 `

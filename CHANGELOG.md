@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **From v0.11.1-rc.3, a pair with a UDP listener gets one file and one reload of its UDP service on each
+  appliance; every other balancer gets nothing.** This is what the fix "a UDP client that was sending before its
+  listener existed is answered" does to a balancer that exists.
+  - *A balancer without a UDP listener* (a tenant's pair or single VM, a cluster's pair with TCP Services only): no
+    file is written and nothing is reloaded.
+  - *A pair with a UDP listener*, a tenant's or a cluster's, at its first pass after the upgrade (a cluster's
+    controller's next request, the services sync, or the next change), the standby first and then the appliance that
+    holds the address. **Written:** `/etc/proxcloud-lb/lvs.nft`, which gains the chain `lb-input`. **Not written:**
+    `lvs.conf`, `lvs.sysctl`, `proxcloud-lvs-net`, `proxcloud-lvs.service` and its drop-in, which are the same to
+    the byte. **Reloaded:** `proxcloud-lvs.service`, once: its script loads the nftables table again in one
+    transaction, the new table in place of the old, so there is **no moment without the table** or without the
+    forward chain's drop, and keepalived's check process reads its config again. Members that are up stay in the
+    kernel's table, no connection entry is dropped (in real guests of both images a client that sent five datagrams
+    a second from one socket lost none across the reload), the unit is **not** restarted, systemd is not reloaded,
+    no package is installed, and HAProxy and the VRRP keepalived are not touched, so no address moves. Until that
+    pass the appliance serves as it did before the upgrade.
+  - *On the wire, from that reload on.* A UDP datagram to an address of such a balancer for a port that has no
+    UDP listener, or whose listener's pool has no server at all, is dropped: **the client gets no ICMP "port
+    unreachable" for it any more** (a UDP traceroute to the address ends without its last hop). A listener whose
+    servers are all down answers "port unreachable" as before, and TCP and ping are as before.
+  - *A client that is caught at that moment stays caught.* The chain keeps a caught flow from being made and frees
+    none: a client that was already unanswered before the upgrade is answered once it was silent for more than
+    30 s, as before, and is not caught again.
+  - No row gets a new field. A portal rolled back to v0.11.1-rc.3 writes its own `lvs.nft` back at its first pass
+    (one file, one reload).
 - **From v0.11.1-rc.2, a pair with a UDP listener gets two files and one reload of its UDP service on each
   appliance; every other balancer gets nothing.** This is what the change "a changed UDP connection limit is
   applied, and UDP changes are taken quicker" does to a balancer that exists.
@@ -567,6 +592,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A UDP client that was sending before its listener existed is answered.** On an appliance pair a UDP client
+  that was already sending from one source port when the listener for its port was added got no answer for as long
+  as it kept sending (lab drill of v0.11.1-rc.3, finding T2-F1: 0 of 2584 datagrams in the 8 minutes after the
+  listener was live; answered again only after more than 30 s of silence). The balancer read `ACTIVE`, its members
+  `UP`, and a new client was answered, so nothing showed it. It held for every client that sends from one port and
+  is never silent for 30 s (a syslog, flow or metrics exporter, a VPN peer), in three ways: a UDP listener or a
+  Service port added while clients send, a restart of `nftables.service` on the appliance that holds the address,
+  and a UDP Service made again on a kept address, which is on the appliance some seconds before its listener.
+  - *Cause.* A datagram that reached the address before its virtual server existed was tracked as a flow without
+    the source rewrite the UDP path needs, and every later datagram of that flow refreshed the entry: once the
+    listener was there, the server got the client's own address as the source and sent its answer by the tenant
+    gateway, where it was lost.
+  - *Fix.* The appliance's nftables table has one more chain, `lb-input`, in the input hook after IPVS: a first
+    UDP datagram from outside that IPVS did not take is dropped there before its connection entry is confirmed, so
+    no such flow is made, and the first datagram after the listener is served is answered. The kernel's own table
+    decides, so nothing has to follow the listeners, and no package is added.
+  - *Measured* in real guests of Debian 13 and Ubuntu 26.04 with a client that sends five datagrams a second from
+    one socket: without the chain, 0 answers in 62 s; with it, the first answer 0.6 to 0.8 s after the push that
+    added the listener, 0.0 to 0.2 s after the members were back in the table at a restart of `nftables.service`,
+    and 0.7 to 0.8 s after the push for an address that came 7 s before its listener. A client of a listener that
+    was there first lost nothing when the listener was added, at a reload of the UDP service, at a member's weight
+    change and when the second address came.
+  - *Weighed and left out.* A set of the listeners' ports that keeps other UDP untracked: it fails in the same way
+    when a port enters the set before its virtual server exists, which is the order of a push and of a start, and
+    otherwise costs a starting service's flows a datagram or two. Removing the entries with `conntrack`: it works
+    and needs a package neither image has, on every existing appliance.
+  - The state read notices a table without the chain (the one of a release before, or one changed by hand): such
+    an appliance reads up with a change to load, and the pass loads the file again.
+  - *Not changed, said plainly.* The chain frees no client that is caught already (upgrade notes). A UDP datagram
+    for a port without a listener gets no "port unreachable" any more (upgrade notes). Nothing of this ran on a
+    lab yet: the lab re-drill is to show it on an appliance VM with the image's own kernel.
 - **A changed connection limit of a UDP listener reaches the kernel.** A `connectionLimit` added to, raised on or
   removed from a UDP listener that already served was written to `lvs.conf` on both appliances, the row read
   `ACTIVE`, and the kernel kept the figure of before: keepalived 2.3.x rewrites a member at a reload only when its

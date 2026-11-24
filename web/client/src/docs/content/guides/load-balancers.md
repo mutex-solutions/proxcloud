@@ -96,7 +96,8 @@ A load balancer with high availability also takes **UDP** listeners; one that ru
 - **Spreading traffic** works as for TCP: round robin, least connections or by source address, with the servers' weights. **Session persistence** by source address keeps a client address on one server until it has been silent for the time you set (three hours when empty).
 - A UDP listener's **connection limit** counts per server, not for the listener as a whole: with a limit of 1000 and three servers, up to 3000 clients are served at a time. It has no idle timeout, and a UDP pool has no connect or server timeout.
 - **After a failover** of the load balancer the other appliance spreads the clients afresh, so a client may reach another server than before. With traffic spread by source address it is the same server as long as both appliances see the same servers up.
-- A UDP listener whose pool has no server that can take traffic answers "port unreachable".
+- A UDP listener whose servers are all down answers "port unreachable". A datagram for a UDP port without a listener, or for a listener whose pool has no server at all, gets no answer.
+- **A client may send before its listener exists.** A client that already sends to the address when you add the UDP listener for its port is answered from its next datagram on.
 
 ### Checking UDP servers
 

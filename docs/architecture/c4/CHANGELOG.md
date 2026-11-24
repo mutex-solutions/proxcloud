@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-25: a UDP client that was sending before its listener existed is answered (lab drill of v0.11.1-rc.3)
+
+**What changed:** no new component, container, listener, route or relation, and no new file on an appliance. The
+nftables table of an appliance with a UDP listener holds one more chain.
+
+- `internal/cloud/pve/lblvs.go`: `lvsFiles` writes the chain `lb-input` into `lvs.nft` (input hook, priority 150,
+  after IPVS: a first UDP datagram from outside to this host that IPVS did not take is dropped before its
+  connection entry is confirmed). `lvsServingFn` reads the chain back and answers 2 (`VRRPState.LVSDiffers`) for a
+  table without it, so a pass loads the file again.
+- `test/integration/lb_udp_before_listener_test.go`: the real-guest test of the three ways in, with its control.
+
+**Why:** lab finding T2-F1 of the drill of v0.11.1-rc.3. A datagram that met the address before its virtual server
+existed left a connection entry without the masquerade, every later datagram of the flow refreshed it, and the
+member's answer went to the client's address by the tenant gateway: a client sending from one port got 0 answers of
+2584 datagrams in 8 minutes after its listener was added, while the balancer read `ACTIVE`. The designs weighed and
+what each showed in real guests are in `docs/cloud-integration.md` ("What the drill of v0.11.1-rc.3 found about
+UDP").
+
+**Diagrams updated:** `c4-code.md`, the row of `RenderLVS` / `lvsFiles`. C1 to C3 are unchanged.
+
 ## 2026-11-24: a changed UDP connection limit is applied, and UDP changes are taken quicker (drill of v0.11.1-rc.2)
 
 **What changed:** no new component, container, listener, route or relation. An appliance with a UDP listener holds

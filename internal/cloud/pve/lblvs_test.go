@@ -324,6 +324,8 @@ func TestLVSFiles(t *testing.T) {
 		"    type filter hook forward priority 0; policy drop;\n    ct state established,related counter accept\n",
 		"    type filter hook prerouting priority -300;\n    meta l4proto tcp notrack\n",
 		"    type filter hook output priority -300;\n    meta l4proto tcp notrack\n",
+		// After IPVS (98, 99) and before the entry is confirmed: no connection entry for a datagram IPVS did not take.
+		"  chain lb-input {\n    type filter hook input priority 150;\n    iifname != \"lo\" meta pkttype host meta l4proto udp ct state new counter drop\n  }\n",
 	} {
 		if !strings.Contains(nft, want) {
 			t.Errorf("lvs.nft lacks %q:\n%s", want, nft)

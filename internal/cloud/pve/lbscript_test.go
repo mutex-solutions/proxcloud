@@ -53,6 +53,15 @@ func holder(g *lbguesttest.Guest) {
 	g.Listen("203.0.113.10:80", "203.0.113.10:443")
 }
 
+// nftListed is what the nft stub prints for every call: the product's table as nft lists the two chains the state
+// read looks at. nftListedBefore is the table of the releases before the input chain (v0.11.1-rc.1 to rc.3).
+const (
+	nftListedBefore = "table ip proxcloud-lb {\n\tchain lb-forward {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n"
+	nftListed       = "table ip proxcloud-lb {\n\tchain lb-input {\n\t\ttype filter hook input priority 150; policy accept;\n" +
+		"\t\tiifname != \"lo\" meta pkttype host meta l4proto udp ct state new counter packets 7 bytes 203 drop\n\t}\n" +
+		"\tchain lb-forward {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n"
+)
+
 // udp gives the guest the UDP service as PushLVS leaves it, with these virtual servers ("203.0.113.10 53").
 func udp(g *lbguesttest.Guest, servers ...string) {
 	conf, table := "instance lvs\n", "IP Virtual Server version 1.2.1 (size=4096)\nProt LocalAddress:Port Scheduler Flags\n"
@@ -70,7 +79,7 @@ func udp(g *lbguesttest.Guest, servers ...string) {
 	g.Write("/proc/sys/net/ipv4/vs/conntrack", "1\n")
 	g.Write("/proc/sys/net/ipv4/vs/snat_reroute", "1\n")
 	g.Write("/proc/sys/net/ipv4/ip_forward", "1\n")
-	g.Stub("nft", "table ip proxcloud-lb {\n\tchain lb-forward {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n")
+	g.Stub("nft", nftListed)
 	g.Stub("active", "haproxy\nkeepalived\n"+lvsService+"\n")
 }
 
@@ -195,6 +204,13 @@ func TestServingScriptsSayWhatIsMissing(t *testing.T) {
 				{"a listener is missing", lbServingFn + "serving", func() { g.Listen("203.0.113.10:80") }, 1, "HAProxy does not listen on 203.0.113.10:443\n"},
 				{"a virtual server is missing", lvsServingFn + "lvsserving", func() { g.Write("/proc/net/ip_vs", "") }, 1, "the UDP listener 203.0.113.10:53 is not in the IPVS table\n"},
 				{"forwarding is off", lvsServingFn + "lvsserving", func() { g.Write("/proc/sys/net/ipv4/ip_forward", "0\n") }, 1, "forwarding is off\n"},
+				// A table without the input chain's drop (a release before, or changed by hand) serves, and is not the
+				// product's: its own answer, which makes the pass load the file again (lab finding T2-F1).
+				{"the table of a release before", lvsServingFn + "lvsserving", func() {
+					g.Write("/proc/sys/net/ipv4/ip_forward", "1\n")
+					udp(g, "203.0.113.10 53")
+					g.Stub("nft", nftListedBefore)
+				}, 2, "the nftables table is not the one of the UDP service's file\n"},
 				// A caller's variables stay the caller's, whatever a helper names its own.
 				{"the caller's variables", lbServingFn + lbWorkerFn + lvsServingFn + "v=1 l=2 b=3 have=4 out=5; serving; lvsserving; worker; echo $v $l $b $have $out",
 					func() {
@@ -590,7 +606,7 @@ func TestPushLVSWritesOnlyWhatDiffers(t *testing.T) {
 				t.Errorf("a push that was not served disabled a unit that has a config to go back to:\n%s", calls)
 			}
 			// A config keepalived refuses: nothing moves.
-			g.Stub("nft", "table ip proxcloud-lb {\n\tchain lb-forward {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n")
+			g.Stub("nft", nftListed)
 			g.Stub("keepalived-refuses", "(lvs.conf.new: Line 3) Unknown keyword\n")
 			if _, _, err = push(one); err == nil || !strings.Contains(err.Error(), "Unknown keyword") {
 				t.Fatalf("a config keepalived refuses: %v", err)
