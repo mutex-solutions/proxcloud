@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
@@ -379,5 +380,93 @@ func TestLBPairUDPChangeCost(t *testing.T) {
 	}
 	if lb.Status != lbStatusActive {
 		t.Errorf("after the change: %s %q", lb.Status, lb.StatusMessage)
+	}
+}
+
+// A replace's planned switch with a UDP listener (drill R3-F3 of v0.11.1-rc.2: the address moved to the new
+// appliance before any member was in its UDP table; UDP lost 2.4 s where TCP lost 0.8 s, and one port had no member
+// for 5.2 s). keepalived is stopped on the appliance that goes only when the kernel's table of the one that takes
+// the address holds every member the other one holds, or after lbUDPMembersWait, and then the log says so.
+//
+// The tables here are the fake's, in the text the kernel prints: that keepalived fills a table only after a
+// member's first good check, and how long that takes, is the real-guest test's (test/integration/lb_udp_test.go
+// and lb_udp_changes_test.go).
+func TestLBPlannedSwitchWaitsForUDPMembers(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	ps, _ := h.pveFor(es)
+	stopped := func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return slices.Contains(f.log, "302 keepalived stop")
+	}
+	execs := func() int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.execs
+	}
+	again := func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.log = slices.DeleteFunc(f.log, func(l string) bool { return l == "302 keepalived stop" })
+		g, o := f.guests["302"], f.guests["301"]
+		g.keepalived, g.role, g.holds, o.role, o.holds = true, "MASTER", true, "BACKUP", false
+	}
+	apply := func(when string) {
+		t.Helper()
+		if err := h.lbApplyPair(ctx, es, &Project{ID: "p1"}, &cloud.CloudResource{}, lb); err != nil || lb.Status != lbStatusActive {
+			t.Fatalf("%s: %s %q %v", when, lb.Status, lb.StatusMessage, err)
+		}
+	}
+	apply("the pair")
+	// Without a UDP listener nothing is asked: the one command is the stop.
+	n := execs()
+	lbPlannedSwitch(ctx, ps, lb, "n2", 302, "n1", 301)
+	if !stopped() || execs() != n+1 {
+		t.Fatalf("a pair without a UDP listener: stopped %v with %d guest commands, want the stop alone", stopped(), execs()-n)
+	}
+	again()
+
+	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 53, Protocol: "udp", Pool: "dns"})
+	lb.Pools = append(lb.Pools, pve.LBPool{Name: "dns", Protocol: "udp", Algorithm: "roundrobin", Members: []pve.LBMember{
+		{Node: true, Port: 53, Weight: 1, Address: "10.0.0.11"}, {Node: true, Port: 53, Weight: 1, Address: "10.0.0.12"}, {Node: true, Port: 53, Weight: 1, Address: "10.0.0.13"}}})
+	apply("the UDP listener")
+	// The appliance that goes, 302, holds two of the three members (the third fails its check everywhere). The
+	// one that takes the address was started a moment ago: its table holds the listener and no member yet. Both
+	// read "up".
+	f.set("302", func(g *lbGuest) { g.dead = []string{"10.0.0.13:53"} })
+	f.set("301", func(g *lbGuest) { g.dead = []string{"10.0.0.11:53", "10.0.0.12:53", "10.0.0.13:53"} })
+	done := make(chan struct{})
+	go func() { lbPlannedSwitch(ctx, ps, lb, "n2", 302, "n1", 301); close(done) }()
+	time.Sleep(1500 * time.Millisecond)
+	if stopped() {
+		t.Fatal("keepalived was stopped on the appliance that holds the address while the other one had no UDP member in its table")
+	}
+	// One member in is not what the other one holds.
+	f.set("301", func(g *lbGuest) { g.dead = []string{"10.0.0.12:53", "10.0.0.13:53"} })
+	time.Sleep(1500 * time.Millisecond)
+	if stopped() {
+		t.Fatal("keepalived was stopped while the appliance that takes the address had one of the two members the other one holds")
+	}
+	// Both in; the member that is down on the one that goes is not waited for.
+	f.set("301", func(g *lbGuest) { g.dead = []string{"10.0.0.13:53"} })
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the switch did not go on once the appliance that takes the address held the members")
+	}
+	if !stopped() {
+		t.Fatal("the planned switch ended without stopping keepalived")
+	}
+	again()
+
+	// Bounded: an appliance that never gets the members is switched to all the same.
+	defer func(d time.Duration) { lbUDPMembersWait = d }(lbUDPMembersWait)
+	lbUDPMembersWait = 2 * time.Second
+	f.set("301", func(g *lbGuest) { g.dead = []string{"10.0.0.11:53", "10.0.0.12:53", "10.0.0.13:53"} })
+	start := time.Now()
+	lbPlannedSwitch(ctx, ps, lb, "n2", 302, "n1", 301)
+	if took := time.Since(start); !stopped() || took < 2*time.Second || took > 8*time.Second {
+		t.Fatalf("an appliance that never gets its members: stopped %v after %s, want the switch after the wait of %s", stopped(), took, lbUDPMembersWait)
 	}
 }

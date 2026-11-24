@@ -321,6 +321,15 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		}
 		g.lvs = false
 		return lbRun{}
+	case cmd == "systemctl stop keepalived": // a replace's planned switch: the peer takes the address
+		f.log = append(f.log, vm+" keepalived stop")
+		g.keepalived, g.holds = false, false
+		for id, o := range f.guests {
+			if id != vm && o.keepalived {
+				o.role, o.holds = "MASTER", true
+			}
+		}
+		return lbRun{}
 	case strings.Contains(cmd, "cat /proc/net/ip_vs"):
 		return lbRun{out: g.ipvs()}
 	case strings.Contains(cmd, "command -v haproxy"): // a ready check that only asks for the binaries (v0.11.0-rc.1)

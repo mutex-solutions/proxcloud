@@ -1231,9 +1231,8 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 		if vm, ok := vms[old]; ok && !vm.NodeDown && pve.LBOfTags(vm.Tags) == lb.ID && vm.Status == "running" {
 			if peer := slices.IndexFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID != old && a.State == lbAppUp }); peer >= 0 {
 				// The planned switch: the peer takes the address before this VM goes.
-				if err := ps.StopKeepalived(ctx, vm.Node, vm.VMID); err != nil {
-					slog.Warn("load balancer: planned switch", "lb", externalID, "vm", old, "err", err)
-				}
+				to := vms[lb.Appliances[peer].ServerID]
+				lbPlannedSwitch(ctx, ps, lb, vm.Node, vm.VMID, to.Node, to.VMID)
 				time.Sleep(2 * time.Second)
 			}
 		}
@@ -1285,6 +1284,50 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 			return "the new appliance " + app.ServerID + " did not become ready"
 		case <-time.After(lbConvergeEvery):
 		}
+	}
+}
+
+// lbUDPMembersWait is how long a planned switch waits for the appliance that takes the address to have its UDP
+// members: a first check is made at once and answers within its timeout, 5 s unless the tenant set another, and a
+// member that fails it is tried again after the interval.
+var lbUDPMembersWait = 30 * time.Second
+
+// lbPlannedSwitch makes the appliance from (node, VM) give up the address, which its peer to takes in about 0.6 s.
+// "Up" says of the peer that its UDP service holds every virtual server, not that a member is in one: keepalived
+// puts a member in the table after its first good check, so an appliance that was started a moment ago took the
+// address with an empty table (drill R3-F3 of v0.11.1-rc.2: UDP lost 2.4 s at a replace where TCP lost 0.8 s, and
+// one port had no member for 5.2 s). So the switch first waits until the peer holds every UDP member the appliance
+// that goes holds, as the kernel's table of each says. It waits lbUDPMembersWait at most, and then goes on and says
+// so in the log: the address moves to an appliance that lacks members rather than staying on a VM that is about
+// to be destroyed. A balancer without a UDP listener is asked nothing.
+func lbPlannedSwitch(ctx context.Context, ps *pve.Service, lb *loadBalancer, fromNode string, from int, toNode string, to int) {
+	if pve.RenderLVS(lb.LBSpec, lb.VIPs) != "" {
+		for start := time.Now(); ; {
+			// What the one that goes holds; if it cannot say, there is nothing to wait for.
+			old, _, err := ps.LVSHealth(ctx, fromNode, from, lb.LBSpec, lb.VIPs)
+			if err != nil {
+				break
+			}
+			now, _, nerr := ps.LVSHealth(ctx, toNode, to, lb.LBSpec, lb.VIPs) // the same spec: the same members in the same order
+			missing := 0
+			for i, m := range old {
+				if m.Status == "UP" && (nerr != nil || i >= len(now) || now[i].Status != "UP") {
+					missing++
+				}
+			}
+			if missing == 0 {
+				break
+			}
+			if time.Since(start) >= lbUDPMembersWait || ctx.Err() != nil {
+				slog.Warn("load balancer: planned switch: the appliance that takes the address still lacks UDP members the other one holds; switching all the same",
+					"lb", lb.ID, "from", from, "to", to, "missing", missing, "waited", time.Since(start).Round(time.Second).String())
+				break
+			}
+			time.Sleep(time.Second)
+		}
+	}
+	if err := ps.StopKeepalived(ctx, fromNode, from); err != nil {
+		slog.Warn("load balancer: planned switch", "lb", lb.ID, "vm", from, "err", err)
 	}
 }
 
