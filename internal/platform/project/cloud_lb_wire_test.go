@@ -52,6 +52,11 @@ type lbGuest struct {
 	noNft    bool
 	lvs      bool
 	lvsFails string
+	// staleLimit: the connection limit the kernel's table holds on every UDP member where the config has none, as
+	// keepalived's reload left it until v0.11.1-rc.2 (drill R3-F2). 0: the table is as the config has it. A UDP
+	// apply that is taken puts it right; that the product's edit does is the real-guest test's
+	// (test/integration/lb_udp_changes_test.go).
+	staleLimit int
 	// The certificate directory (v0.11.1): its files are in disk, written by the agent as <name>.pem.new and moved in
 	// place by the install command. certMode holds what stat says of the directory or of a file that is not as a
 	// push leaves it (a file or a directory somebody opened up); nothing recorded means root's alone.
@@ -312,7 +317,7 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 			return lbRun{exit: 1, err: g.lvsFails}
 		}
 		g.moveIn(lbGuestLVSFiles...)
-		g.lvs = true
+		g.lvs, g.staleLimit = true, 0
 		return lbRun{}
 	case strings.Contains(cmd, "systemctl disable -q --now proxcloud-lvs"): // the last UDP listener went
 		f.log = append(f.log, vm+" lvs remove")
@@ -497,9 +502,13 @@ func (f *pairWire) stateRead(g *lbGuest, cmd string) lbRun {
 	udp := g.lvs && g.disk[lbGuestLVSFiles[0]] != ""
 	if !lbguesttest.Available() {
 		n := map[bool]int{true: 1}
+		l := n[udp]
+		if udp && g.staleLimit > 0 {
+			l = 2
+		}
 		// The files as they are on the guest, which is not always what the product wrote last.
 		return lbRun{out: fmt.Sprintf("%s %d %d %d %s %s %s %d", role, n[g.haproxy], n[holds], n[g.serving()], lbHash(g.file),
-			g.sum("/etc/keepalived/keepalived.conf"), g.lvsSum(), n[udp]) + certs}
+			g.sum("/etc/keepalived/keepalived.conf"), g.lvsSum(), l) + certs}
 	}
 	if g.box == nil {
 		g.box = lbguesttest.New(f.t)
@@ -543,6 +552,24 @@ func (f *pairWire) stateRead(g *lbGuest, cmd string) lbRun {
 		}
 	}
 	b.Write("/proc/net/ip_vs", g.ipvs())
+	// The table as ipvsadm lists it, only where it differs from the config (no listing is no difference).
+	b.Unstub("ipvsadm")
+	b.Unstub("ipvsadm-thresholds")
+	if udp && g.staleLimit > 0 {
+		plain, thresholds, vs := "", "", ""
+		for _, line := range strings.Split(g.disk[lbGuestLVSFiles[0]], "\n") {
+			switch w := strings.Fields(line); {
+			case len(w) >= 3 && w[0] == "virtual_server":
+				vs = "UDP  " + w[1] + ":" + w[2] + " wrr\n"
+			case len(w) >= 3 && w[0] == "real_server":
+				plain += vs + "  -> " + w[1] + ":" + w[2] + " Masq 1 0 0\n"
+				thresholds += vs + fmt.Sprintf("  -> %s:%s %d 0 0 0\n", w[1], w[2], g.staleLimit)
+				vs = ""
+			}
+		}
+		b.Stub("ipvsadm", plain)
+		b.Stub("ipvsadm-thresholds", thresholds)
+	}
 	for _, key := range []string{"vs/conntrack", "vs/snat_reroute", "ip_forward"} {
 		b.Write("/proc/sys/net/ipv4/"+key, "1\n")
 	}

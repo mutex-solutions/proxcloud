@@ -144,7 +144,17 @@ func TestLBApplianceUDPChanges(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				return st.LVS
+				return st.LVS && !st.LVSDiffers // served, and as the config has it
+			}
+			// differs: the state read says that every listener is served and the kernel's table holds a figure the
+			// config has differently, which is a change to load and not a service that is down.
+			differs := func() bool {
+				t.Helper()
+				st, err := ps.ReadVRRPState(ctx, "n1", 100, vip)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return st.LVS && st.LVSDiffers
 			}
 			// expect: the kernel has it, and the state read calls it served.
 			expect := func(when, want string) {
@@ -216,16 +226,16 @@ func TestLBApplianceUDPChanges(t *testing.T) {
 			stillHeld("the limit raised to 50")
 			// The control, which is the drill's finding: the file with a limit of 5 and the unit's own reload, which
 			// is all a push did until v0.11.1-rc.2. keepalived leaves the kernel's 50, and the state read, which
-			// said "serving" of it then, now says it is not: that is what makes a pass push again.
+			// said "serving" of it then, now says that the table differs: that is what makes a pass push again.
 			g.run(ctx, "sed -i 's/uthreshold 50/uthreshold 5/' /etc/keepalived/lvs.conf && systemctl reload proxcloud-lvs && sleep 2")
 			if got := kernel(); got != "wrr | 10.77.0.11:5000 w1 u50 | 10.77.0.12:5000 w1 u50" {
 				t.Fatalf("control: keepalived's own reload wrote the changed limit to the kernel (%q): this keepalived does not show the finding, and the steps above prove nothing of the product's edit", got)
 			}
-			if serving() {
-				t.Fatalf("control: the kernel keeps a limit of 50 where the file says 5, and the state read calls it served\n%s", diag())
+			if serving() || !differs() {
+				t.Fatalf("control: the kernel keeps a limit of 50 where the file says 5, and the state read does not say that the table differs (as the config has it: %v)\n%s", serving(), diag())
 			}
 			// The push again that follows such a read: nothing of the files differs from what is on the appliance.
-			push("pushed again after a read that says not served", opts{limit: 5})
+			push("pushed again after a read that says the table differs", opts{limit: 5})
 			expect("pushed again", "wrr | 10.77.0.11:5000 w1 u5 | 10.77.0.12:5000 w1 u5")
 
 			// 4. The limit removed: the kernel has none, and flows above the old limit are answered (the drill: 20
@@ -256,7 +266,7 @@ func TestLBApplianceUDPChanges(t *testing.T) {
 				expect(c.when, c.want)
 				stillHeld(c.when)
 			}
-			// A table changed by hand, each of the four: the state read says it is not served, and the push that
+			// A table changed by hand, each of the four: the state read says that it differs, and the push that
 			// follows puts it back without a file to write.
 			for _, by := range []string{
 				"-E -u " + vip + ":5000 -s lc",
@@ -265,8 +275,8 @@ func TestLBApplianceUDPChanges(t *testing.T) {
 				"-e -u " + vip + ":5000 -r 10.77.0.11:5000 -m -w 1 -x 3",
 			} {
 				g.run(ctx, "ipvsadm "+by)
-				if serving() {
-					t.Fatalf("after ipvsadm %s by hand the state read calls the table served: %q", by, kernel())
+				if serving() || !differs() {
+					t.Fatalf("after ipvsadm %s by hand the state read does not say that the table differs: %q", by, kernel())
 				}
 				push("after ipvsadm "+by, opts{})
 				expect("after ipvsadm "+by+" and a push", "wrr | 10.77.0.11:5000 w1 u0 | 10.77.0.12:5000 w1 u0")

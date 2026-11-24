@@ -392,6 +392,10 @@ const (
 	// what the config says (lvsdrift); it prints what is missing otherwise. The table is keepalived's own word that
 	// it runs the file: /proc/net/ip_vs prints a server as "UDP  CB00710A:1388 wrr". A subshell, as serving() is:
 	// nothing it sets reaches its caller.
+	//
+	// It answers 1 for a service that does not serve a listener, and 2 for one that serves them all with a figure
+	// the config has differently: that appliance answers UDP, with the limit of before a change, and the state read
+	// says so apart (VRRPState.LVSDiffers), since "not served" puts an appliance down in the row.
 	lvsServingFn = lvsDriftFn + `lvsserving() (
   systemctl is-active -q ` + lvsService + ` || { echo "the UDP service is not running"; return 1; }
   [ "$(cat /proc/sys/net/ipv4/vs/conntrack 2>/dev/null)" = 1 ] && [ "$(cat /proc/sys/net/ipv4/vs/snat_reroute 2>/dev/null)" = 1 ] || { echo "IPVS does not track and reroute its connections"; return 1; }
@@ -401,7 +405,7 @@ const (
   for v in $(awk '$1=="virtual_server"{split($2,a,"."); printf "%02X%02X%02X%02X:%04X/%s:%s\n",a[1],a[2],a[3],a[4],$3,$2,$3}' ` + lvsConfig + `); do
     echo "$have" | grep -qxF -e "${v%%/*}" || { echo "the UDP listener ${v#*/} is not in the IPVS table"; return 1; }
   done
-  [ -z "$(lvsdrift)" ] || { echo "the IPVS table does not hold a connection limit, a weight, an algorithm or a persistence as the UDP configuration has it"; return 1; }
+  [ -z "$(lvsdrift)" ] || { echo "the IPVS table does not hold a connection limit, a weight, an algorithm or a persistence as the UDP configuration has it"; return 2; }
 )
 `
 	// lvsSetFn defines lvsset(): it puts right what lvsdrift() names, one ipvsadm edit each. An edit changes the

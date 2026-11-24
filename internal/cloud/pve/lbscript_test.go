@@ -145,6 +145,27 @@ func TestVRRPStateScriptWithAndWithoutUDP(t *testing.T) {
 			if got := read(); got.HAProxy || !got.HoldsVIP || !got.LVS {
 				t.Fatalf("HAProxy's master does not answer: %+v", got)
 			}
+			// A table that holds the listener with a connection limit the config does not have (drill R3-F2 of
+			// v0.11.1-rc.2): the appliance serves UDP and has a change it did not load, which is not "not served".
+			holder(g)
+			udp(g, vip+" 53")
+			g.Stub("ipvsadm", "UDP  203.0.113.10:53 wrr\n  -> 10.77.0.11:5000              Masq    1      0          0\n")
+			g.Stub("ipvsadm-thresholds", "UDP  203.0.113.10:53 wrr\n  -> 10.77.0.11:5000              5          0          0          0\n")
+			if got := read(); !got.LVS || !got.LVSDiffers || !got.HoldsVIP || !got.Serving {
+				t.Fatalf("a UDP table with a limit the config does not have: %+v, want served and differing", got)
+			}
+			g.Stub("ipvsadm-thresholds", "UDP  203.0.113.10:53 wrr\n  -> 10.77.0.11:5000              0          0          0          0\n")
+			if got := read(); !got.LVS || got.LVSDiffers {
+				t.Fatalf("a UDP table as the config has it: %+v", got)
+			}
+			// One that lacks a listener is not served, whatever else differs.
+			g.Stub("ipvsadm-thresholds", "UDP  203.0.113.10:53 wrr\n  -> 10.77.0.11:5000              5          0          0          0\n")
+			g.Write("/proc/net/ip_vs", "")
+			if got := read(); got.LVS || got.LVSDiffers {
+				t.Fatalf("a UDP table without the listener: %+v, want not served", got)
+			}
+			g.Unstub("ipvsadm")
+			g.Unstub("ipvsadm-thresholds")
 			holder(g)
 			udp(g, vip+" 53")
 			g.Stub("active", "haproxy\n"+lvsService+"\n")
@@ -434,10 +455,11 @@ func TestLVSDriftScript(t *testing.T) {
 				if exit, out, stderr := g.Run(shell, lvsDriftFn+"lvsdrift"); exit != 0 || out != c.want {
 					t.Errorf("%s: lvsdrift exit %d said %q (stderr %q), want %q", c.name, exit, out, stderr, c.want)
 				}
-				// The state read: a table that differs is not served, which is what makes a pass push again.
+				// The state read: a table that differs is its own answer, 2, which is what makes a pass push
+				// again; 1 is a listener that is not served (TestVRRPStateScriptWithAndWithoutUDP reads both).
 				wantExit, wantSaid := 0, ""
 				if c.want != "" {
-					wantExit, wantSaid = 1, "the IPVS table does not hold a connection limit, a weight, an algorithm or a persistence as the UDP configuration has it\n"
+					wantExit, wantSaid = 2, "the IPVS table does not hold a connection limit, a weight, an algorithm or a persistence as the UDP configuration has it\n"
 				}
 				if exit, out, _ := g.Run(shell, lvsServingFn+"lvsserving"); exit != wantExit || out != wantSaid {
 					t.Errorf("%s: lvsserving exit %d said %q, want %d %q", c.name, exit, out, wantExit, wantSaid)

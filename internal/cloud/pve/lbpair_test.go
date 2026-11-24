@@ -186,6 +186,8 @@ func TestParseVRRPState(t *testing.T) {
 		// With what the files hash to and the UDP service's word, as the appliance answers since v0.11.1.
 		"MASTER 1 1 1 aa bb cc 1": {State: "MASTER", HAProxy: true, HoldsVIP: true, Serving: true, HAProxySum: "aa", KeepalivedSum: "bb", LVSSum: "cc", LVS: true},
 		"BACKUP 1 0 1 aa bb - 0":  {State: "BACKUP", HAProxy: true, Serving: true, HAProxySum: "aa", KeepalivedSum: "bb", LVSSum: "-"},
+		// Served, with a figure in the kernel's table the config has differently (v0.11.1-rc.3).
+		"BACKUP 1 0 1 aa bb cc 2": {State: "BACKUP", HAProxy: true, Serving: true, HAProxySum: "aa", KeepalivedSum: "bb", LVSSum: "cc", LVS: true, LVSDiffers: true},
 		"MASTER 1 1 1 aa bb cc":   {State: "UNKNOWN"},
 	} {
 		if got := ParseVRRPState(out); got != want {

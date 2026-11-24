@@ -10,15 +10,18 @@ and rules: [README.md](README.md#maintenance-rule).
 one more file, and the portal keeps one more in-memory map. The rest is inside existing code elements.
 
 - `internal/cloud/pve/lblvs.go`: `lvsDriftFn` (`lvsdrift()`: what the kernel's IPVS table holds differently from
-  `lvs.conf`, as `ipvsadm` edit arguments) is part of `lvsServingFn`, so `ReadVRRPState` answers "not served" for a
-  table that differs; `lvsSetFn` (`lvsset()`) runs the edits in `lvsApply` after the reload. `lvsHave` answers what
+  `lvs.conf`, as `ipvsadm` edit arguments) is part of `lvsServingFn`, whose answer for a
+  table that holds every listener and differs is its own (2, `VRRPState.LVSDiffers`), apart from "not served" (1);
+  `lvsSetFn` (`lvsset()`) runs the edits in `lvsApply` after the reload. `lvsHave` answers what
   each file hashes to and `PushLVS` writes the files that differ; `lvsApply` takes a push with any subset of the
   files, sets owner and mode on the ones that stay, and rolls back only a config it replaced. `RenderLVS` writes
   `warmup 0` beside `alpha`. `lvsFiles` gains `lvsDropIn`, `proxcloud-lvs.service.d/nftables.conf` (`PartOf`,
   `After`, `ReloadPropagatedFrom` nftables.service), which `lvssum`, `LVSHash` and `lvsRemove` cover.
 - `internal/platform/project/cloud_lb_pair_pve.go`: `lbApplyPair` reads the appliances at once (before the pushes
   and after) and makes HAProxy's push and the UDP push of one appliance at once; an appliance at its first install
-  keeps them in turn. `lbPlannedSwitch` (with `lbUDPMembersWait`) is the planned switch of `lbReplaceStep`: it
+  keeps them in turn. An appliance whose UDP table differs from its config (`LVSDiffers`) is pushed again as one
+  with a change to take, the standby first and not past an appliance that holds a push, and reads `up` with a
+  change that waits, not `down`. `lbPlannedSwitch` (with `lbUDPMembersWait`) is the planned switch of `lbReplaceStep`: it
   waits for the peer's UDP members before it stops keepalived.
 - `internal/platform/project/cloud_lb_cluster_pve.go`: `lbClusterConverge` leaves a mark in `Handler.lbChanged`
   before it asks for the cluster's lock, and the holder starts the next converge when it lets go with a mark left.

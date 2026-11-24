@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - *A pair with a UDP listener*, a tenant's or a cluster's, at its first pass after the upgrade (a cluster's
     controller's next request, the provider sync, or the next change), the standby first and then the appliance that
     holds the address. **Written:** `/etc/keepalived/lvs.conf`, which gains one line, `warmup 0`, in every virtual
-    server that has a health check, and the new `/etc/systemd/system/proxcloud-lvs.service.d/nftables.conf`. **Not
+    server that has a health check (a pair whose UDP pools all have the check switched off gets the drop-in alone,
+    with the same reload), and the new `/etc/systemd/system/proxcloud-lvs.service.d/nftables.conf`. **Not
     written:** `lvs.nft`, `lvs.sysctl`, `proxcloud-lvs-net` and `proxcloud-lvs.service`, which are the same to the
     byte and are no longer written when they are. **Reloaded:** systemd's unit files (`daemon-reload`, for the
     drop-in) and `proxcloud-lvs.service`, once: its script loads the nftables table again in one transaction and
@@ -563,7 +564,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left 5, and after its removal 20 of 30 new flows got no answer. The UDP apply now compares the kernel's table
   with the file after the reload and edits what differs with `ipvsadm`, which keeps every flow; and the state read
   compares each member's limit and weight and each listener's algorithm and persistence timeout with the file, so
-  a table that differs is "not served" and is pushed again, not `ACTIVE`. Weight, algorithm and persistence were
+  a table that differs is pushed again: such an appliance answers UDP with the figure of before, so it reads up
+  with "a change is not loaded on it yet" and the row says that a change waits, where a listener the table lacks
+  still reads "not served" and puts the appliance down. It is pushed as a change is, the standby first, and not
+  while the standby holds a push. Weight, algorithm and persistence were
   checked for the same fault on both images: keepalived writes those itself. Run in real guests of Debian 13 and
   Ubuntu 26.04 on the CI runner's kernel; not run on a lab.
 - **A UDP change is live sooner.** On the lab a change was live after 14 to 44 s where the plan aims at 15 s: a UDP

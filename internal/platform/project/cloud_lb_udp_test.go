@@ -383,6 +383,80 @@ func TestLBPairUDPChangeCost(t *testing.T) {
 	}
 }
 
+// A pair whose kernel holds a connection limit the config does not have, which is what a pair of v0.11.1-rc.2 holds
+// after a limit was changed on a UDP listener (drill R3-F2: keepalived's reload left the old figure). It answers UDP
+// on both appliances, so it is a change that is not loaded and not an appliance that is down: the row stays ACTIVE
+// and says that a change waits, the standby is pushed first, and while the standby cannot take a push the appliance
+// that holds the address is given none. The table is the fake's (lbGuest.staleLimit); the state read's script runs
+// as the text it is.
+func TestLBPairUDPTableThatDiffers(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	// apply runs a pass and answers what the appliances were asked to load.
+	apply := func() (loads []string) {
+		t.Helper()
+		f.mu.Lock()
+		n := len(f.log)
+		f.mu.Unlock()
+		if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+			t.Fatal(err)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, l := range f.log[n:] {
+			if strings.HasSuffix(l, " reload") || strings.Contains(l, " write ") {
+				loads = append(loads, l)
+			}
+		}
+		return loads
+	}
+	apply()
+	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 53, Protocol: "udp", Pool: "dns"})
+	lb.Pools = append(lb.Pools, pve.LBPool{Name: "dns", Protocol: "udp", Algorithm: "roundrobin",
+		Members: []pve.LBMember{{Node: true, Port: 53, Weight: 1, Address: "10.0.0.11"}}})
+	if apply(); lb.Status != lbStatusActive || lb.StatusMessage != "" {
+		t.Fatalf("the first UDP listener: %s %q", lb.Status, lb.StatusMessage)
+	}
+	if loads := apply(); len(loads) != 0 {
+		t.Fatalf("a pass over a pair that is in order loaded %q", loads)
+	}
+
+	// Both appliances hold the stale limit, and the standby (301) cannot take a push: dpkg is at work on it.
+	f.set("301", func(g *lbGuest) { g.staleLimit, g.upgrading = 5, true })
+	f.set("302", func(g *lbGuest) { g.staleLimit = 5 })
+	loads := apply()
+	if len(loads) != 0 {
+		t.Errorf("while the standby holds its push, the pass loaded %q: the appliance that holds the address takes no change before the standby", loads)
+	}
+	for _, a := range lb.Appliances {
+		if a.State != lbAppUp || !lbAppWaits(a) {
+			t.Errorf("appliance %s answers UDP with the limit of before: %s %q, want up and waiting for a change", a.ServerID, a.State, a.Reason)
+		}
+	}
+	if lb.Status != lbStatusActive || !strings.Contains(lb.StatusMessage, "A change waits") || !lb.waiting {
+		t.Errorf("the pair serves and has a change to load: %s %q (tried again by the platform: %v), want ACTIVE with what waits", lb.Status, lb.StatusMessage, lb.waiting)
+	}
+
+	// The standby is free again: it is pushed first, then the holder, with no file to write, and the row is in order.
+	f.set("301", func(g *lbGuest) { g.upgrading = false })
+	if loads := apply(); !slices.Equal(loads, []string{"301 lvs reload", "302 lvs reload"}) {
+		t.Errorf("the pass after the standby was free loaded %q, want the UDP service of the standby and then of the holder", loads)
+	}
+	if lb.Status != lbStatusActive || lb.StatusMessage != "" || lb.waiting || f.guests["301"].staleLimit != 0 || f.guests["302"].staleLimit != 0 {
+		t.Errorf("after the push: %s %q waiting=%v", lb.Status, lb.StatusMessage, lb.waiting)
+	}
+	if loads := apply(); len(loads) != 0 {
+		t.Errorf("the pass after that loaded %q", loads)
+	}
+
+	// The holder alone: it is pushed, the standby is not.
+	f.set("302", func(g *lbGuest) { g.staleLimit = 5 })
+	if loads := apply(); !slices.Equal(loads, []string{"302 lvs reload"}) || lb.Status != lbStatusActive || lb.StatusMessage != "" {
+		t.Errorf("a table that differs on the holder alone: loaded %q, %s %q", loads, lb.Status, lb.StatusMessage)
+	}
+}
+
 // A replace's planned switch with a UDP listener (drill R3-F3 of v0.11.1-rc.2: the address moved to the new
 // appliance before any member was in its UDP table; UDP lost 2.4 s where TCP lost 0.8 s, and one port had no member
 // for 5.2 s). keepalived is stopped on the appliance that goes only when the kernel's table of the one that takes

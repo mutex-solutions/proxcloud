@@ -538,6 +538,14 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		// whole config. The standby comes first here too (lbPushOrder).
 		reloadHAProxy := known && a.HAProxyHash != "" && (!st.Serving || differs(st.HAProxySum, a.HAProxyHash) || st.CertFiles != "")
 		reloadLVS := known && a.LVSHash != "" && lvs != "" && (!st.LVS || differs(st.LVSSum, a.LVSHash))
+		// The UDP service serves its listeners and the kernel's table holds a figure the config has differently (a
+		// connection limit keepalived's reload left behind until v0.11.1-rc.2, a table changed by hand). That is a
+		// change the appliance has not loaded: it is pushed again as a change is, the standby first and not past
+		// an appliance that holds a push, and it is not an appliance that is down.
+		driftLVS := known && a.LVSHash != "" && lvs != "" && st.LVS && st.LVSDiffers
+		if driftLVS {
+			slog.Warn("load balancer: an appliance's UDP table is not as its configuration has it; pushing it again", "lb", lb.ID, "vm", a.ServerID)
+		}
 		if restartKeepalived || reloadHAProxy || reloadLVS {
 			slog.Warn("load balancer: an appliance does not run what its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID,
 				"keepalived", st.State, "haproxyServing", st.Serving, "haproxyFile", !differs(st.HAProxySum, a.HAProxyHash),
@@ -611,7 +619,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		case behind && !reloadLVS: // a change of the UDP listeners waits as every other
 		case want == "":
 			udp = "remove"
-		case (want != a.LVSHash && refused == nil) || reloadLVS:
+		case ((want != a.LVSHash || driftLVS) && refused == nil) || reloadLVS:
 			udp = "push"
 		}
 		// HAProxy and the UDP service take their change at once on an appliance: they are two services, each with
@@ -734,10 +742,11 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			a.State, a.Reason = lbAppDown, "keepalived is "+strings.ToLower(st.State)
 		case a.LVSHash != "" && lvs != "" && !st.LVS:
 			a.State, a.Reason = lbAppDown, "its UDP listeners are not served"
-		case !current:
+		case !current || (a.LVSHash != "" && lvs != "" && st.LVSDiffers):
 			// It serves the config its row records and has a change still to take: that is an appliance in order,
 			// and the row says what waits and why. It read "down" until v0.11.1-rc.2, and a pair whose two
-			// appliances both waited read DOWN "No appliance answers" while it served (drill R2b-1).
+			// appliances both waited read DOWN "No appliance answers" while it served (drill R2b-1). A UDP table
+			// that still differs from the config after this pass is such a change: its push was held or waits.
 			a.State, a.Reason = lbAppUp, lbWaitsPrefix+"it is loaded at the next pass"
 			switch {
 			case held[a] != "":
