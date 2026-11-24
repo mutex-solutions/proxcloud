@@ -532,7 +532,7 @@ func TestPushLVSWritesOnlyWhatDiffers(t *testing.T) {
 			}
 			// The first push: every file.
 			writes, execs, err := push(one)
-			want("the first push", writes, execs, err, lvsNft, lvsSysctl, lvsNet, lvsUnit, lvsConfig)
+			want("the first push", writes, execs, err, lvsNft, lvsSysctl, lvsNet, lvsUnit, lvsDropIn, lvsConfig)
 			placed("the first push", one)
 			// A member comes: the config alone.
 			writes, execs, err = push(two)

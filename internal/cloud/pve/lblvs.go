@@ -43,6 +43,8 @@ const (
 	lvsNet     = "/usr/local/sbin/proxcloud-lvs-net"
 	lvsUnit    = "/etc/systemd/system/proxcloud-lvs.service"
 	lvsService = "proxcloud-lvs"
+	// lvsDropIn ties the unit to nftables.service (lvsFiles).
+	lvsDropIn = lvsUnit + ".d/nftables.conf"
 	// lvsTable and its chains: plain names of the product's own. nft reads "fwd" and other short words as keywords
 	// (spike, nft 1.1.6: "unexpected fwd, expecting string").
 	lvsTable   = "ip proxcloud-lb"
@@ -310,6 +312,15 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 `},
+		// nftables.service empties the whole ruleset when it stops and when it loads its own file again, the
+		// product's table with it, and the unit above did not notice: forwarding stayed on with no forward chain
+		// until the next pass (drill R3-o5 of v0.11.1-rc.2). So the unit goes with it. A stop or a restart of
+		// nftables.service stops this unit first (After), which switches forwarding off before the ruleset goes,
+		// and a restart starts it again after, table first; a reload loads the table again right behind it. At
+		// boot the unit starts after nftables.service where that one is enabled, not beside it. A file of its
+		// own, and the last one: the unit file of the release before stays as it is, so an appliance that gets
+		// this file reloads systemd and restarts nothing.
+		{lvsDropIn, "[Unit]\nPartOf=nftables.service\nAfter=nftables.service\nReloadPropagatedFrom=nftables.service\n"},
 	}
 }
 
@@ -327,7 +338,7 @@ func LVSHash(config, tenantIface string) string {
 
 const (
 	// lvsSumFn defines lvssum(): the digest LVSHash gives for the files on the appliance, "-" without a config.
-	lvsSumFn = `lvssum() { [ -f ` + lvsConfig + ` ] && cat ` + lvsConfig + ` ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` 2>/dev/null | sha256sum | cut -c1-64 || echo -; }
+	lvsSumFn = `lvssum() { [ -f ` + lvsConfig + ` ] && cat ` + lvsConfig + ` ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` ` + lvsDropIn + ` 2>/dev/null | sha256sum | cut -c1-64 || echo -; }
 `
 	// lvsDriftFn defines lvsdrift(): what the kernel's IPVS table holds differently from the config on disk, of
 	// everything the config can change on a virtual or a real server that stays: a virtual server's scheduler and
@@ -400,13 +411,13 @@ const (
 	// ("-" for one that is not there). PushLVS then writes the files that differ and no other: a member that comes
 	// or goes changes lvs.conf alone, and the four support files change with a release only (drill R2a-1 of
 	// v0.11.1-rc.2: every push wrote all five, seven guest calls where three do).
-	lvsHave = `mkdir -p ` + lvsDir + ` /etc/keepalived /usr/local/sbin
-for f in ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` ` + lvsConfig + `; do rm -f $f.new; [ -f $f ] && sha256sum < $f | cut -c1-64 || echo -; done`
+	lvsHave = `mkdir -p ` + lvsDir + ` /etc/keepalived /usr/local/sbin ` + lvsUnit + `.d
+for f in ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` ` + lvsDropIn + ` ` + lvsConfig + `; do rm -f $f.new; [ -f $f ] && sha256sum < $f | cut -c1-64 || echo -; done`
 	// lvsApply runs after the files that differ are written, each beside its place as <path>.new; a file without one
 	// stays as it is. keepalived checks a new config before it replaces the one in use; a running unit reloads (HUP:
 	// the table keeps the members that are up), a stopped one starts, and a unit file a release changed restarts it.
-	// keepalived does not write a changed connection limit to a real server that stays, so lvsset() does, after the
-	// reload and before each look. Then lvsserving() must hold: only on the answer 0 is the hash recorded. If it does
+	// The drop-in that ties the unit to nftables.service reloads systemd alone. keepalived does not write a changed
+	// connection limit to a real server that stays, so lvsset() does, after the reload and before each look. Then lvsserving() must hold: only on the answer 0 is the hash recorded. If it does
 	// not, a config this push replaced goes back and is loaded again; a first config that was not served goes and
 	// the unit stops, which switches forwarding off; a push that brought no config changes nothing more. Every file
 	// is moved in here by a rename with its owner and mode set, as keepalived's own are (lbKeepalivedApply): the unit
@@ -416,15 +427,17 @@ for f in ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` ` + lvs
 	lvsApply = lbNoSSH + lbPkgGateKeepalived + `set -e
 F=` + lvsConfig + `
 U=` + lvsUnit + `
+D=` + lvsDropIn + `
 new() { [ -f "$1.new" ]; }
 own() { [ ! -f "$2" ] || { chown root:root "$2"; chmod $1 "$2"; }; }
-for f in ` + lvsNft + ` ` + lvsSysctl + ` $F $U; do own 0644 $f.new; own 0644 $f; done
+for f in ` + lvsNft + ` ` + lvsSysctl + ` $F $U $D; do own 0644 $f.new; own 0644 $f; done
 own 0755 ` + lvsNet + `.new
 own 0755 ` + lvsNet + `
 ! new $F || keepalived -t -f $F.new
 for f in ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + `; do ! new $f || mv -f $f.new $f; done
 how=reload
 if new $U; then if cmp -s $U.new $U; then rm -f $U.new; else mv $U.new $U; systemctl daemon-reload; how=restart; fi; fi
+if new $D; then mv $D.new $D; systemctl daemon-reload; fi
 before=kept
 if new $F; then
   if [ -f $F ]; then cp $F $F.old; before=old; else rm -f $F.old; before=none; fi
@@ -451,8 +464,8 @@ exit 1`
 	lvsRemove = `systemctl disable -q --now ` + lvsService + ` 2>/dev/null
 sysctl -q -w net.ipv4.ip_forward=0
 nft delete table ` + lvsTable + ` 2>/dev/null
-rm -f ` + lvsConfig + ` ` + lvsConfig + `.old ` + lvsConfig + `.new ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` ` + lvsUnit + `.new ` + lvsNft + `.new ` + lvsSysctl + `.new ` + lvsNet + `.new
-rmdir ` + lvsDir + ` 2>/dev/null
+rm -f ` + lvsConfig + ` ` + lvsConfig + `.old ` + lvsConfig + `.new ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` ` + lvsUnit + `.new ` + lvsNft + `.new ` + lvsSysctl + `.new ` + lvsNet + `.new ` + lvsDropIn + ` ` + lvsDropIn + `.new
+rmdir ` + lvsDir + ` ` + lvsUnit + `.d 2>/dev/null
 systemctl daemon-reload
 [ "$(cat /proc/sys/net/ipv4/ip_forward)" = 0 ] || { echo "forwarding is still on" >&2; exit 1; }
 ! nft list table ` + lvsTable + ` >/dev/null 2>&1 || { echo "the forwarding filter is still loaded" >&2; exit 1; }

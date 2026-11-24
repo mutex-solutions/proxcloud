@@ -325,6 +325,68 @@ ip -n m3 addr add 10.77.0.13/24 dev eth0 && ip -n m3 link set eth0 up && ip -n m
 			}
 			t.Logf("a new member with an open port was in the table %v after the push that named it", took)
 			stillHeld("after a member came and went")
+
+			// 7. nftables.service (drill R3-o5 of v0.11.1-rc.2: its restart on an appliance with a UDP listener left
+			// forwarding on without the balancer's table until the next pass, so the appliance routed between the
+			// public and the tenant network). The unit is part of it now.
+			pushSpec("two members again", spec(opts{}))
+			// net is "forwarding, policy-drop chains loaded".
+			net := func() string {
+				return g.run(ctx, "echo $(cat /proc/sys/net/ipv4/ip_forward) $(nft list chain ip proxcloud-lb lb-forward 2>/dev/null | grep -c 'policy drop')")
+			}
+			answered := func(when string) {
+				t.Helper()
+				for start := time.Now(); flows(2) != 2; time.Sleep(500 * time.Millisecond) {
+					if time.Since(start) > 20*time.Second {
+						t.Fatalf("%s: UDP is not answered again after 20 s (forwarding and chain: %s)\n%s", when, net(), diag())
+					}
+				}
+				if got := net(); got != "1 1" || !serving() {
+					t.Fatalf("%s: forwarding and chain are %q and the state read says serving=%v, want forwarding on with the chain loaded\n%s", when, got, serving(), diag())
+				}
+			}
+			answered("before nftables.service is touched")
+			// The control first, which is the finding: without the drop-in a restart of nftables.service leaves
+			// forwarding on and no chain, and the state read says so.
+			g.run(ctx, "mv /etc/systemd/system/proxcloud-lvs.service.d/nftables.conf /root/ && systemctl daemon-reload && systemctl restart nftables")
+			if got := net(); got != "1 0" || serving() {
+				t.Fatalf("control: without the drop-in a restart of nftables.service leaves forwarding and chain %q (serving=%v), want forwarding on without the chain: this guest does not show the finding", got, serving())
+			}
+			// The push that follows that read brings the drop-in back with the table: the file is one of the
+			// service's, and its absence is a difference.
+			pushSpec("after the drop-in was taken away", spec(opts{}))
+			if got := g.run(ctx, "cat /etc/systemd/system/proxcloud-lvs.service.d/nftables.conf"); !strings.Contains(got, "PartOf=nftables.service") {
+				t.Fatalf("the push did not bring the drop-in back: %q", got)
+			}
+			answered("after the push that brought the drop-in back")
+			// A restart: the unit restarts with it, the table before forwarding, and UDP is answered again when the
+			// members have passed their first check. At no time read here is forwarding on without the chain.
+			restarts := g.run(ctx, "systemctl show -p ExecMainStartTimestampMonotonic --value proxcloud-lvs")
+			g.run(ctx, "systemctl restart nftables")
+			if got := net(); got == "1 0" {
+				t.Fatalf("after a restart of nftables.service forwarding is on without the chain\n%s", diag())
+			}
+			answered("after a restart of nftables.service")
+			if now := g.run(ctx, "systemctl show -p ExecMainStartTimestampMonotonic --value proxcloud-lvs"); now == restarts {
+				t.Fatalf("a restart of nftables.service did not restart the UDP unit")
+			}
+			// A reload loads nftables.service's own file, which empties the ruleset: the unit's reload follows it
+			// and loads the table again. The members stay in the table.
+			g.run(ctx, "systemctl reload nftables")
+			for start := time.Now(); net() != "1 1"; time.Sleep(200 * time.Millisecond) {
+				if time.Since(start) > 5*time.Second {
+					t.Fatalf("5 s after a reload of nftables.service forwarding and chain are %q\n%s", net(), diag())
+				}
+			}
+			answered("after a reload of nftables.service")
+			// A stop: the unit stops with it, and forwarding goes off before the ruleset does. The state read says
+			// the UDP service is not served, and the push that follows starts it.
+			g.run(ctx, "systemctl stop nftables")
+			if got := net(); got != "0 0" || serving() {
+				t.Fatalf("after a stop of nftables.service forwarding and chain are %q (serving=%v), want forwarding off", got, serving())
+			}
+			pushSpec("after a stop of nftables.service", spec(opts{}))
+			answered("after the push that followed a stop of nftables.service")
 			t.Logf("%s; %s; kernel %s", g.run(ctx, "keepalived --version 2>&1 | head -1"), g.run(ctx, "ipvsadm --version"), g.run(ctx, "uname -r"))
 		})
 	}

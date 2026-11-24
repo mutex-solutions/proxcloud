@@ -336,8 +336,8 @@ func TestLBPairUDPChangeCost(t *testing.T) {
 	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 53, Protocol: "udp", Pool: "dns"})
 	lb.Pools = append(lb.Pools, pve.LBPool{Name: "dns", Protocol: "udp", Algorithm: "roundrobin",
 		Members: []pve.LBMember{{Node: true, Port: 53, Weight: 1, Address: "10.0.0.11"}}})
-	if writes, _ := apply(); len(writes) != 10 || lb.Status != lbStatusActive {
-		t.Fatalf("the first UDP listener: %s, wrote %q, want the five files of the UDP service on each appliance", lb.Status, writes)
+	if writes, _ := apply(); len(writes) != 2*len(lbGuestLVSFiles) || lb.Status != lbStatusActive {
+		t.Fatalf("the first UDP listener: %s, wrote %q, want every file of the UDP service on each appliance", lb.Status, writes)
 	}
 
 	// A member comes.

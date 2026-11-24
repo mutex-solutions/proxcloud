@@ -361,6 +361,12 @@ func TestLVSFiles(t *testing.T) {
 			t.Errorf("the unit lacks %q", want)
 		}
 	}
+	// The unit goes and comes with nftables.service, by a file of its own: the unit file is the one of the release
+	// before, so no appliance restarts its UDP service to get it.
+	if got := files[lvsDropIn]; got != "[Unit]\nPartOf=nftables.service\nAfter=nftables.service\nReloadPropagatedFrom=nftables.service\n" || strings.Contains(unit, "nftables") ||
+		lvsDropIn != lvsUnit+".d/nftables.conf" {
+		t.Errorf("the drop-in %s:\n%s", lvsDropIn, got)
+	}
 	for _, f := range files {
 		if strings.Contains(f, "net0") || strings.Contains(f, "eth0") {
 			t.Errorf("an interface name is written out:\n%s", f)

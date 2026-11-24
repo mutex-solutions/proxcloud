@@ -104,7 +104,7 @@ var lbGuestBind = regexp.MustCompile(`(?m)^\s*bind ([1-9][0-9.]*:[0-9]+)`)
 
 // The UDP service's files, in the order the guest sums them (pve's lvssum).
 var lbGuestLVSFiles = []string{"/etc/keepalived/lvs.conf", "/etc/proxcloud-lb/lvs.nft", "/etc/proxcloud-lb/lvs.sysctl", "/usr/local/sbin/proxcloud-lvs-net",
-	"/etc/systemd/system/proxcloud-lvs.service"}
+	"/etc/systemd/system/proxcloud-lvs.service", "/etc/systemd/system/proxcloud-lvs.service.d/nftables.conf"}
 
 // keepalived's config and its support files (pve's lbPairFiles).
 var lbGuestPairFiles = []string{"/etc/keepalived/keepalived.conf", "/usr/local/sbin/proxcloud-lb-check", "/usr/local/sbin/proxcloud-lb-notify",
