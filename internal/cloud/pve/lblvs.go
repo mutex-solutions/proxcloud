@@ -323,11 +323,56 @@ const (
 	// lvsSumFn defines lvssum(): the digest LVSHash gives for the files on the appliance, "-" without a config.
 	lvsSumFn = `lvssum() { [ -f ` + lvsConfig + ` ] && cat ` + lvsConfig + ` ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` 2>/dev/null | sha256sum | cut -c1-64 || echo -; }
 `
+	// lvsDriftFn defines lvsdrift(): what the kernel's IPVS table holds differently from the config on disk, of
+	// everything the config can change on a virtual or a real server that stays: a virtual server's scheduler and
+	// persistence timeout, a real server's weight and connection limit (its upper threshold). It prints nothing
+	// when there is no difference, and otherwise one line each, the arguments of the ipvsadm call that puts it
+	// right. Only what both hold is compared: a member that is out of the table is keepalived's own matter (its
+	// check), and a virtual server the table lacks is lvsserving()'s.
+	//
+	// keepalived 2.3.x rewrites a real server at a reload only when its weight changed, so a connection limit
+	// added to, raised on or removed from a listener stayed in the file and never reached the kernel (drill R3-F2
+	// of v0.11.1-rc.2: a removed limit of 5 kept refusing new flows). A scheduler and a persistence timeout it
+	// does rewrite; they are compared all the same, so a table changed by hand reads as one.
+	//
+	// ipvsadm comes with keepalived on both images (a recommended package). Where it is absent nothing is compared
+	// and nothing set, as before this function existed. A subshell: nothing it sets reaches its caller.
+	lvsDriftFn = `lvsdrift() (
+  command -v ipvsadm >/dev/null 2>&1 || exit 0
+  { cat ` + lvsConfig + `; echo ==; ipvsadm -Ln; echo ==; ipvsadm -Ln --thresholds; } 2>/dev/null | awk '
+    $1=="==" { n++; v=""; next }
+    n==0 {
+      if ($1=="virtual_server") { v=$2":"$3; r="" }
+      else if ($1=="lvs_sched") S[v]=$2
+      else if ($1=="persistence_timeout") P[v]=$2
+      else if ($1=="real_server") { r=v" "$2":"$3; W[r]=1; U[r]=0 }
+      else if ($1=="weight" && r!="") W[r]=$2
+      else if ($1=="uthreshold" && r!="") U[r]=$2
+      next
+    }
+    $1=="UDP" {
+      v=$2
+      if (n==1 && (v in S)) {
+        p=0
+        for (i=4; i<NF; i++) if ($i=="persistent") p=$(i+1)
+        if ($3!=S[v] || p!=P[v]+0) print "-E -u", v, "-s", S[v] (P[v]+0>0 ? " -p " P[v] : "")
+      }
+      next
+    }
+    $1!="->" { v=""; next }
+    v!="" && ((v" "$2) in W) {
+      r=v" "$2
+      if (n==1) w[r]=$4
+      else if ((r in w) && (w[r]!=W[r] || $3!=U[r])) print "-e -u", v, "-r", $2, "-m -w", W[r], "-x", U[r], "-y 0"
+    }'
+)
+`
 	// lvsServingFn defines lvsserving(): the unit runs, IPVS tracks and reroutes, the forward chain is loaded with
-	// forwarding on, and the IPVS table holds every virtual server of the config on disk; it prints what is missing
-	// otherwise. The table is keepalived's own word that it runs the file: /proc/net/ip_vs prints a server as
-	// "UDP  CB00710A:1388 wrr". A subshell, as serving() is: nothing it sets reaches its caller.
-	lvsServingFn = `lvsserving() (
+	// forwarding on, the IPVS table holds every virtual server of the config on disk, and what it holds of them is
+	// what the config says (lvsdrift); it prints what is missing otherwise. The table is keepalived's own word that
+	// it runs the file: /proc/net/ip_vs prints a server as "UDP  CB00710A:1388 wrr". A subshell, as serving() is:
+	// nothing it sets reaches its caller.
+	lvsServingFn = lvsDriftFn + `lvsserving() (
   systemctl is-active -q ` + lvsService + ` || { echo "the UDP service is not running"; return 1; }
   [ "$(cat /proc/sys/net/ipv4/vs/conntrack 2>/dev/null)" = 1 ] && [ "$(cat /proc/sys/net/ipv4/vs/snat_reroute 2>/dev/null)" = 1 ] || { echo "IPVS does not track and reroute its connections"; return 1; }
   nft list chain ` + lvsTable + ` ` + lvsForward + ` 2>/dev/null | grep -q 'policy drop' || { echo "the forwarding filter is not loaded"; return 1; }
@@ -336,11 +381,19 @@ const (
   for v in $(awk '$1=="virtual_server"{split($2,a,"."); printf "%02X%02X%02X%02X:%04X/%s:%s\n",a[1],a[2],a[3],a[4],$3,$2,$3}' ` + lvsConfig + `); do
     echo "$have" | grep -qxF -e "${v%%/*}" || { echo "the UDP listener ${v#*/} is not in the IPVS table"; return 1; }
   done
+  [ -z "$(lvsdrift)" ] || { echo "the IPVS table does not hold a connection limit, a weight, an algorithm or a persistence as the UDP configuration has it"; return 1; }
 )
+`
+	// lvsSetFn defines lvsset(): it puts right what lvsdrift() names, one ipvsadm edit each. An edit changes the
+	// figures of a server in place: its connections, and every other server's, stay (the real-guest test holds a
+	// flow across each). Never an error: what an edit did not put right, lvsserving() says.
+	lvsSetFn = `lvsset() { lvsdrift | ( set -f; while read -r a; do ipvsadm $a; done ) >/dev/null 2>&1 || true; }
 `
 	// lvsApply runs after the files are written. keepalived checks the new config before it replaces the one in
 	// use; a running unit reloads (HUP: the table keeps the members that are up), a stopped one starts, and a unit
-	// file a release changed restarts it. Then lvsserving() must hold: only on the answer 0 is the hash recorded. If
+	// file a release changed restarts it. keepalived does not write a changed connection limit to a real server that
+	// stays, so lvsset() does, after the reload and before each look. Then lvsserving() must hold: only on the answer
+	// 0 is the hash recorded. If
 	// it does not, the file in use before goes back and is loaded again; with none before, the unit stops, which
 	// switches forwarding off. Every file is written beside its place, as <path>.new, and moved in here by a rename
 	// with its owner and mode set, as keepalived's own are (lbKeepalivedApply): the unit reads the table's file and
@@ -358,10 +411,10 @@ if cmp -s $U.new $U; then rm -f $U.new; else mv $U.new $U; systemctl daemon-relo
 if [ -f $F ]; then cp $F $F.old; else rm -f $F.old; fi
 mv $F.new $F
 systemctl enable -q ` + lvsService + `
-` + lvsServingFn + `swap() {
+` + lvsServingFn + lvsSetFn + `swap() {
   if systemctl is-active -q ` + lvsService + `; then systemctl $how ` + lvsService + ` || return 1; else systemctl reset-failed ` + lvsService + ` 2>/dev/null || true; systemctl start ` + lvsService + ` || { echo "the UDP service did not start" >&2; return 1; }; fi
   n=0
-  until why=$(lvsserving); do
+  until lvsset; why=$(lvsserving); do
     n=$((n+1))
     [ $n -lt 20 ] || { echo "$why" >&2; return 1; }
     sleep 0.5

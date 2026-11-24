@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http/httptest"
 	"net/netip"
 	"os"
@@ -380,5 +381,89 @@ func TestLBPairFilesGolden(t *testing.T) {
 	if got := files[lbSysctlFile] + files[lbDropIn]; got != "net.ipv4.ip_nonlocal_bind = 1\nnet.ipv4.conf.all.rp_filter = 2\nnet.ipv4.conf.default.rp_filter = 2\n"+
 		"[Service]\nExecStartPre=/usr/sbin/ip link set dev ens19 up\n" {
 		t.Errorf("the sysctl file or the unit drop-in changed:\n%s", got)
+	}
+}
+
+// lvsdrift() and lvsset(), run as the text they are on a config RenderLVS made and on tables as ipvsadm prints them
+// (the listings are copied from keepalived 2.3.3 and 2.3.4 with ipvsadm 1.31, Debian 13 and Ubuntu 26.04). Drill
+// R3-F2 of v0.11.1-rc.2: a connection limit changed on a listener stayed in the file, the kernel kept the old one,
+// the state read said "serving" and the row ACTIVE. What the kernel itself does with an edit is the real-guest
+// test's (test/integration/lb_udp_test.go, TestLBApplianceUDPChanges).
+func TestLVSDriftScript(t *testing.T) {
+	spec := LBSpec{
+		Listeners: []LBListener{{Port: 53, Protocol: "udp", Pool: "dns", ConnectionLimit: 50}},
+		Pools: []LBPool{{Name: "dns", Protocol: "udp", Algorithm: "leastconn", SessionPersistence: &LBPersistence{Type: "source_ip", Timeout: 300},
+			Members: []LBMember{{ServerID: "101", Port: 53, Weight: 3, Address: "10.77.0.11"}, {ServerID: "102", Port: 53, Weight: 1, Address: "10.77.0.12"},
+				{ServerID: "103", Port: 53, Weight: 1, Address: "10.77.0.13"}}}},
+	}
+	config := RenderLVS(spec, []string{"203.0.113.10"})
+	// table is the two listings of a table with these figures; the third member is out of it (its check fails).
+	table := func(sched string, w1, u1, w2, u2 int) (plain, thresholds string) {
+		head := "IP Virtual Server version 1.2.1 (size=4096)\nProt LocalAddress:Port Scheduler Flags\n"
+		tcp := "TCP  203.0.113.10:53 wrr\n  -> 10.77.0.11:53                Masq    7      0          0         \n"
+		plain = head + "  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn\n" + tcp + "UDP  203.0.113.10:53 " + sched + "\n" +
+			fmt.Sprintf("  -> 10.77.0.11:53                Masq    %d      0          0         \n  -> 10.77.0.12:53                Masq    %d      2          0         \n", w1, w2)
+		thresholds = head + "  -> RemoteAddress:Port           Uthreshold Lthreshold ActiveConn InActConn\n" + strings.Replace(tcp, "Masq    7", "9          0", 1) + "UDP  203.0.113.10:53 " + sched + "\n" +
+			fmt.Sprintf("  -> 10.77.0.11:53                %d         0          0          0         \n  -> 10.77.0.12:53                %d         0          2          0         \n", u1, u2)
+		return plain, thresholds
+	}
+	const m1, m2 = "-e -u 203.0.113.10:53 -r 10.77.0.11:53 -m -w 3 -x 50 -y 0\n", "-e -u 203.0.113.10:53 -r 10.77.0.12:53 -m -w 1 -x 50 -y 0\n"
+	for _, shell := range lbguesttest.Shells() {
+		t.Run(shell, func(t *testing.T) {
+			g := lbguesttest.New(t)
+			udp(g, "203.0.113.10 53")
+			g.Write(lvsConfig, config)
+			for _, c := range []struct {
+				name, sched    string
+				w1, u1, w2, u2 int
+				want           string
+			}{
+				{"the table as the config has it", "lc persistent 300", 3, 50, 1, 50, ""},
+				{"a limit the kernel never got (R3-F2: added)", "lc persistent 300", 3, 0, 1, 0, m1 + m2},
+				{"a limit the kernel kept (R3-F2: raised from 5)", "lc persistent 300", 3, 5, 1, 50, m1},
+				{"a weight", "lc persistent 300", 3, 50, 2, 50, m2},
+				{"the algorithm", "wrr persistent 300", 3, 50, 1, 50, "-E -u 203.0.113.10:53 -s lc -p 300\n"},
+				{"the persistence timeout", "lc persistent 600", 3, 50, 1, 50, "-E -u 203.0.113.10:53 -s lc -p 300\n"},
+				{"no persistence", "lc", 3, 50, 1, 50, "-E -u 203.0.113.10:53 -s lc -p 300\n"},
+			} {
+				plain, thresholds := table(c.sched, c.w1, c.u1, c.w2, c.u2)
+				g.Stub("ipvsadm", plain)
+				g.Stub("ipvsadm-thresholds", thresholds)
+				g.Unstub("ipvsadm-calls")
+				if exit, out, stderr := g.Run(shell, lvsDriftFn+"lvsdrift"); exit != 0 || out != c.want {
+					t.Errorf("%s: lvsdrift exit %d said %q (stderr %q), want %q", c.name, exit, out, stderr, c.want)
+				}
+				// The state read: a table that differs is not served, which is what makes a pass push again.
+				wantExit, wantSaid := 0, ""
+				if c.want != "" {
+					wantExit, wantSaid = 1, "the IPVS table does not hold a connection limit, a weight, an algorithm or a persistence as the UDP configuration has it\n"
+				}
+				if exit, out, _ := g.Run(shell, lvsServingFn+"lvsserving"); exit != wantExit || out != wantSaid {
+					t.Errorf("%s: lvsserving exit %d said %q, want %d %q", c.name, exit, out, wantExit, wantSaid)
+				}
+				// The apply's part: one edit for each line, and never an error of its own.
+				exit, _, stderr := g.Run(shell, "set -e\n"+lvsDriftFn+lvsSetFn+"lvsset")
+				calls, _ := os.ReadFile(g.Path("stub/ipvsadm-calls"))
+				if exit != 0 || string(calls) != c.want {
+					t.Errorf("%s: lvsset exit %d (stderr %q) ran %q, want %q", c.name, exit, stderr, calls, c.want)
+				}
+			}
+			// A listener without a limit and without persistence asks the kernel to have none: the removal of R3-F2.
+			spec.Listeners[0].ConnectionLimit, spec.Pools[0].SessionPersistence = 0, nil
+			g.Write(lvsConfig, RenderLVS(spec, []string{"203.0.113.10"}))
+			plain, thresholds := table("lc persistent 300", 3, 5, 1, 5)
+			g.Stub("ipvsadm", plain)
+			g.Stub("ipvsadm-thresholds", thresholds)
+			want := "-E -u 203.0.113.10:53 -s lc\n" + strings.ReplaceAll(m1+m2, "-x 50", "-x 0")
+			if _, out, _ := g.Run(shell, lvsDriftFn+"lvsdrift"); out != want {
+				t.Errorf("a removed limit and persistence: lvsdrift said %q, want %q", out, want)
+			}
+			// A member that enters between the two listings has no weight in the first: it is not compared, so a
+			// state read never calls a table in motion a table that differs.
+			g.Stub("ipvsadm", strings.Replace(plain, "  -> 10.77.0.12:53                Masq    1      2          0         \n", "", 1))
+			if _, out, _ := g.Run(shell, lvsDriftFn+"lvsdrift"); out != "-E -u 203.0.113.10:53 -s lc\n"+strings.ReplaceAll(m1, "-x 50", "-x 0") {
+				t.Errorf("a member in one listing only: lvsdrift said %q", out)
+			}
+		})
 	}
 }
