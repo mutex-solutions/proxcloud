@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -93,6 +94,35 @@ func (p PublicIP) OwnedByLB() bool { return strings.HasPrefix(p.ServerID, lbOwne
 // IsPublic: a public NIC's address, the billed kind. A net0 row is an address on the project's own
 // vnet (zones without DHCP) and costs nothing.
 func (p PublicIP) IsPublic() bool { return p.NIC == publicNIC }
+
+// FloatingIPRow is the FLOATING_IP row of public allocation a: what lists the address for the tenant and bills it.
+// The allocation is the truth and the row is derived from it (platform_derived). The provider sync makes one of
+// every public allocation (syncjob's floatingIPProvider), and a cluster's balancer of its own addresses in the pass
+// that takes them (lbAddressRows): both make this row, so neither changes the other's. The allocation time is part
+// of the row's identity, so an address released and handed to someone else gets a new row and bill item even if no
+// sample saw it free.
+func FloatingIPRow(a PublicIP, region string) cloud.CloudResource {
+	var since int64
+	if a.CreatedAt != nil {
+		since = a.CreatedAt.Unix()
+	}
+	return cloud.CloudResource{
+		ExternalID: fmt.Sprintf("%s/%s/%d", a.NetworkID, a.IP, since),
+		ServiceID:  a.ServiceID,
+		ProjectID:  a.ProjectID,
+		Region:     region,
+		Type:       cloud.TypeFloatingIP,
+		CreatedAt:  a.CreatedAt, // bill from the allocation, not from the first sample after it
+		Data: map[string]any{"floatingIp": map[string]any{
+			"floating_ip_address": a.IP,
+			"floating_network_id": a.NetworkID,
+			"status":              "ACTIVE",
+			"server_id":           a.ServerID,
+			"nic":                 a.NIC,
+			"platform_derived":    true,
+		}},
+	}
+}
 
 // publicOfProject selects what the floatingIps quota counts: public NICs only, not the net0 addresses
 // allocated on the project's own vnets.

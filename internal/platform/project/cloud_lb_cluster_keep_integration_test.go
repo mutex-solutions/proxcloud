@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -33,11 +34,12 @@ import (
 // and what a guest answers).
 //
 // Shown: the address of a Service that goes with the annotation leaves both appliances and their firewall and stays
-// the balancer's, allocated (so in the floatingIps quota, and billed: the meter makes a FLOATING_IP row of every
-// public allocation, syncjob/pve_meter.go) with its FLOATING_IP row left alone, while one that goes without it is
-// given back; an annotation set and a Service deleted with no pass in between still keeps, and so does one the
-// controller never sent with the annotation and names as being deleted with it (and the other way round: the
-// object's last word counts, not the last state's); a kept address counts in
+// the balancer's, allocated (so in the floatingIps quota, and billed: the pass that takes an address writes its
+// FLOATING_IP row, the one the meter makes of every public allocation, syncjob/pve_meter.go) with its FLOATING_IP row
+// left alone, while one that goes without it is given back; an annotation set and a Service deleted with no pass in
+// between still keeps, and so does one the controller never sent with the annotation and names as being deleted
+// with it (and the other way round: the object's last word counts, not the last state's); the row lists what a
+// pass decided, and an address has its FLOATING_IP row, before the appliances are pushed; a kept address counts in
 // the quota, and a Service that names it gets it without the quota or the pool being asked; a Service that names
 // another cluster's kept address, another project's address, a free one, one in use or no address at all gets an
 // address of the pool and one Event, the same whichever it was, and nothing of the other cluster moves; a Service
@@ -205,15 +207,8 @@ func testLBClusterKeepAddress(t *testing.T) {
 			slices.ContainsFunc(f.rules["301"], func(r pve.FirewallRule) bool { return r.Dest == ip }) ||
 			slices.ContainsFunc(f.rules["302"], func(r pve.FirewallRule) bool { return r.Dest == ip })
 	}
-	// What the meter makes of a public allocation, and the address's release archives.
-	bill := func(ip string) {
-		t.Helper()
-		now := time.Now().UTC()
-		if _, err := h.cloud.Insert(ctx, &cloud.CloudResource{ExternalID: "fip-" + ip, ServiceID: "svc", ProjectID: "p1", Type: cloud.TypeFloatingIP,
-			CreatedAt: &now, Data: map[string]any{"floatingIp": map[string]any{"server_id": owner, "floating_ip_address": ip}}}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// The addresses that have a FLOATING_IP row, which lists and bills them: the pass that takes an address writes
+	// it, and the address's release archives it.
 	billed := func() []string {
 		t.Helper()
 		fips, err := h.cloud.FindByServiceProjectAndType(ctx, "svc", "p1", cloud.TypeFloatingIP)
@@ -276,8 +271,21 @@ func testLBClusterKeepAddress(t *testing.T) {
 	if ans := put(a, b); event(ans, "a", lbgw.ReasonKeepAddressLimit) != "" || len(ans.Services[0].Events) != 0 {
 		t.Fatalf("a Service that keeps its address is told nothing: %+v", ans.Services[0])
 	}
-	bill(vipA)
-	bill(vipB)
+	// Each address is listed and billed with the pass that took it, from its allocation on, and no provider sync ran
+	// here (drill R2a-o2 of v0.11.1-rc.2: 4 rows for 12 addresses until one did). The row is the sync's own: a sync
+	// after it finds nothing to change.
+	if want := slices.Sorted(slices.Values([]string{vipA, vipB})); !slices.Equal(billed(), want) {
+		t.Fatalf("floating rows %v, want %v: an address that is allocated is billed", billed(), want)
+	}
+	fips, _ := h.cloud.FindByServiceProjectAndType(ctx, "svc", "p1", cloud.TypeFloatingIP)
+	allocs, _ := h.publicIPs.ForServer(ctx, "svc", owner)
+	for _, a := range allocs {
+		want := FloatingIPRow(a, "")
+		i := slices.IndexFunc(fips, func(r cloud.CloudResource) bool { return r.ExternalID == want.ExternalID })
+		if i < 0 || fips[i].CreatedAt == nil || !fips[i].CreatedAt.Equal(*a.CreatedAt) || !reflect.DeepEqual(fips[i].Data, want.Data) {
+			t.Fatalf("the row of %s is not the one the sync makes of its allocation (billed from %v): %+v", a.IP, a.CreatedAt, fips)
+		}
+	}
 	put()
 	if got := state().KeepGone; !slices.Equal(got, []string{"a"}) {
 		t.Fatalf("the state without a and b carries %v, want a alone", got)
@@ -489,7 +497,9 @@ func testLBClusterKeepAddress(t *testing.T) {
 	if lb = read(); !slices.Equal(lb.Cluster.Kept, more) || len(lb.Cluster.Releasing) != 0 || vipOf(lb, "g") != vipG {
 		t.Fatalf("a refused release changed the row: %+v", lb.Cluster)
 	}
-	bill(vipC)
+	if !slices.Contains(billed(), vipC) {
+		t.Fatalf("the kept address has no floating row: %v", billed())
+	}
 	if code := release("p1", vipC); code != http.StatusOK {
 		t.Fatalf("release of a kept address: %d", code)
 	}
@@ -521,16 +531,68 @@ func testLBClusterKeepAddress(t *testing.T) {
 	if slices.Contains(lb.Cluster.Kept, vipI) || slices.Contains(owned(), vipI) || slices.Contains(billed(), vipI) || served(vipI) {
 		t.Fatalf("i's address %s: kept %v, owned %v, floating rows %v, served %v", vipI, lb.Cluster.Kept, owned(), billed(), served(vipI))
 	}
-	// h is stored without the annotation, and named with it at its delete: kept.
-	put(g, svc("h", 98, "", ""))
-	vipH := vipOf(converge("h ready", settled(2)), "h")
-	send([]lbgw.Gone{{UID: "h", Annotations: keepTrue}}, g)
-	if got := state().KeepGone; !slices.Equal(got, []string{"h"}) {
-		t.Fatalf("h was annotated just before its delete, and the state carries %v", got)
+	// h is stored without the annotation, and named with it at its delete: kept. The pass is held before its first
+	// call to Proxmox each time, to read what the row says before the appliances are pushed: the new Service's
+	// address with its FLOATING_IP row, and then the kept address as kept, in the cluster's row and in quota-usage
+	// (drill R2a-o1: both followed the delete by a whole pass, 44 s on the lab).
+	inThePass := func(what string, request func(), done func(*loadBalancer) bool) {
+		t.Helper()
+		hold := make(chan struct{})
+		f.mu.Lock()
+		f.gate = hold
+		f.mu.Unlock()
+		defer func() {
+			f.mu.Lock()
+			f.gate = nil
+			f.mu.Unlock()
+			close(hold)
+		}()
+		request()
+		for deadline := time.Now().Add(10 * time.Second); !done(read()); time.Sleep(50 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: not in the row while the pass waits for Proxmox: %+v", what, read().Cluster)
+			}
+		}
+	}
+	vipH := ""
+	inThePass("h's address", func() { put(g, svc("h", 98, "", "")) }, func(lb *loadBalancer) bool {
+		i := slices.IndexFunc(lb.Cluster.Services, func(s lbClusterSvc) bool { return s.UID == "h" })
+		if i >= 0 {
+			vipH = lb.Cluster.Services[i].VIP
+		}
+		return vipH != ""
+	})
+	if served(vipH) || !slices.Contains(billed(), vipH) {
+		t.Fatalf("h's address %s before the pushes: served %v, floating rows %v, want the row from the allocation on", vipH, served(vipH), billed())
+	}
+	converge("h ready", settled(2))
+	if lb = read(); lb.Cluster.Services[0].State != lbgw.StateReady {
+		t.Fatalf("g: %+v", lb.Cluster.Services[0])
+	}
+	inThePass("h's address as kept", func() {
+		send([]lbgw.Gone{{UID: "h", Annotations: keepTrue}}, g)
+		if got := state().KeepGone; !slices.Equal(got, []string{"h"}) {
+			t.Fatalf("h was annotated just before its delete, and the state carries %v", got)
+		}
+	}, func(lb *loadBalancer) bool { return slices.Contains(lb.Cluster.Kept, vipH) })
+	if lb = read(); !served(vipH) || len(lb.Cluster.Services) != 1 || lb.Cluster.Services[0].State != lbgw.StateReady {
+		t.Fatalf("before the pushes: h's address served %v, the row's Services %+v (g stays ready)", served(vipH), lb.Cluster.Services)
+	}
+	all, err := h.cloud.FindAllByProjectID(ctx, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nq, err := h.pveNetworkQuota(ctx, "p1", "svc", map[string]any{"floatingIps": 20}, all)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.IndexFunc(nq.Addresses, func(a quotaAddress) bool { return a.IP == vipH }); i < 0 || nq.Addresses[i].Kind != "kept" {
+		t.Fatalf("quota-usage before the pushes: %+v, want %s as kept", nq.Addresses, vipH)
 	}
 	lb = converge("h kept", settled(1))
-	if !slices.Contains(lb.Cluster.Kept, vipH) || len(lb.Cluster.Kept) != lbgw.MaxKeptAddresses || !slices.Contains(owned(), vipH) || served(vipH) {
-		t.Fatalf("h's address %s: kept %v, owned %v, served %v", vipH, lb.Cluster.Kept, owned(), served(vipH))
+	if !slices.Contains(lb.Cluster.Kept, vipH) || len(lb.Cluster.Kept) != lbgw.MaxKeptAddresses || !slices.Contains(owned(), vipH) ||
+		!slices.Contains(billed(), vipH) || served(vipH) {
+		t.Fatalf("h's address %s: kept %v, owned %v, floating rows %v, served %v", vipH, lb.Cluster.Kept, owned(), billed(), served(vipH))
 	}
 	// The limit of five stays: the cluster keeps five now, and a Service annotated at its delete gives its back.
 	put(g, svc("j", 100, "", ""))

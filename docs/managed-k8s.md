@@ -907,7 +907,12 @@ call for its own cluster, and minting it again rotates it.
   without a controller), the credential is revoked first, then the appliances, the addresses with their `FLOATING_IP`
   rows, the row and the state go.
 - What the tenant pays: the two appliances are `SERVER` rows of the project with their `VOLUME` rows, billed from the
-  first Service until the cluster is deleted, and each address is a billed `FLOATING_IP`. Only the addresses are
+  first Service until the cluster is deleted, and each address is a billed `FLOATING_IP`. The pass that allocates an
+  address writes that row, billed from the allocation on, and the pass that gives the address back archives it: a
+  provider sync is not needed for either, and finds the row as it would have made it. The cluster's row says what a
+  pass decided (each Service's address, the kept addresses, the ones on their way back) before the appliances are
+  pushed, so the cluster page's kept list and `quota-usage` follow a Service's delete at the start of that pass,
+  not at its end. Only the addresses are
   checked against the quota (`floatingIps`); the appliances are not checked against the server quota. **The quota
   caps the cluster's Services**: a project's public addresses count together (its servers', its own load balancers',
   each Service's), and the quota the seed gives a provider is 5 (`deploy/seed`, `floatingIps`), so a cluster in

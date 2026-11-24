@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **What an existing cluster balancer gets from the fixes for Services that are deleted (#452): no file, no
+  reload.** No config the platform renders changed, so the upgrade pushes nothing to an appliance for them: no
+  HAProxy, keepalived or LVS file is written, nothing is reloaded, and no address moves. What changes is in the
+  portal's rows, at each cluster balancer's first pass after the upgrade (its controller's next request, within
+  30 s, or the provider sync): every address the balancer holds that has no `FLOATING_IP` row yet gets one, billed
+  from the time the address was allocated, which is what the next provider sync would have written. On a site
+  whose sync runs on schedule that is at most the addresses taken since its last run; on a site that ran none it
+  is every Service and kept address, which were in the quota but neither listed nor billed until now. A tenant's
+  own balancers are untouched: their addresses' rows are the sync's, as before.
+- **A cluster keeps the controller it has, and with it the old answer to an annotation set just before a delete.**
+  The portal's upgrade restarts no controller. Until a cluster is moved to the portal's controller image (the
+  tenant's platform update, the operator's **Bump**, or "Enable load balancer controller" again), a Service
+  annotated `proxcloud.io/lb-keep-address: "true"` and deleted within about a second still gives its address back,
+  and a credential rotation still puts one Warning `GatewayRefused` on each Service. The move rolls the
+  controller's pod only: no machine, no appliance, no balancer config. A controller of this release against a
+  portal rolled back to an earlier v0.11.1 build works: that portal refuses the new field, is sent the request
+  without it in the same turn, and goes by its stored state as it did.
 - **UDP and TLS from Services need the cluster on chart 0.1.19.** The platform BOM now pins cluster chart
   `proxmox-kamaji-cluster` 0.1.19 for new tenant clusters. On an installed platform that is a record-only step of
   the upgrade run, from every previous BOM: it writes the version on the Kubernetes provider and touches no cluster,
@@ -499,6 +516,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Service's address was listed and billed only after a provider sync, and the cluster page followed a delete
+  a whole pass late.** The `FLOATING_IP` row of a public address is what lists it for the tenant and bills it. For
+  the addresses of a cluster's Services it was written by the provider sync alone: on the lab 12 addresses were in
+  use with 4 rows until a sync ran, and two addresses taken and given back in between never had one (drill R2a-o2
+  of v0.11.1-rc.2); on a site with the scheduler the wait was the sync's interval. Now the pass that allocates an
+  address writes its row, billed from the allocation's time, and the pass that gives it back archives it, as
+  before. The row is the one the sync makes, so a sync after it changes nothing, and a kept address keeps its
+  Service's row. Separately, the cluster's row was saved at the end of a pass, after both appliances were pushed:
+  the page's kept list and `quota-usage` showed a deleted Service's address as the Service's for 44 s after the
+  delete, 40 s after it had stopped answering (drill R2a-o1). Now the row is saved as soon as the pass has decided,
+  before its first call to Proxmox: the Services, each one's address, the kept addresses and the ones on their way
+  back. A Service that was ready reads ready meanwhile, as it did; what the appliances serve is still said at the
+  pass's end. The quota count itself never depended on either. Tests on PostgreSQL through the gateway's own
+  handler, with the pass held before its first call to Proxmox; each fails without its fix. Not run on a lab.
 - **A credential rotation put a Warning on every Service of the cluster.** The operator's "Enable load balancer
   controller" on a cluster that has a controller replaces its credential: the old token stops at once, and the
   kubelet writes the new one into the controller's Secret volume at its next sync of the pod. The call in between

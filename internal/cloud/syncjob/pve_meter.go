@@ -7,7 +7,6 @@ package syncjob
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -293,8 +292,7 @@ func (j *Job) floatingIPProvider(region, projectID, serviceID string) *floatingI
 }
 
 // floatingIPProvider: the allocation table is the truth, the row is derived from it
-// (platform_derived). The allocation time is part of the row's identity, so an address released
-// and handed to someone else gets a new row and bill item even if no sample saw it free.
+// (project.FloatingIPRow, which a cluster's balancer also writes for its own addresses as it takes them).
 type floatingIPProvider struct {
 	list                         PublicIPLister
 	region, projectID, serviceID string
@@ -317,25 +315,9 @@ func (p *floatingIPProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 		if !a.IsPublic() {
 			continue
 		}
-		var since int64
-		if a.CreatedAt != nil {
-			since = a.CreatedAt.Unix()
-		}
-		out = append(out, cloud.CloudResource{
-			ExternalID: fmt.Sprintf("%s/%s/%d", a.NetworkID, a.IP, since),
-			ProjectID:  p.projectID,
-			Region:     p.region,
-			Type:       cloud.TypeFloatingIP,
-			CreatedAt:  a.CreatedAt, // bill from the allocation, not from the first sample after it
-			Data: map[string]any{"floatingIp": map[string]any{
-				"floating_ip_address": a.IP,
-				"floating_network_id": a.NetworkID,
-				"status":              "ACTIVE",
-				"server_id":           a.ServerID,
-				"nic":                 a.NIC,
-				"platform_derived":    true,
-			}},
-		})
+		row := project.FloatingIPRow(a, p.region)
+		row.ServiceID, row.ProjectID = "", p.projectID // the reconcile names the service
+		out = append(out, row)
 	}
 	return out, nil
 }

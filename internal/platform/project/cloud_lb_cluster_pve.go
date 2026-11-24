@@ -10,6 +10,7 @@ package project
 // complete by construction, so there is no day of grace as in the approved design.
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -564,8 +565,33 @@ func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.Extern
 	if err != nil || lb.Cluster == nil {
 		return false, err
 	}
+	was, _ := json.Marshal(lb)
+	ready := map[string]bool{} // the Services the row had ready
+	for _, s := range lb.Cluster.Services {
+		ready[s.UID] = s.State == lbgw.StateReady
+	}
 	if err := h.lbClusterDesired(ctx, es, proj, lb, st); err != nil {
 		return false, err
+	}
+	// The row says what this pass decided before the appliances are pushed, which takes the pass most of its time:
+	// the Services it serves, each one's address, the addresses it keeps and the ones on their way back. The
+	// cluster's page and quota-usage read the row, and listed a deleted Service's address as the Service's until
+	// the pushes were through (drill R2a-o1 of v0.11.1-rc.2: 44 s after the delete, 3.4 s after the address had
+	// stopped answering). A Service that was ready reads ready meanwhile, as it did while the row waited for the
+	// pass's end: what the appliances serve is said after the pushes, below.
+	for i := range lb.Cluster.Services {
+		if s := &lb.Cluster.Services[i]; s.State == lbgw.StateBuilding && ready[s.UID] {
+			s.State = lbgw.StateReady
+		}
+	}
+	if now, _ := json.Marshal(lb); !bytes.Equal(was, now) {
+		if err := h.lbSave(ctx, cr, lb); err != nil {
+			return false, err
+		}
+	}
+	// And each address the balancer holds has its FLOATING_IP row from this pass on, not from the next provider sync.
+	if err := h.lbAddressRows(ctx, es, proj, LBAddressOwner(lb.ID)); err != nil {
+		slog.Warn("load balancer: floating IP rows of a cluster's addresses; the next pass writes them", "cluster", lb.Cluster.ID, "err", err)
 	}
 	if len(lb.Appliances) > 0 {
 		err = h.lbApplyPair(ctx, es, proj, cr, lb)
@@ -867,6 +893,35 @@ func (h *Handler) lbClusterReleaseKept(ctx context.Context, proj *Project, clust
 	}
 	h.lbPasses.Delete(clusterID) // the next pass has an address to give back, whatever the last one found
 	go h.lbClusterConverge(context.WithoutCancel(ctx), clusterID, true)
+	return nil
+}
+
+// lbAddressRows writes the FLOATING_IP row of each public address owner holds that has none: the row lists the
+// address and bills it, from the allocation's time on. It was the provider sync's alone to write, so a Service's
+// address was not listed and not billed until a sync ran, and one given back before that never was (drill R2a-o2 of
+// v0.11.1-rc.2: 4 rows for 12 addresses on a site that ran no sync). A kept address is its Service's allocation, and
+// keeps that row. The row is the sync's own (FloatingIPRow), written only where there is none, so the two never
+// write over each other; the address's release archives it (lbDropAddressRow).
+func (h *Handler) lbAddressRows(ctx context.Context, es *externalservice.ExternalService, proj *Project, owner string) error {
+	allocs, err := h.publicIPs.ForServer(ctx, es.ID, owner)
+	if err != nil || len(allocs) == 0 {
+		return err
+	}
+	rows, err := h.cloud.FindByServiceProjectAndType(ctx, es.ID, proj.ID, cloud.TypeFloatingIP)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, a := range allocs {
+		row := FloatingIPRow(a, es.PVERegion())
+		if !a.IsPublic() || a.ProjectID != proj.ID || slices.ContainsFunc(rows, func(r cloud.CloudResource) bool { return r.ExternalID == row.ExternalID }) {
+			continue
+		}
+		row.UpdatedAt = &now
+		if _, err := h.cloud.InsertIfAbsent(ctx, &row); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
