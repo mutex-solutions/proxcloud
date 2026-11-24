@@ -622,9 +622,18 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			if got := g.run(ctx, "cat /etc/keepalived/keepalived.conf; for f in /etc/sysctl.d/90-proxcloud-lb.conf /etc/systemd/system/keepalived.service.d/proxcloud.conf /usr/local/sbin/proxcloud-lb-check /usr/local/sbin/proxcloud-lb-notify; do echo $f; cat $f; done"); got != strings.TrimSpace(keepalived+pve.LBPairFilesDigest("lo")) {
 				t.Errorf("keepalived's config and support files on the guest are not the ones the product renders:\n%s", got)
 			}
-			// The notify script writes keepalived's state by a rename too: no temporary file stays beside it.
-			if got := g.run(ctx, "cat /run/proxcloud-lb.state; ls /run/proxcloud-lb.state.* 2>/dev/null | wc -l"); got != "MASTER\n0" {
-				t.Errorf("the state file and what is beside it: %q", got)
+			// The notify script writes keepalived's state by a rename too: no temporary file stays beside it. HAProxy
+			// was stopped and started a moment ago (step 6), which takes keepalived through FAULT and BACKUP: it is
+			// MASTER again about 4 s after HAProxy listens, so the state is waited for and not read once.
+			for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+				got := g.run(ctx, "cat /run/proxcloud-lb.state; ls /run/proxcloud-lb.state.* 2>/dev/null | wc -l")
+				if got == "MASTER\n0" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Errorf("the state file and what is beside it: %q", got)
+					break
+				}
 			}
 
 			// 8. A change while the image's package manager runs (drill R3-F1 and R2b-1 of v0.11.1-rc.2: Ubuntu's apt
