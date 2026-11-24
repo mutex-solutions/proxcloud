@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -463,6 +464,117 @@ func TestLVSDriftScript(t *testing.T) {
 			g.Stub("ipvsadm", strings.Replace(plain, "  -> 10.77.0.12:53                Masq    1      2          0         \n", "", 1))
 			if _, out, _ := g.Run(shell, lvsDriftFn+"lvsdrift"); out != "-E -u 203.0.113.10:53 -s lc\n"+strings.ReplaceAll(m1, "-x 50", "-x 0") {
 				t.Errorf("a member in one listing only: lvsdrift said %q", out)
+			}
+		})
+	}
+}
+
+// A push of the UDP service writes the files that are not on the appliance as they should be, and no other (drill
+// R2a-1 of v0.11.1-rc.2: a member that came or went wrote all five files on each appliance, eight guest calls a
+// push, and a UDP port added with a TCP port answered after 33 s). The product's own push runs against a guest
+// whose scripts are run as text, and the guest's calls are counted: a member change is one write and three
+// commands (ready, what is there, apply), where it was five writes and three commands.
+//
+// What the count cannot show is what a call costs on a real cluster (0.5 to 1 s each on the lab, by
+// chain2-agentcalls.txt of the drill): that is the lab's.
+func TestPushLVSWritesOnlyWhatDiffers(t *testing.T) {
+	for _, shell := range lbguesttest.Shells() {
+		t.Run(shell, func(t *testing.T) {
+			ctx := context.Background()
+			ps, g, a := scriptGuest(t, shell)
+			holder(g)
+			udp(g, "203.0.113.10 53") // the kernel's side, and files that are replaced below
+			for _, f := range append(lvsFiles("ten0"), [2]string{lvsConfig, ""}) {
+				g.Remove(f[0])
+			}
+			// A wait in an apply is no wait here.
+			if err := os.WriteFile(g.Path("bin/sleep"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec := LBSpec{Listeners: []LBListener{{Port: 53, Protocol: "udp", Pool: "dns"}},
+				Pools: []LBPool{{Name: "dns", Protocol: "udp", Algorithm: "roundrobin", Members: []LBMember{{ServerID: "101", Port: 53, Weight: 1, Address: "10.77.0.11"}}}}}
+			one := RenderLVS(spec, []string{"203.0.113.10"})
+			spec.Pools[0].Members = append(spec.Pools[0].Members, LBMember{ServerID: "102", Port: 53, Weight: 1, Address: "10.77.0.12"})
+			two := RenderLVS(spec, []string{"203.0.113.10"})
+			// push answers the files written and the commands run.
+			push := func(config string) (writes []string, execs int, err error) {
+				t.Helper()
+				a.Writes = nil
+				n := a.Execs()
+				err = ps.PushLVS(ctx, "n1", 100, config, "ten0")
+				return a.Writes, a.Execs() - n, err
+			}
+			placed := func(when, config string) {
+				t.Helper()
+				for _, f := range append(lvsFiles("ten0"), [2]string{lvsConfig, config}) {
+					mode := os.FileMode(0o644)
+					if f[0] == lvsNet {
+						mode = 0o755
+					}
+					got, _ := os.ReadFile(g.Path(f[0]))
+					st, err := os.Stat(g.Path(f[0]))
+					if err != nil || string(got) != f[1] || st.Mode().Perm() != mode {
+						t.Errorf("%s: %s is not the pushed file with mode %v (%v)", when, f[0], mode, err)
+					}
+					if _, err := os.Stat(g.Path(f[0] + ".new")); err == nil {
+						t.Errorf("%s: %s.new was not moved in", when, f[0])
+					}
+				}
+			}
+			want := func(when string, writes []string, execs int, err error, files ...string) {
+				t.Helper()
+				for i := range files {
+					files[i] += ".new"
+				}
+				if err != nil || !slices.Equal(writes, files) || execs != 3 {
+					t.Errorf("%s: wrote %q with %d commands (%v), want %q with 3", when, writes, execs, err, files)
+				}
+			}
+			// The first push: every file.
+			writes, execs, err := push(one)
+			want("the first push", writes, execs, err, lvsNft, lvsSysctl, lvsNet, lvsUnit, lvsConfig)
+			placed("the first push", one)
+			// A member comes: the config alone.
+			writes, execs, err = push(two)
+			want("a member added", writes, execs, err, lvsConfig)
+			placed("a member added", two)
+			// Pushed again with nothing to write, as after a state read that said "not served".
+			writes, execs, err = push(two)
+			want("pushed again", writes, execs, err)
+			// A file changed by hand, and what an interrupted push left beside another: the one file is written
+			// again, and the leftover never reaches its place.
+			g.Write(lvsNft, "by hand\n")
+			g.Write(lvsSysctl+".new", "half of a file\n")
+			writes, execs, err = push(two)
+			want("a file changed by hand", writes, execs, err, lvsNft)
+			placed("a file changed by hand", two)
+			// The unit restarted once, with the unit file of the first push, and reloaded for every push after it.
+			if calls, _ := os.ReadFile(g.Path("stub/systemctl-calls")); strings.Count(string(calls), "restart "+lvsService) != 1 || strings.Count(string(calls), "reload "+lvsService) != 3 {
+				t.Errorf("the unit's restarts and reloads over a first push and three more:\n%s", calls)
+			}
+
+			// A push the appliance does not come to serve. With no new config (pushed again, the table does not
+			// load): the config in use stays, and the unit is left alone. With a new one: the one before is back.
+			g.Unstub("nft")
+			if _, _, err = push(two); err == nil || !strings.Contains(err.Error(), "the forwarding filter is not loaded") {
+				t.Fatalf("a push that is not served: %v", err)
+			}
+			placed("a push again that was not served", two)
+			if _, _, err = push(one); err == nil {
+				t.Fatal("a changed config that is not served was taken")
+			}
+			placed("a changed config that was not served", two)
+			if calls, _ := os.ReadFile(g.Path("stub/systemctl-calls")); strings.Contains(string(calls), "disable -q --now "+lvsService) {
+				t.Errorf("a push that was not served disabled a unit that has a config to go back to:\n%s", calls)
+			}
+			// A config keepalived refuses: nothing moves.
+			g.Stub("nft", "table ip proxcloud-lb {\n\tchain lb-forward {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n")
+			g.Stub("keepalived-refuses", "(lvs.conf.new: Line 3) Unknown keyword\n")
+			if _, _, err = push(one); err == nil || !strings.Contains(err.Error(), "Unknown keyword") {
+				t.Fatalf("a config keepalived refuses: %v", err)
+			}
+			if got, _ := os.ReadFile(g.Path(lvsConfig)); string(got) != two {
+				t.Errorf("a config keepalived refused replaced the one in use")
 			}
 		})
 	}

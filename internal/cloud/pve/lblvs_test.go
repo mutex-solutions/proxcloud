@@ -140,7 +140,7 @@ func TestRenderLVSNoInjection(t *testing.T) {
 			SessionPersistence: &LBPersistence{Type: "source_ip", Timeout: 1 << 30}}},
 	}
 	got := RenderLVS(s, []string{"203.0.113.10"})
-	line := regexp.MustCompile(`^(instance lvs|global_defs \{|  router_id proxcloud-lvs|  lvs_flush_on_stop|\}||virtual_server 203\.0\.113\.10 53 \{|  protocol UDP|  lvs_method NAT|  lvs_sched wrr|  alpha|  delay_loop 5|  retry 2|  delay_before_retry 2|  persistence_timeout 10800|  real_server 10\.0\.0\.11 53 \{|    weight 1|    UDP_CHECK \{|      connect_timeout [25]|    \}|    PING_CHECK \{|      retry 2|      delay_before_retry 1|  \})$`)
+	line := regexp.MustCompile(`^(instance lvs|global_defs \{|  router_id proxcloud-lvs|  lvs_flush_on_stop|\}||virtual_server 203\.0\.113\.10 53 \{|  protocol UDP|  lvs_method NAT|  lvs_sched wrr|  alpha|  warmup 0|  delay_loop 5|  retry 2|  delay_before_retry 2|  persistence_timeout 10800|  real_server 10\.0\.0\.11 53 \{|    weight 1|    UDP_CHECK \{|      connect_timeout [25]|    \}|    PING_CHECK \{|      retry 2|      delay_before_retry 1|  \})$`)
 	for _, l := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
 		if !line.MatchString(l) {
 			t.Errorf("line %q is none of the renderer's own:\n%s", l, got)

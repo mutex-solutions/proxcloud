@@ -409,19 +409,33 @@ func lbClusterStatus(lb *loadBalancer, uid string) lbgw.ServiceStatus {
 // lets go of the lock, and passes over it again when it is not the one it applied. Once, not until the state stands
 // still: a Service that keeps changing cannot keep a converge and its lock, and what changes during the second pass
 // is the next PUT's.
-// ponytail: a state stored between that last look and the release still waits for the controller's next send; a
-// "changed" mark the PUT leaves for the lock's holder would close it, if a drill ever shows the gap.
+//
+// What that look does not see, a state stored during the second pass or between the look and the release, waited for
+// the controller's next send all the same (drill R2a-1 of v0.11.1-rc.2: of changes that followed each other the
+// later ones were live after up to 44 s). So a converge leaves a mark before it asks for the lock, the one that
+// holds the lock takes the mark away before each pass reads the state, and when it lets go of the lock with a mark
+// left, a converge asked for one while the last pass was at work: the next one starts at once, with a lock of its
+// own.
+// ponytail: the mark is this process's. Behind a second API replica that holds the lock, such a state still waits
+// for the controller's next send; the mark goes on the lock's row if replicas ever make that gap matter.
 func (h *Handler) lbClusterConverge(ctx context.Context, clusterID string, force bool) {
+	h.lbChanged.Store(clusterID, struct{}{})
 	release, ok, err := h.sdnLock.Hold(ctx, "lbc-"+clusterID, lbcLease, 0)
 	if err != nil {
 		slog.Warn("load balancer: cluster converge lock", "cluster", clusterID, "err", err)
 		return
 	}
 	if !ok {
-		return
+		return // the holder finds the mark
 	}
-	defer release()
+	defer func() {
+		release()
+		if _, asked := h.lbChanged.LoadAndDelete(clusterID); asked {
+			go h.lbClusterConverge(context.WithoutCancel(ctx), clusterID, false)
+		}
+	}()
 	for range 2 {
+		h.lbChanged.Delete(clusterID) // what was asked for until now, this pass reads
 		if err := h.lbClusterPass(ctx, clusterID, force); err != nil {
 			slog.Warn("load balancer: cluster converge", "cluster", clusterID, "err", err)
 		}

@@ -226,7 +226,14 @@ type pairWire struct {
 	execs, certReads int
 	pages            int // reads of the cluster's VM list: one per apply
 	// gate, while set, holds every read of the VM list until it is closed: an apply in the middle of its work.
-	gate chan struct{}
+	// gated counts the reads it holds now. With gateOn it holds a read only once the last HAProxy config written
+	// has that text: the passes after the one that wrote it.
+	gate   chan struct{}
+	gated  int
+	gateOn string
+	// meet, for an appliance, makes its HAProxy apply wait until its UDP apply has been asked for: two pushes that
+	// are made one after the other never meet (the apply says so after 5 s and goes on).
+	meet map[string]chan struct{}
 }
 
 type lbRun struct {
@@ -287,8 +294,19 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		return lbRun{}
 	case strings.Contains(cmd, "command -v ss"): // the ready check
 		return f.readyCheck(g, cmd)
+	case strings.Contains(cmd, "rm -f $f.new; [ -f $f ] && sha256sum"): // what the UDP service's files hash to, before a push writes any
+		out := ""
+		for _, path := range append(slices.Clone(lbGuestLVSFiles[1:]), lbGuestLVSFiles[0]) { // the support files, then the config
+			delete(g.disk, path+".new")
+			out += g.sum(path) + "\n"
+		}
+		return lbRun{out: out}
 	case strings.Contains(cmd, "systemctl enable -q proxcloud-lvs"): // the UDP service's apply: check, swap, (re)load, prove
 		f.log = append(f.log, vm+" lvs reload")
+		if ch := f.meet[vm]; ch != nil {
+			close(ch)
+			delete(f.meet, vm)
+		}
 		if g.lvsFails != "" {
 			delete(g.disk, lbGuestLVSFiles[0]+".new")
 			return lbRun{exit: 1, err: g.lvsFails}
@@ -332,6 +350,15 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		}
 		return lbRun{}
 	case strings.Contains(cmd, "haproxy -c"):
+		if ch := f.meet[vm]; ch != nil {
+			f.mu.Unlock()
+			select {
+			case <-ch:
+			case <-time.After(5 * time.Second):
+				f.t.Errorf("%s: its UDP push was not asked for while its HAProxy push was at work: the two are made one after the other", vm)
+			}
+			f.mu.Lock()
+		}
 		f.log = append(f.log, vm+" haproxy reload")
 		// The apply saves the members' state first, when it says so and HAProxy answers; no answer, no file.
 		if strings.Contains(cmd, "show servers state") {
@@ -526,10 +553,12 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api2/json/cluster/resources" {
 		f.pages++
-		if gate := f.gate; gate != nil {
+		if gate := f.gate; gate != nil && (f.gateOn == "" || (len(f.files) > 0 && strings.Contains(f.files[len(f.files)-1], f.gateOn))) {
+			f.gated++
 			f.mu.Unlock()
 			<-gate
 			f.mu.Lock()
+			f.gated--
 		}
 		if f.gone || f.unseen {
 			write([]map[string]any{})

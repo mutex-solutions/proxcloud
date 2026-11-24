@@ -106,6 +106,13 @@ type Agent struct {
 	Modes  []os.FileMode
 }
 
+// Execs is how many commands the agent was asked to run.
+func (a *Agent) Execs() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.runs)
+}
+
 func (a *Agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

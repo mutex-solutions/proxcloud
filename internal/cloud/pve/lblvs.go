@@ -134,6 +134,12 @@ func lvsServers(s LBSpec, vips []string) []lvsServer {
 // while its port is closed takes no traffic (spike K4: 0 of 277 datagrams lost with it, 78 of 286 without). Its
 // price is a table without members for one check round after a start of the process, which happens at boot and at
 // the first UDP listener; a reload keeps the members that are up.
+//
+// "warmup 0" beside it: keepalived starts a checker's first run after a random wait of up to delay_loop, which is
+// there to spread the checks of many virtual servers and which a new member waited out before it could enter (drill
+// R2a-1 of v0.11.1-rc.2; both images: 3.9 to 6.0 s with the default, 1.0 s with 0, of which 1 s is the UDP check
+// waiting for an ICMP error that does not come). The first check still decides: a member whose port is closed does
+// not enter. A reload that only adds the line keeps every member in the table.
 func RenderLVS(s LBSpec, vips []string) string {
 	servers := lvsServers(s, vips)
 	if len(servers) == 0 {
@@ -164,7 +170,7 @@ func RenderLVS(s LBSpec, vips []string) string {
 		interval := in(hc.Interval, 1, 300, lvsInterval)
 		fmt.Fprintf(&b, "\nvirtual_server %s %d {\n  protocol UDP\n  lvs_method NAT\n  lvs_sched %s\n", v.vip, v.port, sched)
 		if hc.Type != "none" {
-			b.WriteString("  alpha\n")
+			b.WriteString("  alpha\n  warmup 0\n")
 		}
 		// keepalived counts the tries after a first failed check: "fall 3" is retry 2. It takes no "retry 0" (both
 		// images' keepalived -t: "number '0' outside range"), so a member is out after two failed checks at least.
@@ -389,27 +395,41 @@ const (
 	// flow across each). Never an error: what an edit did not put right, lvsserving() says.
 	lvsSetFn = `lvsset() { lvsdrift | ( set -f; while read -r a; do ipvsadm $a; done ) >/dev/null 2>&1 || true; }
 `
-	// lvsApply runs after the files are written. keepalived checks the new config before it replaces the one in
-	// use; a running unit reloads (HUP: the table keeps the members that are up), a stopped one starts, and a unit
-	// file a release changed restarts it. keepalived does not write a changed connection limit to a real server that
-	// stays, so lvsset() does, after the reload and before each look. Then lvsserving() must hold: only on the answer
-	// 0 is the hash recorded. If
-	// it does not, the file in use before goes back and is loaded again; with none before, the unit stops, which
-	// switches forwarding off. Every file is written beside its place, as <path>.new, and moved in here by a rename
-	// with its owner and mode set, as keepalived's own are (lbKeepalivedApply): the unit reads the table's file and
-	// runs the script at every start, also one systemd makes by itself, and never meets one that is half written.
+	// lvsHave opens a push: it makes the directories, takes away what an interrupted push left beside a file's place,
+	// and prints what each file of the UDP service on the appliance hashes to, one a line, lvsFiles' and then the config
+	// ("-" for one that is not there). PushLVS then writes the files that differ and no other: a member that comes
+	// or goes changes lvs.conf alone, and the four support files change with a release only (drill R2a-1 of
+	// v0.11.1-rc.2: every push wrote all five, seven guest calls where three do).
+	lvsHave = `mkdir -p ` + lvsDir + ` /etc/keepalived /usr/local/sbin
+for f in ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + ` ` + lvsUnit + ` ` + lvsConfig + `; do rm -f $f.new; [ -f $f ] && sha256sum < $f | cut -c1-64 || echo -; done`
+	// lvsApply runs after the files that differ are written, each beside its place as <path>.new; a file without one
+	// stays as it is. keepalived checks a new config before it replaces the one in use; a running unit reloads (HUP:
+	// the table keeps the members that are up), a stopped one starts, and a unit file a release changed restarts it.
+	// keepalived does not write a changed connection limit to a real server that stays, so lvsset() does, after the
+	// reload and before each look. Then lvsserving() must hold: only on the answer 0 is the hash recorded. If it does
+	// not, a config this push replaced goes back and is loaded again; a first config that was not served goes and
+	// the unit stops, which switches forwarding off; a push that brought no config changes nothing more. Every file
+	// is moved in here by a rename with its owner and mode set, as keepalived's own are (lbKeepalivedApply): the unit
+	// reads the table's file and runs the script at every start, also one systemd makes by itself, and never meets
+	// one that is half written. A file that stays gets its owner and mode set too: the hash lvsHave compares says
+	// nothing of them, and a script that lost its mode would keep the unit from starting at every push.
 	lvsApply = lbNoSSH + lbPkgGateKeepalived + `set -e
 F=` + lvsConfig + `
 U=` + lvsUnit + `
-chown root:root ` + lvsNft + `.new ` + lvsSysctl + `.new ` + lvsNet + `.new $F.new $U.new
-chmod 0755 ` + lvsNet + `.new
-chmod 0644 ` + lvsNft + `.new ` + lvsSysctl + `.new $F.new $U.new
-keepalived -t -f $F.new
-for f in ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + `; do mv -f $f.new $f; done
+new() { [ -f "$1.new" ]; }
+own() { [ ! -f "$2" ] || { chown root:root "$2"; chmod $1 "$2"; }; }
+for f in ` + lvsNft + ` ` + lvsSysctl + ` $F $U; do own 0644 $f.new; own 0644 $f; done
+own 0755 ` + lvsNet + `.new
+own 0755 ` + lvsNet + `
+! new $F || keepalived -t -f $F.new
+for f in ` + lvsNft + ` ` + lvsSysctl + ` ` + lvsNet + `; do ! new $f || mv -f $f.new $f; done
 how=reload
-if cmp -s $U.new $U; then rm -f $U.new; else mv $U.new $U; systemctl daemon-reload; how=restart; fi
-if [ -f $F ]; then cp $F $F.old; else rm -f $F.old; fi
-mv $F.new $F
+if new $U; then if cmp -s $U.new $U; then rm -f $U.new; else mv $U.new $U; systemctl daemon-reload; how=restart; fi; fi
+before=kept
+if new $F; then
+  if [ -f $F ]; then cp $F $F.old; before=old; else rm -f $F.old; before=none; fi
+  mv $F.new $F
+fi
 systemctl enable -q ` + lvsService + `
 ` + lvsServingFn + lvsSetFn + `swap() {
   if systemctl is-active -q ` + lvsService + `; then systemctl $how ` + lvsService + ` || return 1; else systemctl reset-failed ` + lvsService + ` 2>/dev/null || true; systemctl start ` + lvsService + ` || { echo "the UDP service did not start" >&2; return 1; }; fi
@@ -421,7 +441,10 @@ systemctl enable -q ` + lvsService + `
   done
 }
 swap && exit 0
-if [ -f $F.old ]; then mv $F.old $F; swap; else systemctl disable -q --now ` + lvsService + `; rm -f $F; fi
+case $before in
+old) mv $F.old $F; swap ;;
+none) systemctl disable -q --now ` + lvsService + `; rm -f $F ;;
+esac
 exit 1`
 	// lvsRemove takes everything of the UDP listeners off an appliance whose balancer has none left, forwarding
 	// first, and proves it: no forwarding, no table, no UDP server in the IPVS table (lvs_flush_on_stop).
@@ -445,10 +468,11 @@ systemctl daemon-reload
 
 var lvsReady = lbReadyScript("haproxy socat keepalived nftables", "haproxy.service keepalived.service")
 
-// PushLVS writes the LVS config and its support files on an appliance of a pair and (re)loads the unit, installing
-// nftables first if the image lacks it. nil means the IPVS table was seen to hold every virtual server of config,
-// with the forwarding filter loaded: any other answer means not applied, and the caller records nothing. A config
-// keepalived -t refuses leaves the running one in place.
+// PushLVS brings the LVS config and its support files on an appliance of a pair in line and (re)loads the unit,
+// installing nftables first if the image lacks it. Only a file that is not on the appliance as it should be is
+// written. nil means the IPVS table was seen to hold every virtual server of config as config has it, with the
+// forwarding filter loaded: any other answer means not applied, and the caller records nothing. A config keepalived
+// -t refuses leaves the running one in place.
 func (s *Service) PushLVS(ctx context.Context, node string, vmid int, config, tenantIface string) error {
 	if !lbIfaceRe.MatchString(tenantIface) {
 		return fmt.Errorf("lvs: bad interface %q", tenantIface)
@@ -456,22 +480,24 @@ func (s *Service) PushLVS(ctx context.Context, node string, vmid int, config, te
 	if err := s.lbReady(ctx, node, vmid, lvsReady, lvsInstall); err != nil {
 		return err
 	}
-	exit, _, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "mkdir", "-p", lvsDir, "/etc/keepalived", "/usr/local/sbin")
+	files := append(lvsFiles(tenantIface), [2]string{lvsConfig, config}) // the order lvsHave answers in
+	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lvsHave)
 	if err != nil {
 		return err
 	}
 	if exit != 0 {
 		return fmt.Errorf("lvs: %s", strings.TrimSpace(stderr))
 	}
-	// Each beside its place: lvsApply moves them in, and compares the unit file with the one in use first (a changed
-	// unit file restarts the service).
-	for _, f := range lvsFiles(tenantIface) {
+	// Each beside its place: lvsApply moves them in. An answer that is not one hash a file writes them all.
+	have := strings.Fields(out)
+	for i, f := range files {
+		sum := sha256.Sum256([]byte(f[1]))
+		if len(have) == len(files) && have[i] == hex.EncodeToString(sum[:]) {
+			continue
+		}
 		if err := s.C.GuestWriteFile(ctx, node, vmid, f[0]+".new", f[1]); err != nil {
 			return err
 		}
-	}
-	if err := s.C.GuestWriteFile(ctx, node, vmid, lvsConfig+".new", config); err != nil {
-		return err
 	}
 	exit, _, stderr, err = s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lvsApply)
 	if err != nil {

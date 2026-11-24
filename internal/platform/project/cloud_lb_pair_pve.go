@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -437,7 +438,11 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	}
 	seen := map[*lbAppliance]pve.VRRPState{} // as read before the pushes
 	started := map[*lbAppliance]string{}     // what this pass found not running and pushed again
-	for _, a := range running {
+	// The appliances are asked at once: each read is one command in one guest, and neither waits for the other's
+	// (drill R2a-1 of v0.11.1-rc.2: a pass read them one after the other, twice).
+	read := make([]*pve.VRRPState, len(running))
+	var reads sync.WaitGroup
+	for i, a := range running {
 		if a.HAProxyHash == "" && a.KeepalivedHash == "" {
 			continue
 		}
@@ -450,8 +455,16 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		if a.HAProxyHash == hhash {
 			named = certs
 		}
-		if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip, named...); err == nil {
-			seen[a] = st
+		reads.Go(func() {
+			if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip, named...); err == nil {
+				read[i] = &st
+			}
+		})
+	}
+	reads.Wait()
+	for i, a := range running {
+		if st := read[i]; st != nil {
+			seen[a] = *st
 			// The pushes below go to the standby first by what the appliance says now, not by what the row said at
 			// the pass before: the address may have moved since, and a row v0.11.1-rc.1 wrote for a pair with a UDP
 			// listener says that neither appliance holds it (drill Q1-2).
@@ -587,55 +600,80 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		// A config an appliance refused goes to no other one in this pass: the standby comes first (lbPushOrder), so
 		// what HAProxy does not take there never reaches the appliance that holds the address. One that does not
 		// serve at all has nothing to lose and is pushed.
-		if (hhash != a.HAProxyHash && refused == nil && !behind) || reloadHAProxy {
-			pushed[a] = true
-			wrote, err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...)
-			if wrote > 0 { // before the config, as on the appliance
-				taken(a, "certificates")
-			}
-			if err != nil {
-				if errors.Is(err, pve.ErrLBNotReady) {
-					hold(a, "haproxy", err)
-					continue
-				}
-				refuse(a, "haproxy", err)
-				continue
-			}
-			a.HAProxyHash = hhash
-			taken(a, "haproxy")
-			if reloadHAProxy {
-				started[a] = strings.TrimPrefix(started[a]+" and HAProxy", " and ")
-			}
-		}
-		// The UDP listeners, last: their firewall rules are in, and a member change reloads this service alone.
+		pushHAProxy := (hhash != a.HAProxyHash && refused == nil && !behind) || reloadHAProxy
+		// The UDP listeners: their firewall rules are in, and a member change reloads this service alone.
 		// stray: the appliance holds an LVS config the row records nothing of (a push whose answer was lost, and the
 		// listener gone before the next pass). It would keep forwarding on with nothing looking after its table.
 		stray := known && a.LVSHash == "" && st.LVSSum != "" && st.LVSSum != "-"
-		switch want := lvsWant(a); {
+		want, udp := lvsWant(a), ""
+		switch {
 		case want == "" && a.LVSHash == "" && !stray: // never had a UDP listener: nothing of it is on the appliance
 		case behind && !reloadLVS: // a change of the UDP listeners waits as every other
 		case want == "":
-			pushed[a] = true
-			if err := ps.RemoveLVS(ctx, a.Node, vmid); err != nil {
-				refuse(a, "udp", err)
-				continue
-			}
-			a.LVSHash = ""
-			taken(a, "udp")
+			udp = "remove"
 		case (want != a.LVSHash && refused == nil) || reloadLVS:
-			pushed[a] = true
-			if err := ps.PushLVS(ctx, a.Node, vmid, lvs, a.TenantIface); err != nil {
-				if errors.Is(err, pve.ErrLBNotReady) {
-					hold(a, "udp", err)
-					continue
-				}
-				refuse(a, "udp", err)
-				continue
+			udp = "push"
+		}
+		// HAProxy and the UDP service take their change at once on an appliance: they are two services, each with
+		// files, a check and a proof of its own, and neither apply reads or writes anything of the other's. One
+		// after the other, a UDP port added with a TCP port waited on each appliance for HAProxy's reload, which
+		// takes 4 to 5 s (drill R2a-1 of v0.11.1-rc.2: UDP answered after 33 s). The standby still comes first for
+		// each of them: both pushes of an appliance have answered before the next appliance is given anything.
+		// An appliance no HAProxy config ever reached is at its first install, where two pushes at once would
+		// start two package managers: it takes them one after the other, and no UDP listener while HAProxy is not
+		// in, as before.
+		var wrote int
+		var herr, uerr error
+		var both sync.WaitGroup
+		switch {
+		case !pushHAProxy:
+		case a.HAProxyHash == "":
+			if wrote, herr = ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...); herr != nil {
+				udp = ""
 			}
-			a.LVSHash = want
-			taken(a, "udp")
-			if reloadLVS {
-				started[a] = strings.TrimPrefix(started[a]+" and the UDP service", " and ")
+		default:
+			both.Go(func() { wrote, herr = ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...) })
+		}
+		switch udp {
+		case "remove":
+			both.Go(func() { uerr = ps.RemoveLVS(ctx, a.Node, vmid) })
+		case "push":
+			both.Go(func() { uerr = ps.PushLVS(ctx, a.Node, vmid, lvs, a.TenantIface) })
+		}
+		both.Wait()
+		if pushHAProxy {
+			pushed[a] = true
+			if wrote > 0 { // before the config, as on the appliance
+				taken(a, "certificates")
+			}
+			switch {
+			case herr == nil:
+				a.HAProxyHash = hhash
+				taken(a, "haproxy")
+				if reloadHAProxy {
+					started[a] = strings.TrimPrefix(started[a]+" and HAProxy", " and ")
+				}
+			case errors.Is(herr, pve.ErrLBNotReady):
+				hold(a, "haproxy", herr)
+			default:
+				refuse(a, "haproxy", herr)
+			}
+		}
+		if udp != "" {
+			pushed[a] = true
+			switch {
+			case uerr == nil:
+				if a.LVSHash = want; udp == "remove" {
+					a.LVSHash = ""
+				}
+				taken(a, "udp")
+				if udp == "push" && reloadLVS {
+					started[a] = strings.TrimPrefix(started[a]+" and the UDP service", " and ")
+				}
+			case udp == "push" && errors.Is(uerr, pve.ErrLBNotReady):
+				hold(a, "udp", uerr)
+			default:
+				refuse(a, "udp", uerr)
 			}
 		}
 	}
@@ -655,19 +693,31 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			lb.settled = false
 		}
 	}
-	for _, a := range running {
+	// What each appliance says now: read again after a push, which changed it, and again at once.
+	again := make([]*pve.VRRPState, len(running))
+	for i, a := range running {
+		if _, known := seen[a]; (a.State == lbAppBuilding && a.HAProxyHash == "") || (known && !pushed[a]) {
+			continue
+		}
+		vmid, _ := strconv.Atoi(a.ServerID)
+		reads.Go(func() {
+			if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip); err == nil {
+				again[i] = &st
+			}
+		})
+	}
+	reads.Wait()
+	for i, a := range running {
 		if a.State == lbAppBuilding && a.HAProxyHash == "" {
 			continue
 		}
-		// What the appliance says now: read again after a push, which changed it.
 		st, known := seen[a]
 		if !known || pushed[a] {
-			vmid, _ := strconv.Atoi(a.ServerID)
-			var err error
-			if st, err = ps.ReadVRRPState(ctx, a.Node, vmid, vip); err != nil {
+			if again[i] == nil {
 				a.State, a.Reason = lbAppDown, "it does not answer"
 				continue
 			}
+			st = *again[i]
 		}
 		a.Role, a.HoldsVIP = st.State, st.HoldsVIP
 		if vip == "" { // a cluster's pair before its first Service, or after its last: the master holds the placeholder

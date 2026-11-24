@@ -272,6 +272,59 @@ func TestLBApplianceUDPChanges(t *testing.T) {
 				expect("after ipvsadm "+by+" and a push", "wrr | 10.77.0.11:5000 w1 u0 | 10.77.0.12:5000 w1 u0")
 			}
 			stillHeld("after the table was changed by hand and put back")
+
+			// 6. A new member's first check (drill R2a-1 of v0.11.1-rc.2: a UDP member entered 4 to 6 s after the
+			// reload that named it, a random wait of up to a check interval and then the check). m3 is a third
+			// member on the tenant network.
+			g.run(ctx, `ip netns add m3 && ip -n m3 link set lo up && ip -n sw link add s-m3 type veth peer name eth0 netns m3 && ip -n sw link set s-m3 master br0 up &&
+ip -n m3 addr add 10.77.0.13/24 dev eth0 && ip -n m3 link set eth0 up && ip -n m3 route add default via 10.77.0.1`)
+			three := spec(opts{})
+			three.Pools[0].Members = append(three.Pools[0].Members, pve.LBMember{ServerID: "103", Port: 5000, Weight: 1, Address: "10.77.0.13"})
+			pushSpec := func(when string, s pve.LBSpec) {
+				t.Helper()
+				if err := ps.PushLVS(ctx, "n1", 100, pve.RenderLVS(s, vips), "ten0"); err != nil {
+					t.Fatalf("%s: push: %v\n%s", when, err, diag())
+				}
+			}
+			in := func() bool { return strings.Contains(kernel(), "10.77.0.13:5000") }
+			// Its port is closed and its host is up (it answers "port unreachable"): the first check, made at once,
+			// keeps it out, and it stays out. No datagram is lost meanwhile.
+			pushSpec("a member whose port is closed", three)
+			for end := time.Now().Add(8 * time.Second); time.Now().Before(end); time.Sleep(250 * time.Millisecond) {
+				if in() {
+					t.Fatalf("a member whose port is closed entered the table: %q\n%s", kernel(), diag())
+				}
+			}
+			if got := flows(6); got != 6 {
+				t.Fatalf("with a member whose port is closed named in the config, %d of 6 flows were answered\n%s", got, diag())
+			}
+			g.run(ctx, "systemd-run -q --unit=lb-udp-m3 ip netns exec m3 /usr/local/bin/lb-udp-echo m3")
+			for start := time.Now(); !in(); time.Sleep(250 * time.Millisecond) {
+				if time.Since(start) > 20*time.Second {
+					t.Fatalf("the member whose port opened is not in the table after 20 s: %q\n%s", kernel(), diag())
+				}
+			}
+			// Its port is open: it is in the table within 2.5 s of the push that names it, three times of three (with
+			// keepalived's default wait before a first check that is 1 to 6 s, and three of three in about one run
+			// of forty).
+			var took []string
+			for i := range 3 {
+				pushSpec("the member taken out", spec(opts{}))
+				if in() {
+					t.Fatalf("a member the config no longer names is in the table: %q", kernel())
+				}
+				pushSpec("the member named again", three)
+				start := time.Now()
+				for !in() {
+					if time.Since(start) > 2500*time.Millisecond {
+						t.Fatalf("a new member whose port is open, try %d: not in the table 2.5 s after the push that names it (earlier tries: %v)\n%s", i+1, took, diag())
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+				took = append(took, time.Since(start).Round(100*time.Millisecond).String())
+			}
+			t.Logf("a new member with an open port was in the table %v after the push that named it", took)
+			stillHeld("after a member came and went")
 			t.Logf("%s; %s; kernel %s", g.run(ctx, "keepalived --version 2>&1 | head -1"), g.run(ctx, "ipvsadm --version"), g.run(ctx, "uname -r"))
 		})
 	}

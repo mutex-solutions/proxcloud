@@ -297,3 +297,87 @@ func TestLBSingleRefusesUDP(t *testing.T) {
 		t.Fatalf("a single appliance without UDP: %q", why)
 	}
 }
+
+// What a change of a pair with a UDP listener costs and what waits for what (drill R2a-1 of v0.11.1-rc.2: a TCP and
+// a UDP port added in one change answered over UDP after 33 s, and a member change wrote five files on each
+// appliance). Counted here against the fake pair:
+//
+//   - a member that comes to a UDP pool writes one file on each appliance, lvs.conf, where it wrote five, with the
+//     same ten guest commands (two state reads, three for each push, two reads back);
+//   - a TCP and a UDP port added in one change: on each appliance the UDP push is asked for while HAProxy's is at
+//     work, and the appliance that holds the address is given nothing before both pushes of the standby answered.
+//
+// The fake's guest commands take no time, so what the overlap saves on a cluster (HAProxy's reload took 4 to 5 s on
+// the lab) is the lab's to show.
+func TestLBPairUDPChangeCost(t *testing.T) {
+	ctx := context.Background()
+	h, f, es, lb := lbApplyFixture(t)
+	proj, cr := &Project{ID: "p1"}, &cloud.CloudResource{}
+	// apply runs a pass and answers the files it wrote and the guest commands it ran.
+	apply := func() (writes []string, execs int) {
+		t.Helper()
+		f.mu.Lock()
+		n, e := len(f.log), f.execs
+		f.mu.Unlock()
+		if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
+			t.Fatal(err)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, l := range f.log[n:] {
+			if strings.Contains(l, " write ") {
+				writes = append(writes, l)
+			}
+		}
+		return writes, f.execs - e
+	}
+	apply()
+	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 53, Protocol: "udp", Pool: "dns"})
+	lb.Pools = append(lb.Pools, pve.LBPool{Name: "dns", Protocol: "udp", Algorithm: "roundrobin",
+		Members: []pve.LBMember{{Node: true, Port: 53, Weight: 1, Address: "10.0.0.11"}}})
+	if writes, _ := apply(); len(writes) != 10 || lb.Status != lbStatusActive {
+		t.Fatalf("the first UDP listener: %s, wrote %q, want the five files of the UDP service on each appliance", lb.Status, writes)
+	}
+
+	// A member comes.
+	lb.Pools[1].Members = append(lb.Pools[1].Members, pve.LBMember{Node: true, Port: 53, Weight: 1, Address: "10.0.0.12"})
+	writes, execs := apply()
+	if want := []string{"301 write /etc/keepalived/lvs.conf.new", "302 write /etc/keepalived/lvs.conf.new"}; !slices.Equal(writes, want) || execs != 10 || lb.Status != lbStatusActive {
+		t.Fatalf("a member added to a UDP pool: %s, wrote %q with %d guest commands, want %q with 10", lb.Status, writes, execs, want)
+	}
+	if hash := pve.LVSHash(pve.RenderLVS(lb.LBSpec, lb.VIPs), "ens18"); lb.Appliances[0].LVSHash != hash || lb.Appliances[1].LVSHash != hash || f.guests["301"].lvsSum() != hash {
+		t.Fatalf("after the member: the row records %s and %s, the standby's files sum to %s, want %s", lb.Appliances[0].LVSHash, lb.Appliances[1].LVSHash, f.guests["301"].lvsSum(), hash)
+	}
+
+	// A TCP and a UDP port in one change. meet makes each appliance's HAProxy apply wait for its UDP apply to be
+	// asked for: pushes made one after the other fail here.
+	f.mu.Lock()
+	f.meet = map[string]chan struct{}{"301": make(chan struct{}), "302": make(chan struct{})}
+	n := len(f.log)
+	f.mu.Unlock()
+	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 8080, Pool: "web"}, pve.LBListener{Port: 54, Protocol: "udp", Pool: "dns"})
+	apply()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last301, first302 := -1, -1
+	for i, l := range f.log[n:] {
+		switch {
+		case strings.HasPrefix(l, "301 ") && strings.HasSuffix(l, " reload"):
+			last301 = i
+		case strings.HasPrefix(l, "302 ") && strings.HasSuffix(l, " reload") && first302 < 0:
+			first302 = i
+		}
+	}
+	if len(f.meet) != 0 || last301 < 0 || first302 < last301 {
+		t.Fatalf("a TCP and a UDP port in one change: %d appliances whose two pushes did not meet; the standby's last load at %d and the holder's first at %d of:\n%s",
+			len(f.meet), last301, first302, strings.Join(f.log[n:], "\n"))
+	}
+	for _, a := range lb.Appliances {
+		if a.HAProxyHash != lbHash(lbRender(lb)) || a.LVSHash != pve.LVSHash(pve.RenderLVS(lb.LBSpec, lb.VIPs), "ens18") || a.State != lbAppUp {
+			t.Errorf("after the change: %+v", a)
+		}
+	}
+	if lb.Status != lbStatusActive {
+		t.Errorf("after the change: %s %q", lb.Status, lb.StatusMessage)
+	}
+}
