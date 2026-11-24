@@ -1148,8 +1148,15 @@ metadata:
   has no address), its address leaves both appliances and their firewall and is listed under "Kept addresses" on
   the cluster's page. A refused Service that is put right gets a kept address back only by naming it. It
   is still a public address of the project: **billed, and counted in the floating IP quota**, like the address of
-  a Service. The annotation is read as the Service's last state had it, so `kubectl annotate` followed at once by
-  `kubectl delete` keeps the address. A Service that goes before it ever had an address keeps none.
+  a Service.
+- **What counts is the annotation as the Service carries it when it goes.** For a delete that is the object as it
+  reads at the delete: the cluster's controller holds the Service by its finalizer and tells the portal what it says
+  then, so `kubectl annotate` followed at once by `kubectl delete` keeps the address, with no wait in between, and
+  removing the annotation just before the delete gives the address back. **Kept is the address the Service had**:
+  a Service that goes before the balancer had an address for it (it was still pending, or refused) keeps none, and
+  one that goes while the cluster keeps 5 already gives its address back (next point). The controller of v0.11.1
+  does this. One of v0.11.0 sends no annotation at all and keeps no address, until the cluster is moved to the
+  portal's controller ("Upgrade note for v0.11.1" below).
 - **A cluster keeps 5 addresses at most.** With 5 kept, a Service that carries the annotation gets the Warning
   `KeepAddressLimit` while it stands, and its address is given back when it goes. Release one first.
 - **A Service gets a kept address by naming it**: `spec.loadBalancerIP: 203.0.113.30`. It is taken when the
