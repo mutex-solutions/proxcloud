@@ -762,7 +762,7 @@ const (
 	// seconds. Then serving() must hold. If any of it fails the old file goes back and is
 	// loaded again, so the next boot does not read a config that never ran, and the answer is 1: not applied.
 	// The agent creates a file with mode 0666, so the mode is set here. Nothing a tenant wrote is in this
-	// command. sshd goes first: nobody logs in to an appliance, and a listener may want its port.
+	// command. sshd goes first: nobody logs in to an appliance, and a listener may want its port (lbNoSSH).
 	//
 	// Then the one thing of the package manager's a swap waits for (lbPkgGateHAProxy): dpkg at work on HAProxy's own
 	// package. A swap that failed while dpkg was at it lost to the package's own restart: the old file is back and
@@ -772,7 +772,7 @@ const (
 	// has no state to keep: the file goes, and HAProxy starts every member UP, as it does without one (a missing
 	// file is a notice to it, src/server_state.c). The save can never fail the apply. The file's time is set when
 	// it goes in: a pair's track script does not ask for its listeners while HAProxy loads it (lbpair.go).
-	haproxyReload = "systemctl disable --now ssh ssh.socket 2>/dev/null\n" + lbPkgGateHAProxy + `set -e
+	haproxyReload = lbNoSSH + lbPkgGateHAProxy + `set -e
 F=` + haproxyConfig + `
 S=` + haproxyState + `
 if echo "show servers state" | socat -t5 - /run/haproxy/admin.sock > $S.new 2>/dev/null && [ "$(head -n1 $S.new)" = 1 ]; then mv $S.new $S; else rm -f $S $S.new; fi
@@ -803,13 +803,20 @@ swap || { mv $F.old $F; swap || :; pkgsettled haproxy || exit ` + lbBusyExitText
 [ "$(stat -c %a:%U:%G $F)" = 644:root:root ]`
 	// haproxyInstall prepares a stock image from its repositories, over the public NIC.
 	// ponytail: a site with no egress bakes haproxy and socat into the image config.lbImage names.
-	haproxyInstall = "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat iproute2; }"
+	haproxyInstall = lbNoSSH + "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat iproute2; }"
 	guestTimeout   = 30 * time.Second
 	// lbBusyExit is the answer of a ready check, and of an apply, that waits for the guest's package manager: wait,
 	// and start no install. EX_TEMPFAIL, a code nothing an apply runs under "set -e" answers (keepalived -t exits 3
 	// on a fatal error, which is a config it refuses and not a wait).
 	lbBusyExit     = 75
 	lbBusyExitText = "75"
+	// lbNoSSH keeps sshd off an appliance for good: nobody logs in to one, and a listener may want port 22. The units
+	// are masked, not only disabled: a disabled unit is still started by whatever asks for it, and on the Ubuntu
+	// image cloud-init does at every boot (drill R4-o1 of v0.11.1-rc.2: sshd listened again after a reboot, with
+	// both units "disabled", until the next HAProxy reload stopped it). "disable" goes first: it takes the alias
+	// sshd.service away, which is a second name for the unit. It is the first line of the install and of every
+	// apply, so an appliance of an older release gets it with its next push. It can never fail a script.
+	lbNoSSH = "systemctl disable --now ssh.service ssh.socket >/dev/null 2>&1; systemctl mask --now ssh.service ssh.socket >/dev/null 2>&1\n"
 	// lbPkgSettledFn defines pkgsettled(): dpkg has each package named installed and configured. Any other state of
 	// a package that was installed is dpkg at work on that very package (unpacked, half-configured), which ends
 	// with the package's own restart of its service.

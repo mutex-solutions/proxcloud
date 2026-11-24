@@ -172,6 +172,8 @@ swap || { mv $F.old $F; swap; exit 1; }`
 	lbRC2Ready = `pgrep -x 'apt-get|apt|dpkg' >/dev/null && exit 3
 for p in haproxy socat keepalived; do [ "$(dpkg-query -W -f='${Status}' $p 2>/dev/null)" = 'install ok installed' ] || exit 1; done
 command -v ss >/dev/null && systemctl cat haproxy.service keepalived.service >/dev/null 2>&1`
+	// lbSSHListens prints how many sockets listen on port 22.
+	lbSSHListens = `ss -Hltn 'sport = :22' | wc -l`
 )
 
 // An appliance's config is recorded only when the running HAProxy serves it. The guest is a real one of each image an
@@ -184,7 +186,9 @@ command -v ss >/dev/null && systemctl cat haproxy.service keepalived.service >/d
 // N3-8); the single appliance's config; and the mode of every file the agent wrote.
 //
 // From the drill of v0.11.1-rc.2: a change is taken while a package manager runs, and waits in the one case that dpkg
-// is at work on HAProxy's own package, until dpkg is done with it (R3-F1, R2b-1).
+// is at work on HAProxy's own package, until dpkg is done with it (R3-F1, R2b-1); and sshd, which the image runs,
+// is masked by the product's install and stays off over a reboot, where a unit that is only disabled is started
+// again by whatever asks for it (R4-o1).
 func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
 		t.Run(image, func(t *testing.T) {
@@ -256,6 +260,11 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 				}
 			}
 
+			// The image runs sshd, as a cloud image does: here it is installed and listens before the product's first
+			// command (on Ubuntu through its socket).
+			// (No ss yet: iproute2 comes with the product's install. g.run fails the test when sshd is not up.)
+			g.run(ctx, "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server >/dev/null 2>&1; systemctl start ssh.socket 2>/dev/null || systemctl start ssh.service; systemctl is-active ssh.service ssh.socket | grep -qx active")
+
 			// 1. The first push, through the product's own install line. Asked as fast as the agent answers, so the
 			// push lands as early as the ready check lets it. Every refusal while the binaries already exist is one
 			// the check of v0.11.0-rc.1 (command -v) would have let through, into dpkg's configure.
@@ -281,6 +290,23 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			t.Logf("%s; %s; refused %d times while the binaries were already there",
 				g.run(ctx, "haproxy -v | head -1"), g.run(ctx, "keepalived --version 2>&1 | head -1"), early)
 			listens("after the first push", vip+":80")
+			// The install masked sshd: nothing listens, and nothing can start it.
+			sshOff := func(when string) {
+				t.Helper()
+				if got := g.run(ctx, "systemctl is-enabled ssh.service ssh.socket 2>/dev/null | sort -u; "+lbSSHListens); got != "masked\n0" {
+					t.Fatalf("%s: sshd's units are %q, want both masked and nothing listening on 22", when, got)
+				}
+				if code, _, _ := g.sh(ctx, "ssh", "sh", "-c", "systemctl start ssh.service || systemctl start ssh.socket || systemctl start sshd.service"); code == 0 {
+					t.Fatalf("%s: sshd could be started", when)
+				}
+			}
+			sshOff("after the product's install")
+			if st := state(); !st.HAProxy || !st.Serving {
+				t.Fatalf("after the first push: %+v", st)
+			}
+			if got := g.run(ctx, "dpkg-query -W -f='${Status}' haproxy"); got != "install ok installed" {
+				t.Fatalf("pushed while dpkg said %q", got)
+			}
 
 			// 2. The drill's race, held still: the package's own start has read the package's config and is not done.
 			// The control first: rc.1's apply answers 0, nothing listens, and the state read now says so.
@@ -648,6 +674,43 @@ sed -i '/^Package: haproxy$/,/^$/ s/^Status: install ok installed$/Status: insta
 				}
 			}
 			listens("after dpkg was done with haproxy", vip+":80 "+vip+":8083")
+
+			// 9. sshd over a reboot (drill R4-o1 of v0.11.1-rc.2: with both units disabled, cloud-init started
+			// ssh.service at boot and sshd listened until the next HAProxy reload). The control is what v0.11.1-rc.2
+			// did, a disable: the unit starts for whoever asks. Then any push of the product's masks it again, which
+			// is how an appliance of an older release gets the mask; and it holds over a boot.
+			g.run(ctx, "systemctl unmask ssh.service ssh.socket >/dev/null 2>&1; systemctl disable --now ssh ssh.socket >/dev/null 2>&1; systemctl start ssh.service")
+			if got := g.run(ctx, lbSSHListens); got == "0" {
+				t.Fatal("control: a disabled sshd did not start when asked")
+			}
+			if err := ps.PushKeepalived(ctx, "n1", 100, keepalived, "lo"); err != nil {
+				t.Fatal(err)
+			}
+			sshOff("after a push on an appliance of an older release")
+			if err := c.Stop(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			for deadline := time.Now().Add(5 * time.Minute); ; time.Sleep(2 * time.Second) {
+				if code, out, _ := g.sh(ctx, "reboot", "systemctl", "is-system-running"); code == 0 || strings.TrimSpace(out) == "degraded" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("systemd did not come up after the reboot")
+				}
+			}
+			sshOff("after a reboot")
+			// And the product's own services came back by themselves.
+			for deadline := time.Now().Add(60 * time.Second); ; time.Sleep(time.Second) {
+				if got := g.run(ctx, "systemctl is-active haproxy keepalived | sort -u"); got == "active" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("HAProxy and keepalived after a reboot: %s", g.run(ctx, "systemctl is-active haproxy keepalived | tr '\\n' ' '"))
+				}
+			}
 		})
 	}
 }
