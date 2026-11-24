@@ -446,6 +446,7 @@ var previousSHA256 = map[string]string{
 	"0.11.0":      "d8e37db2fd204a6a58a4d6357f4c54bb6dccc82de52430340f2c8c7ca0e0d7ff",
 	"0.11.1-rc.1": "2d96e6c616ec26f0263e94b190f7d10936645fa6d184bb789d9870518b4248ee",
 	"0.11.1-rc.2": "b66f6e7f3f96efa724393abc2f070fedbf4c2fcf1ef79ce6411d933a38944073",
+	"0.11.1-rc.3": "b9d119c59162ce75956bfb43a251915aaac6d8eee577944292be5434bbe3d581",
 }
 
 // A previous BOM is the file of its tag, byte for byte: an installed platform names it by this sha256, so a changed
