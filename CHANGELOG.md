@@ -536,7 +536,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Its pins are those of `main`, so the plan from it has one change, the release, record only.
   `TestPreviousBOMsMoveCertManager` states that answer, and `TestUpgradeRollsNoMachine` compares ten of the
   nineteen previous BOMs with the BOM on `main`, none of them rolling. No move to that BOM and no apply on such a
-  platform was run on a lab.
+  platform had run on a lab when the file was kept; the candidate's drill then moved one lab's platform to it,
+  from 0.11.1-rc.1.
 - **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1-rc.1`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.1-rc.1.yaml`, sha256
   `2d96e6c616ec26f0263e94b190f7d10936645fa6d184bb789d9870518b4248ee`, the file of the tag byte for byte). The
@@ -937,6 +938,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state the portal reads the same way. HAProxy's config and the certificate files already went in so. Found by
   the drill of v0.11.1-rc.1 (Q1-o2). The fakes and the real-guest tests now refuse any write of the agent's that
   names a file's place.
+
+## [0.11.1-rc.3] - 2026-11-24
+
+The third release candidate of 0.11.1, published as a prerelease and never as `latest`. It is not the release:
+`v0.11.0` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
+still name it. It holds what is under Unreleased above: what `v0.11.1-rc.2` held and the three fixes its lab drill
+asked for (#452, #453, #454). The drill of `v0.11.1-rc.2` ran every part of its plan and found no regression
+against `v0.11.0`; this candidate exists so that three of its findings do not reach the release (a change waited
+while the image's package manager ran on an appliance, a changed connection limit of a UDP listener did not reach
+the kernel, an address annotated to be kept and deleted within a second was given back). Nothing of the three
+fixes had run on a lab when it was tagged. The entries above are not repeated here. Not for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.11.1-rc.3`** (`deploy/platform/platform-bom.yaml`), with the pins of
+  `0.11.1-rc.1` and `0.11.1-rc.2`: the files differ in the release line alone. No chart of the product differs from
+  its newest tag (`git diff proxmox-kamaji-cluster-v0.1.19 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster`,
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` and
+  `git diff proxcloud-sandbox-v0.1.0 -- deploy/charts/proxcloud-sandbox` print nothing), so no chart tag is needed.
+  It is a release BOM, and the release gate passes on it and on the nineteen previous BOMs.
+- **No component of the sandbox feature is in this BOM** (`TestSandboxIsDark`). The sandbox code is in the build and
+  cannot be turned on, as in `v0.11.1-rc.2`.
+- **The plan from each previous BOM** (`PlanFor`). From 0.11.1-rc.2 and from 0.11.1-rc.1 one change, the release,
+  record only, allowed, with no part, no seed row and no machine replaced; phrase `upgrade <name> to 0.11.1-rc.3`.
+  From 0.11.0, 0.11.0-rc.1 and 0.11.0-rc.2 two changes, the release and `tenantCharts.kubernetes` 0.1.17 to 0.1.19,
+  both record only, allowed. From 0.10.2 and 0.10.2-rc.1 the same two rows (the chart from 0.1.16); four from 0.10.1
+  and 0.10.1-rc.2 (those and `cert-manager` on the seed and on the platform cluster); five from 0.10.1-rc.1 (also
+  `pc-platform` 0.1.15 to 0.1.16); and a refusal by the pair gate from the nine BOMs on Kubernetes 1.35.10. This BOM
+  carries no unfinished replacement (`TestRollTowardAKeptCandidateGoesOn` passes under it unchanged).
+- **Billing at the upgrade, from every earlier build.** At each cluster balancer's first pass after the portal's
+  upgrade, every address it holds for a Service or keeps that has no `FLOATING_IP` row gets one, with the
+  allocation's time as its start: the bill item is counted from that time, or from the start of the open bill's
+  cycle where the address is older (`getLastRateTime`). It is the row the sync would have written. A site that ran
+  no sync has every such address billed from its allocation in one step; see the first upgrade note of #452 above
+  and "Billing first" in `docs/releases/v0.11.1-rc.3.md`, which says what to check before the upgrade.
+- **What the portal's upgrade does to the balancers, from `v0.11.1-rc.2`.** See the three upgrade notes above. A
+  pair with a UDP listener gets `lvs.conf` (one line more, `warmup 0`, per virtual server with a check) and the new
+  drop-in of `proxcloud-lvs.service`, with one `daemon-reload` and one reload of that service per appliance, the
+  standby first; a kernel connection limit that was stale is put right by that push. Every other balancer gets
+  nothing: the HAProxy config, `keepalived.conf` and keepalived's support files are the same to the byte (no golden
+  under `internal/cloud/pve/testdata` changed since the tag but the four `lvs-*.conf`, which gain `warmup 0`). The
+  fix for the package manager (#453) pushes no file. Read again from the code on this commit.
+- **From `v0.11.1-rc.1`** that and what the second candidate's upgrade did: keepalived's five files once per
+  appliance of a pair, with one keepalived reload, the standby first; no HAProxy push. **From `v0.11.0`** the one
+  push of every balancer that the first candidate's upgrade made; a balancer of `v0.11.0` has no UDP listener.
+- **The controller's part of #452 reaches a cluster only with the controller's image.** A cluster that is on chart
+  0.1.19 under an earlier candidate is offered no update by the tenant's console (the chart version is the
+  provider's already) and is skipped by "Bump all"; the operator's "Apply settings" on its row, or "Enable load
+  balancer controller" again, sets the image (`SetChartVersion`, `EnableLBController`).
+- **A candidate moves nothing a final moves.** The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION`
+  stay on `v0.11.0`.
+
+### Verified on a lab
+
+Nothing on this candidate, and nothing of its three fixes. On one lab (Ubuntu 26.04 appliances, all on one node,
+the scheduler off), by candidate:
+
+- On `v0.11.1-rc.1` (2026-11-23), not run again: the upgrade from `v0.11.0` under five client loops (31365
+  requests, 0 failed), one push per balancer with the standby first, the platform run of two record-only rows, a
+  cluster on the `v0.11.0` controller unchanged, the cluster's update with no machine rolled, the `lb-internal`
+  and `loadBalancerIP` cases, a UDP Service answering from outside; and TLS on a single balancer (SNI, versions,
+  HTTP/2, PROXY version 1 and 2, a rotation with 0 failed of 6450, the 16 KiB bundle, the search for the private
+  key, a reboot).
+- On `v0.11.1-rc.2` (2026-11-23 and 2026-11-24): the upgrade from `v0.11.1-rc.1` (four loops, 0 failed;
+  keepalived's files once per appliance of a pair, the standby first, no HAProxy reload, no VRRP transition; the
+  pair rc.1 left `DEGRADED` read `ACTIVE` at the first pass; the platform run of one record-only row, 38 s);
+  Kubernetes on the moved cluster and on a new one (UDP, mixed ports, the annotations, TLS from a Secret with a
+  renewal, kept addresses, the first appliance serving alone, replace and failover on the cluster's pair, the
+  cluster's delete); a tenant's own pair with UDP, TLS and faults (six failovers, a replace, reboots, a damaged
+  certificate file healed, a lone appliance); 44 packets routed toward a tenant's address, none arrived.
+
+### Not verified
+
+- Everything of this candidate on a lab, and each of the three fixes since `v0.11.1-rc.2`: a change taken while
+  the package manager runs and the platform's own retries, a changed UDP limit in the kernel and a stale one put
+  right at the upgrade, the keep-address annotation set just before a delete, the `FLOATING_IP` rows a pass writes
+  and what they bill, the health view after a failover, the planned switch that waits for UDP members, sshd after
+  a reboot, the mode of a new certificate file, the restart of `nftables.service`.
+- The upgrade from `v0.11.1-rc.2` (the one push of a pair with a UDP listener), and any move to the BOM
+  `0.11.1-rc.3` (plans read, not run; the lab moved to `0.11.1-rc.2`).
+- What the audit of the drill lists: a node change under load with two workers or more, a project's delete and
+  every pass a scheduler would start by itself, the upgrade of a tenant's own pair with UDP or TLS listeners,
+  Debian 13 appliances on a lab, two nodes, the consoles in a browser, cert-manager itself, a portal rollback,
+  and any production site with a public network.
+- The candidate's images and its tag's workflows: they do not exist before the tag.
+
+### Known issues
+
+- Those of `v0.11.1-rc.2` and `v0.11.1-rc.1`, below, but the ones this candidate fixes.
+- A change still waits while dpkg is at work on a package the appliance itself runs, and during a first install;
+  the balancer says "the platform tries again within half a minute" also when the six retries are over.
+- A cluster on an earlier controller still gives back an address annotated just before its delete; with more than
+  50 Services deleted at once the ones beyond the first 50 are decided from the stored state.
+- After a failover the balancer's row names the old roles until the next pass or the next health read.
+- One busy UDP port hides a closed one on the same server; `leastconn` on UDP counts the flows of the last five
+  minutes.
+- The times of a change (14 to 44 s) and of a failover (0.7 to 0.8 s planned, 3.2 to 3.6 s with a dead master)
+  were measured on `v0.11.1-rc.2`; nothing was measured on this candidate.
+- The full list is in `docs/releases/v0.11.1-rc.3.md`.
 
 ## [0.11.1-rc.2] - 2026-11-24
 

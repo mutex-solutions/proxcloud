@@ -2448,9 +2448,14 @@ machine. Later builds keep it as a previous BOM: from 0.11.1-rc.1 the plan to a 
 row, the release, record only.
 
 The BOM of the candidate `v0.11.1-rc.2` (`0.11.1-rc.2`) has the pins of `0.11.1-rc.1`: the rows and
-refusals above, phrase `upgrade <name> to 0.11.1-rc.2`, and from 0.11.1-rc.1 the release alone. No move
-to it has run on a lab. `main` keeps it as a previous BOM: from 0.11.1-rc.2 the plan to the BOM on `main`
-has one row, the release, record only.
+refusals above, phrase `upgrade <name> to 0.11.1-rc.2`, and from 0.11.1-rc.1 the release alone. One move
+to it ran on a lab, from 0.11.1-rc.1 (2026-11-23): the plan had that one row, and the run replaced no
+machine. Later builds keep it as a previous BOM: from 0.11.1-rc.2 the plan to a BOM with its pins has one
+row, the release, record only.
+
+The BOM of the candidate `v0.11.1-rc.3` (`0.11.1-rc.3`) has the same pins: the rows and refusals above,
+phrase `upgrade <name> to 0.11.1-rc.3`, and from 0.11.1-rc.1 and 0.11.1-rc.2 the release alone. No move
+to it has run on a lab.
 
 "Moves" means that the Application's target is the new chart version and ArgoCD has compared the
 cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is
@@ -3317,7 +3322,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1`, that of v0.10.2 is `0.10.2`, that of v0.11.0 is `0.11.0` (`main` carries a `-dev` one between releases, now `0.12.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1`, `v0.11.0-rc.2`, `v0.11.1-rc.1` and `v0.11.1-rc.2` carry `0.10.0-rc.1`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.2-rc.1`, `0.11.0-rc.1`, `0.11.0-rc.2`, `0.11.1-rc.1` and `0.11.1-rc.2`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well, v0.10.2 keeps that of v0.10.1 and that of the candidate `v0.10.2-rc.1` too, v0.11.0 keeps that of v0.10.2 and those of the candidates `v0.11.0-rc.1` and `v0.11.0-rc.2` as well, and `main` keeps that of v0.11.0 and those of the candidates `v0.11.1-rc.1` and `v0.11.1-rc.2` too). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1`, that of v0.10.2 is `0.10.2`, that of v0.11.0 is `0.11.0` (`main` carries a `-dev` one between releases, now `0.12.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1`, `v0.11.0-rc.2`, `v0.11.1-rc.1`, `v0.11.1-rc.2` and `v0.11.1-rc.3` carry `0.10.0-rc.1`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.2-rc.1`, `0.11.0-rc.1`, `0.11.0-rc.2`, `0.11.1-rc.1`, `0.11.1-rc.2` and `0.11.1-rc.3`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well, v0.10.2 keeps that of v0.10.1 and that of the candidate `v0.10.2-rc.1` too, v0.11.0 keeps that of v0.10.2 and those of the candidates `v0.11.0-rc.1` and `v0.11.0-rc.2` as well, and `main` keeps that of v0.11.0 and those of the candidates `v0.11.1-rc.1` and `v0.11.1-rc.2` too). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
