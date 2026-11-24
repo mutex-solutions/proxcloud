@@ -499,6 +499,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A credential rotation put a Warning on every Service of the cluster.** The operator's "Enable load balancer
+  controller" on a cluster that has a controller replaces its credential: the old token stops at once, and the
+  kubelet writes the new one into the controller's Secret volume at its next sync of the pod. The call in between
+  was refused, and the controller said `Warning GatewayRefused "authentication failure"` on each Service, ten
+  seconds before the Normal Event (drill R2b-o5 of v0.11.1-rc.2), for something no Service's owner can act on. Now
+  a refused credential is not said on the Services while it is younger than two minutes: the turn fails and is
+  logged, the next one comes after the interval and reads the token again, and with the new token the Services hear
+  nothing new. A refusal that lasts (a wrong Secret, a released cluster) is said as before once the two minutes are
+  over. Two minutes, not one retry: the kubelet may take a minute and a half, and the lab's ten seconds were the
+  short end of that. Test: the controller against the gateway's own handler with the credential replaced under it;
+  it fails without the fix. Not run on a lab.
 - **A Service annotated to keep its address just before its delete lost the address.** `kubectl annotate ...
   proxcloud.io/lb-keep-address=true` followed at once by `kubectl delete` gave the address back to the pool, twice on
   the lab (0.31 and 0.36 s between the two; drill R2a-2 of v0.11.1-rc.2), and the guide said the opposite. The portal

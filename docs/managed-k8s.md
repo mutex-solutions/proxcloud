@@ -1405,7 +1405,11 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 It pins the cluster to the provider's chart version in one Application apply (refused below 0.1.17, and with the
 transition check of a chart bump), mints the credential and writes the Secret. Run again on a cluster that has a
 controller it mints a new credential (the old token stops at once; the running controller reads the new one when the
-Secret volume is updated) and sets the portal's image, keeping the cluster's mode. A gate that does not hold answers
+Secret volume is updated, which the kubelet does at its next sync of the pod, up to a minute and a half later) and
+sets the portal's image, keeping the cluster's mode. The controller's calls in between are refused (`401`, one log
+line each on both sides, and the portal's audit of a refused credential): no Service changes and none is told, the
+controller reads its token again at every turn, and only a refusal that lasts two minutes becomes the Warning
+`GatewayRefused` on the cluster's Services (a controller before v0.11.1 said it at the first refused call). A gate that does not hold answers
 `409` and names it. The image is set at create, at this action and at a chart bump (`bump-chart`, **Apply platform
 update**), never by the provider sync: a portal upgrade restarts no controller, and a cluster on an older controller
 keeps working while `/lb/v1` stays compatible. A cluster with a controller is never moved below chart 0.1.17. The

@@ -63,6 +63,11 @@ const (
 	resyncEvery = 30 * time.Second
 	debounce    = time.Second
 	component   = "proxcloud-lb-controller"
+	// authGrace is how long the gateway may refuse the controller's credential before the Services are told. The
+	// operator's "Enable load balancer controller" replaces the credential, and the old one stops at once, while the
+	// kubelet writes the new one into the controller's Secret volume at its next sync of the pod: up to a minute and
+	// a half later. The calls in between are refused, and that is nothing a Service's owner can act on.
+	authGrace = 2 * time.Minute
 )
 
 func main() {
@@ -90,7 +95,7 @@ func main() {
 	}
 	gw := &gateway{url: *gatewayURL, dir: *gatewayDir}
 	c := &controller{api: api, put: gw.put, defaultClass: *defaultClass, log: log,
-		watching: *watch, interval: *interval, resync: resyncEvery, debounce: debounce}
+		watching: *watch, interval: *interval, resync: resyncEvery, debounce: debounce, authGrace: authGrace}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	log.Info("lb-controller: started", "gateway", *gatewayURL, "default", *defaultClass, "protocol", lbgw.Protocol, "watch", *watch)
@@ -364,6 +369,10 @@ type controller struct {
 	again   time.Time
 	// open: the last turn left something for the next one, which is therefore sent whatever its state.
 	open bool
+	// refusedSince is when the gateway first refused the credential in a row of such answers, and authGrace how long
+	// it may before the Services are told (the zero value: at once).
+	refusedSince time.Time
+	authGrace    time.Duration
 }
 
 // service is what a turn reads of one Service.
@@ -497,9 +506,23 @@ func (c *controller) turn(ctx context.Context) error {
 		c.lastReq, c.lastAns = state, ans
 		c.open = c.open || len(ans.NeedCertificates) > 0
 	}
+	var rf *lbgw.Refusal
+	if errors.As(err, &rf) && rf.Status == http.StatusUnauthorized {
+		// The credential is refused. After a rotation that is the old token, until the kubelet has written the new
+		// one: the next turn reads the file again (gateway.put), and no Service is told meanwhile (drill R2b-o5 of
+		// v0.11.1-rc.2: one Warning "authentication failure" on every Service at each rotation). A refusal that
+		// outlasts authGrace is no rotation, and is said as any other.
+		if c.refusedSince.IsZero() {
+			c.refusedSince = time.Now()
+		}
+		if time.Since(c.refusedSince) < c.authGrace {
+			return fmt.Errorf("gateway: %w (the credential is read again at the next turn; the Services are told if this lasts %s)", err, c.authGrace)
+		}
+	} else {
+		c.refusedSince = time.Time{}
+	}
 	if err != nil {
-		var rf *lbgw.Refusal
-		if errors.As(err, &rf) {
+		if rf != nil {
 			reason := rf.Reason
 			if reason == "" {
 				reason = "GatewayRefused"
