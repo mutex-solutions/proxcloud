@@ -144,7 +144,7 @@ The load balancer then ends TLS on the Service's TCP ports with the certificate 
 
 ### Keeping an address
 
-With `proxcloud.io/lb-keep-address: "true"`, a Service's public address stays with the cluster when the Service is deleted. The cluster page lists it under **Kept addresses**. A kept address is **still billed and counted in your quota**. A new Service of the same cluster gets it by naming it in `spec.loadBalancerIP`. A cluster keeps 5 addresses at most; **Release** on the cluster page gives one back, and all go with the cluster. Any other `spec.loadBalancerIP` is not obeyed: the Service gets an address of the pool and the Event `LoadBalancerIPIgnored`.
+With `proxcloud.io/lb-keep-address: "true"`, a Service's public address stays with the cluster when the Service is deleted. What counts is the annotation as the Service carries it when it is deleted: you can annotate a Service and delete it right away, with no wait in between, and removing the annotation before the delete gives the address back. Only an address the Service had is kept: a Service that was still pending or was refused keeps none. The cluster page lists a kept address under **Kept addresses**. A kept address is **still billed and counted in your quota**. A new Service of the same cluster gets it by naming it in `spec.loadBalancerIP`. A cluster keeps 5 addresses at most; **Release** on the cluster page gives one back, and all go with the cluster. Any other `spec.loadBalancerIP` is not obeyed: the Service gets an address of the pool and the Event `LoadBalancerIPIgnored`.
 
 ### If your manifests were written for another cloud's controller
 

@@ -41,6 +41,10 @@ import (
 // portal asks for (tls.go). A protocol 1 controller sends none of them and is served as before, with one thing kept
 // back: its UDP Services stay refused (ProtocolUDP), so that upgrading the portal alone never hands a Service that
 // stood pending a public address, which is billed. The cluster's owner gets UDP by upgrading the cluster.
+//
+// Within protocol 2, v0.11.1-rc.3 adds the Services that are being deleted (Request.Gone). A controller that sends
+// none is served as before, and a portal of before it refuses the field as any it does not know, so the controller
+// sends that portal the request without it (cmd/lb-controller, gateway.put).
 const (
 	ProtocolHeader = "ProxCloud-LB-Protocol"
 	Protocol       = 2
@@ -76,10 +80,14 @@ const (
 
 // Limits of one state. The 45 KiB config cap (pve.LBMaxConfig) is the portal's check, on the rendered config.
 const (
-	MaxServices    = 50
-	MaxPorts       = 20
-	MaxNodes       = 64
-	maxBody        = 64 << 10 // the state's part of a request; the certificates the portal asked for come on top (maxCertBody)
+	MaxServices = 50
+	MaxPorts    = 20
+	MaxNodes    = 64
+	maxBody     = 64 << 10 // the state's part of a request; the certificates the portal asked for (maxCertBody) and the Services being deleted (maxGoneBody) come on top
+	// MaxGone is how many Services that are being deleted one request names; a controller with more names the rest
+	// in its next. maxGoneBody is their part of the body: a uid and one short annotation each.
+	MaxGone        = 50
+	maxGoneBody    = 16 << 10
 	NodePortMin    = 30000
 	NodePortMax    = 32767
 	seenEvery      = time.Minute
@@ -94,6 +102,19 @@ type Request struct {
 	// CertificateData (protocol 2) are the Secrets whose hashes the last answer asked for (Answer.NeedCertificates),
 	// and no other.
 	CertificateData []CertificateData `json:"certificateData,omitempty"`
+	// Gone (protocol 2, from v0.11.1-rc.3) are the Services that are being deleted and that Services therefore
+	// leaves out, each with what its object says at its deletion. The controller still holds them by its finalizer
+	// when it sends this, and lets them go once the portal has answered.
+	Gone []Gone `json:"gone,omitempty"`
+}
+
+// Gone is one Service that is being deleted: its last word. Annotations are the ones that say something of a Service
+// that goes (GoneAnnotations), as the object has them now: a Service annotated a moment before its delete was never
+// sent with the annotation, and one whose annotation was removed a moment before was last sent with it. What the
+// last stored state says of the Service does not count beside this.
+type Gone struct {
+	UID         string            `json:"uid"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // Service is one Service of type LoadBalancer the controller owns. Namespace and Name are for people: they never reach
@@ -194,10 +215,11 @@ type Registry interface {
 }
 
 // Portal is the project side: it filters the nodes against the cluster's workers, takes the certificates it asked
-// for, stores the state and starts the converge, and answers each Service as the cluster's balancer has it now. It
-// may refuse the whole request with a *Refusal (a project that is suspended or being deleted).
+// for, stores the state and starts the converge, and answers each Service as the cluster's balancer has it now. gone
+// are the Services the request leaves out because they are being deleted. It may refuse the whole request with a
+// *Refusal (a project that is suspended or being deleted).
 type Portal interface {
-	LBClusterState(ctx context.Context, cred *Credential, services []Service, nodes []Node, certs []CertificateData) (*Answer, error)
+	LBClusterState(ctx context.Context, cred *Credential, services []Service, nodes []Node, certs []CertificateData, gone []Gone) (*Answer, error)
 }
 
 // Handler serves /lb/v1/ on the gateway listener.
@@ -380,12 +402,14 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 			fmt.Sprintf("This cluster's load balancer controller is older than the portal accepts (protocol %d or later). Bump the cluster to the portal's chart", MinProtocol)}
 	}
 	// The body is the state and, when the last answer asked for them, certificates: the state's part keeps its
-	// limit, and the certificates are measured as they were sent.
+	// limit, and the certificates are measured as they were sent. So are the Services that are being deleted: a
+	// state near its limit must not keep a Service from being let go.
 	var body struct {
 		Request
 		CertificateData json.RawMessage `json:"certificateData"`
+		Gone            json.RawMessage `json:"gone"`
 	}
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody+maxCertBody))
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody+maxGoneBody+maxCertBody))
 	if err == nil {
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
@@ -394,7 +418,7 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	// Over the limit: a body that was cut, a state that is too large, and a body of that size without certificates
 	// that is no state either.
 	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) || (err == nil && len(raw)-len(body.CertificateData) > maxBody) ||
+	if errors.As(err, &tooLarge) || (err == nil && len(raw)-len(body.CertificateData)-len(body.Gone) > maxBody) ||
 		(err != nil && len(raw) > maxBody && !bytes.Contains(raw, []byte("certificateData"))) {
 		// Nothing was stored: the cluster's balancer stays as the last state that fitted made it.
 		return nil, &Refusal{http.StatusRequestEntityTooLarge, ReasonTooLarge, fmt.Sprintf("The cluster's load balancer state is over %d KiB and was not taken: the balancer stays as it is, and no change to a Service or a node reaches it until the state fits. Shorten the Services' load balancer annotations and source ranges", maxBody>>10)}
@@ -405,6 +429,17 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		dec.DisallowUnknownFields()
 		if dec.Decode(&req.CertificateData) != nil || len(req.CertificateData) > MaxClusterCerts {
 			return nil, &Refusal{http.StatusBadRequest, ReasonInvalid, fmt.Sprintf("lb gateway: certificateData is at most %d certificates, each with its certificate and privateKey", MaxClusterCerts)}
+		}
+	}
+	if err == nil && len(body.Gone) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(body.Gone))
+		dec.DisallowUnknownFields()
+		if len(body.Gone) > maxGoneBody || dec.Decode(&req.Gone) != nil || len(req.Gone) > MaxGone ||
+			slices.ContainsFunc(req.Gone, func(g Gone) bool { return !uidRe.MatchString(g.UID) }) {
+			return nil, &Refusal{http.StatusBadRequest, ReasonInvalid, fmt.Sprintf("lb gateway: gone is at most %d Services that are being deleted, each with its uid", MaxGone)}
+		}
+		if protocol < 2 { // no controller of protocol 1 sends them
+			req.Gone = nil
 		}
 	}
 	if err != nil {
@@ -464,7 +499,7 @@ func (h *Handler) serve(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		}
 		accepted = append(accepted, *s)
 	}
-	ans, err := h.Portal.LBClusterState(ctx, cred, accepted, req.Nodes, req.CertificateData)
+	ans, err := h.Portal.LBClusterState(ctx, cred, accepted, req.Nodes, req.CertificateData, req.Gone)
 	if err != nil {
 		return nil, err
 	}

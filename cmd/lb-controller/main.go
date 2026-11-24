@@ -12,6 +12,9 @@
 // the ones of the prefix proxcloud.io/lb-, and no other, as they are and says the Events the answer carries. The two
 // it reads itself need the tenant's API: the node selector (the nodes' labels) and proxcloud.io/lb-tls-secret (the
 // Secrets a Service's TLS ends with: certificates, below).
+//
+// A Service that is being deleted is left out of the state, and named beside it with what its object says then
+// (lbgw.Gone): the finalizer keeps the object readable until the portal has heard its last word.
 package main
 
 import (
@@ -60,6 +63,11 @@ const (
 	resyncEvery = 30 * time.Second
 	debounce    = time.Second
 	component   = "proxcloud-lb-controller"
+	// authGrace is how long the gateway may refuse the controller's credential before the Services are told. The
+	// operator's "Enable load balancer controller" replaces the credential, and the old one stops at once, while the
+	// kubelet writes the new one into the controller's Secret volume at its next sync of the pod: up to a minute and
+	// a half later. The calls in between are refused, and that is nothing a Service's owner can act on.
+	authGrace = 2 * time.Minute
 )
 
 func main() {
@@ -87,7 +95,7 @@ func main() {
 	}
 	gw := &gateway{url: *gatewayURL, dir: *gatewayDir}
 	c := &controller{api: api, put: gw.put, defaultClass: *defaultClass, log: log,
-		watching: *watch, interval: *interval, resync: resyncEvery, debounce: debounce}
+		watching: *watch, interval: *interval, resync: resyncEvery, debounce: debounce, authGrace: authGrace}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	log.Info("lb-controller: started", "gateway", *gatewayURL, "default", *defaultClass, "protocol", lbgw.Protocol, "watch", *watch)
@@ -274,6 +282,19 @@ func (g *gateway) put(ctx context.Context, req *lbgw.Request) (*lbgw.Answer, err
 	if err != nil {
 		return nil, err
 	}
+	if status == http.StatusBadRequest && len(req.Gone) > 0 {
+		// A portal of before v0.11.1-rc.3 knows no Services that are being deleted and refuses the field. It gets the
+		// request without them, and goes by the state it last stored, as it did. A request refused for something
+		// else is refused again, and that answer is the one reported.
+		short := *req
+		short.Gone = nil
+		if body, err = json.Marshal(&short); err != nil {
+			return nil, err
+		}
+		if status, peer, raw, err = send(body); err != nil {
+			return nil, err
+		}
+	}
 	if status == http.StatusBadRequest && peer > 0 && peer < lbgw.Protocol {
 		old, err := json.Marshal(protocol1(req))
 		if err != nil {
@@ -348,6 +369,10 @@ type controller struct {
 	again   time.Time
 	// open: the last turn left something for the next one, which is therefore sent whatever its state.
 	open bool
+	// refusedSince is when the gateway first refused the credential in a row of such answers, and authGrace how long
+	// it may before the Services are told (the zero value: at once).
+	refusedSince time.Time
+	authGrace    time.Duration
 }
 
 // service is what a turn reads of one Service.
@@ -355,10 +380,12 @@ type service struct {
 	ns, name, uid, rv, created string
 	finalizers                 []string
 	owned, deleting, proxy     bool
-	loadBalancerIP             string
-	nodeSelector               string
-	ingress                    []any
-	wire                       lbgw.Service
+	// said: this turn's request names the Service as being deleted (lbgw.Gone).
+	said           bool
+	loadBalancerIP string
+	nodeSelector   string
+	ingress        []any
+	wire           lbgw.Service
 }
 
 func (s *service) held() bool { return slices.Contains(s.finalizers, Finalizer) }
@@ -393,8 +420,19 @@ func (c *controller) turn(ctx context.Context) error {
 	hosts := map[string]string{}                 // by UID: the addresses behind the Service this turn
 	secrets := map[string]lbgw.CertificateData{} // by hash: the Secrets the Services of this turn name, for this turn
 	var owned []*service
+	// The Services that are being deleted and still held, with what their objects say now. The state leaves them
+	// out, and the last one the portal stored may be older than their last change: the controller takes its turn
+	// debounce after a change, so an annotation set and a delete within that second are one turn, this one (drill
+	// R2a-2 of v0.11.1-rc.2: the address of a Service annotated to keep it and deleted 0.3 s later was given back).
+	var gone []lbgw.Gone
 	for _, s := range services {
-		if !s.owned || s.deleting {
+		if !s.owned {
+			continue
+		}
+		if s.deleting {
+			if s.held() && len(gone) < lbgw.MaxGone {
+				gone, s.said = append(gone, lbgw.Gone{UID: s.uid, Annotations: lbgw.GoneAnnotations(s.wire.Annotations)}), true
+			}
 			continue
 		}
 		if !s.held() {
@@ -429,9 +467,12 @@ func (c *controller) turn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The Services being deleted are no part of the state that is compared: they are said in the request that
+	// drops them, which is always sent, and a Service is let go only after a request that named it.
+	req.Gone = gone
 	ans := c.lastAns
 	changed := !bytes.Equal(state, c.lastReq)
-	if now := time.Now(); ans == nil || wasOpen || changed || !now.Before(c.again) {
+	if now := time.Now(); ans == nil || wasOpen || changed || len(gone) > 0 || !now.Before(c.again) {
 		c.lastAns, c.again = nil, now.Add(c.resync)
 		if changed {
 			c.again = now.Add(min(c.interval, c.resync))
@@ -465,9 +506,23 @@ func (c *controller) turn(ctx context.Context) error {
 		c.lastReq, c.lastAns = state, ans
 		c.open = c.open || len(ans.NeedCertificates) > 0
 	}
+	var rf *lbgw.Refusal
+	if errors.As(err, &rf) && rf.Status == http.StatusUnauthorized {
+		// The credential is refused. After a rotation that is the old token, until the kubelet has written the new
+		// one: the next turn reads the file again (gateway.put), and no Service is told meanwhile (drill R2b-o5 of
+		// v0.11.1-rc.2: one Warning "authentication failure" on every Service at each rotation). A refusal that
+		// outlasts authGrace is no rotation, and is said as any other.
+		if c.refusedSince.IsZero() {
+			c.refusedSince = time.Now()
+		}
+		if time.Since(c.refusedSince) < c.authGrace {
+			return fmt.Errorf("gateway: %w (the credential is read again at the next turn; the Services are told if this lasts %s)", err, c.authGrace)
+		}
+	} else {
+		c.refusedSince = time.Time{}
+	}
 	if err != nil {
-		var rf *lbgw.Refusal
-		if errors.As(err, &rf) {
+		if rf != nil {
 			reason := rf.Reason
 			if reason == "" {
 				reason = "GatewayRefused"
@@ -578,6 +633,10 @@ func (c *controller) turn(ctx context.Context) error {
 	// The PUT left these out, and the portal accepted it: let them go.
 	for _, s := range services {
 		if !s.held() || (s.owned && !s.deleting) {
+			continue
+		}
+		if s.owned && s.deleting && !s.said { // more than one request names: this one is named in the next
+			c.open = true
 			continue
 		}
 		if !s.deleting && len(s.ingress) > 0 {
