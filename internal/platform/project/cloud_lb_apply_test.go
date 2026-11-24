@@ -94,15 +94,15 @@ func TestLBPairRecordsOnlyWhatIsServed(t *testing.T) {
 	}
 
 	// The drill's appliance: the hash is recorded, HAProxy's master has a worker, and it runs the package's config.
-	// While the package manager runs it cannot be pushed, and the row says what is wrong, not ACTIVE.
-	f.set("301", func(g *lbGuest) { g.loaded, g.aptRunning = "", true })
+	// While dpkg is at work on HAProxy's own package it cannot be pushed, and the row says what is wrong, not ACTIVE.
+	f.set("301", func(g *lbGuest) { g.loaded, g.upgrading = "", true })
 	apply()
 	if lb.Status != lbStatusDegraded || !strings.Contains(lb.StatusMessage, "appliance 301: HAProxy does not serve its configuration") ||
 		strings.Contains(lb.StatusMessage, "missing") || app("301").State != lbAppDown {
 		t.Fatalf("HAProxy on the package's config: %s %q", lb.Status, lb.StatusMessage)
 	}
 	// Then the same pass that sees it loads the config again.
-	f.set("301", func(g *lbGuest) { g.aptRunning = false })
+	f.set("301", func(g *lbGuest) { g.upgrading = false })
 	apply()
 	if lb.Status != lbStatusActive || f.count("301 haproxy reload") != 2 || f.count("302 haproxy reload") != 2 || !f.guests["301"].serving() {
 		t.Fatalf("after the push: %s %q, log %v", lb.Status, lb.StatusMessage, f.log)
@@ -122,13 +122,13 @@ func TestLBPairRecordsOnlyWhatIsServed(t *testing.T) {
 		t.Fatalf("keepalived stopped: %s %q", lb.Status, lb.StatusMessage)
 	}
 	// keepalived stopped and it cannot be pushed now: the cause and what happens next, and no "missing" appliance.
-	f.set("301", func(g *lbGuest) { g.keepalived, g.aptRunning = false, true })
+	f.set("301", func(g *lbGuest) { g.keepalived, g.upgrading = false, true })
 	apply()
 	if lb.Status != lbStatusDegraded || !strings.Contains(lb.StatusMessage, "appliance 301: keepalived is stopped") ||
 		!strings.Contains(lb.StatusMessage, "The platform puts the other one right") || strings.Contains(lb.StatusMessage, "missing") {
 		t.Fatalf("keepalived stopped, not startable yet: %s %q", lb.Status, lb.StatusMessage)
 	}
-	f.set("301", func(g *lbGuest) { g.aptRunning = false })
+	f.set("301", func(g *lbGuest) { g.upgrading = false })
 	apply()
 
 	// A stopped VM has no agent: it is started, said so, and nothing is asked of its guest.
@@ -206,13 +206,13 @@ func TestLBSingleRecordsOnlyWhatIsServed(t *testing.T) {
 		t.Fatalf("no answer: %s %q, wrote %v", lb.Status, lb.StatusMessage, f.log[writes:])
 	}
 	// HAProxy stopped, and the config cannot be loaded now: DOWN with the cause, not ACTIVE.
-	f.set("301", func(g *lbGuest) { g.agentDown, g.haproxy, g.aptRunning = false, false, true })
+	f.set("301", func(g *lbGuest) { g.agentDown, g.haproxy, g.upgrading = false, false, true })
 	apply()
 	if lb.Status != lbStatusDown || !strings.Contains(lb.StatusMessage, "HAProxy is not running") || lb.AppliedHash != hash {
 		t.Fatalf("HAProxy stopped: %s %q", lb.Status, lb.StatusMessage)
 	}
 	// Then it is loaded again: started, ACTIVE, the same hash.
-	f.set("301", func(g *lbGuest) { g.aptRunning = false })
+	f.set("301", func(g *lbGuest) { g.upgrading = false })
 	apply()
 	if lb.Status != lbStatusActive || lb.AppliedHash != hash || !f.guests["301"].serving() || f.count("301 haproxy reload") != 3 {
 		t.Fatalf("started again: %s %q, log %v", lb.Status, lb.StatusMessage, f.log)
@@ -257,7 +257,7 @@ func TestLBPairRowHashNeedsAnApplianceThatServes(t *testing.T) {
 	// A change neither appliance can take yet, while they cannot hear each other and both hold the address.
 	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 81, Pool: "web"})
 	for _, vm := range []string{"301", "302"} {
-		f.set(vm, func(g *lbGuest) { g.role, g.holds, g.aptRunning = "MASTER", true, true })
+		f.set(vm, func(g *lbGuest) { g.role, g.holds, g.upgrading = "MASTER", true, true })
 	}
 	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
 		t.Fatal(err)
@@ -266,7 +266,7 @@ func TestLBPairRowHashNeedsAnApplianceThatServes(t *testing.T) {
 		t.Fatalf("no appliance serves the new config: %s %q, row hash moved: %v", lb.Status, lb.StatusMessage, lb.AppliedHash != served)
 	}
 	for _, vm := range []string{"301", "302"} {
-		f.set(vm, func(g *lbGuest) { g.aptRunning = false })
+		f.set(vm, func(g *lbGuest) { g.upgrading = false })
 	}
 	if err := h.lbApplyPair(ctx, es, proj, cr, lb); err != nil {
 		t.Fatal(err)

@@ -56,6 +56,7 @@ type lbPass struct {
 	digest  string // of the state it applied (lbStateDigest)
 	at      time.Time
 	settled bool // the row then read ACTIVE, with every Service answered and no address left to give back
+	waiting bool // it left a change an appliance could not take now (loadBalancer.waiting)
 }
 
 // lbStateDigest names a cluster's state by content: the Services and nodes in the order the controller sent them,
@@ -116,8 +117,11 @@ type lbClusterSvc struct {
 	Name      string `json:"name,omitempty"`
 	VIP       string `json:"vip,omitempty"`
 	State     string `json:"state"` // lbgw.StateReady, StateBuilding, StateRefused
-	Reason    string `json:"reason,omitempty"`
-	Message   string `json:"message,omitempty"`
+	// Served names the Service as the appliance that holds the addresses last served it (lbServedDigest): the
+	// Service stays ready by it while that appliance waits for a change of something else (lbClusterApply).
+	Served  string `json:"served,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // SetLBGateway turns on the cluster balancers: the gateway's store of credentials and states (nil = off).
@@ -422,6 +426,15 @@ func (h *Handler) lbClusterConverge(ctx context.Context, clusterID string, force
 			slog.Warn("load balancer: cluster converge", "cluster", clusterID, "err", err)
 		}
 		applied, ok := h.lbPasses.Load(clusterID)
+		// A change an appliance could not take now is tried again by the platform itself, as a tenant's own
+		// balancer's is (lbRetry): the controller's next send would come too, but only while the controller runs.
+		if ok && applied.(lbPass).waiting {
+			h.lbRetry("lbc-"+clusterID, func(ctx context.Context) bool {
+				h.lbClusterConverge(ctx, clusterID, true)
+				last, ok := h.lbPasses.Load(clusterID)
+				return ok && last.(lbPass).waiting
+			})
+		}
 		st, err := h.lbGW.State(ctx, clusterID)
 		if !ok || err != nil || applied.(lbPass).digest == lbStateDigest(st) {
 			return
@@ -486,8 +499,8 @@ func (h *Handler) lbClusterPass(ctx context.Context, clusterID string, force boo
 	if err := h.lbClusterBuild(ctx, es, proj, ext); err != nil {
 		slog.Warn("load balancer: cluster appliance", "cluster", clusterID, "err", err)
 	}
-	settled, err := h.lbClusterApply(ctx, es, proj, ext, st)
-	h.lbPasses.Store(clusterID, lbPass{digest: digest, at: time.Now(), settled: settled})
+	settled, waiting, err := h.lbClusterApply(ctx, es, proj, ext, st)
+	h.lbPasses.Store(clusterID, lbPass{digest: digest, at: time.Now(), settled: settled, waiting: waiting})
 	if settled { // the appliances serve the state: the certificates nothing names any more are not needed again
 		if perr := h.lbClusterPruneCerts(ctx, clusterID); perr != nil {
 			slog.Warn("load balancer: cluster certificates", "cluster", clusterID, "err", perr)
@@ -550,20 +563,21 @@ func (h *Handler) lbClusterBuild(ctx context.Context, es *externalservice.Extern
 
 // lbClusterApply brings the row in line with the state and the appliances with the row, under the row's lock. settled
 // says that it left nothing for a next pass: the balancer is ACTIVE, every Service has its answer (ready or refused),
-// and no address waits to be given back.
-func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.ExternalService, proj *Project, ext string, st *lbgw.State) (settled bool, err error) {
+// no address waits to be given back, and no appliance waits for a change. waiting is the pair apply's word that one
+// does (loadBalancer.waiting).
+func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.ExternalService, proj *Project, ext string, st *lbgw.State) (settled, waiting bool, err error) {
 	release, ok, err := h.lbLock(ctx, ext, lbLockWait)
 	if err != nil || !ok {
-		return false, err // another apply is on it
+		return false, false, err // another apply is on it
 	}
 	defer release()
 	cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, ext)
 	if err != nil || cr == nil {
-		return false, err
+		return false, false, err
 	}
 	lb, err := lbOfRow(cr)
 	if err != nil || lb.Cluster == nil {
-		return false, err
+		return false, false, err
 	}
 	was, _ := json.Marshal(lb)
 	ready := map[string]bool{} // the Services the row had ready
@@ -571,7 +585,7 @@ func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.Extern
 		ready[s.UID] = s.State == lbgw.StateReady
 	}
 	if err := h.lbClusterDesired(ctx, es, proj, lb, st); err != nil {
-		return false, err
+		return false, false, err
 	}
 	// The row says what this pass decided before the appliances are pushed, which takes the pass most of its time:
 	// the Services it serves, each one's address, the addresses it keeps and the ones on their way back. The
@@ -586,7 +600,7 @@ func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.Extern
 	}
 	if now, _ := json.Marshal(lb); !bytes.Equal(was, now) {
 		if err := h.lbSave(ctx, cr, lb); err != nil {
-			return false, err
+			return false, false, err
 		}
 	}
 	// And each address the balancer holds has its FLOATING_IP row from this pass on, not from the next provider sync.
@@ -608,22 +622,59 @@ func (h *Handler) lbClusterApply(ctx context.Context, es *externalservice.Extern
 	}
 	// A Service is ready when the appliance that holds the addresses serves this config: the controller writes the
 	// Service's address into its status on that word (drill N3-7), and the standby gets every config first.
-	applied := lb.AppliedHash == lbAppliedHash(lb) && (lb.Status == lbStatusActive || lb.Status == lbStatusDegraded) &&
-		slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.State == lbAppUp && a.HoldsVIP })
+	//
+	// While that appliance serves the config of before a change it could not take yet (it is up, and waits), a
+	// Service it served and that is itself as it was stays ready: the change is another Service's, or the workers'.
+	// Until v0.11.1-rc.2 every Service of the cluster went back to "building" for as long as an appliance waited
+	// (drill R2b-1). A Service that is new, or changed, is building until the holder has it, as before.
+	// ponytail: Served is one digest per Service, of what the holder of that pass served. After a failover onto an
+	// appliance that was further behind than the one that held the address, a Service changed in between reads
+	// ready one pass early; record the digests per appliance if a drill ever shows it.
+	holderUp := func(current bool) bool {
+		return slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool {
+			return a.State == lbAppUp && a.HoldsVIP && (!current || !lbAppWaits(a))
+		})
+	}
+	served := lb.Status == lbStatusActive || lb.Status == lbStatusDegraded
+	applied := served && lb.AppliedHash == lbAppliedHash(lb) && holderUp(true)
+	stays := served && holderUp(false)
+	want := map[string]lbgw.Service{}
+	if st != nil {
+		for _, s := range st.Services {
+			want[s.UID] = s
+		}
+	}
 	for i := range lb.Cluster.Services {
-		if s := &lb.Cluster.Services[i]; s.State != lbgw.StateRefused {
+		s := &lb.Cluster.Services[i]
+		if s.State == lbgw.StateRefused {
+			s.Served = ""
+			continue
+		}
+		digest := s.Served // no state: nothing of the Service changed
+		if w, ok := want[s.UID]; ok {
+			digest = lbServedDigest(w, s.VIP)
+		}
+		switch {
+		case s.VIP != "" && applied:
+			s.State, s.Served = lbgw.StateReady, digest
+		case s.VIP != "" && stays && s.Served != "" && s.Served == digest:
+			s.State = lbgw.StateReady
+		default:
 			s.State = lbgw.StateBuilding
-			if s.VIP != "" && applied {
-				s.State = lbgw.StateReady
-			}
 		}
 	}
 	if serr := h.lbSave(ctx, cr, lb); serr != nil && err == nil {
 		err = serr
 	}
-	settled = err == nil && lb.Status == lbStatusActive && len(lb.Cluster.Releasing) == 0 &&
+	settled = err == nil && lb.Status == lbStatusActive && len(lb.Cluster.Releasing) == 0 && !lb.waiting &&
 		!slices.ContainsFunc(lb.Cluster.Services, func(s lbClusterSvc) bool { return s.State == lbgw.StateBuilding })
-	return settled, err
+	return settled, lb.waiting, err
+}
+
+// lbServedDigest names a Service as an appliance serves it: everything the controller sent of it, and its address.
+func lbServedDigest(s lbgw.Service, vip string) string {
+	raw, _ := json.Marshal(s)
+	return lbHash(string(raw) + "\n" + vip)
 }
 
 // lbClusterDesired folds the state into the row: Services gone give up their address (kept for the cluster when they

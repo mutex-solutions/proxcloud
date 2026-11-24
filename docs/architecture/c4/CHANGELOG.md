@@ -4,6 +4,39 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-24: a load balancer takes a change while the image's package manager runs (drill of v0.11.1-rc.2)
+
+**What changed:** no new component, container, listener, route or relation. One relation gains a direction: the
+health read of a pair may now write the balancer's row. The rest is inside existing code elements.
+
+- `internal/cloud/pve/lb.go`: `lbReadyScript` asks "installed" before "a package manager runs"; `lbPkgSettledFn`,
+  `lbPkgGateHAProxy` and `lbPkgGateKeepalived` open `haproxyReload`, `lbKeepalivedApply` and `lvsApply` with the
+  same question, and `haproxyReload` answers "held" for a swap that failed while dpkg was at HAProxy's package.
+  `lbBusyExit` is 75 (it was 3, which `keepalived -t` also answers). `ErrLBPackageBusy`, `ErrLBInstalling` and
+  `LBHoldClass` name why a push was not taken. `lbNoSSH` masks sshd and opens the three install lines and the three
+  applies. `PushHAProxy` and `PushPairHAProxy` also answer how many certificate files they wrote.
+- `internal/cloud/pve/lbtls.go`: `lbCertPrepareScript`, a command before the agent's writes that makes each
+  certificate file empty with mode 0600.
+- `internal/platform/project/cloud_lb_pair_pve.go` (`lbApplyPair`): an appliance that cannot take a push holds it
+  and the appliances after it wait (`lbHoldWindow`, `loadBalancer.HeldSince`); an appliance that serves its recorded
+  config and waits for a change is `up` with a reason (`lbAppWaits`); `lbPairStatus` says what waits; one log line
+  per push. `lbRetry` (with `Handler.lbRetries`) is the platform's own retry, started by `pveLBApply` and by
+  `lbClusterConverge`. `lbPairHealth` reads the roles at the call and `lbCorrectRoles` writes them into the row; a
+  later read that reaches an appliance marked "it cannot be reached" takes the mark back (`lbUnreachable`), and a
+  read that reaches no appliance writes nothing.
+- `internal/platform/project/cloud_lb_cluster_pve.go` (`lbClusterApply`): `lbClusterSvc.Served`, a digest of each
+  Service as the holder last served it, keeps a Service ready while the holder waits for another change.
+- `internal/cloud/pve/lbguesttest`: the stubs answer `pgrep` and `dpkg-query` from files, and the agent keeps the
+  mode of a file that exists. The wire fake of `internal/platform/project` runs the ready check's text.
+
+**Why:** the lab drill of v0.11.1-rc.2 (reports R3, R2b, R1, R4). The ready check answered "busy" for any running
+apt, and Ubuntu's timers run on every appliance: a tenant's change was not served for 3 min 28 s (R3-F1), a pair that
+served read `DOWN` for 29 s and its holder was pushed before its standby (R2b-1), no log line showed a push (R1-o1),
+the health read was wrong for about 70 s after each failover (R2b-o2), sshd came back after a reboot (R4-o1), and a
+new certificate file was 0666 for a moment (R3-o4).
+
+**Diagrams updated:** `c4-code.md`, the rows of `Service.PushHAProxy` and `Handler.lbApplyPair`, and a new row for
+`Handler.lbPairHealth` and `lbCorrectRoles`. C1 to C3: none (no element moves).
 ## 2026-11-24: PR #452, a deleting Service says its last word, and an address has its row at once
 
 **What changed:** one field more on an existing wire (`PUT /lb/v1/state`), within protocol 2, and when two rows are

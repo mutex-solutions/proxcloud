@@ -207,7 +207,7 @@ const lbWorkerFn = "worker() ( out=$(echo 'show proc' | socat -t1 - UNIX-CONNECT
 
 const (
 	// lbPairInstall is the pair's own install line; a single appliance keeps haproxyInstall (C13).
-	lbPairInstall = "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat keepalived iproute2; }"
+	lbPairInstall = lbNoSSH + "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat keepalived iproute2; }"
 	lbSysctlFile  = "/etc/sysctl.d/90-proxcloud-lb.conf"
 	lbDropIn      = "/etc/systemd/system/keepalived.service.d/proxcloud.conf"
 	// lbKeepalivedApply runs after the files are written: keepalived checks the new config before it is moved in, and
@@ -220,7 +220,10 @@ const (
 	// moment at every push (seen empty twice by a read every 4 s on the lab, drill Q1-o2 of v0.11.1), and writable
 	// by anyone until the chmod. A reader now sees the file of before or the new one. Nothing reads a name that
 	// ends in .new: systemd and sysctl take *.conf only.
-	lbKeepalivedApply = `set -e
+	//
+	// It opens as HAProxy's apply does: sshd off for good (lbNoSSH), and nothing touched while dpkg is at work on
+	// keepalived's own package (lbPkgGateKeepalived).
+	lbKeepalivedApply = lbNoSSH + lbPkgGateKeepalived + `set -e
 F=/etc/keepalived/keepalived.conf
 chown root:root ` + lbCheckScript + `.new ` + lbNotifyScript + `.new ` + lbSysctlFile + `.new ` + lbDropIn + `.new $F.new
 chmod 0755 ` + lbCheckScript + `.new ` + lbNotifyScript + `.new
@@ -246,9 +249,9 @@ var lbPairReady = lbReadyScript("haproxy socat keepalived", "haproxy.service kee
 
 // PushPairHAProxy installs config on an appliance of a pair, and the pair's packages first if the image lacks them.
 // As PushHAProxy, nil means the running HAProxy was seen to serve config.
-func (s *Service) PushPairHAProxy(ctx context.Context, node string, vmid int, config string, certs ...LBCertFile) error {
+func (s *Service) PushPairHAProxy(ctx context.Context, node string, vmid int, config string, certs ...LBCertFile) (certsWritten int, err error) {
 	if err := s.lbReady(ctx, node, vmid, lbPairReady, lbPairInstall); err != nil {
-		return err
+		return 0, err
 	}
 	return s.swapHAProxy(ctx, node, vmid, config, certs)
 }
@@ -277,10 +280,12 @@ func (s *Service) PushKeepalived(ctx context.Context, node string, vmid int, con
 		}
 	}
 	exit, _, stderr, err = s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbKeepalivedApply)
-	if err != nil {
+	switch {
+	case err != nil:
 		return err
-	}
-	if exit != 0 {
+	case exit == lbBusyExit:
+		return ErrLBPackageBusy
+	case exit != 0:
 		return fmt.Errorf("keepalived did not take the change: %s", strings.TrimSpace(stderr))
 	}
 	return nil

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **From v0.11.1-rc.2: the upgrade pushes no file to a load balancer and reloads none because of the change "a
+  load balancer takes a change while the image's package manager runs".** Nothing an appliance holds changed: the
+  HAProxy config the platform renders, `keepalived.conf`, keepalived's track and notify scripts, the sysctl file,
+  the unit drop-in and the files of the UDP service are the same to the byte, so every recorded hash still matches
+  and the first pass after the upgrade writes nothing on a balancer that serves its config. What changed is the
+  commands the portal sends, and an appliance meets them at its next push, whenever that is (a change of its
+  config, or a service the pass finds not running): the same reload as before, and on that push the appliance's
+  `ssh.service` and `ssh.socket` are masked and stopped. Until that push an existing appliance is as it was: on the
+  Ubuntu image sshd listens again after a reboot until the next HAProxy reload, behind the VM firewall, which
+  drops the port. To mask it everywhere at once, change any balancer's config, or wait for its next change. The
+  balancer's row gets two fields, written without a push: `heldSince` while a change waits, and for a cluster's
+  balancer `served` on each Service, at the first pass after the upgrade. A portal rolled back to v0.11.1-rc.2
+  ignores both and leaves a masked sshd masked.
 - **What an existing cluster balancer gets from the fixes for Services that are deleted (#452): no file, no
   reload.** No config the platform renders changed, so the upgrade pushes nothing to an appliance for them: no
   HAProxy, keepalived or LVS file is written, nothing is reloaded, and no address moves. What changes is in the
@@ -516,6 +529,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A load balancer takes a change while the image's package manager runs.** An appliance answered "busy" to every
+  change whenever a process named `apt-get`, `apt` or `dpkg` ran in it, also long after its own packages were
+  installed, and Ubuntu's own timers run on every appliance: on the lab 4 to 7 minutes after first boot, for 2 to
+  6.5 minutes, and then every day. A tenant's change that was answered 200 was not served for 3 min 28 s, and only
+  because the tenant sent it again: the standby had it, the appliance that holds the address did not, nothing
+  tried again before the next services sync and nothing was logged. Now an appliance whose packages are installed
+  takes the config check, the swap and the reload while apt runs. It waits in one case: dpkg is at work on a
+  package the appliance itself runs (`haproxy`, `socat`, `keepalived`, `nftables`), as in an upgrade by
+  unattended-upgrades, which ends with the package's own restart of its service. dpkg's own record says when that
+  is, and it lasts seconds. The first install waits for the package manager as before
+  ([cloud-integration.md](docs/cloud-integration.md), "A change while the package manager runs"). Not run on a lab.
+- **A pair that serves is never `DOWN`, and its Services stay ready.** An appliance that served the config its row
+  records and could not take a new one read `down`, "it runs an older configuration"; with both appliances in
+  that state the row read `DOWN` "No appliance answers" for 29 s on the lab while both served, and every Service
+  of the cluster went back to "building". Such an appliance is now `up` with the reason, the row stays `ACTIVE`
+  and its message says what waits, on which appliance and why. A cluster's Service that the appliance holding the
+  address serves as it is stays ready while that appliance waits for a change of something else; a Service that
+  is new or changed is ready when the holder serves it, as before.
+- **The standby takes every change first, also when it cannot take one now.** An appliance that was held was
+  skipped and the next one pushed, so the appliance that holds the address got a change 21 s before the standby
+  on the lab. Now the appliances after a held one wait with it, for 100 s; after that the holder goes ahead, as it
+  does beside a standby that is down.
+- **A change that waits is tried again by the platform itself.** 20 s after the pass that was held and every 20 s
+  for two minutes, for a tenant's pair, a load balancer on one VM and a cluster's pair. Until now it waited for
+  the next services sync, which a site without a scheduler does not have.
+- **The log shows each push.** One INFO line per push an appliance took (`load balancer: push taken`: balancer,
+  VM, `haproxy`, `keepalived`, `udp` or `certificates`, keepalived's role, the place in the order) and one WARN per
+  push held or refused, with the class of the reason (`package-manager`, `installing`, `guest-agent`, `refused`).
+  The order of a push could only be read from Proxmox's access log. No line holds a config, a key or a digest.
+- **`GET_HEALTH` and the row are right after a failover.** For about 70 s after a role change, until the next
+  pass, `GET_HEALTH` of a pair answered 409 "the active appliance did not answer" or listed two masters (six of
+  six failovers on the lab): it kept the row's role for an appliance it could not read and asked the first listed
+  holder. It now reads each appliance's role at the call, lists an appliance that cannot be read as `down`, "it
+  cannot be reached", asks the appliance that holds the address now, and corrects the row's roles by the same
+  read when they differ. "It cannot be reached" in the row is that read's own mark: a later `GET_HEALTH` that
+  reaches the appliance and finds it serving takes it back, so a tenant's own pair does not read it until the next
+  services sync after an appliance's reboot. A `GET_HEALTH` that reaches no appliance at all lists them as that
+  and leaves the row as it is: one call Proxmox or the guest agents did not answer does not make a pair that
+  serves read `DOWN`.
+- **sshd stays off on an appliance after a reboot.** The units were disabled, and on the Ubuntu image cloud-init
+  starts `ssh.service` at every boot all the same: sshd listened from the reboot until the next HAProxy reload
+  (about 18 min on the lab), behind the VM firewall and with no authorized key. `ssh.service` and `ssh.socket` are now
+  masked, by the install of a new appliance and by every push on an existing one. The sandbox entry appliance,
+  which is pushed by the same command, gets the same.
+- **A certificate file is never readable by others, not for a moment.** The guest agent creates a file with mode
+  0666, and the chmod came a command later: a new certificate file, which holds the private key, had that mode for
+  the time between the two, inside a directory only root can enter. The file is now made empty with mode 0600
+  before the agent writes into it, and the agent leaves the mode of a file that exists. One more command through
+  the guest agent per push that writes a certificate file, none for a push whose files are in place.
 - **A Service's address was listed and billed only after a provider sync, and the cluster page followed a delete
   a whole pass late.** The `FLOATING_IP` row of a public address is what lists it for the tenant and bills it. For
   the addresses of a cluster's Services it was written by the provider sync alone: on the lab 12 addresses were in

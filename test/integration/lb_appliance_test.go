@@ -25,8 +25,9 @@ import (
 
 // guestAgent is the Proxmox guest agent API of one VM, served by a container that runs systemd as the appliance's
 // image does: exec runs the command in the guest, file-write creates the file with mode 0666 as the real agent does
-// (drill N2-6), and exec-status answers when the command ended. Nothing of the guest is modelled: HAProxy, keepalived,
-// systemd, dpkg and ss are the distribution's own.
+// (drill N2-6) and leaves the mode of a file that exists, which it empties and fills (qemu-ga's guest-file-open
+// creates with O_EXCL and sets the mode only then), and exec-status answers when the command ended. Nothing of the
+// guest is modelled: HAProxy, keepalived, systemd, dpkg and ss are the distribution's own.
 type guestAgent struct {
 	t    *testing.T
 	c    testcontainers.Container
@@ -34,6 +35,7 @@ type guestAgent struct {
 	runs map[int]*guestRun
 	// written lists the files the product wrote through the agent, in order.
 	written []string
+	wmu     sync.Mutex // one file-write at a time: they share the path the content travels by
 }
 
 // writtenSince answers the files written through the agent after the first n, and how many there are now.
@@ -115,7 +117,18 @@ func (g *guestAgent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.Form.Get("file"), ".new") {
 			g.t.Errorf("the agent was asked to write %s onto its place: a file of the product's is written as <path>.new and moved in", r.Form.Get("file"))
 		}
-		if err := g.c.CopyToContainer(r.Context(), []byte(r.Form.Get("content")), r.Form.Get("file"), 0o666); err != nil {
+		// The content travels beside the guest's files and is written by the guest itself, as the agent writes: a
+		// new file is created with mode 0666, an existing one keeps its mode and its inode and is emptied and filled.
+		// (docker cp onto the path would replace the file and give it the mode of the copy, whatever was there.)
+		g.wmu.Lock()
+		defer g.wmu.Unlock()
+		err := g.c.CopyToContainer(r.Context(), []byte(r.Form.Get("content")), "/root/.agent-write", 0o600)
+		if err == nil {
+			if code, _, stderr := g.sh(r.Context(), "write", "sh", "-c", `[ -e "$1" ] || { (umask 0; : > "$1") && chmod 0666 "$1"; } && cat /root/.agent-write > "$1"`, "sh", r.Form.Get("file")); code != 0 {
+				err = fmt.Errorf("exit %d %s", code, stderr)
+			}
+		}
+		if err != nil {
 			g.t.Errorf("file-write %s: %v", r.Form.Get("file"), err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -154,6 +167,13 @@ swap() {
 }
 swap || { mv $F.old $F; swap; exit 1; }`
 	lbListening = `ss -Hltnp | awk '/"haproxy"/{print $4}' | sort -u | tr '\n' ' '`
+	// lbRC2Ready is the ready check of v0.11.1-rc.2, the control: it asks "does a package manager run" first, and
+	// answers 3 (busy) on an appliance whose packages were installed long ago.
+	lbRC2Ready = `pgrep -x 'apt-get|apt|dpkg' >/dev/null && exit 3
+for p in haproxy socat keepalived; do [ "$(dpkg-query -W -f='${Status}' $p 2>/dev/null)" = 'install ok installed' ] || exit 1; done
+command -v ss >/dev/null && systemctl cat haproxy.service keepalived.service >/dev/null 2>&1`
+	// lbSSHListens prints how many sockets listen on port 22.
+	lbSSHListens = `ss -Hltn 'sport = :22' | wc -l`
 )
 
 // An appliance's config is recorded only when the running HAProxy serves it. The guest is a real one of each image an
@@ -164,10 +184,15 @@ swap || { mv $F.old $F; swap; exit 1; }`
 // keepalived now gives the address up (drill N3-3); a stopped HAProxy and a stopped keepalived on a running guest; an
 // apply whose proof fails; a member that does not answer, which costs no request and stays DOWN over a reload (drill
 // N3-8); the single appliance's config; and the mode of every file the agent wrote.
+//
+// From the drill of v0.11.1-rc.2: a change is taken while a package manager runs, and waits in the one case that dpkg
+// is at work on HAProxy's own package, until dpkg is done with it (R3-F1, R2b-1); and sshd, which the image runs,
+// is masked by the product's install and stays off over a reboot, where a unit that is only disabled is started
+// again by whatever asks for it (R4-o1).
 func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
 		t.Run(image, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
 			defer cancel()
 			// systemd as PID 1, and no policy-rc.d: on a VM a package's postinst starts its service.
 			c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -235,6 +260,11 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 				}
 			}
 
+			// The image runs sshd, as a cloud image does: here it is installed and listens before the product's first
+			// command (on Ubuntu through its socket).
+			// (No ss yet: iproute2 comes with the product's install. g.run fails the test when sshd is not up.)
+			g.run(ctx, "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server >/dev/null 2>&1; systemctl start ssh.socket 2>/dev/null || systemctl start ssh.service; systemctl is-active ssh.service ssh.socket | grep -qx active")
+
 			// 1. The first push, through the product's own install line. Asked as fast as the agent answers, so the
 			// push lands as early as the ready check lets it. Every refusal while the binaries already exist is one
 			// the check of v0.11.0-rc.1 (command -v) would have let through, into dpkg's configure.
@@ -242,7 +272,7 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(200 * time.Millisecond) {
 				err := ps.PushKeepalived(ctx, "n1", 100, keepalived, "lo")
 				if err == nil {
-					err = ps.PushPairHAProxy(ctx, "n1", 100, pair)
+					_, err = ps.PushPairHAProxy(ctx, "n1", 100, pair)
 				}
 				if err == nil {
 					break
@@ -260,6 +290,17 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			t.Logf("%s; %s; refused %d times while the binaries were already there",
 				g.run(ctx, "haproxy -v | head -1"), g.run(ctx, "keepalived --version 2>&1 | head -1"), early)
 			listens("after the first push", vip+":80")
+			// The install masked sshd: nothing listens, and nothing can start it.
+			sshOff := func(when string) {
+				t.Helper()
+				if got := g.run(ctx, "systemctl is-enabled ssh.service ssh.socket 2>/dev/null | sort -u; "+lbSSHListens); got != "masked\n0" {
+					t.Fatalf("%s: sshd's units are %q, want both masked and nothing listening on 22", when, got)
+				}
+				if code, _, _ := g.sh(ctx, "ssh", "sh", "-c", "systemctl start ssh.service || systemctl start ssh.socket || systemctl start sshd.service"); code == 0 {
+					t.Fatalf("%s: sshd could be started", when)
+				}
+			}
+			sshOff("after the product's install")
 			if st := state(); !st.HAProxy || !st.Serving {
 				t.Fatalf("after the first push: %+v", st)
 			}
@@ -298,7 +339,7 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			}
 			// The same start, and the product's apply: it waits for the start, reloads, and listens.
 			g.run(ctx, lbPackageStart)
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
 				t.Fatalf("push during the package's start: %v", err)
 			}
 			listens("after a push during the package's start", vip+":80")
@@ -312,7 +353,7 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			if st := state(); st.HAProxy || st.Serving {
 				t.Fatalf("HAProxy stopped: %+v", st)
 			}
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
 				t.Fatalf("push with HAProxy stopped: %v", err)
 			}
 			listens("after a push with HAProxy stopped", vip+":80")
@@ -356,7 +397,7 @@ chmod 0755 /root/track-probe && : > /root/track-probe.out && systemd-run -q --un
 				if i%2 == 0 { // a changed config and an unchanged one are the same reload
 					cfg = pve.RenderHAProxyOn(spec(80, 8082), []string{vip})
 				}
-				if err := ps.PushPairHAProxy(ctx, "n1", 100, cfg); err != nil {
+				if _, err := ps.PushPairHAProxy(ctx, "n1", 100, cfg); err != nil {
 					t.Fatalf("reload %d on the master: %v", i+1, err)
 				}
 			}
@@ -387,7 +428,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			} else {
 				t.Logf("HAProxy stopped: the address was given up after %d ms", ms)
 			}
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
 				t.Fatalf("push with HAProxy stopped, after the reloads: %v", err)
 			}
 			for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(500 * time.Millisecond) {
@@ -402,7 +443,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			// 4. The proof fails: HAProxy answers the reload and does not run the pushed file (here it is started on
 			// another one). Not applied, said why, and the file in use before is back.
 			g.run(ctx, "cp /etc/haproxy/haproxy.cfg /etc/haproxy/other.cfg && echo CONFIG=/etc/haproxy/other.cfg >> /etc/default/haproxy && systemctl restart haproxy")
-			err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8081), []string{vip}))
+			_, err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8081), []string{vip}))
 			if err == nil || errors.Is(err, pve.ErrLBNotReady) || !strings.Contains(err.Error(), "does not listen on "+vip+":8081") {
 				t.Fatalf("push HAProxy does not load: %v", err)
 			}
@@ -410,7 +451,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 				t.Fatalf("the file that was not loaded stayed in place")
 			}
 			g.run(ctx, "sed -i '/^CONFIG=/d' /etc/default/haproxy && systemctl restart haproxy")
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8081), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8081), []string{vip})); err != nil {
 				t.Fatalf("push once HAProxy loads its file again: %v", err)
 			}
 			listens("after the second listener", vip+":80 "+vip+":8081")
@@ -471,7 +512,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 					t.Fatalf("the appliance does not hold the address: %+v", st)
 				}
 			}
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
 				t.Fatalf("push the pool of two members: %v", err)
 			}
 			// Both members are new to the config, so both start UP: the one that never answers gets every second
@@ -492,7 +533,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			}
 			// A reload that changes the pools before it (the listener on 80 and its pool go): the member that was
 			// DOWN is DOWN from the first moment, under a backend whose name did not move, and no request waits.
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(false), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(false), []string{vip})); err != nil {
 				t.Fatalf("reload: %v", err)
 			}
 			if got := says(members(false)); got != "201 UP, 202 DOWN" {
@@ -521,11 +562,11 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 					t.Fatalf("control: the member was never found out again: %s", says(members(false)))
 				}
 			}
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
 				t.Fatalf("reload: %v", err)
 			}
 			g.run(ctx, "test -s /var/lib/haproxy/server-state && systemctl stop haproxy")
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
 				t.Fatalf("push with HAProxy stopped: %v", err)
 			}
 			if got := says(members(true)); got != "201 UP, 202 UP" {
@@ -534,7 +575,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			g.run(ctx, "systemctl stop lb-test-member")
 
 			// 6. A single appliance's config binds every address.
-			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
+			if _, err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
 				t.Fatalf("single appliance: %v", err)
 			}
 			listens("single appliance", "0.0.0.0:80")
@@ -551,17 +592,16 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, ""); err != nil || ok || why != "HAProxy is not running" {
 				t.Fatalf("single appliance stopped: %v %q %v", ok, why, err)
 			}
-			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
+			if _, err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
 				t.Fatalf("single appliance, HAProxy stopped: %v", err)
 			}
 			listens("single appliance started again", "0.0.0.0:80")
 
-			// 7. The agent made every file 0666 (the control; /tmp is a mount docker cp does not reach); what the
-			// product left is root's, 0644, scripts 0755.
-			if err := g.c.CopyToContainer(ctx, []byte("x"), "/root/agent-wrote", 0o666); err != nil {
+			// 7. The agent made every file 0666 (the control); what the product left is root's, 0644, scripts 0755.
+			if err := ps.C.GuestWriteFile(ctx, "n1", 100, "/root/agent-wrote.new", "x"); err != nil {
 				t.Fatal(err)
 			}
-			if got := g.run(ctx, "stat -c %a /root/agent-wrote"); got != "666" {
+			if got := g.run(ctx, "stat -c %a /root/agent-wrote.new"); got != "666" {
 				t.Fatalf("control: the agent's file has mode %s", got)
 			}
 			want := map[string]string{
@@ -585,6 +625,91 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			// The notify script writes keepalived's state by a rename too: no temporary file stays beside it.
 			if got := g.run(ctx, "cat /run/proxcloud-lb.state; ls /run/proxcloud-lb.state.* 2>/dev/null | wc -l"); got != "MASTER\n0" {
 				t.Errorf("the state file and what is beside it: %q", got)
+			}
+
+			// 8. A change while the image's package manager runs (drill R3-F1 and R2b-1 of v0.11.1-rc.2: Ubuntu's apt
+			// timers ran 2 to 6.5 minutes on each appliance, and every change waited for them). A process named
+			// apt-get runs, as apt-daily's does; the packages are installed. The check of v0.11.1-rc.2 says "busy"
+			// (the control); the product's push is taken and served.
+			// (The process is a shell that names itself: sleep is one multi-call binary on Ubuntu 26.04 and runs under
+			// no other name.)
+			g.run(ctx, `printf '%s\n' 'printf %s "$1" > /proc/$$/comm; while :; do sleep 60; done' > /root/named.sh
+systemd-run --quiet --unit=fake-apt sh /root/named.sh apt-get && sleep 0.3 && pgrep -x apt-get >/dev/null`)
+			if code, _, _ := g.sh(ctx, "rc2", "sh", "-c", lbRC2Ready); code != 3 {
+				t.Fatalf("control: the ready check of v0.11.1-rc.2 answered %d while apt runs, want 3 (busy)", code)
+			}
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8082), []string{vip})); err != nil {
+				t.Fatalf("a change while apt runs: %v", err)
+			}
+			listens("a change while apt runs", vip+":80 "+vip+":8082")
+			if err := ps.PushKeepalived(ctx, "n1", 100, keepalived, "lo"); err != nil {
+				t.Fatalf("keepalived's files while apt runs: %v", err)
+			}
+			// The one case that waits: dpkg is at work on HAProxy's own package. dpkg's own record says so, to the
+			// distribution's dpkg-query: the package is unpacked and not configured, as it is between the unpack of
+			// an upgrade and the end of its postinst, which restarts the service.
+			g.run(ctx, `systemd-run --quiet --unit=fake-dpkg sh /root/named.sh dpkg && sleep 0.3 && pgrep -x dpkg >/dev/null
+sed -i '/^Package: haproxy$/,/^$/ s/^Status: install ok installed$/Status: install ok unpacked/' /var/lib/dpkg/status
+[ "$(dpkg-query -W -f='${Status}' haproxy)" = 'install ok unpacked' ]`)
+			_, before := g.writtenSince(0)
+			_, err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8083), []string{vip}))
+			if !errors.Is(err, pve.ErrLBPackageBusy) || pve.LBHoldClass(err) != "package-manager" {
+				t.Fatalf("a change while dpkg is at work on haproxy: %v", err)
+			}
+			if err := ps.PushKeepalived(ctx, "n1", 100, keepalived, "lo"); !errors.Is(err, pve.ErrLBPackageBusy) {
+				t.Fatalf("keepalived's files while dpkg is at work on haproxy: %v", err)
+			}
+			if wrote, _ := g.writtenSince(before); len(wrote) != 0 {
+				t.Fatalf("a push that waits wrote %v", wrote)
+			}
+			listens("while dpkg is at work on haproxy", vip+":80 "+vip+":8082")
+			// dpkg ends its work with the package's own postinst. Then the change is taken.
+			g.run(ctx, "systemctl stop fake-dpkg fake-apt; DEBIAN_FRONTEND=noninteractive dpkg --force-confold --configure haproxy >/dev/null 2>&1; [ \"$(dpkg-query -W -f='${Status}' haproxy)\" = 'install ok installed' ]")
+			for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+				if _, err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8083), []string{vip})); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the change after dpkg was done with haproxy: %v", err)
+				}
+			}
+			listens("after dpkg was done with haproxy", vip+":80 "+vip+":8083")
+
+			// 9. sshd over a reboot (drill R4-o1 of v0.11.1-rc.2: with both units disabled, cloud-init started
+			// ssh.service at boot and sshd listened until the next HAProxy reload). The control is what v0.11.1-rc.2
+			// did, a disable: the unit starts for whoever asks. Then any push of the product's masks it again, which
+			// is how an appliance of an older release gets the mask; and it holds over a boot.
+			g.run(ctx, "systemctl unmask ssh.service ssh.socket >/dev/null 2>&1; systemctl disable --now ssh ssh.socket >/dev/null 2>&1; systemctl start ssh.service")
+			if got := g.run(ctx, lbSSHListens); got == "0" {
+				t.Fatal("control: a disabled sshd did not start when asked")
+			}
+			if err := ps.PushKeepalived(ctx, "n1", 100, keepalived, "lo"); err != nil {
+				t.Fatal(err)
+			}
+			sshOff("after a push on an appliance of an older release")
+			if err := c.Stop(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			for deadline := time.Now().Add(5 * time.Minute); ; time.Sleep(2 * time.Second) {
+				if code, out, _ := g.sh(ctx, "reboot", "systemctl", "is-system-running"); code == 0 || strings.TrimSpace(out) == "degraded" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("systemd did not come up after the reboot")
+				}
+			}
+			sshOff("after a reboot")
+			// And the product's own services came back by themselves.
+			for deadline := time.Now().Add(60 * time.Second); ; time.Sleep(time.Second) {
+				if got := g.run(ctx, "systemctl is-active haproxy keepalived | sort -u"); got == "active" {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("HAProxy and keepalived after a reboot: %s", g.run(ctx, "systemctl is-active haproxy keepalived | tr '\\n' ' '"))
+				}
 			}
 		})
 	}

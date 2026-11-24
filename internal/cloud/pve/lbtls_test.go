@@ -233,9 +233,11 @@ func (g *certGuest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.Contains(cmd, "is not a directory of root alone"):
 			what = "certificate directory"
+		case strings.Contains(cmd, "a certificate file could not be made root's alone"):
+			what = "certificate prepare " + strings.Join(r.Form["command"][4:], ",")
 		case strings.Contains(cmd, "a certificate file is not root's alone"):
 			what = "certificate install " + strings.Join(r.Form["command"][4:], ",")
-		case strings.Contains(cmd, "dpkg-query"):
+		case strings.Contains(cmd, "command -v ss"):
 			what = "ready"
 		case strings.Contains(cmd, "haproxy -c"):
 			what = "reload"
@@ -292,11 +294,11 @@ func TestCertificatesReachAnApplianceBeforeItsConfig(t *testing.T) {
 	certs := []LBCertFile{{Name: a, PEM: "PEM-A"}, {Name: b, PEM: "PEM-B"}}
 
 	g, ps := guest()
-	if err := ps.PushPairHAProxy(ctx, "n1", 100, "config", certs...); err != nil {
+	if _, err := ps.PushPairHAProxy(ctx, "n1", 100, "config", certs...); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"ready", "certificate directory", "write /etc/haproxy/certs/" + a + ".pem.new", "write /etc/haproxy/certs/" + b + ".pem.new",
-		"certificate install " + a + "," + b, "write /etc/haproxy/haproxy.cfg.new", "reload"}
+	want := []string{"ready", "certificate directory", "certificate prepare " + a + "," + b, "write /etc/haproxy/certs/" + a + ".pem.new",
+		"write /etc/haproxy/certs/" + b + ".pem.new", "certificate install " + a + "," + b, "write /etc/haproxy/haproxy.cfg.new", "reload"}
 	if !slices.Equal(g.log, want) {
 		t.Errorf("order of a push:\n%s\nwant\n%s", strings.Join(g.log, "\n"), strings.Join(want, "\n"))
 	}
@@ -305,30 +307,30 @@ func TestCertificatesReachAnApplianceBeforeItsConfig(t *testing.T) {
 	}
 	// A single appliance: the same order.
 	g, ps = guest()
-	if err := ps.PushHAProxy(ctx, "n1", 100, "config", certs[:1]...); err != nil || !slices.Equal(g.log, []string{"ready", "certificate directory",
+	if _, err := ps.PushHAProxy(ctx, "n1", 100, "config", certs[:1]...); err != nil || !slices.Equal(g.log, []string{"ready", "certificate directory", "certificate prepare " + a,
 		"write /etc/haproxy/certs/" + a + ".pem.new", "certificate install " + a, "write /etc/haproxy/haproxy.cfg.new", "reload"}) {
 		t.Errorf("single appliance: %v\n%s", err, strings.Join(g.log, "\n"))
 	}
 	// A directory that cannot be made private: nothing is written, not the config either.
 	g, ps = guest()
 	g.exits["certificate directory"] = 1
-	if err := ps.PushPairHAProxy(ctx, "n1", 100, "config", certs...); err == nil || !strings.Contains(err.Error(), "nothing was written") || len(g.files) != 0 {
+	if _, err := ps.PushPairHAProxy(ctx, "n1", 100, "config", certs...); err == nil || !strings.Contains(err.Error(), "nothing was written") || len(g.files) != 0 {
 		t.Errorf("a directory that is not private: %v, wrote %v", err, g.log)
 	}
 	// Files that could not be given to root alone: the config that names them is not written.
 	g, ps = guest()
 	g.exits["certificate install"] = 1
-	if err := ps.PushPairHAProxy(ctx, "n1", 100, "config", certs...); err == nil || slices.Contains(g.log, "write /etc/haproxy/haproxy.cfg.new") || slices.Contains(g.log, "reload") {
+	if _, err := ps.PushPairHAProxy(ctx, "n1", 100, "config", certs...); err == nil || slices.Contains(g.log, "write /etc/haproxy/haproxy.cfg.new") || slices.Contains(g.log, "reload") {
 		t.Errorf("files not put in place: %v, log %v", err, g.log)
 	}
 	// A name that is not a digest reaches no command and no path.
 	g, ps = guest()
-	if err := ps.PushPairHAProxy(ctx, "n1", 100, "config", LBCertFile{Name: "x; rm -rf /", PEM: "PEM"}); err == nil || !slices.Equal(g.log, []string{"ready"}) {
+	if _, err := ps.PushPairHAProxy(ctx, "n1", 100, "config", LBCertFile{Name: "x; rm -rf /", PEM: "PEM"}); err == nil || !slices.Equal(g.log, []string{"ready"}) {
 		t.Errorf("a bad name: %v, log %v", err, g.log)
 	}
 	// No certificate: the push of before, to the byte of its calls.
 	g, ps = guest()
-	if err := ps.PushPairHAProxy(ctx, "n1", 100, "config"); err != nil || !slices.Equal(g.log, []string{"ready", "write /etc/haproxy/haproxy.cfg.new", "reload"}) {
+	if _, err := ps.PushPairHAProxy(ctx, "n1", 100, "config"); err != nil || !slices.Equal(g.log, []string{"ready", "write /etc/haproxy/haproxy.cfg.new", "reload"}) {
 		t.Errorf("no certificate: %v, log %v", err, g.log)
 	}
 
@@ -371,14 +373,19 @@ func TestPushWritesOnlyTheCertificateFilesThatDiffer(t *testing.T) {
 		g.mu.Lock()
 		g.log = nil
 		g.mu.Unlock()
-		if err := ps.PushHAProxy(ctx, "n1", 100, "config", certs...); err != nil {
+		if _, err := ps.PushHAProxy(ctx, "n1", 100, "config", certs...); err != nil {
 			t.Fatalf("%s: %v", what, err)
 		}
 		want := []string{"ready", "certificate directory"}
 		var names []string
 		for _, c := range written {
-			want = append(want, "write "+path(c)+".new")
 			names = append(names, c.Name)
+		}
+		if len(written) > 0 { // each file is made, empty and with mode 0600, before the agent writes into it
+			want = append(want, "certificate prepare "+strings.Join(names, ","))
+		}
+		for _, c := range written {
+			want = append(want, "write "+path(c)+".new")
 		}
 		if len(written) > 0 {
 			want = append(want, "certificate install "+strings.Join(names, ","))
@@ -415,7 +422,7 @@ func TestPushWritesOnlyTheCertificateFilesThatDiffer(t *testing.T) {
 	push("fewer certificates", certs[:2])
 	// A directory that cannot be made private still stops the push before any file, and before the config.
 	damage(func() { g.exits["certificate directory"] = 1; delete(g.files, path(certs[0])) })
-	if err := ps.PushHAProxy(ctx, "n1", 100, "config", certs[:2]...); err == nil || !strings.Contains(err.Error(), "nothing was written") || g.files[path(certs[0])] != "" {
+	if _, err := ps.PushHAProxy(ctx, "n1", 100, "config", certs[:2]...); err == nil || !strings.Contains(err.Error(), "nothing was written") || g.files[path(certs[0])] != "" {
 		t.Errorf("a directory that is not private: %v", err)
 	}
 }

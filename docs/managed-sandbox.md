@@ -845,7 +845,7 @@ builds the VM (`sandbox.entry`): a clone of the stock image in its own pool `pro
 public bridge with the default route, `net1` on the sandbox vnet, each NIC's address pinned (`ipfilter-net0/1`), inbound
 DROP. The Proxmox provider's sync (`syncjob.reconcileSandboxWorkers` → `pve.Service.SandboxEntry`) then keeps it in
 line every cycle: firewall options, the listener as the only inbound rule (`SetVMInboundPorts`), and HAProxy's config
-through the guest agent (`PushHAProxy`, which installs HAProxy over the public NIC first and disables sshd), pushed
+through the guest agent (`PushHAProxy`, which installs HAProxy over the public NIC first and masks sshd), pushed
 only when the file's hash differs or HAProxy is not running. It touches a VM only when it carries the tag
 `proxcloud-sandbox-entry` and sits in the entry pool (`config.sandbox.proxy.entry.pool`, stage 60 writes it), so a
 recycled vmid or a tenant's VM that its owner tagged (the portal's `/pool` role reaches those) is never written to.

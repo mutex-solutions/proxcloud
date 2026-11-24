@@ -163,7 +163,7 @@ func TestLBApplianceUDP(t *testing.T) {
 			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(time.Second) {
 				err := ps.PushKeepalived(ctx, "n1", 100, keepalived, "pub0")
 				if err == nil {
-					err = ps.PushPairHAProxy(ctx, "n1", 100, haproxy)
+					_, err = ps.PushPairHAProxy(ctx, "n1", 100, haproxy)
 				}
 				if err == nil {
 					break

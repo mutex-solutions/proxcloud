@@ -105,6 +105,8 @@ type Handler struct {
 	// lbPasses is the last finished pass over each cluster's balancer (cluster id -> lbPass), by which a controller's
 	// PUT that changes nothing starts no pass of its own (lbPassDue).
 	lbPasses sync.Map
+	// lbRetries holds the balancers whose apply the platform is trying again by itself (lbRetry), by key.
+	lbRetries sync.Map
 	// sandboxFor builds the sandbox service for a sandbox provider (sandbox-cluster client from
 	// the provider's kubeconfig). SetSandbox; nil = sandbox provisioning and writes are off.
 	sandboxFor func(es *externalservice.ExternalService) (*sandbox.Service, error)

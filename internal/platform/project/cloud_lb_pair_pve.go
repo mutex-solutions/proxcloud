@@ -335,6 +335,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		return err // nothing is known, so nothing changes
 	}
 	pool := ps.PoolFor(proj.ID)
+	lb.waiting = false
 	var running []*lbAppliance
 	for i := range lb.Appliances {
 		a := &lb.Appliances[i]
@@ -469,13 +470,53 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	keepalivedCurrent := map[*lbAppliance]bool{}
 	// refuse records a push an appliance did not take. The reason is the guest's own words, which may quote a line
 	// of a config: it goes into the row's message for the tenant and not into the log.
+	var refusedBy *lbAppliance
 	refuse := func(a *lbAppliance, what string, err error) {
-		refused = err
-		slog.Warn("load balancer: an appliance did not take a push; the reason is in the load balancer's status message", "lb", lb.ID, "vm", a.ServerID, "push", what)
+		refused, refusedBy = err, a
+		slog.Warn("load balancer: an appliance did not take a push; the reason is in the load balancer's status message", "lb", lb.ID, "vm", a.ServerID,
+			"push", what, "role", a.Role, "class", pve.LBHoldClass(err))
 	}
-	for _, a := range lbPushOrder(running) {
+	// An appliance that cannot take a push now (pve.ErrLBNotReady: its guest agent does not answer, or dpkg is at
+	// work on one of its own packages) holds it, and the appliances after it in the order wait with it: the standby
+	// takes every change first, so the one that holds the address is not given a change the standby has not shown
+	// to work (drill R2b-1 of v0.11.1-rc.2: the holder was pushed 21 s before the standby). They wait for one retry
+	// window (lbHoldWindow, counted from the row's HeldSince); a standby that still cannot take it then is one that
+	// is out of order, and the holder goes ahead as it does beside a standby that is down.
+	order := lbPushOrder(running)
+	held := map[*lbAppliance]string{} // why, for the row
+	var waitFor *lbAppliance          // the first appliance in the order that holds a push
+	since, _ := time.Parse(time.RFC3339, lb.HeldSince)
+	inWindow := lb.HeldSince == "" || time.Since(since) < lbHoldWindow()
+	hold := func(a *lbAppliance, what string, err error) {
+		// "building" is for an appliance no config ever reached, which is its first install: nothing waits behind
+		// that one, and the pass of before v0.11.1-rc.3 is unchanged for it. What the others are, the state read
+		// below says.
+		a.State, a.Reason = lbAppBuilding, lbHeldWhy(err)
+		if a.HAProxyHash != "" || a.KeepalivedHash != "" {
+			held[a] = a.Reason
+			if waitFor == nil {
+				waitFor = a
+			}
+		}
+		slog.Warn("load balancer: push held", "lb", lb.ID, "vm", a.ServerID, "push", what, "role", a.Role, "class", pve.LBHoldClass(err))
+	}
+	// taken is the one line the log has of a push an appliance took: which balancer, which VM, what, and where in the
+	// order (drill R1-o1: the push order could only be read from Proxmox's access log). Never a config, a key or a
+	// digest.
+	position := map[*lbAppliance]int{}
+	for i, a := range order {
+		position[a] = i + 1
+	}
+	taken := func(a *lbAppliance, what string) {
+		slog.Info("load balancer: push taken", "lb", lb.ID, "vm", a.ServerID, "push", what, "role", a.Role, "holdsAddress", a.HoldsVIP,
+			"position", position[a], "of", len(order))
+	}
+	for _, a := range order {
 		vmid, _ := strconv.Atoi(a.ServerID)
 		st, known := seen[a]
+		// behind: an appliance before this one holds a push, and the window is open: this one takes no change now.
+		// What it does not serve as its row records is loaded again all the same: that is no change.
+		behind := waitFor != nil && inWindow
 		// keepalived stopped by a replace's planned switch may be started again here before its VM goes: it comes
 		// back as BACKUP and stays so (nopreempt), the address has moved already.
 		restartKeepalived := known && a.KeepalivedHash != "" && st.State == "STOPPED"
@@ -515,44 +556,53 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			if editedKeepalived {
 				slog.Warn("load balancer: an appliance's keepalived config is not the one its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID)
 			}
-			if khash != a.KeepalivedHash || restartKeepalived || editedKeepalived {
+			if (khash != a.KeepalivedHash && !behind) || restartKeepalived || editedKeepalived {
 				pushed[a] = true
 				if err := ps.PushKeepalived(ctx, a.Node, vmid, conf, a.PublicIface); err != nil {
 					if errors.Is(err, pve.ErrLBNotReady) {
-						a.State, a.Reason = lbAppBuilding, "it is installing HAProxy and keepalived"
+						hold(a, "keepalived", err)
 						continue
 					}
 					refuse(a, "keepalived", err)
 					continue
 				}
 				a.KeepalivedHash, a.KeepalivedConfHash = khash, lbHash(conf)
+				taken(a, "keepalived")
 				if restartKeepalived {
 					started[a] = "keepalived"
 				}
 			}
-			keepalivedCurrent[a] = true
+			keepalivedCurrent[a] = a.KeepalivedHash == khash
 		}
 		// HAProxy binds the addresses, and without keepalived's files it cannot bind one the appliance does not hold:
 		// it would refuse its config (drill Q0b-1). keepalived is there on every pass but one whose public network
-		// this project may no longer use.
+		// this project may no longer use, and one that waits behind the other appliance.
 		if a.KeepalivedHash == "" {
 			a.State, a.Reason = lbAppBuilding, "its public network is not available to this project"
+			if behind {
+				a.Reason = "it waits for appliance " + waitFor.ServerID + ", which takes every change first"
+			}
 			continue
 		}
 		// A config an appliance refused goes to no other one in this pass: the standby comes first (lbPushOrder), so
 		// what HAProxy does not take there never reaches the appliance that holds the address. One that does not
 		// serve at all has nothing to lose and is pushed.
-		if (hhash != a.HAProxyHash && refused == nil) || reloadHAProxy {
+		if (hhash != a.HAProxyHash && refused == nil && !behind) || reloadHAProxy {
 			pushed[a] = true
-			if err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...); err != nil {
+			wrote, err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...)
+			if wrote > 0 { // before the config, as on the appliance
+				taken(a, "certificates")
+			}
+			if err != nil {
 				if errors.Is(err, pve.ErrLBNotReady) {
-					a.State, a.Reason = lbAppBuilding, "it is installing HAProxy and keepalived"
+					hold(a, "haproxy", err)
 					continue
 				}
 				refuse(a, "haproxy", err)
 				continue
 			}
 			a.HAProxyHash = hhash
+			taken(a, "haproxy")
 			if reloadHAProxy {
 				started[a] = strings.TrimPrefix(started[a]+" and HAProxy", " and ")
 			}
@@ -563,6 +613,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		stray := known && a.LVSHash == "" && st.LVSSum != "" && st.LVSSum != "-"
 		switch want := lvsWant(a); {
 		case want == "" && a.LVSHash == "" && !stray: // never had a UDP listener: nothing of it is on the appliance
+		case behind && !reloadLVS: // a change of the UDP listeners waits as every other
 		case want == "":
 			pushed[a] = true
 			if err := ps.RemoveLVS(ctx, a.Node, vmid); err != nil {
@@ -570,17 +621,19 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 				continue
 			}
 			a.LVSHash = ""
+			taken(a, "udp")
 		case (want != a.LVSHash && refused == nil) || reloadLVS:
 			pushed[a] = true
 			if err := ps.PushLVS(ctx, a.Node, vmid, lvs, a.TenantIface); err != nil {
 				if errors.Is(err, pve.ErrLBNotReady) {
-					a.State, a.Reason = lbAppBuilding, "it is installing what its UDP listeners need"
+					hold(a, "udp", err)
 					continue
 				}
 				refuse(a, "udp", err)
 				continue
 			}
 			a.LVSHash = want
+			taken(a, "udp")
 			if reloadLVS {
 				started[a] = strings.TrimPrefix(started[a]+" and the UDP service", " and ")
 			}
@@ -620,6 +673,8 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		if vip == "" { // a cluster's pair before its first Service, or after its last: the master holds the placeholder
 			a.HoldsVIP = st.State == "MASTER"
 		}
+		// current: the appliance has every file of this pass.
+		current := a.HAProxyHash == hhash && a.LVSHash == lvsWant(a) && (pn == nil || keepalivedCurrent[a])
 		switch {
 		case !st.HAProxy:
 			a.State, a.Reason = lbAppDown, "HAProxy is not running"
@@ -627,12 +682,24 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			a.State, a.Reason = lbAppDown, "HAProxy does not serve its configuration"
 		case st.State != "MASTER" && st.State != "BACKUP":
 			a.State, a.Reason = lbAppDown, "keepalived is "+strings.ToLower(st.State)
-		case a.HAProxyHash != hhash:
-			a.State, a.Reason = lbAppDown, "it runs an older configuration"
-		case a.LVSHash != lvsWant(a):
-			a.State, a.Reason = lbAppDown, "its UDP listeners are not loaded yet"
-		case lvs != "" && !st.LVS:
+		case a.LVSHash != "" && lvs != "" && !st.LVS:
 			a.State, a.Reason = lbAppDown, "its UDP listeners are not served"
+		case !current:
+			// It serves the config its row records and has a change still to take: that is an appliance in order,
+			// and the row says what waits and why. It read "down" until v0.11.1-rc.2, and a pair whose two
+			// appliances both waited read DOWN "No appliance answers" while it served (drill R2b-1).
+			a.State, a.Reason = lbAppUp, lbWaitsPrefix+"it is loaded at the next pass"
+			switch {
+			case held[a] != "":
+				a.Reason = lbWaitsPrefix + held[a]
+			case waitFor != nil && waitFor != a:
+				a.Reason = lbWaitsPrefix + "appliance " + waitFor.ServerID + " takes every change first and cannot take one now"
+			case refusedBy == a:
+				a.Reason = lbWaitsPrefix + "it did not take it"
+			case refused != nil:
+				a.Reason = lbWaitsPrefix + "appliance " + refusedBy.ServerID + " did not take it"
+			}
+			lb.waiting = lb.waiting || refused == nil
 		default:
 			a.State, a.Reason = lbAppUp, ""
 		}
@@ -640,17 +707,82 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			a.Reason += "; " + what + " did not run its configuration and the platform loaded it again"
 		}
 	}
+	// A push that is held is tried again by the platform itself (lbRetry), and the appliances behind it wait from
+	// the first pass that held one.
+	lb.waiting = lb.waiting || (len(held) > 0 && refused == nil)
+	switch {
+	case !lb.waiting:
+		lb.HeldSince = ""
+	case lb.HeldSince == "":
+		lb.HeldSince = time.Now().UTC().Format(time.RFC3339)
+	}
 	lb.Status, lb.StatusMessage = lbPairStatus(lb.Appliances, lbStuck(cr), lbReplacing(lb, time.Now().UTC()))
 	if refused != nil {
 		lb.Status, lb.StatusMessage = lbStatusError, refused.Error()
 	}
 	// The row's hash says that an appliance serves this config (a cluster's Services are ready by it). The status
-	// alone does not: both appliances holding the address is DEGRADED whatever they run.
-	serves := slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.State == lbAppUp })
+	// alone does not: both appliances holding the address is DEGRADED whatever they run, and an appliance that is up
+	// may still wait for a change.
+	serves := slices.ContainsFunc(lb.Appliances, func(a lbAppliance) bool { return a.State == lbAppUp && !lbAppWaits(a) })
 	if serves && (lb.Status == lbStatusActive || lb.Status == lbStatusDegraded) {
 		lb.AppliedHash = lbAppliedHash(lb)
 	}
 	return nil
+}
+
+// lbWaitsPrefix opens the reason of an appliance that is up, serves the config its row records, and has a change
+// still to take (lbAppWaits).
+const lbWaitsPrefix = "a change is not loaded on it yet: "
+
+// lbAppWaits says that an appliance is up on the config of before a change.
+func lbAppWaits(a lbAppliance) bool {
+	return a.State == lbAppUp && strings.HasPrefix(a.Reason, lbWaitsPrefix)
+}
+
+// lbHeldWhy is, for the row, why an appliance could not take a push now.
+func lbHeldWhy(err error) string {
+	switch pve.LBHoldClass(err) {
+	case "package-manager":
+		return "its package manager is at work on a package the load balancer runs"
+	case "installing":
+		return "it is installing what the load balancer runs"
+	}
+	return "its guest agent does not answer"
+}
+
+var (
+	// lbRetryEvery and lbRetryTries are the platform's own retries of a change an appliance could not take: the
+	// first about 20 s after the pass that was held, the last two minutes after it. Until v0.11.1-rc.2 nothing tried
+	// again before the next services sync, or the tenant's next change (drill R3-F1: 3 min 28 s, and only because
+	// the tenant sent the config again).
+	lbRetryEvery = 20 * time.Second
+	lbRetryTries = 6
+)
+
+// lbHoldWindow is how long the appliances after a held one wait with it (lbApplyPair): up to the last retry, which
+// then finds the window over and pushes them.
+func lbHoldWindow() time.Duration { return time.Duration(lbRetryTries-1) * lbRetryEvery }
+
+// lbRetry queues the platform's own retries of a balancer's apply, by key one loop at a time: pass runs the apply
+// and says whether a change still waits. It ends with the first pass that leaves nothing waiting, after lbRetryTries
+// of them, or with the process; the services sync stays the backstop, as for everything else a pass leaves.
+//
+// A pass gets a context with no deadline, as the passes of the sync and of the controller's sends have: a cluster's
+// pass may build an appliance (lbClusterBuild, up to lbBuildTimeout), and a build a deadline cuts off cannot remove
+// the VM it made, since the removal runs on the same context. A pass that wants a bound sets its own (pveLBApply).
+func (h *Handler) lbRetry(key string, pass func(ctx context.Context) (waiting bool)) {
+	if _, running := h.lbRetries.LoadOrStore(key, struct{}{}); running {
+		return
+	}
+	go func() {
+		defer h.lbRetries.Delete(key)
+		for range lbRetryTries {
+			time.Sleep(lbRetryEvery)
+			if !pass(context.Background()) {
+				return
+			}
+		}
+	}()
 }
 
 // lbPairStatus sums the appliances up. ACTIVE: both answer and one holds the address. DEGRADED: one answers, or both
@@ -680,7 +812,7 @@ func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 		if a.HAProxyHash != "" {
 			applied = true
 		}
-		if a.State != lbAppUp && a.Reason != "" {
+		if a.Reason != "" { // of an appliance that is not up, or of one that is and waits for a change (lbAppWaits)
 			reasons = append(reasons, fmt.Sprintf("appliance %s: %s", a.ServerID, a.Reason))
 		}
 	}
@@ -693,6 +825,10 @@ func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 	case holders > 1:
 		return lbStatusDegraded, "Both appliances hold the address: they cannot hear each other. Traffic may reach either one until they do; nothing is changed automatically."
 	case up == 2 && holders == 1 && len(apps) == 2:
+		if why != "" {
+			// Both serve, and a change waits on one or both: what waits, why, and that nobody has to do anything.
+			return lbStatusActive, "A change waits (" + why + "). The load balancer serves meanwhile, with the configuration of before the change where it is not loaded; the platform tries again within half a minute, by itself."
+		}
 		return lbStatusActive, ""
 	case up == 2:
 		return lbStatusDegraded, "Neither appliance holds the address yet: they are choosing which one does."
@@ -702,9 +838,8 @@ func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 		}
 		switch {
 		case holders == 1 && !holderUp:
-			// The one that holds the address is the one that is not right (it runs the config of before a change
-			// it could not take yet, and serves that), and the standby is: "no standby" would be the wrong way
-			// round (drill N3-4).
+			// The one that holds the address is the one that is not right, and the standby is: "no standby" would
+			// be the wrong way round (drill N3-4).
 			return lbStatusDegraded, "The appliance that holds the address is the one that is not in order" + why + "; the other one is ready, as its standby. The platform puts it right at its next pass."
 		case replacing:
 			return lbStatusDegraded, "One appliance carries the traffic while the other is being replaced" + why + "."
@@ -754,24 +889,44 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 		vip = lb.VIPs[0]
 	}
 	type seen struct {
-		app lbAppliance
-		vm  *pve.ClusterResource
+		app  lbAppliance
+		vm   *pve.ClusterResource
+		read bool // the appliance answered the state read of this call
 	}
+	// Each appliance's role is read at the call, and an appliance that cannot be read is listed as that: not with the
+	// role and the address the row had for it. Until v0.11.1-rc.2 it kept them, so after a failover the stopped
+	// appliance was listed as the master beside the real one, and it was the one asked for the members: 409 "did
+	// not answer" (drill R2b-o2 and R3: six of six failovers, for about 70 s each, until the next pass).
 	var apps []seen
 	for _, a := range lb.Appliances {
 		vm, err := ps.ResolveVM(ctx, proj.ID, a.ServerID)
 		if err != nil || vm == nil || vm.NodeDown || pve.LBOfTags(vm.Tags) != lb.ID {
 			a.Role, a.HoldsVIP = "", false
+			if a.State == lbAppUp {
+				a.State, a.Reason = lbAppDown, lbReasonUnreachable
+			}
 			apps = append(apps, seen{app: a})
 			continue
 		}
-		if st, err := ps.ReadVRRPState(ctx, vm.Node, vm.VMID, vip); err == nil {
-			a.Role, a.HoldsVIP = st.State, st.HoldsVIP
-			if a.State == lbAppUp && !st.Serving { // the row's word is older than this read
-				a.State, a.Reason = lbAppDown, "HAProxy does not serve its configuration"
+		st, err := ps.ReadVRRPState(ctx, vm.Node, vm.VMID, vip)
+		if err != nil {
+			a.Role, a.HoldsVIP = "", false
+			if a.State == lbAppUp {
+				a.State, a.Reason = lbAppDown, lbReasonUnreachable
 			}
+			apps = append(apps, seen{app: a, vm: vm})
+			continue
 		}
-		apps = append(apps, seen{app: a, vm: vm})
+		a.Role, a.HoldsVIP = st.State, st.HoldsVIP || (vip == "" && st.State == "MASTER")
+		switch {
+		case a.State == lbAppUp && !st.Serving: // the row's word is older than this read
+			a.State, a.Reason = lbAppDown, "HAProxy does not serve its configuration"
+		case a.State == lbAppDown && a.Reason == lbReasonUnreachable && st.HAProxy && st.Serving && (st.State == "MASTER" || st.State == "BACKUP"):
+			// A health read marked it (lbCorrectRoles), and this one reaches it and finds it serving: the mark is the
+			// health read's to take back. It was up before the mark, which is all the mark replaced.
+			a.State, a.Reason = lbAppUp, ""
+		}
+		apps = append(apps, seen{app: a, vm: vm, read: true})
 	}
 	out := map[string]any{"result": []pve.LBMemberHealth{}}
 	var list []lbAppliance
@@ -779,30 +934,106 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 		list = append(list, s.app)
 	}
 	out["appliances"] = list
-	for _, s := range apps {
-		if s.vm != nil && s.app.HoldsVIP && s.app.HAProxyHash != "" {
-			health, notLoaded, err := ps.LBHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec)
-			if errors.Is(err, pve.ErrLBNoHAProxy) {
-				return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, lbNoHAProxyMsg)
-			}
+	// A read that reached no appliance knows nothing of the pair (Proxmox's API or both guest agents did not answer
+	// this call): the answer lists them as that, and the row is left to the pass. Written, a pair that serves would
+	// read DOWN from one failed call until its next pass.
+	if slices.ContainsFunc(apps, func(s seen) bool { return s.read }) {
+		h.lbCorrectRoles(ctx, es, lb, list)
+	}
+	// The members are asked of the appliance that holds the address now. While none does (the seconds of a
+	// failover), any appliance that answered says the same of them: both run the same config and the same checks.
+	ask := slices.IndexFunc(apps, func(s seen) bool { return s.read && s.app.HoldsVIP && s.app.HAProxyHash != "" })
+	if ask < 0 {
+		ask = slices.IndexFunc(apps, func(s seen) bool { return s.read && s.app.HAProxyHash != "" })
+	}
+	if ask >= 0 {
+		s := apps[ask]
+		health, notLoaded, err := ps.LBHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec)
+		if errors.Is(err, pve.ErrLBNoHAProxy) {
+			return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, lbNoHAProxyMsg)
+		}
+		if err != nil {
+			slog.Warn("load balancer: health", "project", proj.ID, "lb", lb.ID, "err", err)
+			return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's active appliance did not answer")
+		}
+		if lb.HasUDP() { // the UDP pools' members are in the kernel's table, not in HAProxy
+			udp, udpNotLoaded, err := ps.LVSHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec, lb.VIPs)
 			if err != nil {
-				slog.Warn("load balancer: health", "project", proj.ID, "lb", lb.ID, "err", err)
+				slog.Warn("load balancer: udp health", "project", proj.ID, "lb", lb.ID, "err", err)
 				return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's active appliance did not answer")
 			}
-			if lb.HasUDP() { // the UDP pools' members are in the kernel's table, not in HAProxy
-				udp, udpNotLoaded, err := ps.LVSHealth(ctx, s.vm.Node, s.vm.VMID, lb.LBSpec, lb.VIPs)
-				if err != nil {
-					slog.Warn("load balancer: udp health", "project", proj.ID, "lb", lb.ID, "err", err)
-					return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The load balancer's active appliance did not answer")
-				}
-				health, notLoaded = append(health, udp...), append(notLoaded, udpNotLoaded...)
-			}
-			out["result"] = health
-			lbHealthNotLoaded(out, notLoaded)
-			break
+			health, notLoaded = append(health, udp...), append(notLoaded, udpNotLoaded...)
 		}
+		out["result"] = health
+		lbHealthNotLoaded(out, notLoaded)
 	}
 	return out, nil
+}
+
+// lbReasonUnreachable is the reason of an appliance a health read could not reach.
+const lbReasonUnreachable = "it cannot be reached"
+
+// lbUnreachable says that an appliance carries the health read's mark.
+func lbUnreachable(a lbAppliance) bool {
+	return a.State == lbAppDown && a.Reason == lbReasonUnreachable
+}
+
+// lbCorrectRoles writes into the row what a health read just saw of the appliances' roles, when the row says
+// otherwise: who holds the address, and an appliance that cannot be reached. The row had it right only from the next
+// pass on, about 70 s after a failover on a cluster's pair (drill R2b-o2). Only that is written, and the status the
+// appliances add up to: what an appliance runs is the pass's to say. A balancer that is being changed is left to the
+// change, which reads the appliances itself.
+//
+// "It cannot be reached" is the health read's own mark, and a later read that reaches the appliance takes it back
+// (lbPairHealth): a tenant's own pair has no pass before the next services sync, and would read "cannot be reached"
+// for an appliance that came back minutes ago.
+func (h *Handler) lbCorrectRoles(ctx context.Context, es *externalservice.ExternalService, lb *loadBalancer, read []lbAppliance) {
+	differs := func(row []lbAppliance) bool {
+		for _, a := range row {
+			i := slices.IndexFunc(read, func(r lbAppliance) bool { return r.ServerID == a.ServerID })
+			if i >= 0 && (read[i].Role != a.Role || read[i].HoldsVIP != a.HoldsVIP || (lbUnreachable(a) && read[i].State == lbAppUp)) {
+				return true
+			}
+		}
+		return false
+	}
+	if h.sdnLock == nil || !differs(lb.Appliances) {
+		return
+	}
+	ext := "lb-" + lb.ID
+	release, ok, err := h.lbLock(ctx, ext, 0)
+	if err != nil || !ok {
+		return
+	}
+	defer release()
+	cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, ext)
+	if err != nil || cr == nil {
+		return
+	}
+	row, err := lbOfRow(cr)
+	if err != nil || !differs(row.Appliances) {
+		return
+	}
+	for i := range row.Appliances {
+		a := &row.Appliances[i]
+		j := slices.IndexFunc(read, func(r lbAppliance) bool { return r.ServerID == a.ServerID })
+		if j < 0 || a.State == lbAppGone || a.State == lbAppBuilding {
+			continue
+		}
+		a.Role, a.HoldsVIP = read[j].Role, read[j].HoldsVIP
+		switch {
+		case a.State == lbAppUp && read[j].State == lbAppDown:
+			a.State, a.Reason = lbAppDown, read[j].Reason
+		case lbUnreachable(*a) && read[j].State == lbAppUp:
+			a.State, a.Reason = lbAppUp, ""
+		}
+	}
+	if row.Status == lbStatusActive || row.Status == lbStatusDegraded || row.Status == lbStatusDown {
+		row.Status, row.StatusMessage = lbPairStatus(row.Appliances, false, lbReplacing(row, time.Now().UTC()))
+	}
+	if err := h.lbSave(ctx, cr, row); err != nil {
+		slog.Warn("load balancer: correct the roles after a health read", "lb", lb.ID, "err", err)
+	}
 }
 
 // lbHealthNotLoaded adds to a GET_HEALTH answer the listeners the appliance does not run, and says so: member states

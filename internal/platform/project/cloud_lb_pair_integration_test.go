@@ -99,6 +99,121 @@ func TestLBPairApplyOrderAndStatus(t *testing.T) {
 		t.Fatalf("second apply: %s %v, writes %v", status, err, f.log[writes:])
 	}
 
+	// A tenant's change while dpkg is at work on HAProxy's own package on the appliance that holds the address (drill
+	// R3-F1 of v0.11.1-rc.2: answered 200, not served for 3 min 28 s, nothing tried again). The call is answered,
+	// the row says what waits, and the platform's own retry loads it: no second call, no services sync.
+	every, tries := lbRetryEvery, lbRetryTries
+	lbRetryEvery, lbRetryTries = 200*time.Millisecond, 100
+	f.set("302", func(g *lbGuest) { g.upgrading = true })
+	if _, err := h.lbEdit(ctx, es, "lb-abc", func(lb *loadBalancer) { lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 81, Pool: "web"}) }); err != nil {
+		t.Fatal(err)
+	}
+	status, err = h.pveLBApply(ctx, es, proj, "lb-abc")
+	saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
+	got, _ = lbOfRow(saved)
+	if err != nil || status != lbStatusActive || got.HeldSince == "" || !strings.Contains(got.StatusMessage, "A change waits (appliance 302: ") {
+		t.Fatalf("a change the holder cannot take now: %s %v %q", status, err, got.StatusMessage)
+	}
+	holderHas := func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.guests["302"].loaded, ":81")
+	}
+	if holderHas() || !strings.Contains(f.guests["301"].loaded, ":81") {
+		t.Fatal("the standby does not have the change, or the holder has it already")
+	}
+	f.set("302", func(g *lbGuest) { g.upgrading = false })
+	for deadline := time.Now().Add(10 * time.Second); !holderHas(); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("nothing tried the change again on the holder")
+		}
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
+		if got, _ = lbOfRow(saved); got.Status == lbStatusActive && got.StatusMessage == "" && got.HeldSince == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the row after the retry: %s %q", got.Status, got.StatusMessage)
+		}
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) { // the retries are over
+		if _, running := h.lbRetries.Load("lb-abc"); !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the retries went on after the change was loaded")
+		}
+	}
+	lbRetryEvery, lbRetryTries = every, tries
+	f.mu.Lock()
+	writes = len(f.log)
+	f.mu.Unlock()
+
+	// A failover the row does not know of yet: the master's VM is stopped and the standby holds the address. The
+	// health read lists what is so now, and puts it into the row (drill R2b-o2 of v0.11.1-rc.2: the row and
+	// GET_HEALTH were wrong until the next pass, about 70 s).
+	f.set("302", func(g *lbGuest) { g.stopped = true })
+	f.set("301", func(g *lbGuest) { g.role, g.holds = "MASTER", true })
+	health, herr := h.lbPairHealth(ctx, es, proj, got)
+	if herr != nil {
+		t.Fatalf("GET_HEALTH after a failover: %v", herr)
+	}
+	if apps := health["appliances"].([]lbAppliance); !apps[0].HoldsVIP || apps[0].Role != "MASTER" || apps[1].HoldsVIP || apps[1].Role != "" || apps[1].State != lbAppDown {
+		t.Fatalf("GET_HEALTH after a failover lists %+v", apps)
+	}
+	saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
+	got, _ = lbOfRow(saved)
+	if a, b := got.Appliances[0], got.Appliances[1]; !a.HoldsVIP || a.Role != "MASTER" || b.HoldsVIP || b.Role != "" || b.State != lbAppDown ||
+		got.Status != lbStatusDegraded || !strings.Contains(got.StatusMessage, "appliance 302: "+lbReasonUnreachable) {
+		t.Fatalf("the row after the health read: %s %q %+v", got.Status, got.StatusMessage, got.Appliances)
+	}
+	// A read that finds the row right writes nothing.
+	stamp := saved.UpdatedAt
+	if _, herr := h.lbPairHealth(ctx, es, proj, got); herr != nil {
+		t.Fatal(herr)
+	}
+	if again, _ := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc"); !again.UpdatedAt.Equal(*stamp) {
+		t.Fatal("a health read that found the row right wrote it again")
+	}
+	// A read that reaches no appliance knows nothing of the pair (Proxmox's API, or both guest agents, did not answer
+	// that one call): the answer lists them as that, and the row is not written. Written, a pair that serves read
+	// DOWN "No appliance answers" from one failed call until its next pass.
+	f.set("301", func(g *lbGuest) { g.agentDown = true })
+	if health, herr = h.lbPairHealth(ctx, es, proj, got); herr != nil {
+		t.Fatal(herr)
+	}
+	if apps := health["appliances"].([]lbAppliance); apps[0].State != lbAppDown || apps[0].Reason != lbReasonUnreachable || apps[0].Role != "" {
+		t.Fatalf("GET_HEALTH that reaches no appliance lists %+v", apps)
+	}
+	if again, _ := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc"); !again.UpdatedAt.Equal(*stamp) {
+		row, _ := lbOfRow(again)
+		t.Fatalf("a health read that reached no appliance wrote the row: %s %q", row.Status, row.StatusMessage)
+	}
+	// The stopped appliance is back, as the standby, and no pass has run (a tenant's own pair has none before the next
+	// services sync): the health read that reaches it takes its own mark back, in the answer and in the row.
+	f.set("301", func(g *lbGuest) { g.agentDown = false })
+	f.set("302", func(g *lbGuest) { g.stopped, g.role, g.holds = false, "BACKUP", false })
+	if health, herr = h.lbPairHealth(ctx, es, proj, got); herr != nil {
+		t.Fatal(herr)
+	}
+	if apps := health["appliances"].([]lbAppliance); apps[1].State != lbAppUp || apps[1].Reason != "" || apps[1].Role != "BACKUP" || !apps[0].HoldsVIP {
+		t.Fatalf("GET_HEALTH once the appliance is back lists %+v", apps)
+	}
+	saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
+	if got, _ = lbOfRow(saved); got.Appliances[1].State != lbAppUp || got.Appliances[1].Reason != "" || got.Appliances[1].Role != "BACKUP" ||
+		got.Status != lbStatusActive || got.StatusMessage != "" {
+		t.Fatalf("the row once the appliance is back: %s %q %+v", got.Status, got.StatusMessage, got.Appliances)
+	}
+	f.set("302", func(g *lbGuest) { g.role, g.holds = "MASTER", true })
+	f.set("301", func(g *lbGuest) { g.role, g.holds = "BACKUP", false })
+	if status, err := h.pveLBApply(ctx, es, proj, "lb-abc"); err != nil || status != lbStatusActive {
+		t.Fatalf("the pass after the appliances are back: %s %v", status, err)
+	}
+	f.mu.Lock()
+	writes = len(f.log)
+	f.mu.Unlock()
+
 	// Both hold the address: DEGRADED, said so, nothing done about it.
 	f.mu.Lock()
 	f.guests["301"].role, f.guests["301"].holds = "MASTER", true

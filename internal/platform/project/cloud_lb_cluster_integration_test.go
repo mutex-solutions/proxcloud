@@ -552,35 +552,96 @@ func TestLBClusterStateConverges(t *testing.T) {
 
 	// N3-7 (v0.11.0-rc.2 drill): the controller writes a Service's address into its status when the Service is
 	// answered "ready", so ready means that the appliance holding the address serves the Service's config. Here the
-	// holder cannot take a change yet (its package manager runs) and the standby has it: the Service is not ready,
-	// keeps its address, and the row says which appliance is behind (N3-4: it said "no standby").
+	// holder cannot take a change yet (dpkg is at work on its HAProxy package) and the standby has it: the Service
+	// that changed is not ready and keeps its address. Both appliances serve, so the row is ACTIVE and says which
+	// appliance waits and why (it read DEGRADED, or DOWN with both waiting, until v0.11.1-rc.2: drill R2b-1).
 	loaded := func(vm string) string {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		return f.guests[vm].loaded
 	}
-	f.set("302", func(g *lbGuest) { g.aptRunning = true })
+	f.set("302", func(g *lbGuest) { g.upgrading = true })
 	moved := svc("a", 80, 30084)
 	state(moved)
 	lb = converge("the standby serves the change, the holder does not", func(lb *loadBalancer) bool {
-		return lb.Status == lbStatusDegraded && strings.Contains(loaded("301"), worker1+":30084 check")
+		return lb.Status == lbStatusActive && lb.StatusMessage != "" && strings.Contains(loaded("301"), worker1+":30084 check")
 	})
 	if s := lb.Cluster.Services[0]; s.State != lbgw.StateBuilding || s.VIP != vipA || strings.Contains(loaded("302"), ":30084") ||
-		!strings.Contains(lb.StatusMessage, "The appliance that holds the address is the one that is not in order (appliance 302: it runs an older configuration)") {
+		!strings.Contains(lb.StatusMessage, "A change waits (appliance 302: a change is not loaded on it yet: its package manager is at work on a package the load balancer runs)") {
 		t.Fatalf("ready before the holder serves it: %+v, %s %q", s, lb.Status, lb.StatusMessage)
 	}
 	if ans := state(moved); ans.Services[0].State != lbgw.StateBuilding || ans.Services[0].Address != vipA {
 		t.Fatalf("the controller is answered %+v", ans.Services[0])
 	}
-	f.set("302", func(g *lbGuest) { g.aptRunning = false })
+	f.set("302", func(g *lbGuest) { g.upgrading = false })
 	converge("ready once the holder serves it", func(lb *loadBalancer) bool {
-		return lb.Status == lbStatusActive && lb.Cluster.Services[0].State == lbgw.StateReady && strings.Contains(loaded("302"), worker1+":30084 check")
+		return lb.Status == lbStatusActive && lb.StatusMessage == "" && lb.Cluster.Services[0].State == lbgw.StateReady && strings.Contains(loaded("302"), worker1+":30084 check")
 	})
+
+	// R2b-1 (v0.11.1-rc.2 drill): a worker leaves while both appliances wait. Nothing of the Service changed, and the
+	// appliance that holds the address serves it as it is: the Service stays ready, and the row is never DOWN
+	// (it read DOWN "No appliance answers" for 29 s, and every Service of the cluster got "building"). The change is
+	// then loaded by the platform's own retry, with no other call: not the controller's next send, not a sync.
+	every, tries := lbRetryEvery, lbRetryTries
+	lbRetryEvery, lbRetryTries = 200*time.Millisecond, 100
+	workers := nodes
+	nodes = slices.Delete(slices.Clone(workers), 1, 2) // w2 leaves
+	for _, vm := range []string{"301", "302"} {
+		f.set(vm, func(g *lbGuest) { g.upgrading = true })
+	}
+	if ans := state(moved); ans.Services[0].State != lbgw.StateReady {
+		t.Fatalf("a Service is not ready before the pass of a worker's leaving: %+v", ans.Services[0])
+	}
+	until("the pass that both appliances hold", func() bool {
+		lb := read()
+		return lb.HeldSince != "" && strings.Contains(lb.StatusMessage, "A change waits (appliance 301: ")
+	})
+	if lb = read(); lb.Status != lbStatusActive || lb.Cluster.Services[0].State != lbgw.StateReady ||
+		!strings.Contains(loaded("301"), worker2+":30084") || !strings.Contains(loaded("302"), worker2+":30084") {
+		t.Fatalf("while both appliances wait: %s %q, Service %+v", lb.Status, lb.StatusMessage, lb.Cluster.Services[0])
+	}
+	if ans := state(moved); ans.Services[0].State != lbgw.StateReady || ans.Services[0].Address != vipA {
+		t.Fatalf("while both appliances wait the controller is answered %+v", ans.Services[0])
+	}
+	if !strings.Contains(lb.StatusMessage, "appliance 302: a change is not loaded on it yet: appliance 301 takes every change first") {
+		t.Fatalf("the row does not say that the holder waits for the standby: %q", lb.StatusMessage)
+	}
+	for _, vm := range []string{"301", "302"} {
+		f.set(vm, func(g *lbGuest) { g.upgrading = false })
+	}
+	until("the platform's own retry loads the change on both", func() bool {
+		return !strings.Contains(loaded("301"), worker2+":30084") && !strings.Contains(loaded("302"), worker2+":30084")
+	})
+	until("the row after the retry", func() bool {
+		lb := read()
+		return lb.Status == lbStatusActive && lb.StatusMessage == "" && lb.HeldSince == "" && lb.Cluster.Services[0].State == lbgw.StateReady
+	})
+	f.mu.Lock()
+	lastStandby, lastHolder := 0, 0
+	for i, l := range f.log {
+		switch l {
+		case "301 haproxy reload":
+			lastStandby = i
+		case "302 haproxy reload":
+			lastHolder = i
+		}
+	}
+	f.mu.Unlock()
+	if lastHolder < lastStandby {
+		t.Fatal("the retry pushed the holder before the standby")
+	}
+	until("the end of the retries", func() bool {
+		_, running := h.lbRetries.Load("lbc-c1")
+		return !running
+	})
+	lbRetryEvery, lbRetryTries = every, tries
+	nodes = workers
 	state(a)
 	until("the state put back", func() bool {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		return strings.Contains(f.files[len(f.files)-1], worker1+":30080 check") && strings.Contains(f.guests["302"].loaded, worker1+":30080 check")
+		return strings.Contains(f.files[len(f.files)-1], worker1+":30080 check") && strings.Contains(f.guests["302"].loaded, worker1+":30080 check") &&
+			strings.Contains(f.guests["302"].loaded, worker2+":30080 check")
 	})
 	quiet()
 

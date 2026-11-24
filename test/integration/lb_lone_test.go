@@ -205,7 +205,7 @@ cat /root/heard.log`)
 			// 1. The control, the lab's finding in a real guest: the pair's HAProxy config on an appliance keepalived
 			// was never pushed to. HAProxy cannot bind an address the guest does not hold, and refuses.
 			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(time.Second) {
-				err := ps.PushPairHAProxy(ctx, "n1", 100, haproxy, cert)
+				_, err := ps.PushPairHAProxy(ctx, "n1", 100, haproxy, cert)
 				if err != nil && !errors.Is(err, pve.ErrLBNotReady) {
 					if !strings.Contains(err.Error(), "cannot bind socket") {
 						t.Fatalf("HAProxy without keepalived: %v, want it to refuse the bind", err)
@@ -222,7 +222,7 @@ cat /root/heard.log`)
 			if err := ps.PushKeepalived(ctx, "n1", 100, alone, "pub0"); err != nil {
 				t.Fatalf("keepalived with no peer: %v", err)
 			}
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, haproxy, cert); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, haproxy, cert); err != nil {
 				t.Fatalf("HAProxy on the appliance that is alone: %v\n%s", err, diag())
 			}
 			for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(500 * time.Millisecond) {
