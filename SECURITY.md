@@ -36,7 +36,8 @@ published artifacts are pullable before relying on them.
 |------------------|--------|
 | `v0.11.0` | Current stable release; report issues against it; fixes land on `main` for a later release; no SLA |
 | Current `main` | Development fixes; no stable support/SLA promise |
-| `v0.11.1-rc.3` | Release candidate of `v0.11.1`, for a lab; not for production and not supported; use `v0.11.0` |
+| `v0.11.1-rc.4` | Release candidate of `v0.11.1`, for a lab; not for production and not supported; use `v0.11.0` |
+| `v0.11.1-rc.3` | Third release candidate of `v0.11.1`, replaced by `v0.11.1-rc.4` (its lab drill found that a UDP client that already sends when the listener for its port is added gets no answer while it keeps sending); not supported |
 | `v0.11.1-rc.2` | Second release candidate of `v0.11.1`, replaced by `v0.11.1-rc.3` (its lab drill found that a change waits while the image's package manager runs on an appliance, that a changed connection limit of a UDP listener is not applied, and that an address annotated to be kept just before its delete is given back); not supported |
 | `v0.11.1-rc.1` | First release candidate of `v0.11.1`, replaced by `v0.11.1-rc.2` (its lab drill found that a load balancer pair with a UDP listener reads as degraded); not supported |
 | `v0.10.2` | Previous stable release; no stated backport support; upgrade to `v0.11.0` (see the changelog) |

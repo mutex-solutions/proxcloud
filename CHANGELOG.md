@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once it serves again".** A pair whose row still reads `DEGRADED` with "its VM is stopped; starting it" or "it does
   not answer" for an appliance that is back is put right by the first health read of it (the balancer's page, a
   `GET_HEALTH` call) or by its next pass, whichever comes first; by the pass alone when the balancer was changed
-  while that appliance was down. No row gets a new field.
+  while that appliance was down, and on a pair with a UDP listener, whose row records the UDP files of
+  v0.11.1-rc.3 until the push of the next note. No row gets a new field.
 - **From v0.11.1-rc.3, a pair with a UDP listener gets one file and one reload of its UDP service on each
   appliance; every other balancer gets nothing.** This is what the fix "a UDP client that was sending before its
   listener existed is answered" does to a balancer that exists.
@@ -566,7 +567,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Its pins are those of `main`, so the plan from it has one change, the release, record only.
   `TestPreviousBOMsMoveCertManager` states that answer, and `TestUpgradeRollsNoMachine` compares eleven of the
   twenty previous BOMs with the BOM on `main`, none of them rolling. No move to that BOM and no apply on such a
-  platform was run on a lab.
+  platform had run on a lab when the file was kept; the candidate's drill then moved one lab's platform to it,
+  from 0.11.1-rc.2.
 - **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1-rc.2`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.1-rc.2.yaml`, sha256
   `b66f6e7f3f96efa724393abc2f070fedbf4c2fcf1ef79ce6411d933a38944073`, the file of the tag byte for byte). The
@@ -1020,6 +1022,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state the portal reads the same way. HAProxy's config and the certificate files already went in so. Found by
   the drill of v0.11.1-rc.1 (Q1-o2). The fakes and the real-guest tests now refuse any write of the agent's that
   names a file's place.
+
+## [0.11.1-rc.4] - 2026-11-25
+
+The fourth release candidate of 0.11.1, published as a prerelease and never as `latest`. It is not the release:
+`v0.11.0` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
+still name it. It holds what is under Unreleased above: what `v0.11.1-rc.3` held and the one pull request its lab
+drill asked for (#473). The drill of `v0.11.1-rc.3` ran every part of its plan and found no regression against
+`v0.11.0` or `v0.11.1-rc.2`: the upgrade from rc.2 did what its notes said, and the three fixes of rc.3 held. This
+candidate exists so that one of its findings does not reach the release (a UDP client that was already sending
+when the listener for its port was added got no answer for as long as it kept sending); it carries one smaller fix
+of the same drill too (an appliance the platform started after a failover reads up once it serves again). Nothing
+of the two had run on a lab when it was tagged. The entries above are not repeated here. Not for a production
+site.
+
+### Changed
+
+- **The platform BOM's release is `0.11.1-rc.4`** (`deploy/platform/platform-bom.yaml`), with the pins of
+  `0.11.1-rc.1`, `0.11.1-rc.2` and `0.11.1-rc.3`: the files differ in the release line alone. No chart of the
+  product differs from its newest tag
+  (`git diff proxmox-kamaji-cluster-v0.1.19 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster`,
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` and
+  `git diff proxcloud-sandbox-v0.1.0 -- deploy/charts/proxcloud-sandbox` print nothing), so no chart tag is needed.
+  It is a release BOM, and the release gate passes on it and on the twenty previous BOMs.
+- **No component of the sandbox feature is in this BOM** (`TestSandboxIsDark`). The sandbox code is in the build and
+  cannot be turned on, as in `v0.11.1-rc.3`.
+- **The plan from each previous BOM** (`PlanFor`). From 0.11.1-rc.3, 0.11.1-rc.2 and 0.11.1-rc.1 one change, the
+  release, record only, allowed, with no part, no seed row and no machine replaced; phrase
+  `upgrade <name> to 0.11.1-rc.4`. From 0.11.0, 0.11.0-rc.1 and 0.11.0-rc.2 two changes, the release and
+  `tenantCharts.kubernetes` 0.1.17 to 0.1.19, both record only, allowed. From 0.10.2 and 0.10.2-rc.1 the same two
+  rows (the chart from 0.1.16); four from 0.10.1 and 0.10.1-rc.2 (those and `cert-manager` on the seed and on the
+  platform cluster); five from 0.10.1-rc.1 (the tenant chart from 0.1.15, and also `pc-platform` 0.1.15 to 0.1.16);
+  and a refusal by the pair gate from the nine BOMs on Kubernetes 1.35.10. This BOM carries no unfinished
+  replacement (`TestRollTowardAKeptCandidateGoesOn` passes under it unchanged).
+- **What the portal's upgrade does to the balancers, from `v0.11.1-rc.3`.** See the first two upgrade notes above.
+  A pair with a UDP listener gets `/etc/proxcloud-lb/lvs.nft` (the table gains the chain `lb-input`) and one reload
+  of `proxcloud-lvs.service` per appliance, the standby first; the other five files of the UDP service are the same
+  to the byte, the unit is not restarted and systemd is not reloaded. Every other balancer gets nothing, and the
+  fix of the health read pushes no file: no golden under `internal/cloud/pve/testdata` changed since the tag, and
+  the only code outside tests that changed is `internal/cloud/pve/lblvs.go` and
+  `internal/platform/project/cloud_lb_pair_pve.go`. Read again from the code on this commit.
+- **On the wire, for a pair with a UDP listener, from that reload on.** A UDP datagram for a port without a UDP
+  listener, or for a listener whose pool has no server at all, is dropped without an ICMP "port unreachable". A
+  client that is unanswered at the upgrade stays so until it was silent for more than 30 s.
+- **From `v0.11.1-rc.2`** that and what the third candidate's upgrade did, in one push: `lvs.conf`, the drop-in of
+  `proxcloud-lvs.service` and `lvs.nft`, with one `daemon-reload` and one reload of that service per appliance.
+  **From `v0.11.1-rc.1`** also keepalived's five files once per appliance of a pair, with one keepalived reload.
+  **From `v0.11.0`** the one push of every balancer that the first candidate's upgrade made; a balancer of
+  `v0.11.0` has no UDP listener.
+- **Billing at the upgrade from `v0.11.0`, `v0.11.1-rc.1` and `v0.11.1-rc.2`** is what the section of
+  `0.11.1-rc.3` below says: an address of a cluster's balancer without a `FLOATING_IP` row gets one at the first
+  pass, with the allocation's time as its start. A site that runs `v0.11.1-rc.3` has these rows.
+- **Nothing the controller does changed since `v0.11.1-rc.3`.** A cluster that is on chart 0.1.19 under rc.1 or
+  rc.2 still needs "Apply settings" or "Enable load balancer controller" again for the controller's part of #452.
+- **A candidate moves nothing a final moves.** The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION`
+  stay on `v0.11.0`.
+
+### Verified on a lab
+
+Nothing on this candidate, and nothing of its two fixes. On one lab (Ubuntu 26.04 appliances, all on one node,
+the scheduler off), by candidate:
+
+- On `v0.11.1-rc.1` (2026-11-23) and on `v0.11.1-rc.2` (2026-11-23 and 2026-11-24), not run again: what the
+  section of `0.11.1-rc.3` below lists.
+- On `v0.11.1-rc.3` (2026-11-24), the upgrade from `v0.11.1-rc.2`: eight client loops, 183773 requests in 47
+  minutes, 0 failed; no HAProxy config, no keepalived file, no HAProxy reload and no VRRP transition on four
+  appliances; a pair with a UDP listener got `lvs.conf` and the drop-in once with one reload of the UDP service,
+  the standby first by 10 to 11 s; a stale limit (kernel 5, listener 50) put right by that push; six addresses got
+  their `FLOATING_IP` row with the allocation's time as start; the platform run of one record-only row, 8.5 s, 19
+  VMs kept their process; a cluster on chart 0.1.19 moved by "Apply settings", only the controller's pod rolled.
+- On `v0.11.1-rc.3`, its three fixes: a UDP limit, algorithm, persistence and weight in the kernel of both
+  appliances at the first read (#454), a replace with UDP that lost 0.7 s of TCP and 0.8 s of UDP, forwarding
+  never on without the table at a restart of nftables (0 of 87 samples); a change taken at once while `apt-get`
+  ran, and held with "A change waits" while dpkg worked on `haproxy`, landed by the platform's own retry, never
+  `DOWN` or `ERROR` (#453), `GET_HEALTH` right at three reads in the 30 s after a holder's shutdown, sshd masked after a
+  reboot, a new certificate file 0600 in every sample; annotate and delete in one command line kept the address,
+  twice, the limit of five held, a rotation raised no Warning (#452); and the clean-up left nothing billed.
+- On `v0.11.1-rc.3`, the finding this candidate fixes: 2584 of 2584 datagrams of a one-socket client unanswered
+  after its listener was added, and 4933 after a restart of `nftables.service`.
+
+### Not verified
+
+- Everything of this candidate on a lab, and both fixes since `v0.11.1-rc.3`: the new table on an appliance VM
+  with the image's own kernel (the tests ran each image's userland on the test host's kernel), a one-socket sender
+  before its listener, a restart and a reload of `nftables.service` on the holder, a real failover and a Service
+  made again on a kept address while a client sends, the appliance's own DNS, time sync and apt under the chain;
+  the health read after a failover where the platform starts the appliance (its tests use a fake guest and a fake
+  Proxmox), and with a change made while it was down.
+- The upgrade to this candidate from any earlier build, and any move to the BOM `0.11.1-rc.4` (plans read, not
+  run; the lab moved to `0.11.1-rc.3`).
+- What the audit of the rc.3 drill lists: an upgrade with a held push, a real unattended-upgrades upgrade of
+  `haproxy`, a Service deleted while pending or refused, more than 50 Services deleted at once, what a charge run
+  bills, pveproxy down during `GET_HEALTH`, a node change under load with two workers or more, a project's delete
+  and every pass a scheduler would start by itself, Debian 13 appliances on a lab, two nodes, the consoles in a
+  browser, cert-manager itself, a portal rollback, and any production site with a public network.
+- The candidate's images and its tag's workflows: they do not exist before the tag.
+
+### Known issues
+
+- Those of `v0.11.1-rc.3`, `v0.11.1-rc.2` and `v0.11.1-rc.1`, below, but the ones this candidate fixes.
+- A UDP client that is caught at the upgrade stays caught until it was silent for more than 30 s; the first
+  datagrams after a listener is served can be lost until its first member passes its check (in real guests the
+  first answer came 0.6 to 0.8 s after the push that added the listener).
+- A UDP port without a listener answers no ICMP "port unreachable"; a masquerade or TCP `notrack` rule taken out
+  of the loaded table by hand is not noticed, as under rc.3.
+- An appliance that was down through a change stays one change behind, and reads down "its VM is stopped;
+  starting it", until the next services sync or the next change: nothing queues a pass after the one that started
+  its VM.
+- The platform's own retries are six, 20 s apart.
+- The times of a change (16 to 33 s), of a replace (0.7 s of TCP and TLS, 0.8 s of UDP) and of a planned failover
+  (0.7 to 0.8 s) were measured on `v0.11.1-rc.3`; nothing was measured on this candidate.
+- The full list is in `docs/releases/v0.11.1-rc.4.md`.
 
 ## [0.11.1-rc.3] - 2026-11-24
 
