@@ -499,6 +499,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Service annotated to keep its address just before its delete lost the address.** `kubectl annotate ...
+  proxcloud.io/lb-keep-address=true` followed at once by `kubectl delete` gave the address back to the pool, twice on
+  the lab (0.31 and 0.36 s between the two; drill R2a-2 of v0.11.1-rc.2), and the guide said the opposite. The portal
+  read the wish from the last state it had stored, and the cluster's controller takes its turn a second after a
+  change: an annotation and a delete within that second were one turn, in which the Service was already left out,
+  so the portal never saw the annotation. Now the controller names the Services that are being deleted beside the
+  state, each with what its object says at its deletion (the finalizer `proxcloud.io/load-balancer` keeps the object
+  readable until then), and lets a Service go only after a request that named it. The portal goes by that word, and
+  by its stored state only for a controller that sends none. The other order is right too: an annotation removed
+  just before the delete gives the address back, where the stored state would have kept it. The limit of five kept
+  addresses stands, and a Service that never had an address keeps none. The field (`gone`) is an addition within
+  protocol 2 of `/lb/v1`: a controller of v0.11.0 or of an earlier v0.11.1 build is served as before, and a portal
+  that does not know the field (rolled back) refuses it and is sent the request without it in the same turn. Up to
+  50 Services being deleted are named per request, outside the state's 64 KiB; more wait for the next turn. Tests:
+  the controller against an API server that sends the events in a real one's order, through the gateway's own
+  handler, and the portal on PostgreSQL through the same handler; each fails without its half of the fix. Not run
+  on a lab.
 - **The first appliance of a pair could not serve until the second existed.** A cluster's appliance pair is built
   one appliance per attempt, and an attempt that fails (no room on a node, a failed clone) is tried again five
   minutes later. keepalived was pushed only to an appliance that had a peer, and keepalived's files are what let

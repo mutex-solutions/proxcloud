@@ -5,10 +5,13 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,16 +51,17 @@ type fakePortal struct {
 	nodes   []Node
 	certs   []CertificateData
 	need    []string // what it asks for
+	gone    []Gone
 	refusal *Refusal
 	calls   int
 }
 
-func (p *fakePortal) LBClusterState(_ context.Context, cred *Credential, services []Service, nodes []Node, certs []CertificateData) (*Answer, error) {
+func (p *fakePortal) LBClusterState(_ context.Context, cred *Credential, services []Service, nodes []Node, certs []CertificateData, gone []Gone) (*Answer, error) {
 	p.calls++
 	if p.refusal != nil {
 		return nil, p.refusal
 	}
-	p.got, p.nodes, p.certs = services, nodes, certs
+	p.got, p.nodes, p.certs, p.gone = services, nodes, certs, gone
 	ans := &Answer{NeedCertificates: p.need}
 	for _, s := range services {
 		ans.Services = append(ans.Services, ServiceStatus{UID: s.UID, State: StateBuilding})
@@ -378,4 +382,56 @@ func TestSplit(t *testing.T) {
 	if strings.Join(lb, ",") != "/lb/v1/state" || strings.Join(csi, ",") != "/api2/json/nodes,/lb/v2/state,/lb/v1,/api2/json//x" {
 		t.Fatalf("lb %v, csi %v", lb, csi)
 	}
+}
+
+// The Services that are being deleted (Request.Gone, from v0.11.1-rc.3) reach the portal as the controller named
+// them, beside the state and outside its size limit: a state that just fits must not keep a Service from being let
+// go. A controller of protocol 1 has none, and what is no list of uids is refused whole, with nothing stored.
+func TestGoneServicesReachThePortal(t *testing.T) {
+	r := newRig()
+	r.protocol = "2"
+	keep := map[string]string{OwnPrefix + KnobKeepAddress: "true"}
+	gone := []Gone{{UID: "u-2", Annotations: keep}, {UID: "u-3"}}
+	w, ans := r.put(t, "PVEAPIToken=lb@proxcloud!c1=s1", Request{Services: []Service{web("u-1")}, Gone: gone})
+	if w.Code != http.StatusOK || len(ans.Services) != 1 || !reflect.DeepEqual(r.portal.gone, gone) {
+		t.Fatalf("%d %s: the portal heard %+v", w.Code, w.Body, r.portal.gone)
+	}
+
+	// A state at its limit, and fifty Services being deleted on top.
+	big := web("u-1")
+	big.Annotations = map[string]string{}
+	for i := 0; len(mustJSON(Request{Services: []Service{big}})) < maxBody-200; i++ {
+		big.Annotations[fmt.Sprintf("example.com/%04d", i)] = strings.Repeat("x", 100)
+	}
+	var many []Gone
+	for i := range MaxGone {
+		many = append(many, Gone{UID: fmt.Sprintf("u-gone-%d", i), Annotations: keep})
+	}
+	if raw := mustJSON(Request{Services: []Service{big}, Gone: many}); len(raw) <= maxBody {
+		t.Fatalf("the request is %d bytes: the test wants one over the state's limit", len(raw))
+	}
+	if w, _ := r.put(t, "PVEAPIToken=lb@proxcloud!c1=s1", Request{Services: []Service{big}, Gone: many}); w.Code != http.StatusOK || len(r.portal.gone) != MaxGone {
+		t.Fatalf("a full state with %d Services being deleted: %d %s", MaxGone, w.Code, w.Body)
+	}
+
+	calls := r.portal.calls
+	for what, body := range map[string]any{
+		"one more than a request names": Request{Gone: append(slices.Clone(many), Gone{UID: "u-more"})},
+		"a uid that is none":            Request{Gone: []Gone{{UID: "not a uid"}}},
+		"a field the gateway knows not": map[string]any{"services": []any{}, "nodes": []any{}, "gone": []any{map[string]any{"uid": "u-2", "keep": true}}},
+	} {
+		if w, _ := r.put(t, "PVEAPIToken=lb@proxcloud!c1=s1", body); w.Code != http.StatusBadRequest || r.portal.calls != calls {
+			t.Errorf("%s: %d %s, %d calls reached the portal", what, w.Code, w.Body, r.portal.calls-calls)
+		}
+	}
+
+	r.protocol, r.portal.gone = "1", nil
+	if w, _ := r.put(t, "PVEAPIToken=lb@proxcloud!c1=s1", Request{Services: []Service{web("u-1")}, Gone: gone}); w.Code != http.StatusOK || r.portal.gone != nil {
+		t.Fatalf("protocol 1: %d, the portal heard %+v", w.Code, r.portal.gone)
+	}
+}
+
+func mustJSON(v any) []byte {
+	raw, _ := json.Marshal(v)
+	return raw
 }

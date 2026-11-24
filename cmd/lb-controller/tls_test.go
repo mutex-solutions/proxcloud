@@ -24,7 +24,7 @@ type certPortal struct {
 	also    string
 }
 
-func (p *certPortal) LBClusterState(_ context.Context, _ *lbgw.Credential, services []lbgw.Service, _ []lbgw.Node, certs []lbgw.CertificateData) (*lbgw.Answer, error) {
+func (p *certPortal) LBClusterState(_ context.Context, _ *lbgw.Credential, services []lbgw.Service, _ []lbgw.Node, certs []lbgw.CertificateData, _ []lbgw.Gone) (*lbgw.Answer, error) {
 	p.puts, p.got = p.puts+1, services
 	for _, c := range certs {
 		p.uploads = append(p.uploads, c)

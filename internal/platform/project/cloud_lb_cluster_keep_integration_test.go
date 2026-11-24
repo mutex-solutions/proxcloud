@@ -35,7 +35,9 @@ import (
 // Shown: the address of a Service that goes with the annotation leaves both appliances and their firewall and stays
 // the balancer's, allocated (so in the floatingIps quota, and billed: the meter makes a FLOATING_IP row of every
 // public allocation, syncjob/pve_meter.go) with its FLOATING_IP row left alone, while one that goes without it is
-// given back; an annotation set and a Service deleted with no pass in between still keeps; a kept address counts in
+// given back; an annotation set and a Service deleted with no pass in between still keeps, and so does one the
+// controller never sent with the annotation and names as being deleted with it (and the other way round: the
+// object's last word counts, not the last state's); a kept address counts in
 // the quota, and a Service that names it gets it without the quota or the pool being asked; a Service that names
 // another cluster's kept address, another project's address, a free one, one in use or no address at all gets an
 // address of the pool and one Event, the same whichever it was, and nothing of the other cluster moves; a Service
@@ -116,12 +118,13 @@ func testLBClusterKeepAddress(t *testing.T) {
 	}
 
 	gw := &lbgw.Handler{Reg: store, Portal: h}
-	put := func(services ...lbgw.Service) *lbgw.Answer {
+	// send is one request of the controller: the Services it owns, and the ones it names as being deleted.
+	send := func(gone []lbgw.Gone, services ...lbgw.Service) *lbgw.Answer {
 		t.Helper()
 		if services == nil {
 			services = []lbgw.Service{}
 		}
-		raw, _ := json.Marshal(lbgw.Request{Services: services, Nodes: nodes})
+		raw, _ := json.Marshal(lbgw.Request{Services: services, Nodes: nodes, Gone: gone})
 		r := httptest.NewRequest(http.MethodPut, lbgw.StatePath, bytes.NewReader(raw))
 		r.Header.Set("Authorization", "PVEAPIToken="+lbgw.TokenID("c1")+"="+secret)
 		r.Header.Set(lbgw.ProtocolHeader, "2")
@@ -135,6 +138,10 @@ func testLBClusterKeepAddress(t *testing.T) {
 			t.Fatal(err)
 		}
 		return &ans
+	}
+	put := func(services ...lbgw.Service) *lbgw.Answer {
+		t.Helper()
+		return send(nil, services...)
 	}
 	read := func() *loadBalancer {
 		t.Helper()
@@ -493,6 +500,45 @@ func testLBClusterKeepAddress(t *testing.T) {
 	}
 	if code := release("p1", vipC); code != http.StatusNotFound {
 		t.Fatalf("a second release of the same address: %d", code)
+	}
+
+	// kubectl annotate ... proxcloud.io/lb-keep-address=true and kubectl delete at once (drill R2a-2 of
+	// v0.11.1-rc.2: 0.31 and 0.36 s apart, the address given back both times). The controller takes its turn a second
+	// after a change, so the portal never stored the Service with the annotation; the request that drops the Service
+	// names it as being deleted, with what its object says then (cmd/lb-controller sends exactly this:
+	// TestServiceAnnotatedJustBeforeItsDeleteSaysSo). That word decides, not the last stored state.
+	//
+	// The other order first, while the cluster has room for a fifth address: i was stored with the annotation, and
+	// its object has none when it is deleted. Its address is given back.
+	keepTrue := map[string]string{lbgw.OwnPrefix + lbgw.KnobKeepAddress: "true"}
+	put(g, svc("i", 99, "true", ""))
+	vipI := vipOf(converge("i ready", settled(2)), "i")
+	send([]lbgw.Gone{{UID: "i"}}, g)
+	if got := state().KeepGone; len(got) != 0 {
+		t.Fatalf("i's annotation was removed before its delete, and the state carries %v", got)
+	}
+	lb = converge("i given back", settled(1))
+	if slices.Contains(lb.Cluster.Kept, vipI) || slices.Contains(owned(), vipI) || slices.Contains(billed(), vipI) || served(vipI) {
+		t.Fatalf("i's address %s: kept %v, owned %v, floating rows %v, served %v", vipI, lb.Cluster.Kept, owned(), billed(), served(vipI))
+	}
+	// h is stored without the annotation, and named with it at its delete: kept.
+	put(g, svc("h", 98, "", ""))
+	vipH := vipOf(converge("h ready", settled(2)), "h")
+	send([]lbgw.Gone{{UID: "h", Annotations: keepTrue}}, g)
+	if got := state().KeepGone; !slices.Equal(got, []string{"h"}) {
+		t.Fatalf("h was annotated just before its delete, and the state carries %v", got)
+	}
+	lb = converge("h kept", settled(1))
+	if !slices.Contains(lb.Cluster.Kept, vipH) || len(lb.Cluster.Kept) != lbgw.MaxKeptAddresses || !slices.Contains(owned(), vipH) || served(vipH) {
+		t.Fatalf("h's address %s: kept %v, owned %v, served %v", vipH, lb.Cluster.Kept, owned(), served(vipH))
+	}
+	// The limit of five stays: the cluster keeps five now, and a Service annotated at its delete gives its back.
+	put(g, svc("j", 100, "", ""))
+	vipJ := vipOf(converge("j ready", settled(2)), "j")
+	send([]lbgw.Gone{{UID: "j", Annotations: keepTrue}}, g)
+	lb = converge("the sixth, annotated at its delete, is given back", settled(1))
+	if len(lb.Cluster.Kept) != lbgw.MaxKeptAddresses || slices.Contains(lb.Cluster.Kept, vipJ) || slices.Contains(owned(), vipJ) || slices.Contains(billed(), vipJ) {
+		t.Fatalf("j's address %s: kept %v, owned %v, floating rows %v", vipJ, lb.Cluster.Kept, owned(), billed())
 	}
 
 	// The cluster's release gives back what it kept, with the rest.

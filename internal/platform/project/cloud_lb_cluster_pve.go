@@ -207,8 +207,9 @@ func (h *Handler) lbClusterSettings(ctx context.Context, cred *lbgw.Credential, 
 // LBClusterState is the gateway's call (lbgw.Portal): services passed the gateway's own checks, nodes did not yet. It
 // refuses with no change while the project is suspended or being deleted (C3), takes the certificates it asked for
 // (lbClusterTLS), stores the state, starts a converge when there is something to converge (lbPassDue), and answers
-// each Service as the balancer has it now. Nothing is built here.
-func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, services []lbgw.Service, nodes []lbgw.Node, certs []lbgw.CertificateData) (*lbgw.Answer, error) {
+// each Service as the balancer has it now. gone are the Services the controller names as being deleted, with their
+// last word (lbClusterKeepGone). Nothing is built here.
+func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, services []lbgw.Service, nodes []lbgw.Node, certs []lbgw.CertificateData, gone []lbgw.Gone) (*lbgw.Answer, error) {
 	if h.lbGW == nil || h.sdnLock == nil || h.publicIPs == nil || h.pveFor == nil || h.pveFlavors == nil {
 		return nil, &lbgw.Refusal{Status: http.StatusServiceUnavailable, Message: "Load balancers are not configured on this portal"}
 	}
@@ -265,7 +266,7 @@ func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, ser
 		return nil, err
 	}
 	st := &lbgw.State{ID: cred.ID, Services: stored, Nodes: accepted, CertHashes: keep}
-	if st.KeepGone, err = h.lbClusterKeepGone(ctx, cred.ID, lb, stored); err != nil {
+	if st.KeepGone, err = h.lbClusterKeepGone(ctx, cred.ID, lb, stored, gone); err != nil {
 		return nil, err
 	}
 	if err := h.lbGW.PutState(ctx, st); err != nil {
@@ -298,22 +299,39 @@ func (h *Handler) LBClusterState(ctx context.Context, cred *lbgw.Credential, ser
 	return ans, nil
 }
 
-// lbClusterKeepGone is the new state's KeepGone: the Services that asked to keep their address in the last state, or
-// were carried in its KeepGone, that are not in stored and whose address the balancer lb still holds for them. A
-// Service the converge has let go of (its address is kept or given back, and the row lists it no more) leaves the
-// list with the next PUT, and one that went before the balancer had an address for it keeps none.
-func (h *Handler) lbClusterKeepGone(ctx context.Context, clusterID string, lb *loadBalancer, stored []lbgw.Service) ([]string, error) {
+// lbClusterKeepGone is the new state's KeepGone: the Services that are not in stored, that asked to keep their address
+// and whose address the balancer lb still holds for them. A Service the converge has let go of (its address is kept
+// or given back, and the row lists it no more) leaves the list with the next PUT, and one that went before the
+// balancer had an address for it keeps none.
+//
+// What a Service asked is, in this order: what the controller says of it in gone, which is the object as it reads at
+// its deletion; else what the last state had of it, in its annotations or carried in its KeepGone. The last state
+// alone is not enough: the controller takes its turn a second after a change, so a Service annotated and deleted
+// within that second was never sent with the annotation and its address was given back (drill R2a-2 of v0.11.1-rc.2,
+// twice, 0.31 and 0.36 s between kubectl annotate and kubectl delete), and one whose annotation was removed and that
+// was then deleted kept an address nobody asked to keep. A controller of before v0.11.1-rc.3 sends no gone, and its
+// Services go by the last state as they did.
+func (h *Handler) lbClusterKeepGone(ctx context.Context, clusterID string, lb *loadBalancer, stored []lbgw.Service, gone []lbgw.Gone) ([]string, error) {
 	if lb == nil || lb.Cluster == nil {
 		return nil, nil // no balancer, no address
 	}
 	last, err := h.lbGW.State(ctx, clusterID)
-	if err != nil || last == nil {
+	if err != nil {
 		return nil, err
 	}
-	asked := slices.Clone(last.KeepGone)
-	for i := range last.Services {
-		if lbgw.KeepsAddress(&last.Services[i]) {
-			asked = append(asked, last.Services[i].UID)
+	var asked []string
+	if last != nil {
+		asked = slices.Clone(last.KeepGone)
+		for i := range last.Services {
+			if lbgw.KeepsAddress(&last.Services[i]) {
+				asked = append(asked, last.Services[i].UID)
+			}
+		}
+	}
+	for _, g := range gone {
+		asked = slices.DeleteFunc(asked, func(uid string) bool { return uid == g.UID })
+		if lbgw.KeepsAddress(&lbgw.Service{Annotations: g.Annotations}) {
+			asked = append(asked, g.UID)
 		}
 	}
 	var out []string
