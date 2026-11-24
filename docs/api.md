@@ -240,7 +240,8 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
     server: a server that is down leaves in about 10 s, one that runs with the port closed is seen only by the
     ICMP error it sends, which a server under traffic rate-limits. It takes `payload` (the datagram as 2 to 256
     hexadecimal digits; random bytes when absent) and `requireReply` (boolean: up only while the server answers
-    the datagram). A UDP listener whose pool has no server to send to answers ICMP port unreachable.
+    the datagram). A UDP listener whose servers are all down answers ICMP port unreachable. A datagram for a UDP port
+    without a listener, or for a listener whose pool has no server at all, is dropped without an answer.
 - **Certificates** of a project, for its `tls` and `https` listeners (`project:cloud_resource:read` to read,
   `project:cloud_resource:manage` to change):
   - `GET /api/v1/project/{id}/certificates` and `GET .../certificates/{certId}`: `id`, `name`, `subject`, `issuer`,

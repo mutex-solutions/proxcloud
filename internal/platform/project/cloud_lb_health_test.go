@@ -51,8 +51,66 @@ func TestLBPairHealthAfterAFailover(t *testing.T) {
 	if _, apps = health(); apps[1].State != lbAppUp || apps[1].Reason != "" || apps[1].Role != "BACKUP" {
 		t.Errorf("the appliance that answers again: %+v", apps[1])
 	}
-	// One that is down for another reason stays so: only the health read's own mark is the health read's to take back.
-	lb.Appliances[1].Reason = "keepalived is fault"
+	// The pass's marks for an appliance it could not read are taken back the same way (lab finding T2-o1 of
+	// v0.11.1-rc.3: after a failover the appliance the pass started read "its VM is stopped; starting it", and the
+	// balancer DEGRADED, until the next pass, with the appliance back as the standby).
+	for _, reason := range []string{lbReasonStarting, lbReasonNoAnswer} {
+		lb.Appliances[1].State, lb.Appliances[1].Reason = lbAppDown, reason
+		if _, apps = health(); apps[1].State != lbAppUp || apps[1].Reason != "" || apps[1].Role != "BACKUP" {
+			t.Errorf("the appliance the pass marked %q, which answers and serves: %+v", reason, apps[1])
+		}
+		// Still booting: its agent does not answer yet, and the mark stays.
+		f.set("302", func(g *lbGuest) { g.agentDown = true })
+		lb.Appliances[1].State, lb.Appliances[1].Reason = lbAppDown, reason
+		if _, apps = health(); apps[1].State != lbAppDown || apps[1].Reason != reason {
+			t.Errorf("the appliance the pass marked %q, which does not answer yet: %+v", reason, apps[1])
+		}
+		// It answers and HAProxy does not run: not taken back.
+		f.set("302", func(g *lbGuest) { g.agentDown, g.haproxy = false, false })
+		if _, apps = health(); apps[1].State != lbAppDown || apps[1].Reason != reason {
+			t.Errorf("the appliance the pass marked %q, which answers and does not serve: %+v", reason, apps[1])
+		}
+		f.set("302", func(g *lbGuest) { g.haproxy = true })
+	}
+	// A pair with a UDP listener: the mark is taken back only when the UDP service serves too. An appliance that is
+	// back with HAProxy serving and its UDP unit not running does not serve what its row records, and stays down
+	// until a pass has loaded it.
+	spec, was := lb.LBSpec, lb.Appliances[1].HAProxyHash
+	lb.Listeners = append(lb.Listeners[:len(lb.Listeners):len(lb.Listeners)], pve.LBListener{Port: 53, Protocol: "udp", Pool: "dns"})
+	lb.Pools = append(lb.Pools[:len(lb.Pools):len(lb.Pools)], pve.LBPool{Name: "dns", Protocol: "udp", Algorithm: "roundrobin",
+		Members: []pve.LBMember{{ServerID: "101", Port: 53, Weight: 1, Address: "10.0.0.41"}}})
+	conf := pve.RenderLVS(lb.LBSpec, lb.VIPs)
+	if conf == "" {
+		t.Fatal("no UDP config for a balancer with a UDP listener")
+	}
+	lb.Appliances[1].HAProxyHash, lb.Appliances[1].LVSHash = lbHash(lbRender(lb)), pve.LVSHash(conf, lb.Appliances[1].TenantIface)
+	lb.Appliances[1].State, lb.Appliances[1].Reason = lbAppDown, lbReasonStarting
+	f.set("301", func(g *lbGuest) { g.lvs, g.disk[lbGuestLVSFiles[0]] = true, conf })
+	if _, apps = health(); apps[1].State != lbAppDown || apps[1].Reason != lbReasonStarting {
+		t.Errorf("the appliance the pass started, whose UDP service does not serve: %+v", apps[1])
+	}
+	f.set("302", func(g *lbGuest) { g.lvs, g.disk[lbGuestLVSFiles[0]] = true, conf })
+	if _, apps = health(); apps[1].State != lbAppUp || apps[1].Reason != "" {
+		t.Errorf("the appliance the pass started, whose UDP service serves: %+v", apps[1])
+	}
+	for _, vm := range []string{"301", "302"} {
+		f.set(vm, func(g *lbGuest) { g.lvs = false; delete(g.disk, lbGuestLVSFiles[0]) })
+	}
+	lb.LBSpec, lb.Appliances[1].HAProxyHash, lb.Appliances[1].LVSHash = spec, was, ""
+	// A change the pass loaded on its peer while it was down: it serves the config of before, its row records that
+	// config's hash, and the pass's mark stays until a pass has loaded the change on it. Taken back, it read up with
+	// no reason and the balancer ACTIVE while one appliance lacked a listener. The health read's own mark is not
+	// held by this: no pass has run since it was written.
+	lb.Appliances[1].HAProxyHash = lbHash("the config of before the change")
+	for reason, want := range map[string]string{lbReasonStarting: lbAppDown, lbReasonNoAnswer: lbAppDown, lbReasonUnreachable: lbAppUp} {
+		lb.Appliances[1].State, lb.Appliances[1].Reason = lbAppDown, reason
+		if _, apps = health(); apps[1].State != want {
+			t.Errorf("the appliance marked %q that is behind a change reads %s, want %s: %+v", reason, apps[1].State, want, apps[1])
+		}
+	}
+	lb.Appliances[1].HAProxyHash = was
+	// One that is down for another reason stays so: a finding of the pass is the pass's to take back.
+	lb.Appliances[1].State, lb.Appliances[1].Reason = lbAppDown, "keepalived is fault"
 	if _, apps = health(); apps[1].State != lbAppDown || apps[1].Reason != "keepalived is fault" {
 		t.Errorf("an appliance the pass found down: %+v", apps[1])
 	}

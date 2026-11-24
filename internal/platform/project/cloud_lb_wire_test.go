@@ -573,7 +573,8 @@ func (f *pairWire) stateRead(g *lbGuest, cmd string) lbRun {
 	for _, key := range []string{"vs/conntrack", "vs/snat_reroute", "ip_forward"} {
 		b.Write("/proc/sys/net/ipv4/"+key, "1\n")
 	}
-	b.Stub("nft", "table ip proxcloud-lb {\n\tchain lb-forward {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n")
+	b.Stub("nft", "table ip proxcloud-lb {\n\tchain lb-input {\n\t\tiifname != \"lo\" meta pkttype host meta l4proto udp ct state new counter packets 0 bytes 0 drop\n\t}\n"+
+		"\tchain lb-forward {\n\t\ttype filter hook forward priority filter; policy drop;\n\t}\n}\n")
 	exit, out, stderr := b.Run("sh", strings.TrimPrefix(cmd, "sh -c "))
 	return lbRun{exit: exit, out: strings.TrimRight(out, "\n") + certs, err: stderr}
 }
