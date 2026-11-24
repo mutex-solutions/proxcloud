@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once it serves again".** A pair whose row still reads `DEGRADED` with "its VM is stopped; starting it" or "it does
   not answer" for an appliance that is back is put right by the first health read of it (the balancer's page, a
   `GET_HEALTH` call) or by its next pass, whichever comes first; by the pass alone when the balancer was changed
-  while that appliance was down. No row gets a new field.
+  while that appliance was down, and on a pair with a UDP listener, whose row records the UDP files of
+  v0.11.1-rc.3 until the push of the next note. No row gets a new field.
 - **From v0.11.1-rc.3, a pair with a UDP listener gets one file and one reload of its UDP service on each
   appliance; every other balancer gets nothing.** This is what the fix "a UDP client that was sending before its
   listener existed is answered" does to a balancer that exists.
@@ -1095,7 +1096,7 @@ the scheduler off), by candidate:
   appliances at the first read (#454), a replace with UDP that lost 0.7 s of TCP and 0.8 s of UDP, forwarding
   never on without the table at a restart of nftables (0 of 87 samples); a change taken at once while `apt-get`
   ran, and held with "A change waits" while dpkg worked on `haproxy`, landed by the platform's own retry, never
-  `DOWN` or `ERROR` (#453), `GET_HEALTH` right at 5, 15 and 30 s after a holder's shutdown, sshd masked after a
+  `DOWN` or `ERROR` (#453), `GET_HEALTH` right at three reads in the 30 s after a holder's shutdown, sshd masked after a
   reboot, a new certificate file 0600 in every sample; annotate and delete in one command line kept the address,
   twice, the limit of five held, a rotation raised no Warning (#452); and the clean-up left nothing billed.
 - On `v0.11.1-rc.3`, the finding this candidate fixes: 2584 of 2584 datagrams of a one-socket client unanswered
@@ -1122,7 +1123,8 @@ the scheduler off), by candidate:
 
 - Those of `v0.11.1-rc.3`, `v0.11.1-rc.2` and `v0.11.1-rc.1`, below, but the ones this candidate fixes.
 - A UDP client that is caught at the upgrade stays caught until it was silent for more than 30 s; the first
-  datagrams after a listener is served can be lost for 0.6 to 0.9 s, until its first member passes its check.
+  datagrams after a listener is served can be lost until its first member passes its check (in real guests the
+  first answer came 0.6 to 0.8 s after the push that added the listener).
 - A UDP port without a listener answers no ICMP "port unreachable"; a masquerade or TCP `notrack` rule taken out
   of the loaded table by hand is not noticed, as under rc.3.
 - An appliance that was down through a change stays one change behind, and reads down "its VM is stopped;
