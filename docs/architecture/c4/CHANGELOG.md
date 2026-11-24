@@ -4,6 +4,42 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-24: a changed UDP connection limit is applied, and UDP changes are taken quicker (drill of v0.11.1-rc.2)
+
+**What changed:** no new component, container, listener, route or relation. An appliance with a UDP listener holds
+one more file, and the portal keeps one more in-memory map. The rest is inside existing code elements.
+
+- `internal/cloud/pve/lblvs.go`: `lvsDriftFn` (`lvsdrift()`: what the kernel's IPVS table holds differently from
+  `lvs.conf`, as `ipvsadm` edit arguments) is part of `lvsServingFn`, whose answer for a
+  table that holds every listener and differs is its own (2, `VRRPState.LVSDiffers`), apart from "not served" (1);
+  `lvsSetFn` (`lvsset()`) runs the edits in `lvsApply` after the reload. `lvsHave` answers what
+  each file hashes to and `PushLVS` writes the files that differ; `lvsApply` takes a push with any subset of the
+  files, sets owner and mode on the ones that stay, and rolls back only a config it replaced. `RenderLVS` writes
+  `warmup 0` beside `alpha`. `lvsFiles` gains `lvsDropIn`, `proxcloud-lvs.service.d/nftables.conf` (`PartOf`,
+  `After`, `ReloadPropagatedFrom` nftables.service), which `lvssum`, `LVSHash` and `lvsRemove` cover.
+- `internal/platform/project/cloud_lb_pair_pve.go`: `lbApplyPair` reads the appliances at once (before the pushes
+  and after) and makes HAProxy's push and the UDP push of one appliance at once; an appliance at its first install
+  keeps them in turn. An appliance whose UDP table differs from its config (`LVSDiffers`) is pushed again as one
+  with a change to take, the standby first and not past an appliance that holds a push, and reads `up` with a
+  change that waits, not `down`. `lbPlannedSwitch` (with `lbUDPMembersWait`) is the planned switch of `lbReplaceStep`: it
+  waits for the peer's UDP members before it stops keepalived.
+- `internal/platform/project/cloud_lb_cluster_pve.go`: `lbClusterConverge` leaves a mark in `Handler.lbChanged`
+  before it asks for the cluster's lock, and the holder starts the next converge when it lets go with a mark left.
+- `internal/cloud/pve/lbguesttest`: an `ipvsadm` stub that lists a table from files and records edits, and
+  `Agent.Execs`. The wire fake of `internal/platform/project` answers `lvsHave`, a planned switch's stop of
+  keepalived, and can hold a pass or make two pushes meet.
+
+**Why:** the lab drill of v0.11.1-rc.2 (reports R3 and R2a). A connection limit changed on a UDP listener never
+reached the kernel while the row read `ACTIVE` (R3-F2: keepalived 2.3.x rewrites a real server at a reload only when
+its weight changed). A change was live after 14 to 44 s against an aim of 15 s (R2a-1: five files written for one
+that differed, a random wait before a new member's first check, the UDP push behind HAProxy's reload, and a state
+stored during a converge's last pass waiting for the controller's next send). A replace moved the address to an
+appliance whose UDP table had no member yet (R3-F3). A restart of nftables.service left forwarding on without the
+product's table until the next pass (R3-o5).
+
+**Diagrams updated:** `c4-code.md`, the rows of `RenderLVS` / `Service.PushLVS` and of `Handler.lbApplyPair`. C1 to
+C3: none (no element moves).
+
 ## 2026-11-24: a load balancer takes a change while the image's package manager runs (drill of v0.11.1-rc.2)
 
 **What changed:** no new component, container, listener, route or relation. One relation gains a direction: the

@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -437,7 +438,11 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	}
 	seen := map[*lbAppliance]pve.VRRPState{} // as read before the pushes
 	started := map[*lbAppliance]string{}     // what this pass found not running and pushed again
-	for _, a := range running {
+	// The appliances are asked at once: each read is one command in one guest, and neither waits for the other's
+	// (drill R2a-1 of v0.11.1-rc.2: a pass read them one after the other, twice).
+	read := make([]*pve.VRRPState, len(running))
+	var reads sync.WaitGroup
+	for i, a := range running {
 		if a.HAProxyHash == "" && a.KeepalivedHash == "" {
 			continue
 		}
@@ -450,8 +455,16 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		if a.HAProxyHash == hhash {
 			named = certs
 		}
-		if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip, named...); err == nil {
-			seen[a] = st
+		reads.Go(func() {
+			if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip, named...); err == nil {
+				read[i] = &st
+			}
+		})
+	}
+	reads.Wait()
+	for i, a := range running {
+		if st := read[i]; st != nil {
+			seen[a] = *st
 			// The pushes below go to the standby first by what the appliance says now, not by what the row said at
 			// the pass before: the address may have moved since, and a row v0.11.1-rc.1 wrote for a pair with a UDP
 			// listener says that neither appliance holds it (drill Q1-2).
@@ -525,6 +538,14 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		// whole config. The standby comes first here too (lbPushOrder).
 		reloadHAProxy := known && a.HAProxyHash != "" && (!st.Serving || differs(st.HAProxySum, a.HAProxyHash) || st.CertFiles != "")
 		reloadLVS := known && a.LVSHash != "" && lvs != "" && (!st.LVS || differs(st.LVSSum, a.LVSHash))
+		// The UDP service serves its listeners and the kernel's table holds a figure the config has differently (a
+		// connection limit keepalived's reload left behind until v0.11.1-rc.2, a table changed by hand). That is a
+		// change the appliance has not loaded: it is pushed again as a change is, the standby first and not past
+		// an appliance that holds a push, and it is not an appliance that is down.
+		driftLVS := known && a.LVSHash != "" && lvs != "" && st.LVS && st.LVSDiffers
+		if driftLVS {
+			slog.Warn("load balancer: an appliance's UDP table is not as its configuration has it; pushing it again", "lb", lb.ID, "vm", a.ServerID)
+		}
 		if restartKeepalived || reloadHAProxy || reloadLVS {
 			slog.Warn("load balancer: an appliance does not run what its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID,
 				"keepalived", st.State, "haproxyServing", st.Serving, "haproxyFile", !differs(st.HAProxySum, a.HAProxyHash),
@@ -587,55 +608,80 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		// A config an appliance refused goes to no other one in this pass: the standby comes first (lbPushOrder), so
 		// what HAProxy does not take there never reaches the appliance that holds the address. One that does not
 		// serve at all has nothing to lose and is pushed.
-		if (hhash != a.HAProxyHash && refused == nil && !behind) || reloadHAProxy {
-			pushed[a] = true
-			wrote, err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...)
-			if wrote > 0 { // before the config, as on the appliance
-				taken(a, "certificates")
-			}
-			if err != nil {
-				if errors.Is(err, pve.ErrLBNotReady) {
-					hold(a, "haproxy", err)
-					continue
-				}
-				refuse(a, "haproxy", err)
-				continue
-			}
-			a.HAProxyHash = hhash
-			taken(a, "haproxy")
-			if reloadHAProxy {
-				started[a] = strings.TrimPrefix(started[a]+" and HAProxy", " and ")
-			}
-		}
-		// The UDP listeners, last: their firewall rules are in, and a member change reloads this service alone.
+		pushHAProxy := (hhash != a.HAProxyHash && refused == nil && !behind) || reloadHAProxy
+		// The UDP listeners: their firewall rules are in, and a member change reloads this service alone.
 		// stray: the appliance holds an LVS config the row records nothing of (a push whose answer was lost, and the
 		// listener gone before the next pass). It would keep forwarding on with nothing looking after its table.
 		stray := known && a.LVSHash == "" && st.LVSSum != "" && st.LVSSum != "-"
-		switch want := lvsWant(a); {
+		want, udp := lvsWant(a), ""
+		switch {
 		case want == "" && a.LVSHash == "" && !stray: // never had a UDP listener: nothing of it is on the appliance
 		case behind && !reloadLVS: // a change of the UDP listeners waits as every other
 		case want == "":
-			pushed[a] = true
-			if err := ps.RemoveLVS(ctx, a.Node, vmid); err != nil {
-				refuse(a, "udp", err)
-				continue
+			udp = "remove"
+		case ((want != a.LVSHash || driftLVS) && refused == nil) || reloadLVS:
+			udp = "push"
+		}
+		// HAProxy and the UDP service take their change at once on an appliance: they are two services, each with
+		// files, a check and a proof of its own, and neither apply reads or writes anything of the other's. One
+		// after the other, a UDP port added with a TCP port waited on each appliance for HAProxy's reload, which
+		// takes 4 to 5 s (drill R2a-1 of v0.11.1-rc.2: UDP answered after 33 s). The standby still comes first for
+		// each of them: both pushes of an appliance have answered before the next appliance is given anything.
+		// An appliance no HAProxy config ever reached is at its first install, where two pushes at once would
+		// start two package managers: it takes them one after the other, and no UDP listener while HAProxy is not
+		// in, as before.
+		var wrote int
+		var herr, uerr error
+		var both sync.WaitGroup
+		switch {
+		case !pushHAProxy:
+		case a.HAProxyHash == "":
+			if wrote, herr = ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...); herr != nil {
+				udp = ""
 			}
-			a.LVSHash = ""
-			taken(a, "udp")
-		case (want != a.LVSHash && refused == nil) || reloadLVS:
+		default:
+			both.Go(func() { wrote, herr = ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...) })
+		}
+		switch udp {
+		case "remove":
+			both.Go(func() { uerr = ps.RemoveLVS(ctx, a.Node, vmid) })
+		case "push":
+			both.Go(func() { uerr = ps.PushLVS(ctx, a.Node, vmid, lvs, a.TenantIface) })
+		}
+		both.Wait()
+		if pushHAProxy {
 			pushed[a] = true
-			if err := ps.PushLVS(ctx, a.Node, vmid, lvs, a.TenantIface); err != nil {
-				if errors.Is(err, pve.ErrLBNotReady) {
-					hold(a, "udp", err)
-					continue
+			if wrote > 0 { // before the config, as on the appliance
+				taken(a, "certificates")
+			}
+			switch {
+			case herr == nil:
+				a.HAProxyHash = hhash
+				taken(a, "haproxy")
+				if reloadHAProxy {
+					started[a] = strings.TrimPrefix(started[a]+" and HAProxy", " and ")
 				}
-				refuse(a, "udp", err)
-				continue
+			case errors.Is(herr, pve.ErrLBNotReady):
+				hold(a, "haproxy", herr)
+			default:
+				refuse(a, "haproxy", herr)
 			}
-			a.LVSHash = want
-			taken(a, "udp")
-			if reloadLVS {
-				started[a] = strings.TrimPrefix(started[a]+" and the UDP service", " and ")
+		}
+		if udp != "" {
+			pushed[a] = true
+			switch {
+			case uerr == nil:
+				if a.LVSHash = want; udp == "remove" {
+					a.LVSHash = ""
+				}
+				taken(a, "udp")
+				if udp == "push" && reloadLVS {
+					started[a] = strings.TrimPrefix(started[a]+" and the UDP service", " and ")
+				}
+			case udp == "push" && errors.Is(uerr, pve.ErrLBNotReady):
+				hold(a, "udp", uerr)
+			default:
+				refuse(a, "udp", uerr)
 			}
 		}
 	}
@@ -655,19 +701,31 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			lb.settled = false
 		}
 	}
-	for _, a := range running {
+	// What each appliance says now: read again after a push, which changed it, and again at once.
+	again := make([]*pve.VRRPState, len(running))
+	for i, a := range running {
+		if _, known := seen[a]; (a.State == lbAppBuilding && a.HAProxyHash == "") || (known && !pushed[a]) {
+			continue
+		}
+		vmid, _ := strconv.Atoi(a.ServerID)
+		reads.Go(func() {
+			if st, err := ps.ReadVRRPState(ctx, a.Node, vmid, vip); err == nil {
+				again[i] = &st
+			}
+		})
+	}
+	reads.Wait()
+	for i, a := range running {
 		if a.State == lbAppBuilding && a.HAProxyHash == "" {
 			continue
 		}
-		// What the appliance says now: read again after a push, which changed it.
 		st, known := seen[a]
 		if !known || pushed[a] {
-			vmid, _ := strconv.Atoi(a.ServerID)
-			var err error
-			if st, err = ps.ReadVRRPState(ctx, a.Node, vmid, vip); err != nil {
+			if again[i] == nil {
 				a.State, a.Reason = lbAppDown, "it does not answer"
 				continue
 			}
+			st = *again[i]
 		}
 		a.Role, a.HoldsVIP = st.State, st.HoldsVIP
 		if vip == "" { // a cluster's pair before its first Service, or after its last: the master holds the placeholder
@@ -684,10 +742,11 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			a.State, a.Reason = lbAppDown, "keepalived is "+strings.ToLower(st.State)
 		case a.LVSHash != "" && lvs != "" && !st.LVS:
 			a.State, a.Reason = lbAppDown, "its UDP listeners are not served"
-		case !current:
+		case !current || (a.LVSHash != "" && lvs != "" && st.LVSDiffers):
 			// It serves the config its row records and has a change still to take: that is an appliance in order,
 			// and the row says what waits and why. It read "down" until v0.11.1-rc.2, and a pair whose two
-			// appliances both waited read DOWN "No appliance answers" while it served (drill R2b-1).
+			// appliances both waited read DOWN "No appliance answers" while it served (drill R2b-1). A UDP table
+			// that still differs from the config after this pass is such a change: its push was held or waits.
 			a.State, a.Reason = lbAppUp, lbWaitsPrefix+"it is loaded at the next pass"
 			switch {
 			case held[a] != "":
@@ -1181,9 +1240,8 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 		if vm, ok := vms[old]; ok && !vm.NodeDown && pve.LBOfTags(vm.Tags) == lb.ID && vm.Status == "running" {
 			if peer := slices.IndexFunc(lb.Appliances, func(a lbAppliance) bool { return a.ServerID != old && a.State == lbAppUp }); peer >= 0 {
 				// The planned switch: the peer takes the address before this VM goes.
-				if err := ps.StopKeepalived(ctx, vm.Node, vm.VMID); err != nil {
-					slog.Warn("load balancer: planned switch", "lb", externalID, "vm", old, "err", err)
-				}
+				to := vms[lb.Appliances[peer].ServerID]
+				lbPlannedSwitch(ctx, ps, lb, vm.Node, vm.VMID, to.Node, to.VMID)
 				time.Sleep(2 * time.Second)
 			}
 		}
@@ -1235,6 +1293,50 @@ func (h *Handler) lbReplaceStep(ctx context.Context, u *user.User, es *externals
 			return "the new appliance " + app.ServerID + " did not become ready"
 		case <-time.After(lbConvergeEvery):
 		}
+	}
+}
+
+// lbUDPMembersWait is how long a planned switch waits for the appliance that takes the address to have its UDP
+// members: a first check is made at once and answers within its timeout, 5 s unless the tenant set another, and a
+// member that fails it is tried again after the interval.
+var lbUDPMembersWait = 30 * time.Second
+
+// lbPlannedSwitch makes the appliance from (node, VM) give up the address, which its peer to takes in about 0.6 s.
+// "Up" says of the peer that its UDP service holds every virtual server, not that a member is in one: keepalived
+// puts a member in the table after its first good check, so an appliance that was started a moment ago took the
+// address with an empty table (drill R3-F3 of v0.11.1-rc.2: UDP lost 2.4 s at a replace where TCP lost 0.8 s, and
+// one port had no member for 5.2 s). So the switch first waits until the peer holds every UDP member the appliance
+// that goes holds, as the kernel's table of each says. It waits lbUDPMembersWait at most, and then goes on and says
+// so in the log: the address moves to an appliance that lacks members rather than staying on a VM that is about
+// to be destroyed. A balancer without a UDP listener is asked nothing.
+func lbPlannedSwitch(ctx context.Context, ps *pve.Service, lb *loadBalancer, fromNode string, from int, toNode string, to int) {
+	if toNode != "" && pve.RenderLVS(lb.LBSpec, lb.VIPs) != "" { // a peer the VM list does not show cannot be asked
+		for start := time.Now(); ; {
+			// What the one that goes holds; if it cannot say, there is nothing to wait for.
+			old, _, err := ps.LVSHealth(ctx, fromNode, from, lb.LBSpec, lb.VIPs)
+			if err != nil {
+				break
+			}
+			now, _, nerr := ps.LVSHealth(ctx, toNode, to, lb.LBSpec, lb.VIPs) // the same spec: the same members in the same order
+			missing := 0
+			for i, m := range old {
+				if m.Status == "UP" && (nerr != nil || i >= len(now) || now[i].Status != "UP") {
+					missing++
+				}
+			}
+			if missing == 0 {
+				break
+			}
+			if time.Since(start) >= lbUDPMembersWait || ctx.Err() != nil {
+				slog.Warn("load balancer: planned switch: the appliance that takes the address still lacks UDP members the other one holds; switching all the same",
+					"lb", lb.ID, "from", from, "to", to, "missing", missing, "waited", time.Since(start).Round(time.Second).String())
+				break
+			}
+			time.Sleep(time.Second)
+		}
+	}
+	if err := ps.StopKeepalived(ctx, fromNode, from); err != nil {
+		slog.Warn("load balancer: planned switch", "lb", lb.ID, "vm", from, "err", err)
 	}
 }
 

@@ -140,7 +140,7 @@ func TestRenderLVSNoInjection(t *testing.T) {
 			SessionPersistence: &LBPersistence{Type: "source_ip", Timeout: 1 << 30}}},
 	}
 	got := RenderLVS(s, []string{"203.0.113.10"})
-	line := regexp.MustCompile(`^(instance lvs|global_defs \{|  router_id proxcloud-lvs|  lvs_flush_on_stop|\}||virtual_server 203\.0\.113\.10 53 \{|  protocol UDP|  lvs_method NAT|  lvs_sched wrr|  alpha|  delay_loop 5|  retry 2|  delay_before_retry 2|  persistence_timeout 10800|  real_server 10\.0\.0\.11 53 \{|    weight 1|    UDP_CHECK \{|      connect_timeout [25]|    \}|    PING_CHECK \{|      retry 2|      delay_before_retry 1|  \})$`)
+	line := regexp.MustCompile(`^(instance lvs|global_defs \{|  router_id proxcloud-lvs|  lvs_flush_on_stop|\}||virtual_server 203\.0\.113\.10 53 \{|  protocol UDP|  lvs_method NAT|  lvs_sched wrr|  alpha|  warmup 0|  delay_loop 5|  retry 2|  delay_before_retry 2|  persistence_timeout 10800|  real_server 10\.0\.0\.11 53 \{|    weight 1|    UDP_CHECK \{|      connect_timeout [25]|    \}|    PING_CHECK \{|      retry 2|      delay_before_retry 1|  \})$`)
 	for _, l := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
 		if !line.MatchString(l) {
 			t.Errorf("line %q is none of the renderer's own:\n%s", l, got)
@@ -360,6 +360,12 @@ func TestLVSFiles(t *testing.T) {
 		if !strings.Contains(unit, want) {
 			t.Errorf("the unit lacks %q", want)
 		}
+	}
+	// The unit goes and comes with nftables.service, by a file of its own: the unit file is the one of the release
+	// before, so no appliance restarts its UDP service to get it.
+	if got := files[lvsDropIn]; got != "[Unit]\nPartOf=nftables.service\nAfter=nftables.service\nReloadPropagatedFrom=nftables.service\n" || strings.Contains(unit, "nftables") ||
+		lvsDropIn != lvsUnit+".d/nftables.conf" {
+		t.Errorf("the drop-in %s:\n%s", lvsDropIn, got)
 	}
 	for _, f := range files {
 		if strings.Contains(f, "net0") || strings.Contains(f, "eth0") {

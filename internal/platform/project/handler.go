@@ -105,6 +105,9 @@ type Handler struct {
 	// lbPasses is the last finished pass over each cluster's balancer (cluster id -> lbPass), by which a controller's
 	// PUT that changes nothing starts no pass of its own (lbPassDue).
 	lbPasses sync.Map
+	// lbChanged marks the clusters a converge was asked for while another one held the cluster's lock
+	// (lbClusterConverge).
+	lbChanged sync.Map
 	// lbRetries holds the balancers whose apply the platform is trying again by itself (lbRetry), by key.
 	lbRetries sync.Map
 	// sandboxFor builds the sandbox service for a sandbox provider (sandbox-cluster client from

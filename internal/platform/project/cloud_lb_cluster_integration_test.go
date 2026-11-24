@@ -512,6 +512,39 @@ func TestLBClusterStateConverges(t *testing.T) {
 		return strings.Contains(f.files[len(f.files)-1], worker1+":30086 check")
 	})
 	quiet()
+	// Three changes that follow each other (drill R2a-1 of v0.11.1-rc.2: the later ones were live after up to 44 s).
+	// The third arrives while the converge is at its second pass, which is its last: the look at the stored state
+	// comes before that pass, so the third state was nobody's until the controller sent it again. Its PUT finds the
+	// lock held and leaves a mark; the converge that lets go of the lock starts the next one at once. No PUT comes
+	// after the third here, and it is applied.
+	gate1, gate2 := make(chan struct{}), make(chan struct{})
+	f.mu.Lock()
+	f.gate = gate1
+	f.mu.Unlock()
+	base = passes()
+	state(svc("a", 80, 30087))
+	until("the first change's pass in the middle of its work", func() bool { return passes() > base && lockedUntil().After(time.Now()) })
+	state(svc("a", 80, 30088)) // stored; the look after the first pass finds it
+	f.mu.Lock()
+	f.gate, f.gateOn = gate2, worker1+":30087 check" // the passes after the one that applies the first change
+	f.mu.Unlock()
+	close(gate1)
+	until("the first pass done and the second in the middle of its work", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.files[len(f.files)-1], worker1+":30087 check") && f.gated > 0
+	})
+	state(svc("a", 80, 30089)) // stored during the converge's last pass: nothing looks at the state after it
+	f.mu.Lock()
+	f.gate, f.gateOn = nil, ""
+	f.mu.Unlock()
+	close(gate2)
+	until("a state stored during a converge's last pass applied by the converge it started, with no PUT after it", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Contains(f.files[len(f.files)-1], worker1+":30089 check")
+	})
+	quiet()
 	// Once more, not until the state stands still: under a Service that keeps changing a converge still ends, so
 	// its lock is free for the next one and no pass runs without a PUT behind it.
 	stop, flapped := make(chan struct{}), make(chan struct{})

@@ -52,6 +52,11 @@ type lbGuest struct {
 	noNft    bool
 	lvs      bool
 	lvsFails string
+	// staleLimit: the connection limit the kernel's table holds on every UDP member where the config has none, as
+	// keepalived's reload left it until v0.11.1-rc.2 (drill R3-F2). 0: the table is as the config has it. A UDP
+	// apply that is taken puts it right; that the product's edit does is the real-guest test's
+	// (test/integration/lb_udp_changes_test.go).
+	staleLimit int
 	// The certificate directory (v0.11.1): its files are in disk, written by the agent as <name>.pem.new and moved in
 	// place by the install command. certMode holds what stat says of the directory or of a file that is not as a
 	// push leaves it (a file or a directory somebody opened up); nothing recorded means root's alone.
@@ -104,7 +109,7 @@ var lbGuestBind = regexp.MustCompile(`(?m)^\s*bind ([1-9][0-9.]*:[0-9]+)`)
 
 // The UDP service's files, in the order the guest sums them (pve's lvssum).
 var lbGuestLVSFiles = []string{"/etc/keepalived/lvs.conf", "/etc/proxcloud-lb/lvs.nft", "/etc/proxcloud-lb/lvs.sysctl", "/usr/local/sbin/proxcloud-lvs-net",
-	"/etc/systemd/system/proxcloud-lvs.service"}
+	"/etc/systemd/system/proxcloud-lvs.service", "/etc/systemd/system/proxcloud-lvs.service.d/nftables.conf"}
 
 // keepalived's config and its support files (pve's lbPairFiles).
 var lbGuestPairFiles = []string{"/etc/keepalived/keepalived.conf", "/usr/local/sbin/proxcloud-lb-check", "/usr/local/sbin/proxcloud-lb-notify",
@@ -226,7 +231,14 @@ type pairWire struct {
 	execs, certReads int
 	pages            int // reads of the cluster's VM list: one per apply
 	// gate, while set, holds every read of the VM list until it is closed: an apply in the middle of its work.
-	gate chan struct{}
+	// gated counts the reads it holds now. With gateOn it holds a read only once the last HAProxy config written
+	// has that text: the passes after the one that wrote it.
+	gate   chan struct{}
+	gated  int
+	gateOn string
+	// meet, for an appliance, makes its HAProxy apply wait until its UDP apply has been asked for: two pushes that
+	// are made one after the other never meet (the apply says so after 5 s and goes on).
+	meet map[string]chan struct{}
 }
 
 type lbRun struct {
@@ -287,14 +299,25 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		return lbRun{}
 	case strings.Contains(cmd, "command -v ss"): // the ready check
 		return f.readyCheck(g, cmd)
+	case strings.Contains(cmd, "rm -f $f.new; [ -f $f ] && sha256sum"): // what the UDP service's files hash to, before a push writes any
+		out := ""
+		for _, path := range append(slices.Clone(lbGuestLVSFiles[1:]), lbGuestLVSFiles[0]) { // the support files, then the config
+			delete(g.disk, path+".new")
+			out += g.sum(path) + "\n"
+		}
+		return lbRun{out: out}
 	case strings.Contains(cmd, "systemctl enable -q proxcloud-lvs"): // the UDP service's apply: check, swap, (re)load, prove
 		f.log = append(f.log, vm+" lvs reload")
+		if ch := f.meet[vm]; ch != nil {
+			close(ch)
+			delete(f.meet, vm)
+		}
 		if g.lvsFails != "" {
 			delete(g.disk, lbGuestLVSFiles[0]+".new")
 			return lbRun{exit: 1, err: g.lvsFails}
 		}
 		g.moveIn(lbGuestLVSFiles...)
-		g.lvs = true
+		g.lvs, g.staleLimit = true, 0
 		return lbRun{}
 	case strings.Contains(cmd, "systemctl disable -q --now proxcloud-lvs"): // the last UDP listener went
 		f.log = append(f.log, vm+" lvs remove")
@@ -302,6 +325,15 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 			delete(g.disk, path)
 		}
 		g.lvs = false
+		return lbRun{}
+	case cmd == "systemctl stop keepalived": // a replace's planned switch: the peer takes the address
+		f.log = append(f.log, vm+" keepalived stop")
+		g.keepalived, g.holds = false, false
+		for id, o := range f.guests {
+			if id != vm && o.keepalived {
+				o.role, o.holds = "MASTER", true
+			}
+		}
 		return lbRun{}
 	case strings.Contains(cmd, "cat /proc/net/ip_vs"):
 		return lbRun{out: g.ipvs()}
@@ -332,6 +364,15 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		}
 		return lbRun{}
 	case strings.Contains(cmd, "haproxy -c"):
+		if ch := f.meet[vm]; ch != nil {
+			f.mu.Unlock()
+			select {
+			case <-ch:
+			case <-time.After(5 * time.Second):
+				f.t.Errorf("%s: its UDP push was not asked for while its HAProxy push was at work: the two are made one after the other", vm)
+			}
+			f.mu.Lock()
+		}
 		f.log = append(f.log, vm+" haproxy reload")
 		// The apply saves the members' state first, when it says so and HAProxy answers; no answer, no file.
 		if strings.Contains(cmd, "show servers state") {
@@ -461,9 +502,13 @@ func (f *pairWire) stateRead(g *lbGuest, cmd string) lbRun {
 	udp := g.lvs && g.disk[lbGuestLVSFiles[0]] != ""
 	if !lbguesttest.Available() {
 		n := map[bool]int{true: 1}
+		l := n[udp]
+		if udp && g.staleLimit > 0 {
+			l = 2
+		}
 		// The files as they are on the guest, which is not always what the product wrote last.
 		return lbRun{out: fmt.Sprintf("%s %d %d %d %s %s %s %d", role, n[g.haproxy], n[holds], n[g.serving()], lbHash(g.file),
-			g.sum("/etc/keepalived/keepalived.conf"), g.lvsSum(), n[udp]) + certs}
+			g.sum("/etc/keepalived/keepalived.conf"), g.lvsSum(), l) + certs}
 	}
 	if g.box == nil {
 		g.box = lbguesttest.New(f.t)
@@ -507,6 +552,24 @@ func (f *pairWire) stateRead(g *lbGuest, cmd string) lbRun {
 		}
 	}
 	b.Write("/proc/net/ip_vs", g.ipvs())
+	// The table as ipvsadm lists it, only where it differs from the config (no listing is no difference).
+	b.Unstub("ipvsadm")
+	b.Unstub("ipvsadm-thresholds")
+	if udp && g.staleLimit > 0 {
+		plain, thresholds, vs := "", "", ""
+		for _, line := range strings.Split(g.disk[lbGuestLVSFiles[0]], "\n") {
+			switch w := strings.Fields(line); {
+			case len(w) >= 3 && w[0] == "virtual_server":
+				vs = "UDP  " + w[1] + ":" + w[2] + " wrr\n"
+			case len(w) >= 3 && w[0] == "real_server":
+				plain += vs + "  -> " + w[1] + ":" + w[2] + " Masq 1 0 0\n"
+				thresholds += vs + fmt.Sprintf("  -> %s:%s %d 0 0 0\n", w[1], w[2], g.staleLimit)
+				vs = ""
+			}
+		}
+		b.Stub("ipvsadm", plain)
+		b.Stub("ipvsadm-thresholds", thresholds)
+	}
 	for _, key := range []string{"vs/conntrack", "vs/snat_reroute", "ip_forward"} {
 		b.Write("/proc/sys/net/ipv4/"+key, "1\n")
 	}
@@ -526,10 +589,12 @@ func (f *pairWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api2/json/cluster/resources" {
 		f.pages++
-		if gate := f.gate; gate != nil {
+		if gate := f.gate; gate != nil && (f.gateOn == "" || (len(f.files) > 0 && strings.Contains(f.files[len(f.files)-1], f.gateOn))) {
+			f.gated++
 			f.mu.Unlock()
 			<-gate
 			f.mu.Lock()
+			f.gated--
 		}
 		if f.gone || f.unseen {
 			write([]map[string]any{})

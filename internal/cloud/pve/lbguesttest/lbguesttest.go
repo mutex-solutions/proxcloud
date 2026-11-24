@@ -78,9 +78,13 @@ f="$R/stub/dpkg-$p"
 [ -e "$f" ] || { printf 'install ok installed'; exit 0; }
 head -n1 "$f" | tr -d '\n'
 [ "$(wc -l < "$f")" -le 1 ] || sed -i 1d "$f"`,
-	"ss":  `cat "$R/stub/ss" 2>/dev/null`,
-	"ip":  `cat "$R/stub/ip" 2>/dev/null`,
-	"nft": `cat "$R/stub/nft" 2>/dev/null`,
+	// The kernel's IPVS table as ipvsadm lists it: stub/ipvsadm is "ipvsadm -Ln" and stub/ipvsadm-thresholds the
+	// same with --thresholds. No file is an empty table. Every other call is an edit: it does nothing and is listed
+	// in stub/ipvsadm-calls.
+	"ipvsadm": `case " $* " in *" --thresholds "*) cat "$R/stub/ipvsadm-thresholds" 2>/dev/null ;; *" -Ln "*) cat "$R/stub/ipvsadm" 2>/dev/null ;; *) echo "$*" >> "$R/stub/ipvsadm-calls" ;; esac`,
+	"ss":      `cat "$R/stub/ss" 2>/dev/null`,
+	"ip":      `cat "$R/stub/ip" 2>/dev/null`,
+	"nft":     `cat "$R/stub/nft" 2>/dev/null`,
 	// HAProxy's master socket. stub/socat-refuses holds how many more connections it refuses first: a reload.
 	"socat": `cat >/dev/null
 n=$(cat "$R/stub/socat-refuses" 2>/dev/null || echo 0)
@@ -100,6 +104,13 @@ type Agent struct {
 	runs   []map[string]any
 	Writes []string
 	Modes  []os.FileMode
+}
+
+// Execs is how many commands the agent was asked to run.
+func (a *Agent) Execs() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.runs)
 }
 
 func (a *Agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {

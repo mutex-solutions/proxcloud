@@ -315,7 +315,11 @@ type VRRPState struct {
 	// with what it recorded: a hash in a row says the appliance runs that file only while the file is still there
 	// (spike of v0.11.1, SP-2: a config edited by hand stayed, since only "listeners are served" was asked).
 	HAProxySum, KeepalivedSum, LVSSum string
-	LVS                               bool // the UDP service runs its config (lvsServingFn)
+	LVS                               bool // the UDP service serves every listener of its config (lvsServingFn)
+	// LVSDiffers: it serves them, and the kernel's table holds a connection limit, a weight, an algorithm or a
+	// persistence timeout differently from the config (lvsdrift): a change that is not loaded, not a service that is
+	// down.
+	LVSDiffers bool
 	// CertFiles says what is wrong with the certificate files the read was asked about (lbCertFaults), "" when
 	// nothing is or nothing was asked.
 	CertFiles string
@@ -334,7 +338,7 @@ func (s *Service) ReadVRRPState(ctx context.Context, node string, vmid int, vip 
 		"s=$(cat " + lbStateFile + " 2>/dev/null); systemctl is-active -q keepalived || s=STOPPED; " +
 		// serving and lvsserving run in a subshell: their loops use variables of their own, and lvsserving's is v,
 		// which is the answer to "holds the address" here (with a UDP listener the holder read as holding nothing).
-		"worker && h=1 || h=0; " + holds + "; (serving) >/dev/null 2>&1 && c=1 || c=0; (lvsserving) >/dev/null 2>&1 && l=1 || l=0; " +
+		"worker && h=1 || h=0; " + holds + "; (serving) >/dev/null 2>&1 && c=1 || c=0; (lvsserving) >/dev/null 2>&1; case $? in 0) l=1 ;; 2) l=2 ;; *) l=0 ;; esac; " +
 		"echo \"${s:-UNKNOWN} $h $v $c $(sum " + haproxyConfig + ") $(sum /etc/keepalived/keepalived.conf) $(lvssum) $l\""
 	if len(certs) > 0 {
 		script = lbCertStateFn + script + "; certstate"
@@ -364,7 +368,7 @@ func ParseVRRPState(out string) VRRPState {
 		st.HAProxy, st.HoldsVIP, st.Serving = f[1] == "1", f[2] == "1", f[3] == "1"
 	}
 	if len(f) == 8 {
-		st.HAProxySum, st.KeepalivedSum, st.LVSSum, st.LVS = f[4], f[5], f[6], f[7] == "1"
+		st.HAProxySum, st.KeepalivedSum, st.LVSSum, st.LVS, st.LVSDiffers = f[4], f[5], f[6], f[7] == "1" || f[7] == "2", f[7] == "2"
 	}
 	if st.State == "STOP" {
 		st.State = "STOPPED"
