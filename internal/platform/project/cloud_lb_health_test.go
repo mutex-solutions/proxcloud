@@ -51,8 +51,29 @@ func TestLBPairHealthAfterAFailover(t *testing.T) {
 	if _, apps = health(); apps[1].State != lbAppUp || apps[1].Reason != "" || apps[1].Role != "BACKUP" {
 		t.Errorf("the appliance that answers again: %+v", apps[1])
 	}
-	// One that is down for another reason stays so: only the health read's own mark is the health read's to take back.
-	lb.Appliances[1].Reason = "keepalived is fault"
+	// The pass's marks for an appliance it could not read are taken back the same way (lab finding T2-o1 of
+	// v0.11.1-rc.3: after a failover the appliance the pass started read "its VM is stopped; starting it", and the
+	// balancer DEGRADED, until the next pass, with the appliance back as the standby).
+	for _, reason := range []string{lbReasonStarting, lbReasonNoAnswer} {
+		lb.Appliances[1].State, lb.Appliances[1].Reason = lbAppDown, reason
+		if _, apps = health(); apps[1].State != lbAppUp || apps[1].Reason != "" || apps[1].Role != "BACKUP" {
+			t.Errorf("the appliance the pass marked %q, which answers and serves: %+v", reason, apps[1])
+		}
+		// Still booting: its agent does not answer yet, and the mark stays.
+		f.set("302", func(g *lbGuest) { g.agentDown = true })
+		lb.Appliances[1].State, lb.Appliances[1].Reason = lbAppDown, reason
+		if _, apps = health(); apps[1].State != lbAppDown || apps[1].Reason != reason {
+			t.Errorf("the appliance the pass marked %q, which does not answer yet: %+v", reason, apps[1])
+		}
+		// It answers and HAProxy does not run: not taken back.
+		f.set("302", func(g *lbGuest) { g.agentDown, g.haproxy = false, false })
+		if _, apps = health(); apps[1].State != lbAppDown || apps[1].Reason != reason {
+			t.Errorf("the appliance the pass marked %q, which answers and does not serve: %+v", reason, apps[1])
+		}
+		f.set("302", func(g *lbGuest) { g.haproxy = true })
+	}
+	// One that is down for another reason stays so: a finding of the pass is the pass's to take back.
+	lb.Appliances[1].State, lb.Appliances[1].Reason = lbAppDown, "keepalived is fault"
 	if _, apps = health(); apps[1].State != lbAppDown || apps[1].Reason != "keepalived is fault" {
 		t.Errorf("an appliance the pass found down: %+v", apps[1])
 	}

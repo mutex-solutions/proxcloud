@@ -4,6 +4,23 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-25: the health read takes back the pass's marks for an appliance it could not read (lab drill of v0.11.1-rc.3)
+
+**What changed:** no new component, container, listener, route, relation or row field. Inside one code element.
+
+- `internal/platform/project/cloud_lb_pair_pve.go`: `lbUnreachable` now names three reasons, the health read's
+  "it cannot be reached" and the pass's "its VM is stopped; starting it" and "it does not answer"
+  (`lbReasonStarting`, `lbReasonNoAnswer`). `lbPairHealth` and `lbCorrectRoles` take any of them back, in the answer
+  and in the row, when the read reaches the appliance and finds HAProxy serving, keepalived master or backup and,
+  with a UDP listener, the UDP service serving.
+
+**Why:** observation T2-o1 of the lab drill of v0.11.1-rc.3. After a failover the appliance the pass had to start
+read `down` "its VM is stopped; starting it" and the balancer `DEGRADED` until the next pass after it was back, which
+on a tenant's own pair is the next services sync. None of the three reasons says anything of what the appliance
+runs, so the read that sees it serve can take them back; a reason the pass found stays the pass's.
+
+**Diagrams updated:** `c4-code.md`, the row of `Handler.lbPairHealth` / `lbCorrectRoles`. C1 to C3 are unchanged.
+
 ## 2026-11-25: a UDP client that was sending before its listener existed is answered (lab drill of v0.11.1-rc.3)
 
 **What changed:** no new component, container, listener, route or relation, and no new file on an appliance. The

@@ -210,6 +210,41 @@ func TestLBPairApplyOrderAndStatus(t *testing.T) {
 	if status, err := h.pveLBApply(ctx, es, proj, "lb-abc"); err != nil || status != lbStatusActive {
 		t.Fatalf("the pass after the appliances are back: %s %v", status, err)
 	}
+	// A failover a pass meets (lab finding T2-o1 of v0.11.1-rc.3): the holder's VM is stopped, the pass starts it and
+	// writes "its VM is stopped; starting it". The appliance comes back as the standby and no pass runs: the health
+	// read that reaches it and finds it serving takes the pass's mark back, in the answer and in the row. Until
+	// then the row read DEGRADED with the pair whole.
+	f.set("302", func(g *lbGuest) { g.stopped = true })
+	f.set("301", func(g *lbGuest) { g.role, g.holds = "MASTER", true })
+	if status, err := h.pveLBApply(ctx, es, proj, "lb-abc"); err != nil || status != lbStatusDegraded {
+		t.Fatalf("the pass that meets a stopped appliance: %s %v", status, err)
+	}
+	saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
+	if got, _ = lbOfRow(saved); got.Appliances[1].Reason != lbReasonStarting || !strings.Contains(got.StatusMessage, "appliance 302: "+lbReasonStarting) {
+		t.Fatalf("the row after that pass: %s %q %+v", got.Status, got.StatusMessage, got.Appliances)
+	}
+	f.mu.Lock()
+	started := !f.guests["302"].stopped
+	f.mu.Unlock()
+	if !started {
+		t.Fatal("the pass did not start the stopped appliance")
+	}
+	f.set("302", func(g *lbGuest) { g.role, g.holds = "BACKUP", false })
+	if health, herr = h.lbPairHealth(ctx, es, proj, got); herr != nil {
+		t.Fatal(herr)
+	}
+	if apps := health["appliances"].([]lbAppliance); apps[1].State != lbAppUp || apps[1].Reason != "" || apps[1].Role != "BACKUP" {
+		t.Fatalf("GET_HEALTH once the appliance the pass started is back lists %+v", apps)
+	}
+	saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
+	if got, _ = lbOfRow(saved); got.Appliances[1].State != lbAppUp || got.Appliances[1].Reason != "" || got.Status != lbStatusActive || got.StatusMessage != "" {
+		t.Fatalf("the row once the appliance the pass started is back: %s %q %+v", got.Status, got.StatusMessage, got.Appliances)
+	}
+	f.set("302", func(g *lbGuest) { g.role, g.holds = "MASTER", true })
+	f.set("301", func(g *lbGuest) { g.role, g.holds = "BACKUP", false })
+	if status, err := h.pveLBApply(ctx, es, proj, "lb-abc"); err != nil || status != lbStatusActive {
+		t.Fatalf("the pass after the started appliance is back: %s %v", status, err)
+	}
 	f.mu.Lock()
 	writes = len(f.log)
 	f.mu.Unlock()

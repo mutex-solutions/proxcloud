@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **From v0.11.1-rc.3: nothing is pushed or reloaded because of the fix "an appliance the platform started reads up
+  once it serves again".** A pair whose row still reads `DEGRADED` with "its VM is stopped; starting it" or "it does
+  not answer" for an appliance that is back is put right by the first health read of it (the balancer's page, a
+  `GET_HEALTH` call) or by its next pass, whichever comes first. No row gets a new field.
 - **From v0.11.1-rc.3, a pair with a UDP listener gets one file and one reload of its UDP service on each
   appliance; every other balancer gets nothing.** This is what the fix "a UDP client that was sending before its
   listener existed is answered" does to a balancer that exists.
@@ -592,6 +596,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An appliance the platform started reads up once it serves again.** After a failover, the appliance whose VM
+  was stopped and which the platform started read `down` "its VM is stopped; starting it", and the balancer
+  `DEGRADED`, until the next pass after it was back: on a tenant's own pair the next services sync, long after the
+  appliance served again as the standby (lab drill of v0.11.1-rc.3, observation T2-o1). The health read already
+  took back its own mark "it cannot be reached" when it reached the appliance again; it now takes back the pass's
+  two marks for an appliance it could not read as well ("its VM is stopped; starting it", "it does not answer"),
+  in its answer and in the row, when the appliance answers, HAProxy serves its configuration, keepalived is master
+  or backup, and, on a pair with a UDP listener, the UDP service serves. That last condition is new for "it cannot
+  be reached" too. An appliance that is down for a reason the pass found (HAProxy not running, keepalived in
+  fault, UDP listeners not served) stays so until a pass says otherwise.
 - **A UDP client that was sending before its listener existed is answered.** On an appliance pair a UDP client
   that was already sending from one source port when the listener for its port was added got no answer for as long
   as it kept sending (lab drill of v0.11.1-rc.3, finding T2-F1: 0 of 2584 datagrams in the 8 minutes after the
