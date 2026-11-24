@@ -563,7 +563,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   six failovers on the lab): it kept the row's role for an appliance it could not read and asked the first listed
   holder. It now reads each appliance's role at the call, lists an appliance that cannot be read as `down`, "it
   cannot be reached", asks the appliance that holds the address now, and corrects the row's roles by the same
-  read when they differ.
+  read when they differ. "It cannot be reached" in the row is that read's own mark: a later `GET_HEALTH` that
+  reaches the appliance and finds it serving takes it back, so a tenant's own pair does not read it until the next
+  services sync after an appliance's reboot. A `GET_HEALTH` that reaches no appliance at all lists them as that
+  and leaves the row as it is: one call Proxmox or the guest agents did not answer does not make a pair that
+  serves read `DOWN`.
 - **sshd stays off on an appliance after a reboot.** The units were disabled, and on the Ubuntu image cloud-init
   starts `ssh.service` at every boot all the same: sshd listened from the reboot until the next HAProxy reload
   (about 18 min on the lab), behind the VM firewall and with no authorized key. `ssh.service` and `ssh.socket` are now

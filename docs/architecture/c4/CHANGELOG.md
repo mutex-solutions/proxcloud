@@ -21,7 +21,9 @@ health read of a pair may now write the balancer's row. The rest is inside exist
   and the appliances after it wait (`lbHoldWindow`, `loadBalancer.HeldSince`); an appliance that serves its recorded
   config and waits for a change is `up` with a reason (`lbAppWaits`); `lbPairStatus` says what waits; one log line
   per push. `lbRetry` (with `Handler.lbRetries`) is the platform's own retry, started by `pveLBApply` and by
-  `lbClusterConverge`. `lbPairHealth` reads the roles at the call and `lbCorrectRoles` writes them into the row.
+  `lbClusterConverge`. `lbPairHealth` reads the roles at the call and `lbCorrectRoles` writes them into the row; a
+  later read that reaches an appliance marked "it cannot be reached" takes the mark back (`lbUnreachable`), and a
+  read that reaches no appliance writes nothing.
 - `internal/platform/project/cloud_lb_cluster_pve.go` (`lbClusterApply`): `lbClusterSvc.Served`, a digest of each
   Service as the holder last served it, keeps a Service ready while the holder waits for another change.
 - `internal/cloud/pve/lbguesttest`: the stubs answer `pgrep` and `dpkg-query` from files, and the agent keeps the
