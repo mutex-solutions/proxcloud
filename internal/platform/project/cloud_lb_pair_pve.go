@@ -957,6 +957,17 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 	// appliance was listed as the master beside the real one, and it was the one asked for the members: 409 "did
 	// not answer" (drill R2b-o2 and R3: six of six failovers, for about 70 s each, until the next pass).
 	var apps []seen
+	// current: the appliance's row records the files of the balancer's config as it is now. One that was down while
+	// a pass loaded a change on its peer is behind it until a pass loads it too, and the pass's mark on it is not
+	// taken back: it would read up, and the balancer ACTIVE, with no word of the change it lacks.
+	hhash, lvs := lbHash(lbRender(lb)), pve.RenderLVS(lb.LBSpec, lb.VIPs)
+	current := func(a lbAppliance) bool {
+		want := ""
+		if lvs != "" {
+			want = pve.LVSHash(lvs, a.TenantIface)
+		}
+		return a.HAProxyHash == hhash && a.LVSHash == want
+	}
 	for _, a := range lb.Appliances {
 		vm, err := ps.ResolveVM(ctx, proj.ID, a.ServerID)
 		if err != nil || vm == nil || vm.NodeDown || pve.LBOfTags(vm.Tags) != lb.ID {
@@ -980,9 +991,10 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 		switch {
 		case a.State == lbAppUp && !st.Serving: // the row's word is older than this read
 			a.State, a.Reason = lbAppDown, "HAProxy does not serve its configuration"
-		case lbUnreachable(a) && st.HAProxy && st.Serving && (st.State == "MASTER" || st.State == "BACKUP") && (a.LVSHash == "" || st.LVS):
+		case lbUnreachable(a) && (a.Reason == lbReasonUnreachable || current(a)) && st.HAProxy && st.Serving && (st.State == "MASTER" || st.State == "BACKUP") && (a.LVSHash == "" || st.LVS):
 			// A health read marked it (lbCorrectRoles), or a pass that could not read it, and this read reaches it
-			// and finds it serving what its row records: the mark says only "not read", and is taken back.
+			// and finds it serving what its row records: the mark says only "not read", and is taken back. A pass's
+			// mark stays on an appliance that is behind a change (current): the pass that loads it says it is up.
 			a.State, a.Reason = lbAppUp, ""
 		}
 		apps = append(apps, seen{app: a, vm: vm, read: true})
@@ -1040,8 +1052,9 @@ const (
 
 // lbUnreachable says that an appliance is down in the row for no other reason than that it could not be read: by a
 // health read, or by a pass. None of the three reasons says anything of what the appliance runs, so a health read
-// that reaches it and finds it serving takes the mark back (lbPairHealth). Every other reason is a finding of the
-// pass, and stays the pass's.
+// that reaches it and finds it serving takes the mark back (lbPairHealth), unless a pass marked it and loaded a
+// change on its peer since: that appliance is behind the change and waits for a pass. Every other reason is a
+// finding of the pass, and stays the pass's.
 func lbUnreachable(a lbAppliance) bool {
 	return a.State == lbAppDown && (a.Reason == lbReasonUnreachable || a.Reason == lbReasonStarting || a.Reason == lbReasonNoAnswer)
 }

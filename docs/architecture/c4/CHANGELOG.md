@@ -12,7 +12,9 @@ and rules: [README.md](README.md#maintenance-rule).
   "it cannot be reached" and the pass's "its VM is stopped; starting it" and "it does not answer"
   (`lbReasonStarting`, `lbReasonNoAnswer`). `lbPairHealth` and `lbCorrectRoles` take any of them back, in the answer
   and in the row, when the read reaches the appliance and finds HAProxy serving, keepalived master or backup and,
-  with a UDP listener, the UDP service serving.
+  with a UDP listener, the UDP service serving. A pass's mark stays on an appliance whose row records other files
+  than those of the balancer's configuration as it is now (`current` in `lbPairHealth`): it was down through a
+  change, and a pass loads it.
 
 **Why:** observation T2-o1 of the lab drill of v0.11.1-rc.3. After a failover the appliance the pass had to start
 read `down` "its VM is stopped; starting it" and the balancer `DEGRADED` until the next pass after it was back, which
