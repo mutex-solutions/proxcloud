@@ -44,6 +44,19 @@ func TestLBPairHealthAfterAFailover(t *testing.T) {
 	if _, apps = health(); apps[1].Role != "" || apps[1].HoldsVIP || apps[1].State != lbAppDown {
 		t.Errorf("the appliance whose agent is gone: %+v", apps[1])
 	}
+	// A row a health read marked (lbCorrectRoles), and the appliance answers again, as the standby: it is listed as
+	// what it is now, not as "cannot be reached" until the next pass.
+	lb.Appliances[1].Role, lb.Appliances[1].HoldsVIP, lb.Appliances[1].State, lb.Appliances[1].Reason = "", false, lbAppDown, lbReasonUnreachable
+	f.set("302", func(g *lbGuest) { g.agentDown, g.role, g.holds = false, "BACKUP", false })
+	if _, apps = health(); apps[1].State != lbAppUp || apps[1].Reason != "" || apps[1].Role != "BACKUP" {
+		t.Errorf("the appliance that answers again: %+v", apps[1])
+	}
+	// One that is down for another reason stays so: only the health read's own mark is the health read's to take back.
+	lb.Appliances[1].Reason = "keepalived is fault"
+	if _, apps = health(); apps[1].State != lbAppDown || apps[1].Reason != "keepalived is fault" {
+		t.Errorf("an appliance the pass found down: %+v", apps[1])
+	}
+	lb.Appliances[1].State, lb.Appliances[1].Reason = lbAppUp, ""
 	// The seconds of a failover: nobody holds the address yet. An appliance that answers is asked all the same.
 	f.set("301", func(g *lbGuest) { g.role, g.holds = "BACKUP", false })
 	if out, apps = health(); apps[0].HoldsVIP || out["result"] == nil {

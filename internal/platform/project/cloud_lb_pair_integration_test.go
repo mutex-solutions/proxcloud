@@ -176,7 +176,36 @@ func TestLBPairApplyOrderAndStatus(t *testing.T) {
 	if again, _ := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc"); !again.UpdatedAt.Equal(*stamp) {
 		t.Fatal("a health read that found the row right wrote it again")
 	}
-	f.set("302", func(g *lbGuest) { g.stopped = false })
+	// A read that reaches no appliance knows nothing of the pair (Proxmox's API, or both guest agents, did not answer
+	// that one call): the answer lists them as that, and the row is not written. Written, a pair that serves read
+	// DOWN "No appliance answers" from one failed call until its next pass.
+	f.set("301", func(g *lbGuest) { g.agentDown = true })
+	if health, herr = h.lbPairHealth(ctx, es, proj, got); herr != nil {
+		t.Fatal(herr)
+	}
+	if apps := health["appliances"].([]lbAppliance); apps[0].State != lbAppDown || apps[0].Reason != lbReasonUnreachable || apps[0].Role != "" {
+		t.Fatalf("GET_HEALTH that reaches no appliance lists %+v", apps)
+	}
+	if again, _ := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc"); !again.UpdatedAt.Equal(*stamp) {
+		row, _ := lbOfRow(again)
+		t.Fatalf("a health read that reached no appliance wrote the row: %s %q", row.Status, row.StatusMessage)
+	}
+	// The stopped appliance is back, as the standby, and no pass has run (a tenant's own pair has none before the next
+	// services sync): the health read that reaches it takes its own mark back, in the answer and in the row.
+	f.set("301", func(g *lbGuest) { g.agentDown = false })
+	f.set("302", func(g *lbGuest) { g.stopped, g.role, g.holds = false, "BACKUP", false })
+	if health, herr = h.lbPairHealth(ctx, es, proj, got); herr != nil {
+		t.Fatal(herr)
+	}
+	if apps := health["appliances"].([]lbAppliance); apps[1].State != lbAppUp || apps[1].Reason != "" || apps[1].Role != "BACKUP" || !apps[0].HoldsVIP {
+		t.Fatalf("GET_HEALTH once the appliance is back lists %+v", apps)
+	}
+	saved, _ = h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")
+	if got, _ = lbOfRow(saved); got.Appliances[1].State != lbAppUp || got.Appliances[1].Reason != "" || got.Appliances[1].Role != "BACKUP" ||
+		got.Status != lbStatusActive || got.StatusMessage != "" {
+		t.Fatalf("the row once the appliance is back: %s %q %+v", got.Status, got.StatusMessage, got.Appliances)
+	}
+	f.set("302", func(g *lbGuest) { g.role, g.holds = "MASTER", true })
 	f.set("301", func(g *lbGuest) { g.role, g.holds = "BACKUP", false })
 	if status, err := h.pveLBApply(ctx, es, proj, "lb-abc"); err != nil || status != lbStatusActive {
 		t.Fatalf("the pass after the appliances are back: %s %v", status, err)

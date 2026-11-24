@@ -917,8 +917,13 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 			continue
 		}
 		a.Role, a.HoldsVIP = st.State, st.HoldsVIP || (vip == "" && st.State == "MASTER")
-		if a.State == lbAppUp && !st.Serving { // the row's word is older than this read
+		switch {
+		case a.State == lbAppUp && !st.Serving: // the row's word is older than this read
 			a.State, a.Reason = lbAppDown, "HAProxy does not serve its configuration"
+		case a.State == lbAppDown && a.Reason == lbReasonUnreachable && st.HAProxy && st.Serving && (st.State == "MASTER" || st.State == "BACKUP"):
+			// A health read marked it (lbCorrectRoles), and this one reaches it and finds it serving: the mark is the
+			// health read's to take back. It was up before the mark, which is all the mark replaced.
+			a.State, a.Reason = lbAppUp, ""
 		}
 		apps = append(apps, seen{app: a, vm: vm, read: true})
 	}
@@ -928,7 +933,12 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 		list = append(list, s.app)
 	}
 	out["appliances"] = list
-	h.lbCorrectRoles(ctx, es, lb, list)
+	// A read that reached no appliance knows nothing of the pair (Proxmox's API or both guest agents did not answer
+	// this call): the answer lists them as that, and the row is left to the pass. Written, a pair that serves would
+	// read DOWN from one failed call until its next pass.
+	if slices.ContainsFunc(apps, func(s seen) bool { return s.read }) {
+		h.lbCorrectRoles(ctx, es, lb, list)
+	}
 	// The members are asked of the appliance that holds the address now. While none does (the seconds of a
 	// failover), any appliance that answered says the same of them: both run the same config and the same checks.
 	ask := slices.IndexFunc(apps, func(s seen) bool { return s.read && s.app.HoldsVIP && s.app.HAProxyHash != "" })
@@ -962,16 +972,25 @@ func (h *Handler) lbPairHealth(ctx context.Context, es *externalservice.External
 // lbReasonUnreachable is the reason of an appliance a health read could not reach.
 const lbReasonUnreachable = "it cannot be reached"
 
+// lbUnreachable says that an appliance carries the health read's mark.
+func lbUnreachable(a lbAppliance) bool {
+	return a.State == lbAppDown && a.Reason == lbReasonUnreachable
+}
+
 // lbCorrectRoles writes into the row what a health read just saw of the appliances' roles, when the row says
 // otherwise: who holds the address, and an appliance that cannot be reached. The row had it right only from the next
 // pass on, about 70 s after a failover on a cluster's pair (drill R2b-o2). Only that is written, and the status the
 // appliances add up to: what an appliance runs is the pass's to say. A balancer that is being changed is left to the
 // change, which reads the appliances itself.
+//
+// "It cannot be reached" is the health read's own mark, and a later read that reaches the appliance takes it back
+// (lbPairHealth): a tenant's own pair has no pass before the next services sync, and would read "cannot be reached"
+// for an appliance that came back minutes ago.
 func (h *Handler) lbCorrectRoles(ctx context.Context, es *externalservice.ExternalService, lb *loadBalancer, read []lbAppliance) {
 	differs := func(row []lbAppliance) bool {
 		for _, a := range row {
 			i := slices.IndexFunc(read, func(r lbAppliance) bool { return r.ServerID == a.ServerID })
-			if i >= 0 && (read[i].Role != a.Role || read[i].HoldsVIP != a.HoldsVIP) {
+			if i >= 0 && (read[i].Role != a.Role || read[i].HoldsVIP != a.HoldsVIP || (lbUnreachable(a) && read[i].State == lbAppUp)) {
 				return true
 			}
 		}
@@ -1001,8 +1020,11 @@ func (h *Handler) lbCorrectRoles(ctx context.Context, es *externalservice.Extern
 			continue
 		}
 		a.Role, a.HoldsVIP = read[j].Role, read[j].HoldsVIP
-		if a.State == lbAppUp && read[j].State == lbAppDown {
+		switch {
+		case a.State == lbAppUp && read[j].State == lbAppDown:
 			a.State, a.Reason = lbAppDown, read[j].Reason
+		case lbUnreachable(*a) && read[j].State == lbAppUp:
+			a.State, a.Reason = lbAppUp, ""
 		}
 	}
 	if row.Status == lbStatusActive || row.Status == lbStatusDegraded || row.Status == lbStatusDown {
