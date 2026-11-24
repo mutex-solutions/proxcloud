@@ -352,8 +352,11 @@ const (
 	// of v0.11.1-rc.2: a removed limit of 5 kept refusing new flows). A scheduler and a persistence timeout it
 	// does rewrite; they are compared all the same, so a table changed by hand reads as one.
 	//
-	// ipvsadm comes with keepalived on both images (a recommended package). Where it is absent nothing is compared
-	// and nothing set, as before this function existed. A subshell: nothing it sets reaches its caller.
+	// ipvsadm comes with keepalived on both images (a recommended package, and the product's own install brings
+	// it in the real guests of both). A subshell: nothing it sets reaches its caller.
+	// ponytail: where ipvsadm is absent nothing is compared and nothing set, as before this function existed, and
+	// a changed limit stays in the file. Name ipvsadm in lvsReady and lvsInstall if an image ever lacks it; that
+	// makes every existing appliance without it run apt once.
 	lvsDriftFn = `lvsdrift() (
   command -v ipvsadm >/dev/null 2>&1 || exit 0
   { cat ` + lvsConfig + `; echo ==; ipvsadm -Ln; echo ==; ipvsadm -Ln --thresholds; } 2>/dev/null | awk '

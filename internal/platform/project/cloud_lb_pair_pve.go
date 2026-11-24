@@ -1301,7 +1301,7 @@ var lbUDPMembersWait = 30 * time.Second
 // so in the log: the address moves to an appliance that lacks members rather than staying on a VM that is about
 // to be destroyed. A balancer without a UDP listener is asked nothing.
 func lbPlannedSwitch(ctx context.Context, ps *pve.Service, lb *loadBalancer, fromNode string, from int, toNode string, to int) {
-	if pve.RenderLVS(lb.LBSpec, lb.VIPs) != "" {
+	if toNode != "" && pve.RenderLVS(lb.LBSpec, lb.VIPs) != "" { // a peer the VM list does not show cannot be asked
 		for start := time.Now(); ; {
 			// What the one that goes holds; if it cannot say, there is nothing to wait for.
 			old, _, err := ps.LVSHealth(ctx, fromNode, from, lb.LBSpec, lb.VIPs)
