@@ -4,6 +4,39 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-24: PR #452, a deleting Service says its last word, and an address has its row at once
+
+**What changed:** one field more on an existing wire (`PUT /lb/v1/state`), within protocol 2, and when two rows are
+written. No new component, container, listener, credential or relation.
+
+- `internal/cloud/lbgw/gateway.go`: `Request.Gone` and `Gone` (a uid and annotations): the Services the controller
+  leaves out of the state because they are being deleted. `serve` decodes them apart from the state, as it does the
+  certificates, so they do not count in the state's 64 KiB (`maxGoneBody`, 16 KiB of their own; `MaxGone`, 50 a
+  request), checks each uid, drops them for a protocol 1 controller and hands them to `Portal.LBClusterState`,
+  which takes one argument more. `annotations.go`: `GoneAnnotations` names what is sent of such a Service (the
+  keep-address annotation).
+- `cmd/lb-controller`: `turn` names the owned Services that are being deleted and still held in `req.Gone`, sends a
+  request that names one whatever the compared state says, and lets go only of a Service the request named
+  (`service.said`; one beyond 50 waits a turn). `gateway.put` sends a portal that answers `400` to a request with
+  `gone` the request without it, before the step down to protocol 1 it already had. `turn` holds a `401` back
+  from the Services while it is younger than `authGrace` (`controller.refusedSince`).
+- `internal/platform/project/cloud_lb_cluster_pve.go`: `lbClusterKeepGone` reads a deleting Service's wish from
+  `gone` first and from the stored state otherwise. `lbClusterApply` saves the row after `lbClusterDesired` when
+  that changed it, before the pushes, and `lbAddressRows` (new) writes the `FLOATING_IP` row of each address the
+  balancer holds that has none.
+- `internal/platform/project/publicip_pve.go`: `FloatingIPRow` (new) is the row of one public allocation. It was the
+  body of `syncjob`'s `floatingIPProvider.List`, which now calls it, so the sync and the pass make the same row.
+
+**Why:** the lab drill of v0.11.1-rc.2. R2a-2: `kubectl annotate ... lb-keep-address=true` and `kubectl delete`
+within a second gave the address back, because the controller's one turn for both left the Service out and the
+portal read the wish from the state it had stored before. R2b-o5: a planned credential rotation put a Warning on
+every Service. R2a-o1: the cluster page's kept list and `quota-usage` showed a deleted Service's address as the
+Service's until the pass that removed it had pushed both appliances. R2a-o2: an address's `FLOATING_IP` row, which
+lists and bills it, was written only by a provider sync.
+
+**Diagrams updated:** none (no element of C1 to C4 moves). Text: [c2-containers.md](c2-containers.md) (the load
+balancer gateway's row), [c4-code.md](c4-code.md) (`lbgw.Handler`, `Handler.LBClusterState`, `controller.turn`).
+
 ## 2026-11-24: PR #449, the platform tests pull each chart once (Q1-5)
 
 **What changed:** no component, container, wire field, chart or behaviour of the product. Test support of

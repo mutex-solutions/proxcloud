@@ -907,7 +907,12 @@ call for its own cluster, and minting it again rotates it.
   without a controller), the credential is revoked first, then the appliances, the addresses with their `FLOATING_IP`
   rows, the row and the state go.
 - What the tenant pays: the two appliances are `SERVER` rows of the project with their `VOLUME` rows, billed from the
-  first Service until the cluster is deleted, and each address is a billed `FLOATING_IP`. Only the addresses are
+  first Service until the cluster is deleted, and each address is a billed `FLOATING_IP`. The pass that allocates an
+  address writes that row, billed from the allocation on, and the pass that gives the address back archives it: a
+  provider sync is not needed for either, and finds the row as it would have made it. The cluster's row says what a
+  pass decided (each Service's address, the kept addresses, the ones on their way back) before the appliances are
+  pushed, so the cluster page's kept list and `quota-usage` follow a Service's delete at the start of that pass,
+  not at its end. Only the addresses are
   checked against the quota (`floatingIps`); the appliances are not checked against the server quota. **The quota
   caps the cluster's Services**: a project's public addresses count together (its servers', its own load balancers',
   each Service's), and the quota the seed gives a provider is 5 (`deploy/seed`, `floatingIps`), so a cluster in
@@ -1148,8 +1153,15 @@ metadata:
   has no address), its address leaves both appliances and their firewall and is listed under "Kept addresses" on
   the cluster's page. A refused Service that is put right gets a kept address back only by naming it. It
   is still a public address of the project: **billed, and counted in the floating IP quota**, like the address of
-  a Service. The annotation is read as the Service's last state had it, so `kubectl annotate` followed at once by
-  `kubectl delete` keeps the address. A Service that goes before it ever had an address keeps none.
+  a Service.
+- **What counts is the annotation as the Service carries it when it goes.** For a delete that is the object as it
+  reads at the delete: the cluster's controller holds the Service by its finalizer and tells the portal what it says
+  then, so `kubectl annotate` followed at once by `kubectl delete` keeps the address, with no wait in between, and
+  removing the annotation just before the delete gives the address back. **Kept is the address the Service had**:
+  a Service that goes before the balancer had an address for it (it was still pending, or refused) keeps none, and
+  one that goes while the cluster keeps 5 already gives its address back (next point). The controller of v0.11.1
+  does this. One of v0.11.0 sends no annotation at all and keeps no address, until the cluster is moved to the
+  portal's controller ("Upgrade note for v0.11.1" below).
 - **A cluster keeps 5 addresses at most.** With 5 kept, a Service that carries the annotation gets the Warning
   `KeepAddressLimit` while it stands, and its address is given back when it goes. Release one first.
 - **A Service gets a kept address by naming it**: `spec.loadBalancerIP: 203.0.113.30`. It is taken when the
@@ -1398,7 +1410,11 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 It pins the cluster to the provider's chart version in one Application apply (refused below 0.1.17, and with the
 transition check of a chart bump), mints the credential and writes the Secret. Run again on a cluster that has a
 controller it mints a new credential (the old token stops at once; the running controller reads the new one when the
-Secret volume is updated) and sets the portal's image, keeping the cluster's mode. A gate that does not hold answers
+Secret volume is updated, which the kubelet does at its next sync of the pod, up to a minute and a half later) and
+sets the portal's image, keeping the cluster's mode. The controller's calls in between are refused (`401`, one log
+line each on both sides, and the portal's audit of a refused credential): no Service changes and none is told, the
+controller reads its token again at every turn, and only a refusal that lasts two minutes becomes the Warning
+`GatewayRefused` on the cluster's Services (a controller before v0.11.1 said it at the first refused call). A gate that does not hold answers
 `409` and names it. The image is set at create, at this action and at a chart bump (`bump-chart`, **Apply platform
 update**), never by the provider sync: a portal upgrade restarts no controller, and a cluster on an older controller
 keeps working while `/lb/v1` stays compatible. A cluster with a controller is never moved below chart 0.1.17. The

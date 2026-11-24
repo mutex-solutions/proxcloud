@@ -152,7 +152,7 @@ func testLBClusterFirstAppliance(t *testing.T) {
 	}
 	state := func(services ...lbgw.Service) {
 		t.Helper()
-		if _, err := h.LBClusterState(ctx, &cred, services, nodes, nil); err != nil {
+		if _, err := h.LBClusterState(ctx, &cred, services, nodes, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

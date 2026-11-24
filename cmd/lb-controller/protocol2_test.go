@@ -447,7 +447,7 @@ type readyPortal struct {
 	got   []lbgw.Service
 }
 
-func (p *readyPortal) LBClusterState(_ context.Context, _ *lbgw.Credential, services []lbgw.Service, _ []lbgw.Node, _ []lbgw.CertificateData) (*lbgw.Answer, error) {
+func (p *readyPortal) LBClusterState(_ context.Context, _ *lbgw.Credential, services []lbgw.Service, _ []lbgw.Node, _ []lbgw.CertificateData, gone []lbgw.Gone) (*lbgw.Answer, error) {
 	p.calls, p.got = p.calls+1, services
 	ans := &lbgw.Answer{}
 	for _, s := range services {

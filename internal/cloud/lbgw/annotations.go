@@ -167,6 +167,15 @@ func KeepsAddress(s *Service) bool {
 	return err == nil && on
 }
 
+// GoneAnnotations are the annotations of ann that say something of a Service that is being deleted, which is what
+// the controller sends of one (Gone): the wish to keep its address. Every other one is about serving it.
+func GoneAnnotations(ann map[string]string) map[string]string {
+	if v, ok := ann[OwnPrefix+KnobKeepAddress]; ok {
+		return map[string]string{OwnPrefix + KnobKeepAddress: v}
+	}
+	return nil
+}
+
 // Event is something the controller says on the Service, in the answer's order.
 type Event struct {
 	Type    string `json:"type"` // Normal | Warning
