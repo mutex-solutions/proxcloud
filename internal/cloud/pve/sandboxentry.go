@@ -83,5 +83,6 @@ func (s *Service) SandboxEntry(ctx context.Context, vmid int, entryPool, sandbox
 	if err == nil && exit == 0 && strings.HasPrefix(out, hex.EncodeToString(sum[:])) {
 		return nil
 	}
-	return s.PushHAProxy(ctx, vm.Node, vmid, config)
+	_, err = s.PushHAProxy(ctx, vm.Node, vmid, config)
+	return err
 }

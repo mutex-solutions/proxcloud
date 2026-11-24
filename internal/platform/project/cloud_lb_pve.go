@@ -622,8 +622,20 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 	if err := ps.SetLBRules(ctx, vm.Node, vm.VMID, pve.LBListenerRules(lb.Listeners, nil)); err != nil {
 		return err
 	}
-	if err := ps.PushHAProxy(ctx, vm.Node, vm.VMID, config, certs...); err != nil {
+	// The log has one line for the push: taken, or held or refused with the class of the reason. The reason itself
+	// is the guest's own words, which may quote a config: it goes into the row's message and not into the log.
+	wrote, err := ps.PushHAProxy(ctx, vm.Node, vm.VMID, config, certs...)
+	if wrote > 0 {
+		slog.Info("load balancer: push taken", "lb", lb.ID, "vm", lb.ServerID, "push", "certificates", "role", "single", "position", 1, "of", 1)
+	}
+	if err != nil {
 		held := errors.Is(err, pve.ErrLBNotReady)
+		if held {
+			slog.Warn("load balancer: push held", "lb", lb.ID, "vm", lb.ServerID, "push", "haproxy", "role", "single", "class", pve.LBHoldClass(err))
+		} else {
+			slog.Warn("load balancer: an appliance did not take a push; the reason is in the load balancer's status message", "lb", lb.ID, "vm", lb.ServerID,
+				"push", "haproxy", "role", "single", "class", pve.LBHoldClass(err))
+		}
 		switch {
 		case !held:
 			lb.Status, lb.StatusMessage = lbStatusError, err.Error()
@@ -639,6 +651,7 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 		}
 		return nil
 	}
+	slog.Info("load balancer: push taken", "lb", lb.ID, "vm", lb.ServerID, "push", "haproxy", "role", "single", "position", 1, "of", 1)
 	lb.AppliedHash, lb.Status, lb.StatusMessage = hash, lbStatusActive, ""
 	return nil
 }

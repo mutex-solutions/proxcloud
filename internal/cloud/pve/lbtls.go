@@ -316,40 +316,41 @@ func lbCertFaults(out string, certs []LBCertFile) (stale []LBCertFile, why strin
 // made and proven private, then each file the appliance does not hold as the portal would write it (missing,
 // other bytes, another mode or owner: the directory's command says what is there) under a temporary name inside
 // it, then mode, owner and the move in place. A file that is there already, byte for byte and root's alone, is not
-// written again: a write is one call through the guest agent, about 0.6 s, inside the tenant's own request.
-func (s *Service) pushCertificates(ctx context.Context, node string, vmid int, certs []LBCertFile) error {
+// written again: a write is one call through the guest agent, about 0.6 s, inside the tenant's own request. written
+// is how many files the push wrote.
+func (s *Service) pushCertificates(ctx context.Context, node string, vmid int, certs []LBCertFile) (written int, err error) {
 	if len(certs) == 0 {
-		return nil
+		return 0, nil
 	}
 	for i, c := range certs {
 		if !lbCertFileRe.MatchString(c.Name) {
-			return fmt.Errorf("certificate file %d has no valid name", i+1)
+			return 0, fmt.Errorf("certificate file %d has no valid name", i+1)
 		}
 	}
 	exit, out, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", lbCertDirScript)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if exit != 0 {
-		return fmt.Errorf("the appliance's certificate directory could not be made private, nothing was written: %s", strings.TrimSpace(stderr))
+		return 0, fmt.Errorf("the appliance's certificate directory could not be made private, nothing was written: %s", strings.TrimSpace(stderr))
 	}
 	stale, _ := lbCertFaults(out, certs)
 	if len(stale) == 0 {
-		return nil
+		return 0, nil
 	}
 	names := make([]string, len(stale))
 	for i, c := range stale {
 		if err := s.C.GuestWriteFile(ctx, node, vmid, lbCertDir+"/"+c.Name+".pem.new", c.PEM); err != nil {
-			return fmt.Errorf("write certificate file %s: %w", c.Name[:12], err)
+			return 0, fmt.Errorf("write certificate file %s: %w", c.Name[:12], err)
 		}
 		names[i] = c.Name
 	}
 	exit, _, stderr, err = s.C.GuestRun(ctx, node, vmid, guestTimeout, append([]string{"sh", "-c", lbCertInstallScript, "sh"}, names...)...)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if exit != 0 {
-		return fmt.Errorf("the certificate files could not be put in place: %s", strings.TrimSpace(stderr))
+		return 0, fmt.Errorf("the certificate files could not be put in place: %s", strings.TrimSpace(stderr))
 	}
-	return nil
+	return len(stale), nil
 }

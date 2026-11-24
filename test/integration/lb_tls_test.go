@@ -148,7 +148,7 @@ func TestLBApplianceTLS(t *testing.T) {
 			// 1. The first push, through the product's own install: the directory and the files before the config.
 			config := pve.RenderHAProxy(spec(fileA))
 			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(time.Second) {
-				err := ps.PushHAProxy(ctx, "n1", 100, config, fileA, fileB)
+				_, err := ps.PushHAProxy(ctx, "n1", 100, config, fileA, fileB)
 				if err == nil {
 					break
 				}
@@ -408,7 +408,7 @@ func TestLBApplianceTLS(t *testing.T) {
 				first  pve.LBCertFile
 			}{{rotated, fileA2}, {config, fileA}, {rotated, fileA2}} { // there, back and there again: three reloads
 				time.Sleep(300 * time.Millisecond)
-				if err := ps.PushHAProxy(ctx, "n1", 100, to.config, to.first, fileB); err != nil {
+				if _, err := ps.PushHAProxy(ctx, "n1", 100, to.config, to.first, fileB); err != nil {
 					t.Fatalf("change of certificate %d: %v", i+1, err)
 				}
 				if got := served(https, "a.example.org"); !got.Equal(map[bool]lbcerttest.Cert{true: certA2, false: certA}[to.first.Name == fileA2.Name].Leaf) {
@@ -435,12 +435,12 @@ func TestLBApplianceTLS(t *testing.T) {
 			// 6. A config HAProxy refuses: it names a certificate file that is not there. The apply answers so, the
 			// config of before is served and its certificate files are all still in place.
 			missing := spec(pve.LBCertFile{Name: strings.Repeat("f", 64)})
-			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(missing), fileB); err == nil || !strings.Contains(err.Error(), "the last config stays in use") {
+			if _, err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(missing), fileB); err == nil || !strings.Contains(err.Error(), "the last config stays in use") {
 				t.Fatalf("a config naming a missing file: %v", err)
 			}
 			// And a file that is no certificate, under a name the config has: refused the same way.
 			noise := pve.LBCertFile{Name: strings.Repeat("e", 64), PEM: "not a certificate\n"}
-			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(noise)), noise, fileB); err == nil || !strings.Contains(err.Error(), "the last config stays in use") {
+			if _, err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(noise)), noise, fileB); err == nil || !strings.Contains(err.Error(), "the last config stays in use") {
 				t.Fatalf("a file that is no certificate: %v", err)
 			}
 			if got := served(https, "a.example.org"); !got.Equal(certA2.Leaf) {
@@ -456,14 +456,14 @@ func TestLBApplianceTLS(t *testing.T) {
 			// 7. A directory someone opened up is closed again by the next push; one that is a link is refused before
 			// anything is written.
 			g.run(ctx, "chmod 0755 /etc/haproxy/certs")
-			if err := ps.PushHAProxy(ctx, "n1", 100, rotated, fileA2, fileB); err != nil {
+			if _, err := ps.PushHAProxy(ctx, "n1", 100, rotated, fileA2, fileB); err != nil {
 				t.Fatal(err)
 			}
 			if got := certDir(); got != holds(fileA2, fileB) {
 				t.Errorf("after a push onto an opened directory:\n%s", got)
 			}
 			g.run(ctx, "mv /etc/haproxy/certs /etc/haproxy/certs.real && mkdir -m 0777 /tmp/open && ln -s /tmp/open /etc/haproxy/certs")
-			if err := ps.PushHAProxy(ctx, "n1", 100, config, fileA, fileB); err == nil || !strings.Contains(err.Error(), "nothing was written") {
+			if _, err := ps.PushHAProxy(ctx, "n1", 100, config, fileA, fileB); err == nil || !strings.Contains(err.Error(), "nothing was written") {
 				t.Errorf("a certificate directory that is a link: %v", err)
 			}
 			if got := g.run(ctx, "ls /tmp/open | wc -l"); got != "0" {
@@ -546,7 +546,7 @@ func TestLBApplianceTLS(t *testing.T) {
 			// A push with nothing out of order writes the config and no certificate file (drill Q3-o2: every push
 			// wrote every file again, 0.6 s each on the lab).
 			_, mark := g.writtenSince(0)
-			if err := ps.PushHAProxy(ctx, "n1", 100, rotated, certs...); err != nil {
+			if _, err := ps.PushHAProxy(ctx, "n1", 100, rotated, certs...); err != nil {
 				t.Fatal(err)
 			}
 			if got, _ := g.writtenSince(mark); !slices.Equal(got, []string{"/etc/haproxy/haproxy.cfg.new"}) {
@@ -575,7 +575,7 @@ func TestLBApplianceTLS(t *testing.T) {
 				pairRead(c.what, c.why)
 				before := reloads()
 				_, mark := g.writtenSince(0)
-				if err := ps.PushHAProxy(ctx, "n1", 100, rotated, certs...); err != nil {
+				if _, err := ps.PushHAProxy(ctx, "n1", 100, rotated, certs...); err != nil {
 					t.Fatalf("%s: the push that follows: %v", c.what, err)
 				}
 				if got := reloads(); got != before+1 {
@@ -623,7 +623,7 @@ func TestLBApplianceTLS(t *testing.T) {
 			// 9. The last listener that ends TLS goes: so do the certificate files, after the config without them is
 			// served.
 			plain := pve.LBSpec{Listeners: []pve.LBListener{{Port: 8443, Protocol: "tcp", Pool: "echo"}}, Pools: spec(fileA).Pools[1:]}
-			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(plain)); err != nil {
+			if _, err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(plain)); err != nil {
 				t.Fatal(err)
 			}
 			if got := certDir(); got != holds() {

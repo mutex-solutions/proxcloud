@@ -101,7 +101,7 @@ func TestChangeIsTakenWhileThePackageManagerRuns(t *testing.T) {
 
 			// apt-daily runs, the packages are installed: the push is taken and served.
 			g.Stub("pgrep", "apt-get\n")
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, scriptHAProxy); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, scriptHAProxy); err != nil {
 				t.Fatalf("a push while apt runs: %v", err)
 			}
 			if read(g, haproxyConfig) != scriptHAProxy || !slices.Equal(a.Writes, []string{haproxyConfig + ".new"}) {
@@ -111,7 +111,7 @@ func TestChangeIsTakenWhileThePackageManagerRuns(t *testing.T) {
 			// nothing is written.
 			g.Write(haproxyConfig, old)
 			g.Stub("dpkg-haproxy", "install ok unpacked\n")
-			err := ps.PushPairHAProxy(ctx, "n1", 100, scriptHAProxy)
+			_, err := ps.PushPairHAProxy(ctx, "n1", 100, scriptHAProxy)
 			if !errors.Is(err, ErrLBPackageBusy) || !errors.Is(err, ErrLBNotReady) || LBHoldClass(err) != "package-manager" {
 				t.Fatalf("a push during an upgrade of haproxy: %v", err)
 			}

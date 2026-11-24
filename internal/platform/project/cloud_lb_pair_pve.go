@@ -473,7 +473,8 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	var refusedBy *lbAppliance
 	refuse := func(a *lbAppliance, what string, err error) {
 		refused, refusedBy = err, a
-		slog.Warn("load balancer: an appliance did not take a push; the reason is in the load balancer's status message", "lb", lb.ID, "vm", a.ServerID, "push", what)
+		slog.Warn("load balancer: an appliance did not take a push; the reason is in the load balancer's status message", "lb", lb.ID, "vm", a.ServerID,
+			"push", what, "role", a.Role, "class", pve.LBHoldClass(err))
 	}
 	// An appliance that cannot take a push now (pve.ErrLBNotReady: its guest agent does not answer, or dpkg is at
 	// work on one of its own packages) holds it, and the appliances after it in the order wait with it: the standby
@@ -486,7 +487,7 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 	var waitFor *lbAppliance          // the first appliance in the order that holds a push
 	since, _ := time.Parse(time.RFC3339, lb.HeldSince)
 	inWindow := lb.HeldSince == "" || time.Since(since) < lbHoldWindow()
-	hold := func(a *lbAppliance, err error) {
+	hold := func(a *lbAppliance, what string, err error) {
 		// "building" is for an appliance no config ever reached, which is its first install: nothing waits behind
 		// that one, and the pass of before v0.11.1-rc.3 is unchanged for it. What the others are, the state read
 		// below says.
@@ -497,6 +498,18 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 				waitFor = a
 			}
 		}
+		slog.Warn("load balancer: push held", "lb", lb.ID, "vm", a.ServerID, "push", what, "role", a.Role, "class", pve.LBHoldClass(err))
+	}
+	// taken is the one line the log has of a push an appliance took: which balancer, which VM, what, and where in the
+	// order (drill R1-o1: the push order could only be read from Proxmox's access log). Never a config, a key or a
+	// digest.
+	position := map[*lbAppliance]int{}
+	for i, a := range order {
+		position[a] = i + 1
+	}
+	taken := func(a *lbAppliance, what string) {
+		slog.Info("load balancer: push taken", "lb", lb.ID, "vm", a.ServerID, "push", what, "role", a.Role, "holdsAddress", a.HoldsVIP,
+			"position", position[a], "of", len(order))
 	}
 	for _, a := range order {
 		vmid, _ := strconv.Atoi(a.ServerID)
@@ -547,13 +560,14 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 				pushed[a] = true
 				if err := ps.PushKeepalived(ctx, a.Node, vmid, conf, a.PublicIface); err != nil {
 					if errors.Is(err, pve.ErrLBNotReady) {
-						hold(a, err)
+						hold(a, "keepalived", err)
 						continue
 					}
 					refuse(a, "keepalived", err)
 					continue
 				}
 				a.KeepalivedHash, a.KeepalivedConfHash = khash, lbHash(conf)
+				taken(a, "keepalived")
 				if restartKeepalived {
 					started[a] = "keepalived"
 				}
@@ -575,15 +589,20 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		// serve at all has nothing to lose and is pushed.
 		if (hhash != a.HAProxyHash && refused == nil && !behind) || reloadHAProxy {
 			pushed[a] = true
-			if err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...); err != nil {
+			wrote, err := ps.PushPairHAProxy(ctx, a.Node, vmid, haproxy, certs...)
+			if wrote > 0 { // before the config, as on the appliance
+				taken(a, "certificates")
+			}
+			if err != nil {
 				if errors.Is(err, pve.ErrLBNotReady) {
-					hold(a, err)
+					hold(a, "haproxy", err)
 					continue
 				}
 				refuse(a, "haproxy", err)
 				continue
 			}
 			a.HAProxyHash = hhash
+			taken(a, "haproxy")
 			if reloadHAProxy {
 				started[a] = strings.TrimPrefix(started[a]+" and HAProxy", " and ")
 			}
@@ -602,17 +621,19 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 				continue
 			}
 			a.LVSHash = ""
+			taken(a, "udp")
 		case (want != a.LVSHash && refused == nil) || reloadLVS:
 			pushed[a] = true
 			if err := ps.PushLVS(ctx, a.Node, vmid, lvs, a.TenantIface); err != nil {
 				if errors.Is(err, pve.ErrLBNotReady) {
-					hold(a, err)
+					hold(a, "udp", err)
 					continue
 				}
 				refuse(a, "udp", err)
 				continue
 			}
 			a.LVSHash = want
+			taken(a, "udp")
 			if reloadLVS {
 				started[a] = strings.TrimPrefix(started[a]+" and the UDP service", " and ")
 			}

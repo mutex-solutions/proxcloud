@@ -583,10 +583,17 @@ func TestLBCertificatesReachThePair(t *testing.T) {
 		}
 	}
 	wireMu.Unlock()
-	// Nor in a log line, the balancer's row or the fake's own log of what was written where.
+	// Nor in a log line, the balancer's row or the fake's own log of what was written where. The log does say that
+	// certificate files were pushed, to which appliance and before its config (R1-o1 of v0.11.1-rc.2).
 	logMu.Lock()
 	if holdsKey(logs.String()) {
 		t.Error("a log line holds the key")
+	}
+	for _, vm := range []string{"301", "302"} {
+		certs, config := strings.Index(logs.String(), `msg="load balancer: push taken" lb=abc vm=`+vm+" push=certificates"), strings.LastIndex(logs.String(), "vm="+vm+" push=haproxy")
+		if certs < 0 || config < certs {
+			t.Errorf("the log does not show the certificate files of appliance %s before its config (at %d and %d)", vm, certs, config)
+		}
 	}
 	logMu.Unlock()
 	cr, _ := h.cloud.FindByServiceIDAndExternalID(ctx, "svc", "lb-abc")

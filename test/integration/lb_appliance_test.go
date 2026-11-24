@@ -263,7 +263,7 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(200 * time.Millisecond) {
 				err := ps.PushKeepalived(ctx, "n1", 100, keepalived, "lo")
 				if err == nil {
-					err = ps.PushPairHAProxy(ctx, "n1", 100, pair)
+					_, err = ps.PushPairHAProxy(ctx, "n1", 100, pair)
 				}
 				if err == nil {
 					break
@@ -313,7 +313,7 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			}
 			// The same start, and the product's apply: it waits for the start, reloads, and listens.
 			g.run(ctx, lbPackageStart)
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
 				t.Fatalf("push during the package's start: %v", err)
 			}
 			listens("after a push during the package's start", vip+":80")
@@ -327,7 +327,7 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			if st := state(); st.HAProxy || st.Serving {
 				t.Fatalf("HAProxy stopped: %+v", st)
 			}
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
 				t.Fatalf("push with HAProxy stopped: %v", err)
 			}
 			listens("after a push with HAProxy stopped", vip+":80")
@@ -371,7 +371,7 @@ chmod 0755 /root/track-probe && : > /root/track-probe.out && systemd-run -q --un
 				if i%2 == 0 { // a changed config and an unchanged one are the same reload
 					cfg = pve.RenderHAProxyOn(spec(80, 8082), []string{vip})
 				}
-				if err := ps.PushPairHAProxy(ctx, "n1", 100, cfg); err != nil {
+				if _, err := ps.PushPairHAProxy(ctx, "n1", 100, cfg); err != nil {
 					t.Fatalf("reload %d on the master: %v", i+1, err)
 				}
 			}
@@ -402,7 +402,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			} else {
 				t.Logf("HAProxy stopped: the address was given up after %d ms", ms)
 			}
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pair); err != nil {
 				t.Fatalf("push with HAProxy stopped, after the reloads: %v", err)
 			}
 			for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(500 * time.Millisecond) {
@@ -417,7 +417,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			// 4. The proof fails: HAProxy answers the reload and does not run the pushed file (here it is started on
 			// another one). Not applied, said why, and the file in use before is back.
 			g.run(ctx, "cp /etc/haproxy/haproxy.cfg /etc/haproxy/other.cfg && echo CONFIG=/etc/haproxy/other.cfg >> /etc/default/haproxy && systemctl restart haproxy")
-			err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8081), []string{vip}))
+			_, err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8081), []string{vip}))
 			if err == nil || errors.Is(err, pve.ErrLBNotReady) || !strings.Contains(err.Error(), "does not listen on "+vip+":8081") {
 				t.Fatalf("push HAProxy does not load: %v", err)
 			}
@@ -425,7 +425,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 				t.Fatalf("the file that was not loaded stayed in place")
 			}
 			g.run(ctx, "sed -i '/^CONFIG=/d' /etc/default/haproxy && systemctl restart haproxy")
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8081), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8081), []string{vip})); err != nil {
 				t.Fatalf("push once HAProxy loads its file again: %v", err)
 			}
 			listens("after the second listener", vip+":80 "+vip+":8081")
@@ -486,7 +486,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 					t.Fatalf("the appliance does not hold the address: %+v", st)
 				}
 			}
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
 				t.Fatalf("push the pool of two members: %v", err)
 			}
 			// Both members are new to the config, so both start UP: the one that never answers gets every second
@@ -507,7 +507,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			}
 			// A reload that changes the pools before it (the listener on 80 and its pool go): the member that was
 			// DOWN is DOWN from the first moment, under a backend whose name did not move, and no request waits.
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(false), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(false), []string{vip})); err != nil {
 				t.Fatalf("reload: %v", err)
 			}
 			if got := says(members(false)); got != "201 UP, 202 DOWN" {
@@ -536,11 +536,11 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 					t.Fatalf("control: the member was never found out again: %s", says(members(false)))
 				}
 			}
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
 				t.Fatalf("reload: %v", err)
 			}
 			g.run(ctx, "test -s /var/lib/haproxy/server-state && systemctl stop haproxy")
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(members(true), []string{vip})); err != nil {
 				t.Fatalf("push with HAProxy stopped: %v", err)
 			}
 			if got := says(members(true)); got != "201 UP, 202 UP" {
@@ -549,7 +549,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			g.run(ctx, "systemctl stop lb-test-member")
 
 			// 6. A single appliance's config binds every address.
-			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
+			if _, err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
 				t.Fatalf("single appliance: %v", err)
 			}
 			listens("single appliance", "0.0.0.0:80")
@@ -566,7 +566,7 @@ echo $(( ($(date +%s%N) - t0) / 1000000 ))`)
 			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, ""); err != nil || ok || why != "HAProxy is not running" {
 				t.Fatalf("single appliance stopped: %v %q %v", ok, why, err)
 			}
-			if err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
+			if _, err := ps.PushHAProxy(ctx, "n1", 100, pve.RenderHAProxy(spec(80))); err != nil {
 				t.Fatalf("single appliance, HAProxy stopped: %v", err)
 			}
 			listens("single appliance started again", "0.0.0.0:80")
@@ -612,7 +612,7 @@ systemd-run --quiet --unit=fake-apt sh /root/named.sh apt-get && sleep 0.3 && pg
 			if code, _, _ := g.sh(ctx, "rc2", "sh", "-c", lbRC2Ready); code != 3 {
 				t.Fatalf("control: the ready check of v0.11.1-rc.2 answered %d while apt runs, want 3 (busy)", code)
 			}
-			if err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8082), []string{vip})); err != nil {
+			if _, err := ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8082), []string{vip})); err != nil {
 				t.Fatalf("a change while apt runs: %v", err)
 			}
 			listens("a change while apt runs", vip+":80 "+vip+":8082")
@@ -626,7 +626,7 @@ systemd-run --quiet --unit=fake-apt sh /root/named.sh apt-get && sleep 0.3 && pg
 sed -i '/^Package: haproxy$/,/^$/ s/^Status: install ok installed$/Status: install ok unpacked/' /var/lib/dpkg/status
 [ "$(dpkg-query -W -f='${Status}' haproxy)" = 'install ok unpacked' ]`)
 			_, before := g.writtenSince(0)
-			err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8083), []string{vip}))
+			_, err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8083), []string{vip}))
 			if !errors.Is(err, pve.ErrLBPackageBusy) || pve.LBHoldClass(err) != "package-manager" {
 				t.Fatalf("a change while dpkg is at work on haproxy: %v", err)
 			}
@@ -640,7 +640,7 @@ sed -i '/^Package: haproxy$/,/^$/ s/^Status: install ok installed$/Status: insta
 			// dpkg ends its work with the package's own postinst. Then the change is taken.
 			g.run(ctx, "systemctl stop fake-dpkg fake-apt; DEBIAN_FRONTEND=noninteractive dpkg --force-confold --configure haproxy >/dev/null 2>&1; [ \"$(dpkg-query -W -f='${Status}' haproxy)\" = 'install ok installed' ]")
 			for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(500 * time.Millisecond) {
-				if err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8083), []string{vip})); err == nil {
+				if _, err = ps.PushPairHAProxy(ctx, "n1", 100, pve.RenderHAProxyOn(spec(80, 8083), []string{vip})); err == nil {
 					break
 				}
 				if time.Now().After(deadline) {

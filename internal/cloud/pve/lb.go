@@ -850,10 +850,11 @@ var haproxyReady = lbReadyScript("haproxy socat", "haproxy.service")
 // PushHAProxy installs config on a running appliance, and HAProxy first if the image lacks it. certs are the
 // certificate files config names (lbtls.go), written before it. A guest
 // without its agent or without HAProxy yet answers ErrLBNotReady. It answers nil only when the running HAProxy
-// was seen to serve config: any other answer means not applied, and the caller records nothing.
-func (s *Service) PushHAProxy(ctx context.Context, node string, vmid int, config string, certs ...LBCertFile) error {
+// was seen to serve config: any other answer means not applied, and the caller records nothing. certsWritten is how
+// many certificate files the push wrote, for the caller's log line.
+func (s *Service) PushHAProxy(ctx context.Context, node string, vmid int, config string, certs ...LBCertFile) (certsWritten int, err error) {
 	if err := s.lbReady(ctx, node, vmid, haproxyReady, haproxyInstall); err != nil {
-		return err
+		return 0, err
 	}
 	return s.swapHAProxy(ctx, node, vmid, config, certs)
 }
@@ -881,23 +882,23 @@ func (s *Service) lbReady(ctx context.Context, node string, vmid int, ready, ins
 
 // swapHAProxy writes the certificate files config names (certs), then config, and makes HAProxy run it. The files
 // go first: the check of the new config reads them.
-func (s *Service) swapHAProxy(ctx context.Context, node string, vmid int, config string, certs []LBCertFile) error {
-	if err := s.pushCertificates(ctx, node, vmid, certs); err != nil {
-		return err
+func (s *Service) swapHAProxy(ctx context.Context, node string, vmid int, config string, certs []LBCertFile) (certsWritten int, err error) {
+	if certsWritten, err = s.pushCertificates(ctx, node, vmid, certs); err != nil {
+		return certsWritten, err
 	}
 	if err := s.C.GuestWriteFile(ctx, node, vmid, haproxyConfig+".new", config); err != nil {
-		return err
+		return certsWritten, err
 	}
 	exit, _, stderr, err := s.C.GuestRun(ctx, node, vmid, guestTimeout, "sh", "-c", haproxyReload)
 	switch {
 	case err != nil:
-		return err
+		return certsWritten, err
 	case exit == lbBusyExit: // dpkg is at work on HAProxy's own package: nothing changed, or the old file is back
-		return ErrLBPackageBusy
+		return certsWritten, ErrLBPackageBusy
 	case exit != 0:
-		return fmt.Errorf("HAProxy did not take the change, the last config stays in use: %s", strings.TrimSpace(stderr))
+		return certsWritten, fmt.Errorf("HAProxy did not take the change, the last config stays in use: %s", strings.TrimSpace(stderr))
 	}
-	return nil
+	return certsWritten, nil
 }
 
 // HAProxyServing asks a single appliance whether HAProxy runs and listens on every bind of its config, and what is

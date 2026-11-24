@@ -249,9 +249,9 @@ var lbPairReady = lbReadyScript("haproxy socat keepalived", "haproxy.service kee
 
 // PushPairHAProxy installs config on an appliance of a pair, and the pair's packages first if the image lacks them.
 // As PushHAProxy, nil means the running HAProxy was seen to serve config.
-func (s *Service) PushPairHAProxy(ctx context.Context, node string, vmid int, config string, certs ...LBCertFile) error {
+func (s *Service) PushPairHAProxy(ctx context.Context, node string, vmid int, config string, certs ...LBCertFile) (certsWritten int, err error) {
 	if err := s.lbReady(ctx, node, vmid, lbPairReady, lbPairInstall); err != nil {
-		return err
+		return 0, err
 	}
 	return s.swapHAProxy(ctx, node, vmid, config, certs)
 }
