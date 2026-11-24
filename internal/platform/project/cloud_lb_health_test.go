@@ -72,6 +72,19 @@ func TestLBPairHealthAfterAFailover(t *testing.T) {
 		}
 		f.set("302", func(g *lbGuest) { g.haproxy = true })
 	}
+	// A pair with a UDP listener (the row records the UDP files' hash): the mark is taken back only when the UDP
+	// service serves too. An appliance that is back with HAProxy serving and its UDP unit not running does not
+	// serve what its row records, and stays down until a pass has loaded it.
+	lb.Appliances[1].State, lb.Appliances[1].Reason, lb.Appliances[1].LVSHash = lbAppDown, lbReasonStarting, "recorded"
+	if _, apps = health(); apps[1].State != lbAppDown || apps[1].Reason != lbReasonStarting {
+		t.Errorf("the appliance the pass started, whose UDP service does not serve: %+v", apps[1])
+	}
+	f.set("302", func(g *lbGuest) { g.lvs, g.disk[lbGuestLVSFiles[0]] = true, "instance lvs\n" })
+	if _, apps = health(); apps[1].State != lbAppUp || apps[1].Reason != "" {
+		t.Errorf("the appliance the pass started, whose UDP service serves: %+v", apps[1])
+	}
+	f.set("302", func(g *lbGuest) { g.lvs = false; delete(g.disk, lbGuestLVSFiles[0]) })
+	lb.Appliances[1].LVSHash = ""
 	// One that is down for another reason stays so: a finding of the pass is the pass's to take back.
 	lb.Appliances[1].State, lb.Appliances[1].Reason = lbAppDown, "keepalived is fault"
 	if _, apps = health(); apps[1].State != lbAppDown || apps[1].Reason != "keepalived is fault" {
