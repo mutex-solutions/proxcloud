@@ -1,0 +1,1 @@
+{"config":[{"mac_address":"bc:24:11:aa:bb:cc","name":"eth0","subnets":[{"address":"192.0.2.5/24","gateway":"192.0.2.1","type":"static"}],"type":"physical"},{"address":["192.0.2.53"],"type":"nameserver"}],"version":1}
