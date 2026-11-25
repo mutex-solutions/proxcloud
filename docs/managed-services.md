@@ -2428,7 +2428,7 @@ provider, so clusters created after it can get the load balancer controller
 ([managed-k8s.md](managed-k8s.md)); it changes no existing cluster. No move to 0.11.0 itself has run on
 a lab: the two candidates' runs, with these pins, did.
 
-The BOM of v0.11.1 (on `main` as `0.12.0-dev` until the release names it) has the pins of 0.11.0 but
+The BOM of the release `v0.11.1` (`0.11.1`) has the pins of 0.11.0 but
 `tenantCharts.kubernetes`: cluster chart `proxmox-kamaji-cluster` 0.1.19, whose load balancer controller
 watches the tenant's Services, nodes and TLS Secrets ([managed-k8s.md](managed-k8s.md), "Upgrade note for
 v0.11.1"); the platform cluster stays on 0.1.16, and no component of the sandbox feature is in it. From
@@ -2438,7 +2438,9 @@ v0.11.1"); the platform cluster stays on 0.1.16, and no component of the sandbox
 cert-manager rows (four), from 0.10.1-rc.1 `pc-platform` 0.1.15 to 0.1.16 as well (five); from every
 BOM on Kubernetes 1.35.10 it is refused as above (`TestPreviousBOMsMoveCertManager`). The run writes
 chart 0.1.19 on the Kubernetes provider and changes no existing cluster: a cluster made earlier gets UDP
-and TLS from its Services when it is moved to the provider's chart. No move to this BOM has run on a lab.
+and TLS from its Services when it is moved to the provider's chart. The phrase is `upgrade <name> to 0.11.1`,
+and from each of its five candidates the plan has one row, the release, record only. No move to 0.11.1
+itself has run on a lab: the five candidates' runs, with these pins, did (below).
 
 The BOM of the candidate `v0.11.1-rc.1` (`0.11.1-rc.1`) is that BOM under the candidate's name: the
 rows and refusals above, phrase `upgrade <name> to 0.11.1-rc.1`. The candidate exists for the lab drill
@@ -2467,8 +2469,9 @@ pins has one row, the release, record only.
 
 The BOM of the candidate `v0.11.1-rc.5` (`0.11.1-rc.5`) has the same pins: the rows and refusals above,
 phrase `upgrade <name> to 0.11.1-rc.5`, and from 0.11.1-rc.1, 0.11.1-rc.2, 0.11.1-rc.3 and 0.11.1-rc.4 the
-release alone. No move to it has run on a lab. `main` keeps it as a previous BOM: from 0.11.1-rc.5 the plan to
-the BOM on `main` has one row, the release, record only.
+release alone. One move to it ran on a lab, from 0.11.1-rc.4 (2026-11-25, UTC): the plan had that one row, the
+run took 8.5 s and replaced no machine. Later builds keep it as a previous BOM: from 0.11.1-rc.5 the plan to a
+BOM with its pins has one row, the release, record only.
 
 "Moves" means that the Application's target is the new chart version and ArgoCD has compared the
 cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is
@@ -3335,7 +3338,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1`, that of v0.10.2 is `0.10.2`, that of v0.11.0 is `0.11.0` (`main` carries a `-dev` one between releases, now `0.12.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1`, `v0.11.0-rc.2`, `v0.11.1-rc.1`, `v0.11.1-rc.2`, `v0.11.1-rc.3`, `v0.11.1-rc.4` and `v0.11.1-rc.5` carry `0.10.0-rc.1`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.2-rc.1`, `0.11.0-rc.1`, `0.11.0-rc.2`, `0.11.1-rc.1`, `0.11.1-rc.2`, `0.11.1-rc.3`, `0.11.1-rc.4` and `0.11.1-rc.5`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well, v0.10.2 keeps that of v0.10.1 and that of the candidate `v0.10.2-rc.1` too, v0.11.0 keeps that of v0.10.2 and those of the candidates `v0.11.0-rc.1` and `v0.11.0-rc.2` as well, and `main` keeps that of v0.11.0 and those of the candidates `v0.11.1-rc.1`, `v0.11.1-rc.2`, `v0.11.1-rc.3`, `v0.11.1-rc.4` and `v0.11.1-rc.5` too). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1`, that of v0.10.2 is `0.10.2`, that of v0.11.0 is `0.11.0`, that of v0.11.1 is `0.11.1` (`main` carries a `-dev` one between releases; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1`, `v0.11.0-rc.2`, `v0.11.1-rc.1`, `v0.11.1-rc.2`, `v0.11.1-rc.3`, `v0.11.1-rc.4` and `v0.11.1-rc.5` carry `0.10.0-rc.1`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.2-rc.1`, `0.11.0-rc.1`, `0.11.0-rc.2`, `0.11.1-rc.1`, `0.11.1-rc.2`, `0.11.1-rc.3`, `0.11.1-rc.4` and `0.11.1-rc.5`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well, v0.10.2 keeps that of v0.10.1 and that of the candidate `v0.10.2-rc.1` too, v0.11.0 keeps that of v0.10.2 and those of the candidates `v0.11.0-rc.1` and `v0.11.0-rc.2` as well, and v0.11.1 keeps that of v0.11.0 and those of the candidates `v0.11.1-rc.1`, `v0.11.1-rc.2`, `v0.11.1-rc.3`, `v0.11.1-rc.4` and `v0.11.1-rc.5` too). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;

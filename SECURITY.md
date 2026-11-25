@@ -25,7 +25,7 @@ release a fix before any public disclosure.
 
 ## Supported versions
 
-ProxCloud is under active development. `v0.11.0` is the current stable release;
+ProxCloud is under active development. `v0.11.1` is the current stable release;
 its tag publishes the app images and chart. Fixes land on `main` first. There is no
 support SLA, and live installer and split/managed-service acceptance have not been
 performed for this release. Evaluate the exact tagged commit or a reviewed commit
@@ -34,17 +34,12 @@ published artifacts are pullable before relying on them.
 
 | Version / source | Status |
 |------------------|--------|
-| `v0.11.0` | Current stable release; report issues against it; fixes land on `main` for a later release; no SLA |
+| `v0.11.1` | Current stable release; report issues against it; fixes land on `main` for a later release; no SLA |
 | Current `main` | Development fixes; no stable support/SLA promise |
-| `v0.11.1-rc.5` | Release candidate of `v0.11.1`, for a lab; not for production and not supported; use `v0.11.0` |
-| `v0.11.1-rc.4` | Fourth release candidate of `v0.11.1`, replaced by `v0.11.1-rc.5` (the tests of the release found that a UDP client that keeps sending while the UDP service of an appliance stops and starts can stay unanswered while it keeps sending); not supported |
-| `v0.11.1-rc.3` | Third release candidate of `v0.11.1`, replaced by `v0.11.1-rc.4` (its lab drill found that a UDP client that already sends when the listener for its port is added gets no answer while it keeps sending); not supported |
-| `v0.11.1-rc.2` | Second release candidate of `v0.11.1`, replaced by `v0.11.1-rc.3` (its lab drill found that a change waits while the image's package manager runs on an appliance, that a changed connection limit of a UDP listener is not applied, and that an address annotated to be kept just before its delete is given back); not supported |
-| `v0.11.1-rc.1` | First release candidate of `v0.11.1`, replaced by `v0.11.1-rc.2` (its lab drill found that a load balancer pair with a UDP listener reads as degraded); not supported |
-| `v0.10.2` | Previous stable release; no stated backport support; upgrade to `v0.11.0` (see the changelog) |
-| `v0.5.0`, `v0.5.1`, `v0.5.2`, `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.8.1`, `v0.8.2`, `v0.9.0`, `v0.9.1`, `v0.10.0`, `v0.10.1` | Older stable releases; no stated backport support; upgrade to `v0.11.0` |
-| `v0.4.0` | Older stable release; no stated backport support; upgrade to `v0.11.0` (breaking API changes since `v0.4.0`, see the changelog) |
-| `v0.4.0-rc.1`, `v0.7.0-rc.1`, `v0.9.0-rc.1`, `v0.9.0-rc.2`, `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1`, `v0.11.0-rc.2` | Superseded prereleases; upgrade to `v0.11.0` (`v0.11.0-rc.1` has two faults in the load balancer pair that `v0.11.0-rc.2` and `v0.11.0` correct) |
+| `v0.11.0` | Previous stable release; no stated backport support; upgrade to `v0.11.1` (see the changelog) |
+| `v0.5.0`, `v0.5.1`, `v0.5.2`, `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.8.1`, `v0.8.2`, `v0.9.0`, `v0.9.1`, `v0.10.0`, `v0.10.1`, `v0.10.2` | Older stable releases; no stated backport support; upgrade to `v0.11.1` |
+| `v0.4.0` | Older stable release; no stated backport support; upgrade to `v0.11.1` (breaking API changes since `v0.4.0`, see the changelog) |
+| `v0.4.0-rc.1`, `v0.7.0-rc.1`, `v0.9.0-rc.1`, `v0.9.0-rc.2`, `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1`, `v0.11.0-rc.2`, `v0.11.1-rc.1`, `v0.11.1-rc.2`, `v0.11.1-rc.3`, `v0.11.1-rc.4`, `v0.11.1-rc.5` | Superseded prereleases; upgrade to `v0.11.1` (each candidate of `v0.11.1` before the fifth has a load balancer fault that the next one corrects: see the release notes of `v0.11.1`; `v0.11.1-rc.5` has the code of `v0.11.1`) |
 | Older / untagged downstream builds | No stated backport support; report the exact commit |
 
 Every tag from `v0.4.0-rc.1` to `v0.6.0` mounts the unauthenticated job triggers
