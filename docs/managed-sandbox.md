@@ -30,7 +30,11 @@ accepted at a current site. Read the current boundaries below before following h
 > **On a managed-services platform** (no installer) the sandbox machines are a node group of the platform cluster or
 > a platform-owned cluster, both on the platform network, and a platform run registers the provider. What differs
 > from this document (the VM firewall's rule set, the gates on a shared cluster, the portal's identity) is in
-> [managed-services.md](managed-services.md#the-sandbox-provider). No release offers it yet.
+> [managed-services.md](managed-services.md#sandboxes-on-the-platform), with what an operator does and what a tenant
+> sees. Offered from v0.12.0, whose platform BOM names the sandbox chart; not run on a lab yet. Section 6 below (the
+> sandbox registry) does not apply there: the platform path has no registry, its machines pull the built-in templates
+> from ghcr.io at the digests `deploy/templates/images.yaml` holds in the release's build, and those move with a
+> ProxCloud release and no other way.
 
 ## Current saved-lifecycle admission boundary
 

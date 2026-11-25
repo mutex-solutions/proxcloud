@@ -48,6 +48,11 @@ tenantCharts:                      # what the providers pin for new tenant clust
 # for pc-platform only a version TestUpgradeRollsNoMachine passed, internal/platformlife/upgrade_chart_test.go;
 # of the third-party charts only cert-manager's is read, and only for a move listed in certManagerReads there,
 # TestCertManagerMoveRenders; another third-party chart is refused whatever it lists);
+# feature: the component is rendered only for an installation whose settings ask for it, and is the one component an
+# upgrade adds to an installed platform (class added; only a chart of our own for the workload cluster, and only
+# `sandbox`: spec.sandbox with placement shared; with separate the sandbox cluster's own chart installs the same
+# chart inside pc-sandbox, by tenantCharts.kubernetes). Sandboxes also need pc-platform and tenantCharts.kubernetes
+# at 0.1.18 or newer, the first cluster chart that gives a node group a pool, an address range and DNS servers;
 # values: Helm values the component always gets.
 components:
   - name: argocd
@@ -151,7 +156,7 @@ components:
     namespace: proxcloud-system
     chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.3, digest: "sha256:e6873498e625418d9afef7c279ce386ba54b5bd033f37a76a35f7e23bc12e5ad"}
     upgradeFrom: ["0.1.2"]
-  - name: sandbox                  # rendered only for spec.sandbox placement shared; separate installs the same chart inside pc-sandbox
+  - name: sandbox                  # gVisor sandboxes on the node group `sandbox`, only with spec.sandbox (docs/managed-services.md)
     cluster: workload
     wave: 4
     namespace: sandbox-system

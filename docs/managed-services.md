@@ -59,12 +59,13 @@ what is there.
 | Node images | The BOM's two images, imported through [template updates](template-updates.md) | Templates you build first (`images/k8s-node-template.sh`) |
 | Tenant block volumes (proxmox-csi) | None on Compose: the compute provider holds no gateway token, also when the gateway listener is on (`--cluster-gateway`) | Through the CSI gateway |
 | Database backups | None: the database provider is registered without a backup store | To the installer's object store |
-| Sandboxes | No | Yes ([managed-sandbox.md](managed-sandbox.md)) |
+| Sandboxes | From v0.12.0, when the settings ask for them ([Sandboxes on the platform](#sandboxes-on-the-platform)): the built-in templates of the release, no sandbox registry, no custom templates. Not run on a lab yet | Yes ([managed-sandbox.md](managed-sandbox.md)), with the sandbox registry and custom templates |
 | Lab evidence | None yet | See [install.md](install.md) and [managed-k8s.md](managed-k8s.md) for what ran |
 
 Use the console path for a site that was not installed by the installer and wants tenant Kubernetes
 and databases without a management host. Use the installer when you need block volumes for tenant
-clusters, database backups or sandboxes, or when the site is already an installer site.
+clusters, database backups, or sandboxes with a registry of their own, custom templates and an
+egress address of their own, or when the site is already an installer site.
 
 The two paths do not meet in this release. A site whose services cluster the installer built is not
 shown or adopted by the page, and the installer does not write an installation record
@@ -906,14 +907,97 @@ run built with three goes back to one only by Remove and a new install. On a pla
 release builds one machine, 3 is refused at the save (`400 invalid_installation`), so it cannot be
 stored where every apply would then fail.
 
-**Sandboxes (`spec.sandbox`): built by the code, offered by no release yet.** The settings take
-the block, the run builds it, and every installation is still refused it: the block needs a BOM
-that names the sandbox chart, and no BOM does until the release that pins it. Until then the save
-answers `400 invalid_installation` ("the platform's BOM … has no sandbox chart") and the Check's
-`spec` row says the same. A spec without the block means "no sandboxes" on a new installation. On
-an installed platform a PUT without the block keeps the stored one, so a console from before the
+#### Sandboxes on the platform
+
+**Sandboxes (`spec.sandbox`) are offered from v0.12.0, and built only when the settings ask for
+them.** The BOM of v0.12.0 is the first that names the sandbox chart (`proxcloud-sandbox` 0.1.0,
+marked `feature: sandbox`) and a cluster chart for the platform that gives a node group a pool, an
+address range and DNS servers of its own (`proxmox-kamaji-cluster` 0.1.19). A spec without the
+block means "no sandboxes": such an installation plans and renders what it did before, and a run
+makes no pool, ACL row, token, machine, Application or provider for sandboxes. The save answers
+`400 invalid_installation` ("the platform's BOM … has no sandbox chart"), and the Check's `spec`
+row says the same, on a platform whose BOM names no sandbox chart: every platform an earlier
+release installed, until its [upgrade](#upgrade-between-boms) to this release's BOM. The answer
+names the release to upgrade to, and the page shows no Sandboxes block on such a platform. On an
+installed platform a PUT without the block keeps the stored one, so a console from before the
 block never switches sandboxes off: off is the explicit `placement: off`. It is not the field
 `layout`, which is about the two services of today and takes `shared` only.
+
+**What an operator does.** None of these steps has run on a lab
+([Not verified on a lab yet](#not-verified-on-a-lab-yet)); the release candidate's drill is the
+first run.
+
+1. **Before.** The two root scripts have run in their current form
+   ([section 3](#3-proxmox-identities)); sandboxes need no new role, no new privilege and no row
+   added by hand ([proxmox-permissions.md](proxmox-permissions.md#sandboxes-on-the-managed-platform)).
+   What they must have granted is what the Check's `sandbox` row reads: the portal token holds its
+   platform role on `/pool` with propagate (it makes pool `proxcloud-sbx`, writes the one ACL row
+   of `shared` there and the VM firewall of its machines) and `Sys.Modify` on `/` (the cluster
+   firewall's groups and IP sets); for `separate` also `User.Modify` on
+   `/access/groups/proxcloud-kube` (it mints `capmox@pve!pc-sandbox`). A site set up by an older
+   script runs both again as root; nothing else is fixed by hand. The **datacenter firewall is
+   on** (the row fails without it: no VM firewall filters a packet while it is off), and the **job
+   scheduler** runs (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`; see below what else it starts).
+2. **Addresses and a name.** One free aligned CIDR inside the platform network for the sandbox
+   machines (`nodeRange`: room for them and for one more per node while a machine is replaced),
+   one address for sandbox-proxy (`proxyAddress`), and a
+   DNS name whose wildcard `*.<domain>` resolves to that address where clients are. Where a router
+   translates the platform network, it forwards TCP 443 of a public address to `proxyAddress`.
+3. **The settings.** In step 1 of the page (a new installation, or **Settings** of a ready
+   platform), under **Sandboxes**, choose **Shared node group** or **Separate sandbox cluster**
+   and fill the machines, the range, the proxy address and the domain. A preset fills the
+   machines of a block that is switched on and never switches one on. `shared` prints what it
+   gives up, in full, and is saved only with the tick under that text
+   (**What `shared` gives up**, below).
+4. **Check and plan.** The Check adds the rows `sandbox` (the pool, its rights, no VM of
+   another's in it, the datacenter firewall, the proxy address free in the cluster) and
+   `scheduler`, and the `capacity` row counts the sandbox machines and one spare per node; it
+   fails for machines no run has placed yet that do not fit. The plan lists the row `sandbox`
+   (the machines per node, and how many sandboxes a machine of that size holds), `sandbox-pool`
+   and `sandbox-access` (the ACL row, or the token).
+5. **Install or Apply.** The run builds the machines, syncs the sandbox chart and registers the
+   provider "\<name> Sandboxes", **disabled**. No other machine of the platform cluster is
+   replaced: the run's rollout check lets through the new group's templates and nothing else.
+6. **Wait for the fence.** About 20 minutes after a sandbox machine joined, a provider sync has
+   written its VM firewall and taken its `unsecured` taint off. **Check the release gates** on
+   the Ready card reads the four gates without changing anything
+   ([The sandbox provider](#the-sandbox-provider)).
+7. **Go live.** On the provider's page under **Cloud providers**, set a price for sandbox
+   minutes, choose a status other than Disabled and save: the save is refused while a gate does
+   not hold, or while the scheduler is off. Attach the provider to projects as the two others.
+   The self-signed certificate of `*.<domain>` is on the Ready card for clients to trust.
+
+**What a tenant sees.** Nothing until the provider is live and attached to the tenant's project.
+Then the project has the Sandboxes service of the installer path
+([managed-sandbox.md](managed-sandbox.md)): the native API and the E2B-compatible one, the
+templates `base`, `code-interpreter-v1`, `python` and `mcp-gateway` at the images this release
+pins, and each sandbox at `https://<port>-<id>.<domain>` behind the run's certificate, which the
+tenant's client must trust (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`) until an operator's own
+certificate can be stored. A first start of a template the machines did not pull ahead waits for
+its pull (measured in the spike: about two minutes for `base` on a new machine, three seconds
+after). Not there: custom templates and the sandbox registry, the other built-in templates of
+the installer path (the GPU one among them), waking a paused sandbox through the proxy (pause and
+resume are held on every path,
+[managed-sandbox.md](managed-sandbox.md#current-saved-lifecycle-admission-boundary)), and an
+egress address of the sandboxes' own. On `shared` the provider reads "reduced isolation" on the
+Ready card.
+
+**The gates before outside tenants.** The four release gates must hold at the save that sets the
+provider live, and they are read again before every create. They are necessary and not
+sufficient: before a site with outside tenants goes live, the lab drill of the release must have
+shown the fence from inside a sandbox machine (items 3 to 7 of
+[Not verified on a lab yet](#not-verified-on-a-lab-yet)), the placement must be `separate` unless
+the text on `shared` was read and accepted for that site, the router must restrict who reaches
+the proxy address, and a real invoice must have shown the sandbox line
+([billing.md](billing.md)).
+
+**Limits that stay.** The pool name `proxcloud-sbx` and the token name `capmox@pve!pc-sandbox`
+are fixed, so two portals on one Proxmox cluster cannot both build sandboxes (the platform's own
+`capi` token has the same limit). The provider sync fences every VM it finds in the pool, also
+one another hand put there: it is closed, never opened, and the `sandbox` row names it. A sandbox
+machine resized in place only warns on capacity, as every other group does. When the `shared`
+ACL row is deleted by hand, the rows `machines` and `boot-store` degrade and the `sandbox` row
+warns until the next apply writes it again.
 
 ```json
 "sandbox": {
@@ -983,7 +1067,16 @@ need the platform cluster's Cluster API and Kamaji, and the access and the pool 
 
 **Upgrades.** The sandbox chart is the one component an upgrade adds to an installed platform
 (plan class `added`): it is rendered only for settings that ask for it, so for every other
-installation the move changes nothing of it. A `shared` group rolls with the platform cluster's
+installation the move changes nothing of it. **An existing platform gets nothing of sandboxes
+until its operator asks.** The ProxCloud upgrade to v0.12.0 leaves the platform on its BOM, where
+the block is refused and the page shows none. The platform's own upgrade to the 0.12.0 BOM
+([What this release moves](#what-this-release-moves-and-what-it-refuses)) has two rows for it,
+the cluster chart from 0.1.16 to 0.1.19 and the sandbox chart as `added`, and builds nothing: no
+machine is replaced (every object the cluster chart renders for a platform of 0.10.1 to 0.11.1 is
+the same under 0.1.19), nothing is written on Proxmox, and no Application of the sandbox chart is
+made. Asking is then a save of the block and an apply, as on a new installation: that apply
+makes the pool and its access, adds the sandbox machines beside the existing groups, syncs the
+sandbox chart and registers the provider disabled. A `shared` group rolls with the platform cluster's
 machines as its last unit, and every sandbox on a replaced machine ends. An upgrade that replaces
 the machines is refused while the group is asked for and not built (build it first, or leave the
 block out until the upgrade is done), and **while `separate` exists or is asked for**: no run
@@ -1704,7 +1797,7 @@ stage is still trying.
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
 | `stage_unavailable` | any | A run recorded by another release names a stage this one does not have | No action in this release |
 | `tenants_exist` | Remove | Tenant clusters or databases still run on the platform (the message names up to five) | Delete them, **Remove again** |
-| `sandbox_refused` | 7 | The settings ask for another sandbox placement than the one a run built, or the run's BOM has no sandbox chart. Nothing was changed | Set `placement: off`, apply, then the other placement; or leave `spec.sandbox` out |
+| `sandbox_refused` | 7 | The settings ask for another sandbox placement than the one a run built, or the run's BOM has no sandbox chart (a platform an earlier release installed, before its upgrade). Nothing was changed | Set `placement: off`, apply, then the other placement; or leave `spec.sandbox` out |
 | `sandbox_access_failed` | 7 | Proxmox refused pool `proxcloud-sbx`, the ACL row of the sandbox group or the token of the sandbox cluster. The portal token writes them with the rights the setup scripts gave it. Nothing of the cluster was changed | The Check's `sandbox` row names what is missing: run the managed-services script again as root on a node, then **Retry** |
 | `machine_delete_stuck` | Remove | Cluster API is still deleting machines after 45 minutes, or (missing seed) a tagged VM could not be stopped or deleted | Delete the VM the message names in Proxmox, **Remove again** |
 | `volume_delete_failed` | Remove | A recorded volume could not be deleted with the CSI token | Check `csi@pve!csi` and the storage the message names, **Remove again** |
@@ -2364,7 +2457,8 @@ lists every difference. The upgrade is allowed when every difference is one of t
 | `tenantCharts.kubernetes`, `tenantCharts.database` | record only | Stage 10 writes the chart on the two providers. New tenant clusters and databases get it; an existing one keeps its chart until its own chart upgrade |
 | seed `capi`, platform cluster `capi-tenant` (chart `proxcloud-platform`) | chart | The Application moves to the new chart version. ArgoCD syncs, and runs the clusterctl hook again, only when the new chart renders an object differently; the hook then finds every provider at its version and changes nothing |
 | platform cluster `platform` (chart `proxcloud-platform`) | chart | The Application moves to the new chart version. ArgoCD syncs what the new chart renders differently of provider RBAC, tenant AppProjects and the MetalLB pool |
-| seed `pc-platform` (chart `proxmox-kamaji-cluster`) | chart | The Application moves to the new chart version. ArgoCD syncs the Cluster API objects of the platform cluster that the new chart renders differently, after the check that no machine is replaced (below). On a move that replaces machines it moves with the first step of the roll |
+| seed `pc-platform` (chart `proxmox-kamaji-cluster`) | chart | The Application moves to the new chart version. ArgoCD syncs the Cluster API objects of the platform cluster that the new chart renders differently, after the check that no machine is replaced (below). On a move that replaces machines it moves with the first step of the roll. The 0.12.0 BOM moves it from 0.1.16 to 0.1.19, which renders the same objects for a platform without a sandbox group |
+| platform cluster `sandbox` (chart `proxcloud-sandbox`), new in the 0.12.0 BOM | added | Nothing, on a platform whose settings hold no `spec.sandbox` with `shared`: the component is rendered only for those settings, and the record does not list it. It is the one component a move may add (a chart of our own marked `feature`); every other addition and every removal is refused. With `shared` in the settings and not built yet, a move that replaces no machine builds the group in the same run ([Sandboxes on the platform](#sandboxes-on-the-platform)) |
 | `kubernetes.version` (the same, a newer patch or exactly one minor up), `kubernetes.nodeImage`, and `images.kubeVip` together with a new node image, when the target's cluster chart is 0.1.15 or newer and the installation uses the BOM's node image | machines | Cluster API replaces every machine of the platform cluster, ordered by the run ([The platform cluster's machines](#the-platform-clusters-machines)). The plan then begins with the line that there is no way back and has one row `roll/<unit>` per unit with what stops meanwhile, and one row `roll-vm/<unit>` of kind `site` with what is made and deleted on Proxmox |
 | seed and platform cluster `cert-manager` (chart `cert-manager` of the chart mirror), in an upgrade with no `seed.k3s` and no `machines` row | chart | The Application moves to the new chart version in the component's wave (1 on both clusters). ArgoCD applies the CRDs in place (the chart renders them with `crds.enabled: true`; `v1` stays the only version) and removes what the new chart no longer renders. The controller, cainjector and webhook Deployments roll together, each keeping its old pod until the new one is Ready. The wave waits for the Application to be Synced and Healthy and for its sync to have Succeeded, which includes the chart's `startupapicheck` Job (a dry-run Certificate against the webhook). Certificates and their Secrets stay. No machine is replaced, nothing is written on Proxmox and no seed backup is asked for. See [A cert-manager move](#a-cert-manager-move) |
 | `seed.k3s`, to a version that is newer by a patch, by a k3s build (`+k3s2` after `+k3s1`) or by exactly one minor | seed | Stage 5a replaces the k3s binary on the running seed VM and restarts k3s ([The seed's k3s](#the-seeds-k3s)). With it the plan lists four rows of kind `site`, what the stage writes on the seed: the Job, the etcd snapshot, the k3s config drop-in without leader election and the binary (its row gives the way back by hand) |
@@ -3423,9 +3517,10 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
   the `platform` Application keeps the ClusterRole of chart 0.1.1 (self-heal), so re-applying
   `deploy/mgmt-cluster/rbac.yaml` there does not last.
 - **`layout: separate`** (one cluster for Kubernetes, one for databases) is refused by the API.
-- **`spec.sandbox`** is refused by the API of every release so far: no BOM names the sandbox chart
-  yet. The code that builds either placement and registers its provider is in this release
-  ([The sandbox provider](#the-sandbox-provider)); the release whose BOM pins the chart offers it.
+- **`spec.sandbox`** is taken from v0.12.0 on, by a platform on that release's BOM
+  ([Sandboxes on the platform](#sandboxes-on-the-platform)). Not built for it: an operator's own
+  certificate, a sandbox registry with custom templates and template updates between releases, an
+  egress address or a network of the sandboxes' own, and an upgrade in place of `pc-sandbox`.
 - **No IPv6** on the platform network, and one platform network per installation. A VLAN tag needs
   a BOM that names cluster chart 0.1.14 or newer, as this build's does, and the network is fixed after the
   first install: a platform installed without a tag never gets one
@@ -3452,9 +3547,12 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not verified on a lab yet
 
-**Sandboxes on the platform (`spec.sandbox`)** have run on no site: no BOM names the sandbox chart,
-so no installation can save the block. What the code does was run against fakes and against the
-two charts' renders only. A lab must still show, for each placement: the portal token making pool
+**Sandboxes on the platform (`spec.sandbox`)** have run on no site. The BOM of v0.12.0 names the
+sandbox chart and the block is taken, and what the code does was run against fakes and against
+the renders of the two published charts only; the spike of 2026-11-21 ran the node side by hand
+on a throwaway tenant cluster, not this code. That also holds for the upgrade that brings the
+offer: a platform of 0.11.1 moved to the 0.12.0 BOM with every VM id as before, the plan showing
+the sandbox chart as `added` and no machines row. A lab must still show, for each placement: the portal token making pool
 `proxcloud-sbx` and writing the ACL row or minting the token (Proxmox accepting `Pool.Allocate`
 for a `ProxCloudCAPI` row there is run for tenant pools, not for this one); CAPMOX giving a
 sandbox machine its address from `nodeRange` and none from the cluster's range; the group built
