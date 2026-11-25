@@ -641,6 +641,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A unit test of a pair's push order asked for an order the product does not define.**
+  `TestLBPairWithUDPKnowsItsHolder` compared the loads of a change that adds a TCP and a UDP port as one list:
+  HAProxy before the UDP service on each appliance. An appliance takes the two at once since "a UDP port added with
+  a TCP port is served sooner" (#454), so either may be loaded first, and the test failed whenever the UDP service
+  was (CI on the release pull request of v0.11.1-rc.5, the unit step of `go-test`). The order the product does
+  promise, the standby before the appliance that holds the address, held in that run and in every failing run
+  here. The test now asks for that and nothing more: each appliance loads each of the two once, and the standby has
+  loaded both before the other appliance is given either. The assertion as it was failed 56 of 500 runs on two
+  CPUs that six busy loops share, 0 of 500 on an idle workstation under the race detector, and 20 of 20 with the
+  fake appliance holding HAProxy's requests back by 0.6 s; as it is now it passed 500 of 500 in each of the first
+  two and 20 of 20 with either push held back. No other test of `internal/platform/project` or
+  `internal/cloud/pve` asks for an order between two pushes that are started together: the 51 load balancer tests
+  of `internal/platform/project` pass with either push held back. Nothing in the product changes.
 - **No UDP client is left unanswered when the UDP service stops and starts.** On an appliance pair a UDP client
   that kept sending from one source port while `proxcloud-lvs.service` stopped and started on the appliance holding
   the address could get no answer afterwards, for as long as it kept sending, while the balancer read `ACTIVE`, its
