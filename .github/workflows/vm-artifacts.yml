@@ -158,9 +158,11 @@ jobs:
           # No gh run download, download-artifact extraction, unzip, qemu or guest execution.
           python3 images/vm_publish_stage.py unpack --archive "$RUNNER_TEMP/vm-artifact.zip" \
             --staging-dir "$RUNNER_TEMP/vm-publish-payload" > "$RUNNER_TEMP/vm-publication-plan.json"
-      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1; official pin reviewed separately
+      - uses: oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128 # v2.0.4
         with:
           version: 1.3.0
+          # Since v2.0.4 the action sends the job token with the download of the ORAS CLI unless told not to.
+          token: ''
       - name: Authenticate for this publication only
         env:
           GH_TOKEN: ${{ github.token }}
