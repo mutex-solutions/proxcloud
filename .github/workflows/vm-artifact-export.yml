@@ -301,7 +301,7 @@ jobs:
         with:
           name: ${{ needs.export.outputs.artifact_name }}-evidence
           path: ${{ runner.temp }}/evidence
-      - uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1; official pin reviewed separately
+      - uses: oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128 # v1; official pin reviewed separately
         with:
           version: 1.3.0
       - name: Pull the digest anonymously, verify the three files and write the final summary
