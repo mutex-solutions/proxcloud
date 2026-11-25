@@ -600,7 +600,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the file is carried, and its pins are those of `main`, so the plan from it has one change, the release, record
   only: no seed part, no machine replaced. `TestPreviousBOMsMoveCertManager` states that answer, and
   `TestUpgradeRollsNoMachine` compares twelve of the twenty-one previous BOMs with the BOM on `main`, none of them
-  rolling. No move to that BOM and no apply on such a platform was run on a lab.
+  rolling. No move to that BOM and no apply on such a platform had run on a lab when the file was kept; the
+  candidate's drill then moved one lab's platform to it, from 0.11.1-rc.3.
 - **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1-rc.3`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.1-rc.3.yaml`, sha256
   `b9d119c59162ce75956bfb43a251915aaac6d8eee577944292be5434bbe3d581`, the file of the tag byte for byte). The
@@ -1116,6 +1117,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state the portal reads the same way. HAProxy's config and the certificate files already went in so. Found by
   the drill of v0.11.1-rc.1 (Q1-o2). The fakes and the real-guest tests now refuse any write of the agent's that
   names a file's place.
+
+## [0.11.1-rc.5] - 2026-11-25
+
+The fifth release candidate of 0.11.1, published as a prerelease and never as `latest`. It is not the release:
+`v0.11.0` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
+still name it. It holds what is under Unreleased above: what `v0.11.1-rc.4` held and the one pull request merged
+since (#477). One more pull request merged since changes a unit test and nothing in the product (#479): the test of
+a pair's push order no longer asks for an order between the two pushes of one appliance. The drill of `v0.11.1-rc.4`
+ran every part of its plan and found no defect: the upgrade from rc.3 did what its notes said, and the two fixes of
+rc.4 held in every case it tried. This candidate exists because CI on the release pull request of v0.11.1 then found
+a defect that all four candidates have, in a case the drill had tried once: a UDP client that keeps sending while
+the UDP service of an appliance stops and starts can stay unanswered for as long as it sends. Nothing of its fix had
+run on a lab when it was tagged. The entries above are not repeated here. Not for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.11.1-rc.5`** (`deploy/platform/platform-bom.yaml`), with the pins of
+  `0.11.1-rc.1`, `0.11.1-rc.2`, `0.11.1-rc.3` and `0.11.1-rc.4`: the files differ in the release line alone. No
+  chart of the product differs from its newest tag (`git diff proxmox-kamaji-cluster-v0.1.19 --
+  deploy/charts/proxmox-kamaji-cluster`, `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster`, `git
+  diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` and `git diff proxcloud-sandbox-v0.1.0 --
+  deploy/charts/proxcloud-sandbox` print nothing), so no chart tag is needed. It is a release BOM, and the release
+  gate passes on it and on the twenty-one previous BOMs.
+- **No component of the sandbox feature is in this BOM** (`TestSandboxIsDark`). The sandbox code is in the build and
+  cannot be turned on, as in `v0.11.1-rc.4`.
+- **The plan from each previous BOM** (`PlanFor`). From 0.11.1-rc.4, 0.11.1-rc.3, 0.11.1-rc.2 and 0.11.1-rc.1 one
+  change, the release, record only, allowed, with no part, no seed row and no machine replaced; phrase `upgrade
+  <name> to 0.11.1-rc.5`. From 0.11.0, 0.11.0-rc.1 and 0.11.0-rc.2 two changes, the release and
+  `tenantCharts.kubernetes` 0.1.17 to 0.1.19, both record only, allowed. From 0.10.2 and 0.10.2-rc.1 the same two
+  rows (the chart from 0.1.16); four from 0.10.1 and 0.10.1-rc.2 (those and `cert-manager` on the seed and on the
+  platform cluster); five from 0.10.1-rc.1 (the tenant chart from 0.1.15, and also `pc-platform` 0.1.15 to 0.1.16);
+  and a refusal by the pair gate from the nine BOMs on Kubernetes 1.35.10. This BOM carries no unfinished
+  replacement (`TestRollTowardAKeptCandidateGoesOn` passes under it unchanged).
+- **What the portal's upgrade does to the balancers, from `v0.11.1-rc.4`.** See the first upgrade note above. A pair
+  with a UDP listener gets `/usr/local/sbin/proxcloud-lvs-net` (the script of its UDP service) and one reload of
+  `proxcloud-lvs.service` per appliance, the standby first; the other five files of the UDP service are the same to
+  the byte, the unit is not restarted and systemd is not reloaded. The reload finds the nftables table and empties
+  nothing. Every other balancer gets nothing. The only code outside tests that changed since the tag is
+  `internal/cloud/pve/lblvs.go`, and in it that script alone; no file under `internal/cloud/pve/testdata` changed,
+  and one was added, the script of the tag. Read again from the code on this commit.
+- **A UDP client that is unanswered before the upgrade stays so** until it is silent for more than 30 s or sends
+  from another source port. The upgrade's reload frees no one.
+- **From `v0.11.1-rc.3`** that and `lvs.nft`, in one push with one reload of the UDP service per appliance; the
+  operator's log has one WARN line per appliance for it, "load balancer: an appliance's UDP table is not as its
+  configuration has it; pushing it again", which is the state read finding the table of rc.3 (seen on the lab at the
+  upgrade from rc.3 to rc.4). **From `v0.11.1-rc.2`** also `lvs.conf` and the drop-in of `proxcloud-lvs.service`,
+  with one `daemon-reload`. **From `v0.11.1-rc.1`** also keepalived's five files once per appliance of a pair, with
+  one keepalived reload. **From `v0.11.0`** the one push of every balancer that the first candidate's upgrade made;
+  a balancer of `v0.11.0` has no UDP listener.
+- **Billing at the upgrade from `v0.11.0`, `v0.11.1-rc.1` and `v0.11.1-rc.2`** is what the section of `0.11.1-rc.3`
+  below says. A site that runs `v0.11.1-rc.3` or `v0.11.1-rc.4` has these rows.
+- **Nothing the controller does changed since `v0.11.1-rc.3`.** A cluster that is on chart 0.1.19 under rc.1 or rc.2
+  still needs "Apply settings" or "Enable load balancer controller" again for the controller's part of #452.
+- **A candidate moves nothing a final moves.** The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION`
+  stay on `v0.11.0`.
+
+### Verified on a lab
+
+Nothing on this candidate, and nothing of its fix. On one lab (Ubuntu 26.04 appliances, all on one node, the
+scheduler off), by candidate:
+
+- On `v0.11.1-rc.1`, on `v0.11.1-rc.2` and on `v0.11.1-rc.3`, not run again as a whole: what the sections of
+  `0.11.1-rc.4` and `0.11.1-rc.3` below list.
+- On `v0.11.1-rc.4` (2026-11-24, UTC), the upgrade from `v0.11.1-rc.3`: six client loops, four of them UDP from one
+  socket each, 35710 requests in 15 minutes, 0 failed; a pair with a UDP listener got `lvs.nft` alone and one reload
+  of the UDP service, the standby first by 7 to 8 s, with no HAProxy reload and no VRRP transition on four
+  appliances; none of 4464 datagrams lost on each of four running one-socket flows when the table was replaced; the
+  platform run of one record-only row, 8.2 s, 19 VMs kept their process.
+- On `v0.11.1-rc.4`, its two fixes: a UDP listener added while its client sends was answered within 0.02 s of the
+  first new client (0 of 962 under rc.3 on the same lab); a listener removed beside the pair's other UDP listeners
+  left 440 datagrams unanswered while it was gone and was answered 0.06 s after it was served again; a UDP Service
+  made again on its kept address, and a UDP port added to a Service, were answered within 0.18 s of the first new
+  client; a failover with one-socket flows running lost 0.8 s, a replace 0.7 s of TCP and 0.8 s of UDP; after a
+  failover the first `GET_HEALTH` that reached the started appliance serving answered up and wrote the row `ACTIVE`.
+- On `v0.11.1-rc.4`, one try that showed less than its notes said: a restart of `nftables.service` on the appliance
+  that holds the address, where three one-socket flows lost 1.6 s and were then answered. The notes of rc.4 said
+  that such a client is answered once the members are back. That is not what rc.4 does: in real guests of both
+  images such a restart left about 1 client in 8 unanswered at 5 datagrams a second and 3 in 4 at 50 (14 and 13 of
+  100 clients, 72 and 78 of 100), for as long as it kept sending. It is the defect this candidate fixes. The section
+  of `0.11.1-rc.4` below and the notes of that candidate stay as they were published.
+
+### Not verified
+
+- Everything of this candidate on a lab, and its fix: the flush on an appliance VM with the image's own kernel (the
+  tests ran each image's userland on the kernel of a test host and of the CI runner, where `nf_conntrack_netlink`
+  was loaded already, so neither the kernel loading it at the first message nor the script's `modprobe` was
+  exercised, and Debian 13's kernel 6.12 never ran the flush); the events on a real pair with a one-socket client
+  that never stops (the last UDP listener removed and one added again, the service's keepalived killed, a restart
+  and a reload of `nftables.service`); a reboot of the appliance that holds the address and a real failover; the
+  appliance's own DNS, time sync and apt after such a start; and a client caught before the upgrade, that it stays
+  caught through the reload and is freed by the next stop and start.
+- The upgrade to this candidate from any earlier build, and any move to the BOM `0.11.1-rc.5` (plans read, not run;
+  the lab moved to `0.11.1-rc.4`).
+- What the audit of the rc.4 drill lists: a balancer without a UDP listener at the upgrade from rc.3, a reload of
+  `nftables.service`, a listener whose servers are all down, a first datagram for a port without a listener at the
+  appliance (the node's firewall dropped it first), the health fix's one exception, a table changed by hand, every
+  member out and back for a one-socket flow, and what the section of `0.11.1-rc.4` below takes from the audit of the
+  rc.3 drill, Debian 13 appliances on a lab among it.
+- The candidate's images and its tag's workflows: they do not exist before the tag.
+
+### Known issues
+
+- Those of `v0.11.1-rc.4`, `v0.11.1-rc.3`, `v0.11.1-rc.2` and `v0.11.1-rc.1`, below, but the ones this candidate
+  fixes.
+- The upgrade frees no UDP client, and until a pair's first pass after the upgrade it serves as rc.4 did.
+- A flush that fails is said in the journal of `proxcloud-lvs.service` alone, at info priority: the state read still
+  says UDP is served, and the appliance serves as rc.4 did. An image of the operator's own without `perl` or without
+  the kernel module `nf_conntrack_netlink` ends there too.
+- Each start of the UDP service that finds no table empties the appliance's whole connection table: an answer on its
+  way to a UDP question of the appliance's own is lost once.
+- A stop and start of the UDP service still leaves UDP unanswered on that appliance for a second or two, and more
+  than five starts within 10 s meet systemd's start limit.
+- The times of a change, of a replace and of a failover were measured on `v0.11.1-rc.3` and `v0.11.1-rc.4`; nothing
+  was measured on this candidate.
+- The full list is in `docs/releases/v0.11.1-rc.5.md`.
 
 ## [0.11.1-rc.4] - 2026-11-25
 
