@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.1.yaml`, sha256
+  `b04cdabce8ffd004309fbb2e34ffe1a9871648db103553b4badc5bd17be69172`, the file of the tag byte for byte). The
+  `v0.11.1` release commit left the BOM at `0.11.1`, and the release gate refuses only `-dev`. For an upgrade: a
+  platform installed by `v0.11.1` or moved to its BOM is not refused (`bom_unsupported`) under a later build while
+  the file is carried, and its pins are those of `main`, so the plan from it has one change, the release, record
+  only: no seed part, no machine replaced. `TestPreviousBOMsMoveCertManager` states that answer, and
+  `TestUpgradeRollsNoMachine` compares fourteen of the twenty-three previous BOMs with the BOM on `main`, none of
+  them rolling. No move to that BOM and no apply on such a platform was run on a lab.
+
 ## [0.11.1] - 2026-11-26
 
 The release after `v0.11.0`. It completes layer 4 of the load balancer: UDP listeners, TLS termination with
