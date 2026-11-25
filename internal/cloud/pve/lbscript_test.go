@@ -691,3 +691,57 @@ esac`,
 		})
 	}
 }
+
+// What a pair with a UDP listener gets at the upgrade from v0.11.1-rc.4, whose script is testdata's: the script is
+// the one file written, and the unit is reloaded once: no restart (its "up" then finds the table and empties
+// nothing), and systemd is not reloaded. Change what a release pushes knowingly, and say so in its upgrade note.
+func TestPushLVSFromTheCandidateBefore(t *testing.T) {
+	before, err := os.ReadFile("testdata/lvs-net-v0.11.1-rc.4.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, shell := range lbguesttest.Shells() {
+		t.Run(shell, func(t *testing.T) {
+			ps, g, a := scriptGuest(t, shell)
+			holder(g)
+			udp(g, "203.0.113.10 53")
+			if err := os.WriteFile(g.Path("bin/sleep"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec := LBSpec{Listeners: []LBListener{{Port: 53, Protocol: "udp", Pool: "dns"}},
+				Pools: []LBPool{{Name: "dns", Protocol: "udp", Algorithm: "roundrobin", Members: []LBMember{{ServerID: "101", Port: 53, Weight: 1, Address: "10.77.0.11"}}}}}
+			config := RenderLVS(spec, []string{"203.0.113.10"})
+			g.Write(lvsConfig, config)
+			var now string
+			differ := 0
+			for _, f := range lvsFiles("ten0") {
+				if f[0] == lvsNet {
+					now = f[1]
+				}
+			}
+			if now == string(before) {
+				t.Fatal("the script is the one of v0.11.1-rc.4")
+			}
+			g.Write(lvsNet, string(before))
+			for _, f := range lvsFiles("ten0") {
+				if got, _ := os.ReadFile(g.Path(f[0])); string(got) != f[1] {
+					differ++
+				}
+			}
+			g.Remove("stub/systemctl-calls")
+			a.Writes = nil
+			n := a.Execs()
+			if err := ps.PushLVS(context.Background(), "n1", 100, config, "ten0"); err != nil {
+				t.Fatal(err)
+			}
+			calls, _ := os.ReadFile(g.Path("stub/systemctl-calls"))
+			if differ != 1 || !slices.Equal(a.Writes, []string{lvsNet + ".new"}) || a.Execs()-n != 3 ||
+				strings.Count(string(calls), "reload "+lvsService) != 1 || strings.Contains(string(calls), "restart") || strings.Contains(string(calls), "daemon-reload") {
+				t.Errorf("%d files differ from v0.11.1-rc.4's; the push wrote %q with %d commands, and systemd was asked:\n%s\nwant %s alone written and one reload of the unit", differ, a.Writes, a.Execs()-n, calls, lvsNet)
+			}
+			if got, _ := os.ReadFile(g.Path(lvsNet)); string(got) != now {
+				t.Errorf("the script was not replaced")
+			}
+		})
+	}
+}
