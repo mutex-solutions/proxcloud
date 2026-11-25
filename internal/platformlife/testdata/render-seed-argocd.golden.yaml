@@ -4,7 +4,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: cert-manager
         proxcloud.io/platform-installation: pi-0123abcd
       name: cert-manager
@@ -41,7 +41,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: capi
         proxcloud.io/platform-installation: pi-0123abcd
       name: capi
@@ -85,7 +85,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: pc-platform
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform
@@ -200,7 +200,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: cilium
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-cilium
@@ -241,7 +241,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: cert-manager
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-cert-manager
@@ -281,7 +281,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: metallb
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-metallb
@@ -328,7 +328,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: argocd
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-argocd
@@ -609,7 +609,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: cnpg
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-cnpg
@@ -646,7 +646,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: proxmox-csi
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-proxmox-csi
@@ -694,7 +694,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: capi-tenant
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-capi-tenant
@@ -742,7 +742,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: kamaji-crds
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-kamaji-crds
@@ -780,7 +780,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: kamaji-etcd
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-kamaji-etcd
@@ -834,7 +834,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: kamaji
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-kamaji
@@ -880,7 +880,7 @@ applications:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/component: platform
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-platform-platform
@@ -929,7 +929,7 @@ helmChart:
   metadata:
     labels:
       app.kubernetes.io/managed-by: proxcloud-platform
-      proxcloud.io/bom-release: 0.12.0-dev
+      proxcloud.io/bom-release: 0.11.1-rc.5
       proxcloud.io/component: argocd
       proxcloud.io/platform-installation: pi-0123abcd
     name: argocd
@@ -962,7 +962,7 @@ projects:
     metadata:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/platform-installation: pi-0123abcd
       name: proxcloud-platform
       namespace: argocd
@@ -970,7 +970,7 @@ projects:
       clusterResourceWhitelist:
         - group: '*'
           kind: '*'
-      description: The managed-services platform's own components, from the BOM of ProxCloud 0.12.0-dev.
+      description: The managed-services platform's own components, from the BOM of ProxCloud 0.11.1-rc.5.
       destinations:
         - namespace: '*'
           server: https://kubernetes.default.svc
@@ -994,7 +994,7 @@ projects:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
         argocd.argoproj.io/secret-type: repository
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-repo-ghcr-io-mutex-solutions-charts-mirror
       namespace: argocd
@@ -1010,7 +1010,7 @@ projects:
       labels:
         app.kubernetes.io/managed-by: proxcloud-platform
         argocd.argoproj.io/secret-type: repository
-        proxcloud.io/bom-release: 0.12.0-dev
+        proxcloud.io/bom-release: 0.11.1-rc.5
         proxcloud.io/platform-installation: pi-0123abcd
       name: pc-repo-ghcr-io-mutex-solutions-charts
       namespace: argocd
