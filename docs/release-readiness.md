@@ -193,7 +193,7 @@ BOM `0.11.0`. UDP listeners and TLS termination are not in this release. The ful
 
 For `v0.11.1` the same lab ran four drills, each followed by a read-only audit: on the published images of
 `v0.11.1-rc.1` (2026-11-23), `v0.11.1-rc.2` (2026-11-23 and 2026-11-24), `v0.11.1-rc.3` (2026-11-24) and
-`v0.11.1-rc.4` (2026-11-25). One lab, every appliance on one Proxmox node, Ubuntu 26.04 appliances, the scheduler
+`v0.11.1-rc.4` (2026-11-24), dates in UTC. One lab, every appliance on one Proxmox node, Ubuntu 26.04 appliances, the scheduler
 off. The first drill ran the upgrade from `v0.11.0` (31365 requests, 0 failed), TLS on a single balancer and a
 cluster's move to the new controller, and found that a pair with a UDP listener read as degraded. The second ran
 Kubernetes Services and a tenant's own pair with UDP and TLS, and found three faults: a change waited while the

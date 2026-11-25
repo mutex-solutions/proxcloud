@@ -2463,7 +2463,7 @@ row, the release, record only.
 
 The BOM of the candidate `v0.11.1-rc.4` (`0.11.1-rc.4`) has the same pins: the rows and refusals above,
 phrase `upgrade <name> to 0.11.1-rc.4`, and from 0.11.1-rc.1, 0.11.1-rc.2 and 0.11.1-rc.3 the release
-alone. One move to it ran on a lab, from 0.11.1-rc.3 (2026-11-25): the plan had that one row, the run took
+alone. One move to it ran on a lab, from 0.11.1-rc.3 (2026-11-24 UTC): the plan had that one row, the run took
 8.2 s and replaced no machine. Later builds keep it as a previous BOM: from 0.11.1-rc.4 the plan to a BOM
 with its pins has one row, the release, record only.
 

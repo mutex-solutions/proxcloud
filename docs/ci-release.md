@@ -716,7 +716,7 @@ candidate call verified ran on `v0.11.1-rc.1`, on `v0.11.1-rc.2` or on `v0.11.1-
 tag is on the commit `a017132e`; the `docker` and `helm` runs of the tag succeeded on the first attempt, and the
 GitHub Release is a prerelease, with `v0.11.0` still the latest (read on 2026-11-25). The pull request after it
 added `deploy/platform/previous/0.11.1-rc.4.yaml` and set the BOM on `main` back to `0.12.0-dev`, with the pins of
-the candidate. Its drill ran on the same lab on 2026-11-25, on its published images, and a read-only audit
+the candidate. Its drill ran on the same lab on 2026-11-24 (UTC), on its published images, and a read-only audit
 followed: the upgrade from `v0.11.1-rc.3` (28.5 s; six client loops, four of them UDP from one socket each, 35710
 requests, 0 failed) gave each appliance of a pair with a UDP listener `lvs.nft` alone and one reload of its UDP
 unit, the standby first by 7 to 8 s, with no HAProxy reload and no VRRP transition; the platform run to
@@ -1188,7 +1188,7 @@ wave 1); from 0.10.1-rc.1 five (the tenant chart from 0.1.15, and also `pc-platf
 before it. `TestUpgradeRollsNoMachine` compares eleven of the twenty and passes, none of them at step 0 of a roll,
 and `TestPreviousBOMsMoveAsTheirPinsDiffer` and `TestPreviousBOMsMoveCertManager` hold each pair to its answer.
 This BOM carries no unfinished target (`TestRollTowardAKeptCandidateGoesOn`). The move from 0.11.1-rc.3 to
-0.11.1-rc.4 ran on one lab (2026-11-25: one record-only row, 8.2 s, no VM restarted); the others were read, not
+0.11.1-rc.4 ran on one lab (2026-11-24 UTC: one record-only row, 8.2 s, no VM restarted); the others were read, not
 run.
 
 The pairs of the BOM on `main` before that candidate (the nineteen below and 0.11.1-rc.3 to it). `main` had the

@@ -121,8 +121,8 @@ their steps still apply. The release notes (`docs/releases/v0.11.1.md`) give the
 
 Verified on a lab. One lab of three Proxmox nodes, every appliance on one node, Ubuntu 26.04 appliances, the scheduler
 off (every sync started by hand); four drills, on `v0.11.1-rc.1` (2026-11-23), `v0.11.1-rc.2` (2026-11-23 and
-2026-11-24), `v0.11.1-rc.3` (2026-11-24) and `v0.11.1-rc.4` (2026-11-25), each checked afterwards by a read-only audit
-that recomputed its figures. Nothing ran on the images of this release.
+2026-11-24), `v0.11.1-rc.3` (2026-11-24) and `v0.11.1-rc.4` (2026-11-24), dates in UTC, each checked afterwards by a
+read-only audit that recomputed its figures. Nothing ran on the images of this release.
 
 - On rc.1, not run again: the upgrade from `v0.11.0` under five loops (31365 requests, 0 failed); one push per
   balancer, the standby first by 15 s, the single balancer at the first services sync; the platform run of two
