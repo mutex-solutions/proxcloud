@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Sandboxes on the managed platform are offered** (`deploy/platform/platform-bom.yaml`,
+- **Sandboxes on the managed platform are offered** (#483, `deploy/platform/platform-bom.yaml`,
   [managed-services.md](docs/managed-services.md#sandboxes-on-the-platform)). The platform BOM names the sandbox
   chart, `proxcloud-sandbox` 0.1.0 at its published digest, as the component `sandbox` (`feature: sandbox`), and
   moves the platform's own cluster chart from `proxmox-kamaji-cluster` 0.1.16 to 0.1.19, the chart the tenants are

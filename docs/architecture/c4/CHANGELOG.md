@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0)
+## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
 
 **What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23
 below ("dark") become reachable on a site. What moved is data the components read.
