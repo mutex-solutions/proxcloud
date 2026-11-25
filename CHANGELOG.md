@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **From v0.11.1-rc.4, a pair with a UDP listener gets one file and one reload of its UDP service on each
+  appliance; every other balancer gets nothing.** This is what the fix "no UDP client is left unanswered when the
+  UDP service stops and starts" does to a balancer that exists.
+  - *A balancer without a UDP listener* (a tenant's pair or single VM, a cluster's pair with TCP Services only): no
+    file is written and nothing is reloaded.
+  - *A pair with a UDP listener*, a tenant's or a cluster's, at its first pass after the upgrade (a cluster's
+    controller's next request, the services sync, or the next change), the standby first and then the appliance that
+    holds the address. **Written:** `/usr/local/sbin/proxcloud-lvs-net`, the script the unit runs before it starts
+    and at a reload. **Not written:** `lvs.conf`, `lvs.nft`, `lvs.sysctl`, `proxcloud-lvs.service` and its drop-in,
+    which are the same to the byte. **Reloaded:** `proxcloud-lvs.service`, once. The unit is **not** restarted,
+    systemd is not reloaded, no package is installed, and HAProxy and the VRRP keepalived are not touched, so no
+    address moves. The reload runs the new script, which finds the nftables table loaded, loads it again in one
+    transaction as before and **empties nothing**; it also loads the kernel module `nf_conntrack_netlink` when
+    that is not loaded yet (`modprobe`), which nothing uses until the unit next starts. In real guests of both
+    images, 100 such pushes each onto the script of v0.11.1-rc.4, twice, under eight clients that never stop: the
+    unit kept its process and its start time every time, no client was left unanswered and none of 40,000 new
+    sockets was. A datagram without an answer within its client's interval was counted 2 to 9 times in 33,000 at
+    50 a second and 0 to 3 times in 3,400 at 5 a second over the 100 reloads on a busy workstation, and not once
+    in 60 reloads on a quieter one; a reload of the release before read the same there (0 to 7 in 33,000). Until
+    that pass the appliance serves as it did before the upgrade.
+  - *A client that is already caught stays caught.* The upgrade's reload finds the table, so it frees no one: a
+    client that was left unanswered before the upgrade stays so until it is silent for more than 30 s or sends from
+    another source port, as before. From then on a stop and start of the UDP service frees it instead of catching
+    it.
+  - *From then on, at every start of the UDP service that finds no table* (a boot, the first UDP listener, a
+    restart of the unit or of `nftables.service`, a reload of `nftables.service`): the appliance's whole connection
+    table is emptied once, right after the nftables table is loaded, and the unit's journal has one line, "the
+    nftables table was not loaded before: the connection table was emptied". TCP is not tracked while the table is
+    loaded, so HAProxy's connections and the appliance's own (a package mirror) do not notice: 0 of 800 new
+    connections and of 4,000 exchanges on one connection failed over 50 restarts, with the flush as without. An
+    answer that is on its way to a UDP question the appliance itself asked in that instant (DNS, NTP) is dropped
+    once, as a lost datagram is; the next question is answered.
+  - *Coming from v0.11.1-rc.3 or before*, the same one reload carries this file with the files of the notes below.
 - **From v0.11.1-rc.3: nothing is pushed or reloaded because of the fix "an appliance the platform started reads up
   once it serves again".** A pair whose row still reads `DEGRADED` with "its VM is stopped; starting it" or "it does
   not answer" for an appliance that is back is put right by the first health read of it (the balancer's page, a
@@ -608,6 +641,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **No UDP client is left unanswered when the UDP service stops and starts.** On an appliance pair a UDP client
+  that kept sending from one source port while `proxcloud-lvs.service` stopped and started on the appliance holding
+  the address could get no answer afterwards, for as long as it kept sending, while the balancer read `ACTIVE`, its
+  members `UP`, and a new client was answered (CI on the release pull request of v0.11.1: the real-guest test of
+  the fix "a UDP client that was sending before its listener existed is answered", below, failed its step
+  "nftables.service restarted" about one run in twenty). The product caused it by
+  itself: a balancer's last UDP listener removed and a UDP listener added again while a client sends (also a UDP
+  Service made again), and the unit's keepalived dying, which systemd answers with a stop and a start. By hand:
+  `systemctl restart nftables` or `systemctl restart proxcloud-lvs` on the appliance that holds the address, and
+  `systemctl reload nftables` for a client whose first datagrams arrive in those milliseconds. A push that keeps a
+  UDP listener only reloads the unit and never caused it.
+  - *Cause.* The unit's stop empties IPVS, which removes each flow's good connection entry, and then deletes the
+    nftables table, the chain `lb-input` of that fix with it. Connection tracking stays on for about 12 ms
+    after the table is gone. A datagram in that moment is delivered and tracked without the source rewrite, and
+    once the unit is back every later datagram of that client refreshes the entry (30 s), as in that fix's
+    finding. A second, far shorter moment sits inside the table's load at a start: tracking is on before the rules
+    act.
+  - *Fix.* The unit's script notes whether the nftables table was loaded before it loads it, and at a start that
+    found none it empties the kernel's connection table right after the load: one netlink message, what
+    `conntrack -F` sends, from perl-base, which both images have (neither has `conntrack`); no package is added.
+    After the load no such entry can be made, since `lb-input` drops what IPVS does not take and what IPVS takes
+    is rewritten, so the flush leaves none. The kernel's answer is read and the unit's journal says which way it
+    went, in one line. A flush that fails does not keep the unit from starting: an appliance that serves with the
+    defect of before is better than one that does not serve, and the journal says "the connection table could
+    not be emptied".
+  - *Measured* in real guests of Debian 13 and Ubuntu 26.04, 200 stops and starts per event and image, with four
+    one-socket clients at 5 datagrams a second and four at 50. Clients left unanswered before the fix, of 800 at
+    each rate, Debian and then Ubuntu: the last UDP listener removed and added again 37 and 465, 51 and 500; the
+    unit's keepalived killed 43 and 462, 46 and 481; `nftables.service` restarted 49 and 442, 41 and 447. With the
+    fix: 0 of 800 in every one of them. The moment inside the load, under 1,000 sockets that send 5,000 datagrams
+    a second with no listener: 80 and 79 of 200 starts left an entry without the fix, 0 of 200 with it. A
+    reload of `nftables.service` by hand, 100 each: 179 and 178 of 27,000 new sockets left unanswered before, 0
+    with the fix.
+  - *What it does not do.* It frees no client at the upgrade (see the upgrade note), and it does not shorten the
+    stop and start itself: a client's datagrams during it (about 1.2 s at a restart) are not answered.
+  - *Not run on a lab.* Everything above ran in containers on one workstation's kernel (7.0); the appliance VMs'
+    own kernels (6.12 on Debian 13, 7.0 on Ubuntu 26.04) carry the module the flush needs
+    (`nf_conntrack_netlink`, in both images' kernel packages), which the script loads by name. The lab drill of
+    the release is to show the journal line and an answered client on a real pair of each image.
 - **An appliance the platform started reads up once it serves again.** After a failover, the appliance whose VM
   was stopped and which the platform started read `down` "its VM is stopped; starting it", and the balancer
   `DEGRADED`, until the next pass after it was back: on a tenant's own pair the next services sync, long after the

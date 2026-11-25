@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -613,6 +614,133 @@ func TestPushLVSWritesOnlyWhatDiffers(t *testing.T) {
 			}
 			if got, _ := os.ReadFile(g.Path(lvsConfig)); string(got) != two {
 				t.Errorf("a config keepalived refused replaced the one in use")
+			}
+		})
+	}
+}
+
+// The unit's script, run as the text it is: an "up" that finds no table empties the connection table once the table
+// is loaded and read back, and before forwarding goes on; one that finds the table (the unit's reload) empties
+// nothing; a flush that fails is said on stderr, which is the unit's journal, and the unit still starts. The
+// commands are stubs that list their calls: what the kernel does with the message is the real-guest test's
+// (TestLBApplianceUDPStopStart), and perl here only reads the one-liner.
+func TestLVSNetEmptiesTheConnectionTable(t *testing.T) {
+	var script string
+	for _, f := range lvsFiles("ten0") {
+		if f[0] == lvsNet {
+			script = f[1]
+		}
+	}
+	if _, code, ok := strings.Cut(script, "perl -e '"); !ok {
+		t.Fatalf("the script has no perl one-liner:\n%s", script)
+	} else if perl, err := exec.LookPath("perl"); err == nil {
+		code, _, _ = strings.Cut(code, "'")
+		if out, err := exec.Command(perl, "-c", "-e", code).CombinedOutput(); err != nil {
+			t.Errorf("perl does not read the one-liner: %v\n%s", err, out)
+		}
+	}
+	for _, shell := range lbguesttest.Shells() {
+		t.Run(shell, func(t *testing.T) {
+			for _, c := range []struct {
+				name, setup  string
+				exit         int
+				calls        string
+				stdout, errs string
+			}{
+				{"no table before", "", 0,
+					"modprobe -a ip_vs ip_vs_wrr ip_vs_lc ip_vs_sh nf_conntrack_netlink|nft list table|sysctl -q -p|nft -f|nft list chain|perl|sysctl -q -w net.ipv4.ip_forward=1",
+					"the connection table was emptied", ""},
+				{"the table is loaded (a reload)", "table", 0,
+					"modprobe -a ip_vs ip_vs_wrr ip_vs_lc ip_vs_sh nf_conntrack_netlink|nft list table|sysctl -q -p|nft -f|nft list chain|sysctl -q -w net.ipv4.ip_forward=1", "", ""},
+				{"no table before, and the flush fails", "perl-fails", 0,
+					"modprobe -a ip_vs ip_vs_wrr ip_vs_lc ip_vs_sh nf_conntrack_netlink|nft list table|sysctl -q -p|nft -f|nft list chain|perl|sysctl -q -w net.ipv4.ip_forward=1",
+					"", "the connection table could not be emptied"},
+				{"no table before, and the table does not load", "nft-refuses", 1,
+					"modprobe -a ip_vs ip_vs_wrr ip_vs_lc ip_vs_sh nf_conntrack_netlink|nft list table|sysctl -q -p|nft -f|sysctl -q -w net.ipv4.ip_forward=0|nft delete table",
+					"", "could not be set up"},
+			} {
+				g := lbguesttest.New(t)
+				for name, body := range map[string]string{
+					"modprobe": `echo "modprobe $*" >> "$R/stub/calls"`,
+					"sysctl":   `case "$2" in -w) echo "sysctl $1 $2 $3" ;; *) echo "sysctl $1 $2" ;; esac >> "$R/stub/calls"`,
+					"perl":     `echo perl >> "$R/stub/calls"; [ ! -e "$R/stub/perl-fails" ]`,
+					"nft": `case "$1" in -f) echo "nft -f" ;; *) echo "nft $1 $2" ;; esac >> "$R/stub/calls"
+case "$1 $2" in
+"list table") [ -e "$R/stub/table" ] ;;
+"list chain") [ -e "$R/stub/table" ] && echo "type filter hook forward priority filter; policy drop;" ;;
+"delete table") rm -f "$R/stub/table" ;;
+-f*) [ ! -e "$R/stub/nft-refuses" ] && : > "$R/stub/table" ;;
+esac`,
+				} {
+					if err := os.WriteFile(g.Path("bin/"+name), []byte("#!/bin/sh\nR='"+g.Path("")+"'\n"+body+"\n"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if c.setup != "" {
+					g.Stub(c.setup, "")
+				}
+				exit, stdout, stderr := g.Run(shell, script, "proxcloud-lvs-net", "up")
+				calls, _ := os.ReadFile(g.Path("stub/calls"))
+				if got := strings.ReplaceAll(strings.TrimSpace(string(calls)), "\n", "|"); exit != c.exit || got != c.calls {
+					t.Errorf("%s: exit %d, want %d, after\n  %s\nwant\n  %s", c.name, exit, c.exit, got, c.calls)
+				}
+				if (c.stdout == "") != (stdout == "") || !strings.Contains(stdout, c.stdout) || (c.errs == "") != (stderr == "") || !strings.Contains(stderr, c.errs) || strings.Count(stdout+stderr, "\n") > 1 {
+					t.Errorf("%s: it said %q and, on stderr, %q; want one line with %q and %q", c.name, stdout, stderr, c.stdout, c.errs)
+				}
+			}
+		})
+	}
+}
+
+// What a pair with a UDP listener gets at the upgrade from v0.11.1-rc.4, whose script is testdata's: the script is
+// the one file written, and the unit is reloaded once: no restart (its "up" then finds the table and empties
+// nothing), and systemd is not reloaded. Change what a release pushes knowingly, and say so in its upgrade note.
+func TestPushLVSFromTheCandidateBefore(t *testing.T) {
+	before, err := os.ReadFile("testdata/lvs-net-v0.11.1-rc.4.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, shell := range lbguesttest.Shells() {
+		t.Run(shell, func(t *testing.T) {
+			ps, g, a := scriptGuest(t, shell)
+			holder(g)
+			udp(g, "203.0.113.10 53")
+			if err := os.WriteFile(g.Path("bin/sleep"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec := LBSpec{Listeners: []LBListener{{Port: 53, Protocol: "udp", Pool: "dns"}},
+				Pools: []LBPool{{Name: "dns", Protocol: "udp", Algorithm: "roundrobin", Members: []LBMember{{ServerID: "101", Port: 53, Weight: 1, Address: "10.77.0.11"}}}}}
+			config := RenderLVS(spec, []string{"203.0.113.10"})
+			g.Write(lvsConfig, config)
+			var now string
+			differ := 0
+			for _, f := range lvsFiles("ten0") {
+				if f[0] == lvsNet {
+					now = f[1]
+				}
+			}
+			if now == string(before) {
+				t.Fatal("the script is the one of v0.11.1-rc.4")
+			}
+			g.Write(lvsNet, string(before))
+			for _, f := range lvsFiles("ten0") {
+				if got, _ := os.ReadFile(g.Path(f[0])); string(got) != f[1] {
+					differ++
+				}
+			}
+			g.Remove("stub/systemctl-calls")
+			a.Writes = nil
+			n := a.Execs()
+			if err := ps.PushLVS(context.Background(), "n1", 100, config, "ten0"); err != nil {
+				t.Fatal(err)
+			}
+			calls, _ := os.ReadFile(g.Path("stub/systemctl-calls"))
+			if differ != 1 || !slices.Equal(a.Writes, []string{lvsNet + ".new"}) || a.Execs()-n != 3 ||
+				strings.Count(string(calls), "reload "+lvsService) != 1 || strings.Contains(string(calls), "restart") || strings.Contains(string(calls), "daemon-reload") {
+				t.Errorf("%d files differ from v0.11.1-rc.4's; the push wrote %q with %d commands, and systemd was asked:\n%s\nwant %s alone written and one reload of the unit", differ, a.Writes, a.Execs()-n, calls, lvsNet)
+			}
+			if got, _ := os.ReadFile(g.Path(lvsNet)); string(got) != now {
+				t.Errorf("the script was not replaced")
 			}
 		})
 	}
