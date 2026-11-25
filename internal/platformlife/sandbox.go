@@ -345,6 +345,10 @@ func (in *Installation) SandboxProblems() []string {
 		bom = cur.BOM
 	}
 	if bom.Feature(FeatureSandbox) == nil {
+		// A platform that an earlier release installed, under a build that offers sandboxes: the upgrade comes first.
+		if cur, err := Current(); err == nil && cur.Feature(FeatureSandbox) != nil {
+			return []string{fmt.Sprintf("spec.sandbox: the platform's BOM (release %s) has no sandbox chart. Upgrade the platform to release %s first, then save spec.sandbox; until then leave it out, or set placement off", bom.Release, cur.Release)}
+		}
 		return []string{fmt.Sprintf("spec.sandbox: the platform's BOM (release %s) has no sandbox chart, so this release builds no sandboxes on the platform: leave spec.sandbox out, or set placement off", bom.Release)}
 	}
 	chart := ClusterChartVersion(bom)

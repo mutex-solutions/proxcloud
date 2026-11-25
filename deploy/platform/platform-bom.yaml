@@ -78,8 +78,8 @@ components:
     cluster: seed
     wave: 3
     namespace: pc-platform
-    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.16, digest: "sha256:2a58fa81b5a96fd7b23c76b06418af5a477586f151ec8e9eab1bad1536e6f000"}
-    upgradeFrom: ["0.1.13", "0.1.14", "0.1.15"]
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxmox-kamaji-cluster, version: 0.1.19, digest: "sha256:476950b5e841c9460c47960b1841ceac17998b5c06c7358c9966585f6602d5fa"}
+    upgradeFrom: ["0.1.13", "0.1.14", "0.1.15", "0.1.16"]
     stateful: true
   - name: cilium
     cluster: workload
@@ -151,3 +151,9 @@ components:
     namespace: proxcloud-system
     chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-platform, version: 0.1.3, digest: "sha256:e6873498e625418d9afef7c279ce386ba54b5bd033f37a76a35f7e23bc12e5ad"}
     upgradeFrom: ["0.1.2"]
+  - name: sandbox                  # rendered only for spec.sandbox placement shared; separate installs the same chart inside pc-sandbox
+    cluster: workload
+    wave: 4
+    namespace: sandbox-system
+    chart: {repo: ghcr.io/mutex-solutions/charts, name: proxcloud-sandbox, version: 0.1.0, digest: "sha256:04300d336186e3b4c56e9213cf90e90a851b8c37b0da92cc911fb05dcb1bf2c7"}
+    feature: sandbox
