@@ -250,7 +250,7 @@ Where an entry below says the BOM on `main` is `0.12.0-dev`, that was the state 
     holds the address. **Written:** `/usr/local/sbin/proxcloud-lvs-net`, the script the unit runs before it starts
     and at a reload. **Not written:** `lvs.conf`, `lvs.nft`, `lvs.sysctl`, `proxcloud-lvs.service` and its drop-in,
     which are the same to the byte. **Reloaded:** `proxcloud-lvs.service`, once. The unit is **not** restarted,
-    systemd is not reloaded, no package is installed, and HAProxy and the VRRP keepalived are not touched, so no
+    no unit file is written, no package is installed, and HAProxy and the VRRP keepalived are not touched, so no
     address moves. The reload runs the new script, which finds the nftables table loaded, loads it again in one
     transaction as before and **empties nothing**; it also loads the kernel module `nf_conntrack_netlink` when
     that is not loaded yet (`modprobe`), which nothing uses until the unit next starts. In real guests of both
@@ -292,7 +292,7 @@ Where an entry below says the BOM on `main` is `0.12.0-dev`, that was the state 
     transaction, the new table in place of the old, so there is **no moment without the table** or without the
     forward chain's drop, and keepalived's check process reads its config again. Members that are up stay in the
     kernel's table, no connection entry is dropped (in real guests of both images a client that sent five datagrams
-    a second from one socket lost none across the reload), the unit is **not** restarted, systemd is not reloaded,
+    a second from one socket lost none across the reload), the unit is **not** restarted, no unit file is written,
     no package is installed, and HAProxy and the VRRP keepalived are not touched, so no address moves. Until that
     pass the appliance serves as it did before the upgrade.
   - *On the wire, from that reload on.* A UDP datagram to an address of such a balancer for a port that has no

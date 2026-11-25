@@ -752,7 +752,9 @@ appliances of one vCPU that had run a control under `v0.11.1-rc.4` the same day,
 that counted again from the raw client logs. The upgrade from `v0.11.1-rc.4` (32 s; twelve one-socket UDP clients
 at 5, 50 and 500 datagrams a second and a TCP loop: 1,461,283 datagrams and 6,590 requests across it and the ten
 minutes after, none unanswered) gave each appliance the script alone and one reload of its UDP unit, the standby
-first by 15 s, with the unit's process kept; the platform run to `0.11.1-rc.5` was one record-only row (8.5 s).
+first by 15 s, with the unit's process kept, at the services sync after those minutes (in the minute of that push
+1 of 133,169 datagrams went unanswered, cause not found); the platform run to `0.11.1-rc.5` was one record-only
+row (8.5 s).
 Looped on the appliance that holds the address, with the clients sending throughout: the last UDP listener removed
 and added again 40 times, the unit's keepalived killed 60 times, `nftables.service` restarted 40 times and
 `proxcloud-lvs.service` 20 times, and a first listener added 30 times: no client was left unanswered (0 of 1,920

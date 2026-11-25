@@ -194,24 +194,25 @@ BOM `0.11.0`. UDP listeners and TLS termination are not in this release. The ful
 For `v0.11.1` the same lab ran five drills, each followed by a read-only audit: on the published images of
 `v0.11.1-rc.1` (2026-11-23), `v0.11.1-rc.2` (2026-11-23 and 2026-11-24), `v0.11.1-rc.3` (2026-11-24),
 `v0.11.1-rc.4` (2026-11-24) and `v0.11.1-rc.5` (2026-11-25), dates in UTC. One lab, every appliance on one Proxmox
-node, Ubuntu 26.04 appliances of one vCPU, the scheduler off. The first drill ran the upgrade from `v0.11.0`
-(31365 requests, 0 failed), TLS on a single balancer and a cluster's move to the new controller, and found that a
-pair with a UDP listener read as degraded. The second ran Kubernetes Services and a tenant's own pair with UDP and
-TLS, and found three faults: a change waited while the image's package manager ran, a changed UDP connection limit
-did not reach the kernel, and an address annotated just before its delete was given back. The third showed those
-corrected and found that a UDP client that was sending before its listener existed got no answer. The fourth
-showed that corrected and found no defect; the tests of the release then found one in a case that drill had tried
-once: a UDP client that keeps sending while the UDP service of an appliance stops and starts could stay
-unanswered. The fifth looped that case, 190 stops and starts on the appliance that holds the address under twelve
-clients, with no client left unanswered, beside a control under `v0.11.1-rc.4` on the same pair that left one in
-22 of 112; its audit's verdict was that the candidate can become the release unchanged. Each upgrade between two
-neighbours ran under client loops with 0 failed requests. What the fifth drill does not show: its appliances have
-one vCPU, where `v0.11.1-rc.4` loses a client almost only at 500 datagrams a second, so the lab tells the fix from
+node, Ubuntu 26.04 appliances of one vCPU, the scheduler off. The first drill ran the upgrade from `v0.11.0` (31365
+requests, 0 failed), TLS on a single balancer and a cluster's move to the new controller, and found that a pair
+with a UDP listener read as degraded. The second ran Kubernetes Services and a tenant's own pair with UDP and TLS,
+and found three faults: a change waited while the image's package manager ran, a changed UDP connection limit did
+not reach the kernel, and an address annotated just before its delete was given back. The third showed those
+corrected and found that a UDP client that was sending before its listener existed got no answer. The fourth showed
+that corrected and found no defect; the tests of the release then found one in a case that drill had tried once: a
+UDP client that keeps sending while the UDP service of an appliance stops and starts could stay unanswered. The
+fifth looped that case, 160 stops and starts and 30 starts alone on the appliance that holds the address under
+twelve clients, with no client left unanswered, beside a control under `v0.11.1-rc.4` on the same pair that left
+one in 22 of 112 stops and starts; its audit's verdict was that the candidate can become the release unchanged.
+Each upgrade between two neighbours ran under client loops with 0 failed requests, but for one UDP datagram of
+133,169 in the minute of the fifth candidate's push. What the fifth drill does not show: its appliances have one
+vCPU, where `v0.11.1-rc.4` loses a client almost only at 500 datagrams a second, so the lab tells the fix from
 `v0.11.1-rc.4` at that rate alone. Not run on a lab: the published artifacts of `v0.11.1` itself and any move to
 the BOM `0.11.1`, the upgrade from `v0.11.0` straight to the release, Debian 13 appliances, appliances with more
 than one vCPU, two nodes, a node change under load, the consoles, a production site, the scheduler, a rollback of
-the portal, and what a charge run bills for the rows a pass wrote. The full lists are in the
-[release notes of v0.11.1](releases/v0.11.1.md).
+the portal, and what a charge run bills for the rows a pass wrote. The full lists are in the [release notes of
+v0.11.1](releases/v0.11.1.md).
 
 ## Intentional safety holds and operational defaults
 
