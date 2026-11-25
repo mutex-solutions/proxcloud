@@ -301,16 +301,48 @@ func lvsFiles(tenantIface string) [][2]string {
 			"net.ipv4.conf.all.send_redirects = 0\nnet.ipv4.conf." + tenantIface + ".send_redirects = 0\n"},
 		// up: the modules, the sysctls, the table, and forwarding last and only when the forward chain is loaded.
 		// down: forwarding off first. A failed "up" ends in "down": never forwarding without the chain.
+		//
+		// flush: an "up" that found no table empties the kernel's connection table once the table is loaded. While
+		// the table is away its input chain is too, and connection tracking is not: it outlives a deleted table by
+		// some milliseconds (12 in real guests of both images), and it is on inside a load from nothing before the
+		// rules act. A datagram in either moment is delivered and tracked without the masquerade, and every later
+		// datagram of its client refreshes that entry: the client was unanswered for as long as it kept sending
+		// (CI on the release PR of v0.11.1, then 200 stops and starts per image: one client in twenty at 5
+		// datagrams a second, six in ten at 50). Every stop of the unit deletes the table, so every start after one
+		// was a way in: the last UDP listener removed and one added again, keepalived dying, nftables.service or
+		// the unit restarted by hand. After the load no such entry can be made (the input chain drops what IPVS
+		// does not take before it is confirmed; what IPVS takes is masqueraded), so emptying the table then leaves
+		// none (1000 sockets at 5000 datagrams a second: 80 of 200 starts left one without it, 0 with it).
+		// A reload finds the table and empties nothing: its load is one transaction with no such moment.
+		// The whole table: at a start from no table IPVS holds no flow, TCP is not tracked while the table is
+		// loaded, and an entry of the appliance's own (a health check, VRRP, DNS, NTP) is made again by its next
+		// datagram; an answer on its way to a UDP question the appliance asked in that instant is lost once.
+		// Flushing only entries that were never answered and have no rewrite (a status filter in the same message)
+		// freed every client as well, and rests on what a caught entry looks like; the whole flush rests on nothing.
+		// It is one netlink message, what "conntrack -F" sends: neither image has conntrack(8), both have
+		// perl-base. The kernel's answer is read and one line says which way it went: the unit's journal. A flush
+		// that failed keeps the unit starting, since an appliance that serves with the defect of before is better
+		// than one that does not serve. nf_conntrack_netlink takes the message: it is loaded by name here, beside
+		// the IPVS modules, and is in the kernel package of both images.
 		{lvsNet, `#!/bin/sh
 down() {
   sysctl -q -w net.ipv4.ip_forward=0
   nft delete table ` + lvsTable + ` 2>/dev/null
   return 0
 }
+flush() {
+  if perl -e 'alarm 5; socket(S,16,3,12) && send(S,pack("LSSLLCCn",20,258,5,1,0,0,0,0),0,pack("SSLL",16,0,0,0)) && defined recv(S,$r,4096,0) or exit 1; ($t,$e)=unpack("x4Sx10l",$r); exit($t==2 && $e==0 ? 0 : 1)' 2>/dev/null; then
+    echo "the nftables table was not loaded before: the connection table was emptied"
+  else
+    echo "the nftables table was not loaded before and the connection table could not be emptied: a UDP client that sent meanwhile may stay unanswered until it is silent for 30 s or sends from another port" >&2
+  fi
+}
 case "$1" in
 up)
-  modprobe -a ip_vs ip_vs_wrr ip_vs_lc ip_vs_sh 2>/dev/null
+  modprobe -a ip_vs ip_vs_wrr ip_vs_lc ip_vs_sh nf_conntrack_netlink 2>/dev/null
+  nft list table ` + lvsTable + ` >/dev/null 2>&1 && fresh= || fresh=1
   if sysctl -q -p ` + lvsSysctl + ` && nft -f ` + lvsNft + ` && nft list chain ` + lvsTable + ` ` + lvsForward + ` | grep -q 'policy drop'; then
+    [ -z "$fresh" ] || flush
     m=/proc/sys/net/netfilter/nf_conntrack_max
     [ "$(cat $m 2>/dev/null || echo 0)" -ge ` + strconv.Itoa(lvsConntrackMax) + ` ] || { echo ` + strconv.Itoa(lvsConntrackMax) + ` > $m; } 2>/dev/null || true
     sysctl -q -w net.ipv4.ip_forward=1 && exit 0
