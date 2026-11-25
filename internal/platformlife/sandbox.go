@@ -15,8 +15,8 @@ package platformlife
 // Both put their machines on the platform network, in a range of their own (nodeRange, one CIDR) and in the Proxmox
 // pool pve.SandboxPool. This file holds the rules and the renders; sandbox_run.go what a run does on the site.
 //
-// No release pins the sandbox chart yet: SandboxProblems refuses the block while the installation's BOM has no
-// component marked FeatureSandbox, so nothing here runs against a real site until a BOM names one.
+// The BOM of 0.12.0 is the first that pins the sandbox chart. SandboxProblems refuses the block while the installation's
+// BOM has no component marked FeatureSandbox: a platform that an earlier release installed, until its upgrade.
 
 import (
 	"context"
