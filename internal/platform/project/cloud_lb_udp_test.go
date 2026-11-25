@@ -250,12 +250,21 @@ func TestLBPairWithUDPKnowsItsHolder(t *testing.T) {
 	}
 	served("a pair with a UDP listener")
 
-	// A change while the UDP listener is served: the standby first, HAProxy and the UDP service alike.
+	// A change while the UDP listener is served: the standby first, HAProxy and the UDP service alike. Each appliance
+	// takes each of the two once, and the standby has taken both before the appliance that holds the address is
+	// given either. Which of the two an appliance takes first is not the product's to say: they are started
+	// together (lbApplyPair), so the two loads of one appliance are compared as a set.
 	m := mark()
 	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 81, Pool: "web"}, pve.LBListener{Port: 54, Protocol: "udp", Pool: "dns"})
 	apply()
-	if got, want := since(m, " reload"), []string{"302 haproxy reload", "302 lvs reload", "301 haproxy reload", "301 lvs reload"}; !slices.Equal(got, want) {
-		t.Fatalf("a change with a UDP listener served went %q, want the standby first: %q", got, want)
+	got, want := since(m, " reload"), []string{"302 haproxy reload", "302 lvs reload", "301 haproxy reload", "301 lvs reload"}
+	perAppliance := slices.Clone(got)
+	if len(got) == len(want) {
+		slices.Sort(perAppliance[:2])
+		slices.Sort(perAppliance[2:])
+	}
+	if !slices.Equal(perAppliance, want) {
+		t.Fatalf("a change with a UDP listener served went %q, want the standby's two loads and then the holder's two, in either order on each: %q", got, want)
 	}
 	served("after the change")
 

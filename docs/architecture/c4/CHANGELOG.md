@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-25: a pair's push-order test asks for the order across appliances only (CI on the release PR of v0.11.1-rc.5)
+
+**What changed:** no component, container, wire field or behaviour of the product. One assertion of one unit test.
+
+- `internal/platform/project/cloud_lb_udp_test.go`, `TestLBPairWithUDPKnowsItsHolder`: the loads of a change with a
+  TCP and a UDP port are compared per appliance as a set. Each appliance loads HAProxy and the UDP service once,
+  and the standby has loaded both before the appliance that holds the address is given either; which of the two an
+  appliance loads first is no longer asked.
+
+**Why:** `Handler.lbApplyPair` starts the two pushes of one appliance together since #454 and waits for both before
+it goes to the next appliance, so the order across appliances is the product's and the order inside one is not.
+The assertion listed HAProxy first on each, and the unit step of `go-test` failed on the release pull request of
+v0.11.1-rc.5 when an appliance loaded its UDP service first. On unchanged `main` it failed 56 of 500 runs on two
+busy CPUs and 20 of 20 with HAProxy's requests held back in the fake appliance; no other test of
+`internal/platform/project` or `internal/cloud/pve` depends on an order between two pushes that are started
+together (all 51 load balancer tests of `internal/platform/project` pass with either push held back).
+
+**Diagrams updated:** none (no element of C1 to C4 moves).
+
 ## 2026-11-25: no UDP client is left unanswered when the UDP service stops and starts (CI on the release PR of v0.11.1)
 
 **What changed:** no new component, container, listener, route or relation, and no new file on an appliance. One
