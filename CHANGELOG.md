@@ -645,17 +645,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that kept sending from one source port while `proxcloud-lvs.service` stopped and started on the appliance holding
   the address could get no answer afterwards, for as long as it kept sending, while the balancer read `ACTIVE`, its
   members `UP`, and a new client was answered (CI on the release pull request of v0.11.1: the real-guest test of
-  the fix above failed its step "nftables.service restarted" about one run in twenty). The product caused it by
+  the fix "a UDP client that was sending before its listener existed is answered", below, failed its step
+  "nftables.service restarted" about one run in twenty). The product caused it by
   itself: a balancer's last UDP listener removed and a UDP listener added again while a client sends (also a UDP
   Service made again), and the unit's keepalived dying, which systemd answers with a stop and a start. By hand:
   `systemctl restart nftables` or `systemctl restart proxcloud-lvs` on the appliance that holds the address, and
   `systemctl reload nftables` for a client whose first datagrams arrive in those milliseconds. A push that keeps a
   UDP listener only reloads the unit and never caused it.
   - *Cause.* The unit's stop empties IPVS, which removes each flow's good connection entry, and then deletes the
-    nftables table, the chain `lb-input` of the fix above with it. Connection tracking stays on for about 12 ms
+    nftables table, the chain `lb-input` of that fix with it. Connection tracking stays on for about 12 ms
     after the table is gone. A datagram in that moment is delivered and tracked without the source rewrite, and
-    once the unit is back every later datagram of that client refreshes the entry (30 s), as in the finding
-    above. A second, far shorter moment sits inside the table's load at a start: tracking is on before the rules
+    once the unit is back every later datagram of that client refreshes the entry (30 s), as in that fix's
+    finding. A second, far shorter moment sits inside the table's load at a start: tracking is on before the rules
     act.
   - *Fix.* The unit's script notes whether the nftables table was loaded before it loads it, and at a start that
     found none it empties the kernel's connection table right after the load: one netlink message, what
