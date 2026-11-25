@@ -4,6 +4,34 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-25: no UDP client is left unanswered when the UDP service stops and starts (CI on the release PR of v0.11.1)
+
+**What changed:** no new component, container, listener, route or relation, and no new file on an appliance. One
+support file of an appliance with a UDP listener, the script its UDP unit runs, does one thing more.
+
+- `internal/cloud/pve/lblvs.go`: the script of `lvsFiles` (`/usr/local/sbin/proxcloud-lvs-net`) notes in `up`
+  whether the nftables table was loaded before it loads it. When it was not (a start of the unit, or a reload behind
+  a reload of nftables.service), it empties the kernel's connection table right after the load and before
+  forwarding goes on (`flush()`: one netlink message from perl-base, the kernel's answer read), and says in one
+  line which way it went: stdout for "emptied", stderr for "could not be emptied", both the unit's journal. A
+  failed flush does not fail `up`. `up` also loads `nf_conntrack_netlink` by name beside the IPVS modules.
+- `test/integration/lb_udp_stop_start_test.go`: the real-guest test that loops the four events 30 times each with
+  clients at 5 and 50 datagrams a second, with its control (a flush that fails).
+- `internal/cloud/pve/lbscript_test.go`: the script run as text (order of its steps, what it says), and what a
+  push onto the script of v0.11.1-rc.4 writes and reloads (`testdata/lvs-net-v0.11.1-rc.4.sh`).
+- `.github/workflows/test.yml`: the integration step of the `go-test` job may take 60 minutes where it had 40; the
+  new test adds about 10.
+
+**Why:** CI on the release pull request of v0.11.1 failed the real-guest test of the fix below at its step
+"nftables.service restarted", about one run in twenty. The unit's stop deletes the nftables table, and with it the
+input chain that fix added; connection tracking stays on for about 12 ms more, and a datagram in that moment is
+tracked without the masquerade, which every later datagram of its client then refreshes. Every stop of the unit
+was such a moment, and the product makes them by itself (the last UDP listener removed and one added again; the
+unit's keepalived dying). What was weighed and what each showed in real guests is in `docs/cloud-integration.md`
+("What CI on the release pull request of v0.11.1 found about UDP").
+
+**Diagrams updated:** `c4-code.md`, the row of `RenderLVS` / `lvsFiles`. C1 to C3 are unchanged.
+
 ## 2026-11-25: the health read takes back the pass's marks for an appliance it could not read (lab drill of v0.11.1-rc.3)
 
 **What changed:** no new component, container, listener, route, relation or row field. Inside one code element.
