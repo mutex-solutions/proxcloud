@@ -26,9 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     images, 100 such pushes each onto the script of v0.11.1-rc.4, twice, under eight clients that never stop: the
     unit kept its process and its start time every time, no client was left unanswered and none of 40,000 new
     sockets was. A datagram without an answer within its client's interval was counted 2 to 9 times in 33,000 at
-    50 a second and 0 to 3 times in 3,400 at 5 a second over the 100 reloads, on a workstation that ran ten other
-    guests, and not once in 60 reloads on a quieter one; a reload of the release before read the same there (0 to
-    7 in 33,000). Until that pass the appliance serves as it did before the upgrade.
+    50 a second and 0 to 3 times in 3,400 at 5 a second over the 100 reloads on a busy workstation, and not once
+    in 60 reloads on a quieter one; a reload of the release before read the same there (0 to 7 in 33,000). Until
+    that pass the appliance serves as it did before the upgrade.
   - *A client that is already caught stays caught.* The upgrade's reload finds the table, so it frees no one: a
     client that was left unanswered before the upgrade stays so until it is silent for more than 30 s or sends from
     another source port, as before. From then on a stop and start of the UDP service frees it instead of catching
