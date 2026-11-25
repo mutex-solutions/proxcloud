@@ -89,9 +89,11 @@ jobs:
           else
             echo "::warning title=UDP load balancer test skipped::this runner's kernel has no IPVS (ip_vs): TestLBApplianceUDP does not run, the lab drill is the gate for UDP listeners"
           fi
+      # 60 minutes: the real-guest load balancer tests are most of it, and TestLBApplianceUDPStopStart alone loops
+      # 120 stops and starts of the UDP service in each of two guests (about 10 minutes, the guests side by side).
       - name: Integration tests (testcontainers PostgreSQL)
         run: |
-          go test -tags=integration -timeout 40m ./test/integration/... ./cmd/api/...
+          go test -tags=integration -timeout 60m ./test/integration/... ./cmd/api/...
           go test -tags=integration ./internal/platform/project -run '^(TestBuildArchiveSurvivesCleanupAndRestart|TestPVESubnetRefreshFollowsTheLiveZone|TestPVEServerRefreshKeepsTheRowIdentity|TestLBPairApplyOrderAndStatus|TestLBCertificatesReachThePair|TestLBClusterStateConverges|TestLBControllerEnable)$'
 
   # tsc and vite build stay green on a bundle that renders a white page, so open the real build.
