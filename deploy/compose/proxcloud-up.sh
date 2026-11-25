@@ -9,7 +9,7 @@ export LC_ALL=C
 
 # Release pin of the proxcloud-{api,web,admin} images. Kept equal to the chart appVersion by
 # .github/scripts/tests/test_release_policy.py.
-DEFAULT_VERSION="v0.11.0"
+DEFAULT_VERSION="v0.11.1"
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$DIR"
