@@ -729,17 +729,18 @@ long as it sends (in real guests, per restart of `nftables.service`, about 1 cli
 `0.12.0-dev` to `0.11.1-rc.5`, with the pins `main` had, which are those of `0.11.1-rc.1`, `0.11.1-rc.2`,
 `0.11.1-rc.3` and `0.11.1-rc.4`. It holds the one pull request merged since the fourth candidate, #477: the script
 of an appliance's UDP service empties the kernel's connection table at a start that found no nftables table, so that
-a client that sent while the service stopped and started is answered again. No chart of the product differs from its
-newest tag (the same four `git diff` commands print nothing on its commit), so the BOM needs no new chart version,
-and no component of the sandbox feature is in the BOM (`TestSandboxIsDark`). The app chart, the installer's
-ProxCloud pin and `DEFAULT_VERSION` stay on `v0.11.0`. For a balancer that ran under `v0.11.1-rc.4` the portal's
-upgrade pushes one thing: a pair with a UDP listener gets `/usr/local/sbin/proxcloud-lvs-net`, with one reload of
-its UDP unit per appliance, the standby first; every other balancer gets nothing. That reload finds the table and
-empties nothing, so a client that is unanswered before the upgrade stays so until it is silent for more than 30 s or
-sends from another source port. Nothing of #477 has run on a lab: what the notes of this candidate call verified ran
-on `v0.11.1-rc.1`, on `v0.11.1-rc.2`, on `v0.11.1-rc.3` or on `v0.11.1-rc.4`, and they say on which, with the
-correction above. The pull request after its tag adds `deploy/platform/previous/0.11.1-rc.5.yaml` and sets the BOM
-on `main` back to `0.12.0-dev`.
+a client that sent while the service stopped and started is answered again. One more pull request merged since,
+#479, changes a unit test and nothing in the product. No chart of the product differs from its newest tag (the same
+four `git diff` commands print nothing on its commit), so the BOM needs no new chart version, and no component of
+the sandbox feature is in the BOM (`TestSandboxIsDark`). The app chart, the installer's ProxCloud pin and
+`DEFAULT_VERSION` stay on `v0.11.0`. For a balancer that ran under `v0.11.1-rc.4` the portal's upgrade pushes one
+thing: a pair with a UDP listener gets `/usr/local/sbin/proxcloud-lvs-net`, with one reload of its UDP unit per
+appliance, the standby first; every other balancer gets nothing. That reload finds the table and empties nothing, so
+a client that is unanswered before the upgrade stays so until it is silent for more than 30 s or sends from another
+source port. Nothing of #477 has run on a lab: what the notes of this candidate call verified ran on `v0.11.1-rc.1`,
+on `v0.11.1-rc.2`, on `v0.11.1-rc.3` or on `v0.11.1-rc.4`, and they say on which, with the correction above. The
+pull request after its tag adds `deploy/platform/previous/0.11.1-rc.5.yaml` and sets the BOM on `main` back to
+`0.12.0-dev`.
 
 Not verified on a lab: anything on the published images of `v0.9.0` or `v0.9.1`, the move
 of a platform from a candidate's BOM to that of `0.9.0`, and any move to that of `0.9.1`.

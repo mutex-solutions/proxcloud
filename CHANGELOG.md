@@ -1123,12 +1123,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The fifth release candidate of 0.11.1, published as a prerelease and never as `latest`. It is not the release:
 `v0.11.0` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
 still name it. It holds what is under Unreleased above: what `v0.11.1-rc.4` held and the one pull request merged
-since (#477). The drill of `v0.11.1-rc.4` ran every part of its plan and found no defect: the upgrade from rc.3 did
-what its notes said, and the two fixes of rc.4 held in every case it tried. This candidate exists because CI on the
-release pull request of v0.11.1 then found a defect that all four candidates have, in a case the drill had tried
-once: a UDP client that keeps sending while the UDP service of an appliance stops and starts can stay unanswered for
-as long as it sends. Nothing of its fix had run on a lab when it was tagged. The entries above are not repeated
-here. Not for a production site.
+since (#477). One more pull request merged since changes a unit test and nothing in the product (#479): the test of
+a pair's push order no longer asks for an order between the two pushes of one appliance. The drill of `v0.11.1-rc.4`
+ran every part of its plan and found no defect: the upgrade from rc.3 did what its notes said, and the two fixes of
+rc.4 held in every case it tried. This candidate exists because CI on the release pull request of v0.11.1 then found
+a defect that all four candidates have, in a case the drill had tried once: a UDP client that keeps sending while
+the UDP service of an appliance stops and starts can stay unanswered for as long as it sends. Nothing of its fix had
+run on a lab when it was tagged. The entries above are not repeated here. Not for a production site.
 
 ### Changed
 
