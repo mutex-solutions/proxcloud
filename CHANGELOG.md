@@ -108,13 +108,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the tests (`LB_TEST_IMAGE_DEBIAN`, `LB_TEST_IMAGE_UBUNTU`). Same systemd as PID 1, same privileged mode, same
   packages; without the variables a test installs what is missing as before
   ([CONTRIBUTING.md](CONTRIBUTING.md#the-guest-images-of-the-load-balancer-tests)).
-  - **The product's own install is still shown on a plain image**, by one test that reads no variable and cannot
+  - **The product's own install is still shown on a plain image**, by two tests that read no variable and cannot
     skip: `TestLBApplianceServesWhatIsRecorded` (the pair's install line at its start, as before, and now the UDP
-    service's at its end: nftables, with HAProxy and keepalived keeping their processes). That test still needs
-    the mirror; a failure of the install says `mirror` when the mirror does not answer the guest.
-  - **Not shown in a real guest any more:** the install line of a single appliance (`haproxy socat iproute2`, a
-    subset of the pair's line, and the same command otherwise), which `TestLBApplianceTLS` ran on the plain image.
-    A run without the two variables still runs it.
+    service's at its end: nftables, with HAProxy and keepalived keeping their processes) and the new
+    `TestLBSingleApplianceInstalls` (the install line of a single appliance, which a load balancer of one appliance
+    and the sandbox entry run, and which `TestLBApplianceTLS` showed on the plain image until now). Both fail if
+    the plain image already holds what the line installs. They still need the mirror; a failure of the install says
+    `mirror` when the mirror does not answer the guest.
 
 ### Fixed
 

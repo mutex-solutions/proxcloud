@@ -163,16 +163,17 @@ that no test installs from a distribution mirror while it runs.
   day of many pull requests with the repository at 10.8 GB, an entry that only its
   own pull request read was gone within the hour. So the mirror can still fail this
   job, at the build step and under its own name; it can no longer fail a test, apart
-  from the one below.
+  from the two below.
 - **A mirror failure reads as one.** The package step tries three times and then fails
   with a line that starts with `mirror`; the job adds the annotation "Appliance test
   images not built" and runs no integration test. That is the mirror: run the job
   again. A failed test after that step is a test.
-- **One test still needs the mirror, on purpose.** `TestLBApplianceServesWhatIsRecorded`
-  runs on the plain distribution image whatever the variables say, because the
-  product's own install is what it shows; it reads no variable and has no skip. When
-  the install does not end, its failure says `mirror` if the mirror does not answer
-  the guest.
+- **Two tests still need the mirror, on purpose.** `TestLBApplianceServesWhatIsRecorded`
+  (the pair's install line and the UDP service's) and `TestLBSingleApplianceInstalls`
+  (the single appliance's) run on the plain distribution image whatever the variables
+  say, because the product's own install is what they show; they read no variable and
+  have no skip. When an install does not end, the failure says `mirror` if the mirror
+  does not answer the guest.
 - **A package a test needs and the images lack fails that test**, with the files to add
   it to. Without that, the test would install it from the mirror in every run, unseen.
 

@@ -130,9 +130,10 @@ make test-integration
 - A test that needs a package the images lack fails and says so: add the package to
   both Dockerfiles (and to the test's own `lbInstall`/`lbInit` call, which is what a
   run without the images installs).
-- `TestLBApplianceServesWhatIsRecorded` never uses these images: the product's own
-  install on a plain distribution image is what it shows (the pair's install line and
-  the UDP service's), so it always needs the mirror.
+- `TestLBApplianceServesWhatIsRecorded` and `TestLBSingleApplianceInstalls` never use
+  these images: the product's own install on a plain distribution image is what they
+  show (the pair's install line and the UDP service's; the single appliance's), so
+  they always need the mirror.
 - The UDP tests need the kernel's IPVS (`sudo modprobe ip_vs`); without it they skip,
   unless `LB_UDP_REQUIRE_IPVS` is set, as CI sets it.
 

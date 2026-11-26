@@ -190,9 +190,10 @@ command -v ss >/dev/null && systemctl cat haproxy.service keepalived.service >/d
 // is masked by the product's install and stays off over a reboot, where a unit that is only disabled is started
 // again by whatever asks for it (R4-o1).
 //
-// This is the test of the product's own install, and the one real-guest test that runs on the distribution's plain
-// image whatever LB_TEST_IMAGE_* names (lb_guest_test.go): the pair's install line at its start, the UDP service's
-// at its end. It needs the distribution's mirror, and nothing lets it skip.
+// This is the test of the product's own install, and with TestLBSingleApplianceInstalls one of the two real-guest
+// tests that run on the distribution's plain image whatever LB_TEST_IMAGE_* names (lb_guest_test.go): the pair's
+// install line at its start, the UDP service's at its end. It needs the distribution's mirror, and nothing lets it
+// skip.
 func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
 		t.Run(image, func(t *testing.T) {
@@ -727,6 +728,9 @@ sed -i '/^Package: haproxy$/,/^$/ s/^Status: install ok installed$/Status: insta
 				return g.run(ctx, "systemctl show -p MainPID haproxy keepalived | tr '\\n' ' '")
 			}
 			had, pidsBefore := g.run(ctx, "dpkg-query -W -f='${Status}' nftables 2>/dev/null || true"), pids()
+			if had == "install ok installed" {
+				t.Fatal("the plain image has nftables: the UDP service's install line would not run here, and this step would show nothing")
+			}
 			lvs := pve.RenderLVS(pve.LBSpec{
 				Listeners: []pve.LBListener{{Port: 5000, Protocol: "udp", Pool: "udp"}},
 				Pools: []pve.LBPool{{Name: "udp", Protocol: "udp", Algorithm: "roundrobin",
@@ -749,6 +753,80 @@ sed -i '/^Package: haproxy$/,/^$/ s/^Status: install ok installed$/Status: insta
 			}
 			sshOff("after the UDP service's install")
 			t.Logf("the UDP service's install: nftables was %q before it; %s", had, g.run(ctx, "nft --version"))
+		})
+	}
+}
+
+// The install line of a single appliance (PushHAProxy: haproxy, socat and iproute2, no keepalived), which a load
+// balancer of one appliance and the sandbox entry run. Like the test above it runs on the distribution's plain image
+// whatever LB_TEST_IMAGE_* names, needs the distribution's mirror, reads no variable and has no skip: every other
+// test of PushHAProxy runs where the packages are in already (TestLBApplianceTLS showed this line before the images
+// were baked). Shown: the first push is held while the product installs, and the next one after dpkg is done is
+// served, on an appliance that has the line's packages and no keepalived. The two guests run side by side.
+func TestLBSingleApplianceInstalls(t *testing.T) {
+	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
+		t.Run(image, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+			defer cancel()
+			c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+				ContainerRequest: testcontainers.ContainerRequest{
+					Image:      image,
+					Cmd:        lbInit("systemd-sysv", "procps"),
+					Privileged: true,
+					Tmpfs:      map[string]string{"/run": "", "/run/lock": ""},
+				},
+				Started: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.Terminate(context.Background()) })
+			g := &guestAgent{t: t, c: c, runs: map[int]*guestRun{}}
+			g.booted(ctx)
+			srv := httptest.NewServer(g)
+			defer srv.Close()
+			ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := pve.RenderHAProxy(pve.LBSpec{
+				Listeners: []pve.LBListener{{Port: 80, Pool: "web"}},
+				Pools: []pve.LBPool{{Name: "web", Protocol: "http", Algorithm: "roundrobin",
+					Members: []pve.LBMember{{ServerID: "101", Port: 8080, Weight: 1, Address: "10.0.0.11"}}}},
+			})
+			// The product starts its install on the first answer that is not "busy": a guest that never gave that
+			// answer had the packages, and showed nothing of the install.
+			installs := 0
+			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(time.Second) {
+				_, err := ps.PushHAProxy(ctx, "n1", 100, config)
+				if err == nil {
+					break
+				}
+				if !errors.Is(err, pve.ErrLBNotReady) {
+					t.Fatalf("first push: %v", err)
+				}
+				if errors.Is(err, pve.ErrLBInstalling) {
+					installs++
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the appliance did not become ready: %v%s", err, g.mirror(ctx))
+				}
+			}
+			if installs == 0 {
+				t.Fatal("the first push was taken at once: the plain image has the single appliance's packages, and the install line did not run")
+			}
+			const want = "haproxy=install ok installed socat=install ok installed iproute2=install ok installed keepalived="
+			if got := g.run(ctx, `for p in haproxy socat iproute2 keepalived; do printf '%s=%s ' $p "$(dpkg-query -W -f='${Status}' $p 2>/dev/null)"; done`); got != want {
+				t.Fatalf("after the single appliance's install dpkg says %q, want %q", got, want)
+			}
+			if got := g.run(ctx, lbListening); got != "0.0.0.0:80" {
+				t.Fatalf("after the first push HAProxy listens on %q, want 0.0.0.0:80", got)
+			}
+			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, lbSum(config)); err != nil || !ok {
+				t.Fatalf("after the first push: serving %v %q %v", ok, why, err)
+			}
+			t.Logf("%s; the install was started %d time(s)", g.run(ctx, "haproxy -v | head -1"), installs)
 		})
 	}
 }

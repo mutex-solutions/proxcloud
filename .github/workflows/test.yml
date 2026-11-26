@@ -91,8 +91,8 @@ jobs:
           fi
       # The guests of the real-guest load balancer tests (test/integration/lb_guest_test.go): the two distribution
       # images with the tests' packages in them, built once per run and named to the tests below, so that no test
-      # installs from a distribution mirror while it runs. One test stays on the plain image, because the product's
-      # own install is what it shows: TestLBApplianceServesWhatIsRecorded.
+      # installs from a distribution mirror while it runs. Two tests stay on the plain image, because the product's
+      # own install is what they show: TestLBApplianceServesWhatIsRecorded and TestLBSingleApplianceInstalls.
       # Nothing is pushed: the images are loaded into this runner's Docker and the layers are kept in the Actions
       # cache. REFRESH is the ISO week and part of the package layer's cache key, so the first run of a week
       # installs the distribution's current packages again and a later run takes the layer from the cache.

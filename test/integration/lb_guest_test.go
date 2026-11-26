@@ -19,9 +19,10 @@ var lbBakedImage = map[string]string{"debian:trixie": "LB_TEST_IMAGE_DEBIAN", "u
 
 // lbImage answers the image a test runs its guest of distro in: the baked one where its variable names one.
 //
-// One test never asks: TestLBApplianceServesWhatIsRecorded runs on the plain image whatever is set, because the
-// product's own install on an image that has nothing is what it shows (the pair's install line and, at its end, the
-// UDP service's). It reads no variable and has no skip, so a run cannot leave the install out.
+// Two tests never ask, because the product's own install on an image that has nothing is what they show:
+// TestLBApplianceServesWhatIsRecorded (the pair's install line and, at its end, the UDP service's) and
+// TestLBSingleApplianceInstalls (the single appliance's line). They run on the plain image whatever is set, read no
+// variable and have no skip, so a run cannot leave an install line out.
 func lbImage(distro string) string {
 	if image := os.Getenv(lbBakedImage[distro]); image != "" {
 		return image
