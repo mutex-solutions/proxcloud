@@ -121,9 +121,10 @@ func TestPreviousBOMsMoveAsTheirPinsDiffer(t *testing.T) {
 // cluster. From 0.12.0 every one of them also has the two rows that switch sandboxes on: seed/pc-platform, the
 // platform's own cluster chart to 0.1.19 as class chart (from 0.1.16, and from 0.1.15 for 0.10.1-rc.1; no machine is
 // replaced, TestUpgradeRollsNoMachine), and workload/sandbox, the sandbox chart as class added, which no run renders
-// until the settings ask for sandboxes. Neither is a machines row. Every BOM on Kubernetes 1.35.10 is refused by the
-// pair gate on both cert-manager rows, because that pair also moves k3s, Kubernetes and the node image. A newly kept
-// BOM needs its line.
+// until the settings ask for sandboxes. Neither is a machines row. 0.12.0-rc.1 has neither: it pins the cluster chart
+// 0.1.19 for pc-platform and names the sandbox chart already, as this build's BOM does, so it plans the release alone,
+// record only. Every BOM on Kubernetes 1.35.10 is refused by the pair gate on both cert-manager rows, because that
+// pair also moves k3s, Kubernetes and the node image. A newly kept BOM needs its line.
 func TestPreviousBOMsMoveCertManager(t *testing.T) {
 	cur := embedded(t)
 	prev, err := Previous()
@@ -137,6 +138,7 @@ func TestPreviousBOMsMoveCertManager(t *testing.T) {
 		"0.10.1-rc.1": charts, "0.10.1-rc.2": charts, "0.10.1": charts,
 		"0.10.2-rc.1": tenant, "0.10.2": tenant, "0.11.0-rc.1": tenant, "0.11.0-rc.2": tenant, "0.11.0": tenant,
 		"0.11.1-rc.1": own, "0.11.1-rc.2": own, "0.11.1-rc.3": own, "0.11.1-rc.4": own, "0.11.1-rc.5": own, "0.11.1": own,
+		"0.12.0-rc.1": {"/release"},
 	}
 	gate := "not supported by this release: a third-party chart moves only in an upgrade that changes no k3s, Kubernetes " +
 		"version or node image, and this one also changes kubernetes.version, kubernetes.nodeImage, seed.k3s. First finish an " +
