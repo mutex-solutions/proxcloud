@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-27: PR #PRNUM, a platform run builds the function side of its sandboxes (off: no BOM pins the chart)
+## 2026-11-27: PR #512, a platform run builds the function side of its sandboxes (off: no BOM pins the chart)
 
 **What changed:** no new container or component. Components "Platform installations" and "Platform runs" gain
 `internal/platformlife/sandbox_functions.go` (new):

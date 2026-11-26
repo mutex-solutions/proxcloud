@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `FUNCTION`. A provider gains `secret.functionWakeToken` as a field of its own, apart from `proxyWakeToken`,
     which stays empty.
   Tested against a fake cluster only: no function has run on a cluster from this code.
-- **Functions on the managed platform, the platform's side (not reachable yet)** (#PRNUM,
+- **Functions on the managed platform, the platform's side (not reachable yet)** (#512,
   [managed-services.md](docs/managed-services.md#functions-on-the-sandbox-machines)). What a platform run builds
   for functions beside the sandboxes it already builds, for settings that ask for it:
   `spec.sandbox.functions {enabled, portalURL, portalCA}`. **No BOM this build embeds lets a run build it**: functions
