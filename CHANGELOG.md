@@ -92,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Secret the portal already holds a row for is not looked at again until its content changes.
   - Not run on a lab. Shown in real guests of both images and in unit tests (see Fixed).
 
-- **Functions: nothing to do at this upgrade, and what a rollback will mean once they can be enabled.** This
+- **Functions: nothing to do at this upgrade, and what a rollback will mean once they can be enabled** (#513). This
   release creates three empty collections (`functions`, `function_deployments`, `function_hosts`) and can hold a
   `functionQuota` on a project; a portal rolled back to 0.12.x ignores all four. No function can be created, so
   there is no `FUNCTION` row. For the release that lets an operator switch functions on, the rule is already
@@ -104,8 +104,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Serverless functions, the portal's API (switched off: no provider can enable them)**
-  ([managed-functions.md](docs/managed-functions.md)). The second part of functions on the managed platform
+- **Serverless functions, the portal's API (switched off: no provider can enable them)** (#513,
+  [managed-functions.md](docs/managed-functions.md)). The second part of functions on the managed platform
   (v0.13.0): the records, the project routes and the deploy flow on top of #496. **Nothing is reachable.** A save of
   a sandbox provider with `config.sandbox.functions.enabled: true` is refused (`409`), so every route below answers
   `403 functions are not offered here` to all but a read and a delete, and there is nothing to read. What stops an

@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-27: functions API with deploy, roll back and secrets (v0.13.0, switched off)
+## 2026-11-27: PR #513 functions API with deploy, roll back and secrets (v0.13.0, switched off)
 
 **What changed**
 
