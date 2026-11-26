@@ -1,6 +1,7 @@
 // The Sandboxes block of the Managed services page (/platform) against the mock API (src/mocks/handlers/platform.ts):
-// ?mock-platform=sandboxes is a release whose BOM has the sandbox chart, with nothing saved; sandboxready is a ready
-// platform with a shared sandbox group and its disabled sandbox provider.
+// this release's BOM has the sandbox chart, so the settings offer sandboxes (?mock-platform=sandboxes, or no preset:
+// nothing saved); nosandboxes is a release from before the offer, previous a platform such a release installed;
+// sandboxready is a ready platform with a shared sandbox group and its disabled sandbox provider.
 import { AxeBuilder } from "@axe-core/playwright"
 import { expect, test, type Page } from "@playwright/test"
 import { calls, recordCalls } from "./mock-calls.ts"
@@ -36,11 +37,25 @@ async function fillSettings(page: Page) {
 const save = (page: Page) => page.getByRole("button", { name: /^Save (draft|settings)$/ }).click()
 const givesUp = (page: Page) => page.getByRole("note", { name: "What a shared node group gives up" })
 
-test("a release without the sandbox chart offers no sandboxes", async ({ page }) => {
-  await open(page)
-  await expect(page.getByRole("heading", { name: "Node groups" })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "Sandboxes", exact: true })).toHaveCount(0)
-  await expect(page.getByRole("radio", { name: /Shared node group/ })).toHaveCount(0)
+test("this release offers sandboxes: off until the operator chooses, in a new installation and on a ready platform", async ({ page }) => {
+  for (const preset of ["", "ready"]) {
+    await open(page, preset)
+    await expect(page.getByRole("heading", { name: "Sandboxes", exact: true })).toBeVisible()
+    await expect(page.getByRole("radio", { name: /^Off\./ })).toBeChecked()
+    await expect(page.getByRole("radio", { name: /^Shared node group\./ })).toBeEnabled()
+    await expect(page.getByRole("radio", { name: /^Separate sandbox cluster\./ })).toBeEnabled()
+    await expect(page.getByLabel("Sandbox range", { exact: true })).toHaveCount(0)
+  }
+})
+
+test("a release without the sandbox chart, and a platform that one installed, offer no sandboxes", async ({ page }) => {
+  // previous: the platform stays on the BOM that installed it until its upgrade, and that BOM builds no sandboxes.
+  for (const preset of ["nosandboxes", "previous"]) {
+    await open(page, preset)
+    await expect(page.getByRole("heading", { name: "Node groups" })).toBeVisible()
+    await expect(page.getByRole("heading", { name: "Sandboxes", exact: true })).toHaveCount(0)
+    await expect(page.getByRole("radio", { name: /Shared node group/ })).toHaveCount(0)
+  }
 })
 
 test("a shared node group: the machines, the range, what it gives up in full, and the tick", async ({ page }) => {
