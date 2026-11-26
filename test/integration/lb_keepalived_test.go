@@ -30,7 +30,7 @@ func TestLBPairConfigsPassTheirChecks(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 			defer cancel()
 			c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-				ContainerRequest: testcontainers.ContainerRequest{Image: image, Cmd: []string{"sleep", "600"}},
+				ContainerRequest: testcontainers.ContainerRequest{Image: lbImage(image), Cmd: []string{"sleep", "600"}},
 				Started:          true,
 			})
 			if err != nil {
@@ -49,7 +49,7 @@ func TestLBPairConfigsPassTheirChecks(t *testing.T) {
 				}
 				return out.String()
 			}
-			run("apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq keepalived haproxy >/dev/null")
+			run(lbInstall("keepalived", "haproxy"))
 			t.Log(run("keepalived --version 2>&1 | head -1"))
 			// The scripts keepalived runs must exist, or -t disables the track script and fails.
 			run("printf '#!/bin/sh\\n' > /usr/local/sbin/proxcloud-lb-check && printf '#!/bin/sh\\n' > /usr/local/sbin/proxcloud-lb-notify && chmod 0755 /usr/local/sbin/proxcloud-lb-*")
@@ -181,7 +181,7 @@ func TestLBPairConfigsPassTheirChecks(t *testing.T) {
 // saved before the reload says of its member; a listener's connection limit is the frontend's.
 func lbLayer4Behaves(ctx context.Context, t *testing.T, c testcontainers.Container, run func(string) string) {
 	t.Helper()
-	run("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssl socat >/dev/null")
+	run(lbInstall("openssl", "socat"))
 	run("openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/k.pem -out /tmp/c.pem -days 1 -subj /CN=member >/dev/null 2>&1")
 	run(`printf '#!/bin/sh\nhead -n1 >> /tmp/$1.in\necho $1\n' > /tmp/answer && chmod 0755 /tmp/answer`)
 	for name, port := range map[string]int{"a": 9081, "b": 9082, "c": 9083} {
