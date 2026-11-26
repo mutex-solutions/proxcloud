@@ -278,6 +278,13 @@ func TestLBControllerUpdateOffer(t *testing.T) {
 	if len(offered) != 0 || imageBehind["pc-c-behind"] || imageBehind["pc-c-oldchart"] {
 		t.Errorf("no portal image: image behind %v, offered %v", imageBehind, offered)
 	}
+	// A provider without a chart pin: the tenant's action would answer its 400, so the tenant is offered nothing. The
+	// operator's row still says what it sees.
+	noPin := cfg
+	noPin.ChartVersion = ""
+	if _, imageBehind, offered = read(NewWithAPI(api, noPin, "svc-1")); len(offered) != 0 || !imageBehind["pc-c-behind"] {
+		t.Errorf("no chart pin: image behind %v, offered to the tenant %v, want none offered", imageBehind, offered)
+	}
 
 	// The bump of every cluster that is behind, as the operator's "Bump all" does it (the tenant's action is the same
 	// call for one cluster). Applies are counted by the object: an apply puts a new one in the fake.

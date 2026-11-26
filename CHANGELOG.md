@@ -32,7 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     control plane, worker, credential, balancer row and appliances untouched). The apply also writes the
     provider's worker repair setting, as every change of a cluster does.
   - *A cluster without the controller* (MetalLB alone) is not offered it, and a portal without
-    `PROXCLOUD_LB_CONTROLLER_IMAGE` offers it to nobody.
+    `PROXCLOUD_LB_CONTROLLER_IMAGE` offers it to nobody. A tenant is offered it only on a provider with a chart
+    pin (`argocd.chartVersion`): without one the tenant's action refuses, as before.
   - *After a rollback of the portal* the same offer appears for the clusters whose controller came from the newer
     release: applying it moves them back to the portal's image. The note of 0.11.1 still holds: do not move a
     cluster on chart 0.1.19 onto the image of 0.11.0.

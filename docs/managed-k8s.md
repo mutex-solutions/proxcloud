@@ -196,7 +196,8 @@ sequenceDiagram
   cluster with a load balancer controller is behind in a second way, which no chart version shows: its controller
   runs another image than the portal pins now (a portal release that changed nothing in the chart). The portal
   compares the image in the cluster's Application with its own (`PROXCLOUD_LB_CONTROLLER_IMAGE`) and asks no
-  cluster: the tenant's row then carries `lb_controller_update: true` (absent otherwise) and the page offers the
+  cluster: the tenant's row then carries `lb_controller_update: true` (absent otherwise, and on a provider without a
+  chart pin, where the tenant's action refuses) and the page offers the
   update with the words "the load balancer controller only: no machine is replaced"; the operator's row carries
   `lbControllerBehind`, shows "controller image behind" and **Update controller**, and counts as behind. The
   tenant's action, **Update controller** and **Bump all** are the same apply: the controller's image, and its one

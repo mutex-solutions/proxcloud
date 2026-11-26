@@ -15,7 +15,8 @@ and rules: [README.md](README.md#maintenance-rule).
   `GET /admin/service/{id}/k8s-clusters`) and `ClusterPin.Behind`, which the operator's "Bump all"
   (`admin.kamajiClusterBumpAll`) now goes by where it compared chart versions.
 - `internal/cloud/kamaji/syncprovider.go`: the tenant's cluster data carries `lb_controller_update: true` while it
-  holds. The key is absent otherwise, so the row of a cluster that needs nothing does not change.
+  holds and the provider has a chart pin (without one the tenant's action refuses). The key is absent otherwise, so
+  the row of a cluster that needs nothing does not change.
 - `web/client/src/pages/platform/KubernetesPage.tsx`, `web/admin/src/pages/system/CloudProviderDetailPage.tsx`: the
   offer and what it says; the operator's row and count.
 
