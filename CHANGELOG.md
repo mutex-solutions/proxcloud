@@ -53,6 +53,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
   pull request).
 
+### Fixed
+
+- **A node selector term with an empty key matches no node** (`cmd/lb-controller`, `parseSelector`). A term of
+  `proxcloud.io/lb-node-selector` with `=` and no key (`=edge`, `=`) was dropped, so a selector made only of such
+  terms was read as no selector and every node of the cluster was put behind the Service: a typo in the one
+  annotation that narrows a Service's nodes failed open. The term is now kept under the key `""`, which no node
+  label has, so the selector selects no node, alone or next to a term that matches (`pool=edge,=x`), as the
+  upstream controller reads it. The Service is sent with an empty node list, has no member and gets the Warning
+  Event `UnAvailableLoadBalancer`, which is what the guide says of a selector that matches none. Unchanged: a term
+  with a key (the spaces around `=` dropped), a term without `=`, an empty value, an empty term (a trailing comma,
+  `a=b,,c`), and an annotation that is empty or only commas and spaces, which is no selector. Tests:
+  `TestParseSelector`, `TestSelectorSelects` and `TestEmptySelectorKeyOfProtocol2`, all three failing on the
+  parser as it was. The portal is not changed; the controller image carries the fix.
+  - **Upgrade note: a Service whose selector has a term without a key loses its members when the cluster's
+    controller is updated.** A Service annotated `proxcloud.io/lb-node-selector: "=edge"` was served by every node
+    of its cluster. From the first turn of the new controller it is sent with no node, as a Service whose selector
+    matches none: no member answers and the Service gets `UnAvailableLoadBalancer`. A Service with `pool=edge,=x`
+    was served by the nodes labelled `pool=edge` and has no member either. Write the key (`pool=edge`) or remove
+    the annotation and the members are back at the next turn. To find such a Service before the upgrade:
+    `kubectl get svc -A -o json | jq -r '.items[] | select((.metadata.annotations["proxcloud.io/lb-node-selector"] // "") | test("(^|,)\\s*=")) | "\(.metadata.namespace)/\(.metadata.name)"'`.
+    Every other Service gets nothing new.
+
 ## [0.11.1] - 2026-11-26
 
 The release after `v0.11.0`. It completes layer 4 of the load balancer: UDP listeners, TLS termination with
