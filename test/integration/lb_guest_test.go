@@ -53,9 +53,10 @@ func lbInit(packages ...string) []string {
 
 // mirror is the end of the failure message of a step that waited for the product's install, the one thing here
 // that needs the distribution's mirror: it says so when the mirror does not answer the guest. (Lists of its own: the
-// product's apt-get may hold the lock of the guest's.)
+// product's apt-get may hold the lock of the guest's. apt does not make that directory itself, and without it every
+// update fails, mirror or no mirror; TestLBSingleApplianceInstalls asks once where the mirror has just answered.)
 func (g *guestAgent) mirror(ctx context.Context) string {
-	code, out, _ := g.sh(ctx, "mirror", "sh", "-c", "apt-get update -qq -o APT::Update::Error-Mode=any -o Dir::State::lists=/tmp/lb-mirror-probe 2>&1")
+	code, out, _ := g.sh(ctx, "mirror", "sh", "-c", "mkdir -p /tmp/lb-mirror-probe/partial && apt-get update -qq -o APT::Update::Error-Mode=any -o Dir::State::lists=/tmp/lb-mirror-probe 2>&1")
 	if code == 0 {
 		return ""
 	}

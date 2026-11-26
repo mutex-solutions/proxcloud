@@ -826,6 +826,11 @@ func TestLBSingleApplianceInstalls(t *testing.T) {
 			if ok, why, err := ps.HAProxyServing(ctx, "n1", 100, lbSum(config)); err != nil || !ok {
 				t.Fatalf("after the first push: serving %v %q %v", ok, why, err)
 			}
+			// The words a failed install is told apart by: where the install has just ended they must not come, or
+			// every failure of an install would be called the mirror's.
+			if says := g.mirror(ctx); says != "" {
+				t.Fatalf("the mirror has just answered this guest's install, and the probe of a failure says:%s", says)
+			}
 			t.Logf("%s; the install was started %d time(s)", g.run(ctx, "haproxy -v | head -1"), installs)
 		})
 	}
