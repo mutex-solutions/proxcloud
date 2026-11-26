@@ -120,9 +120,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The first release candidate of 0.12.0, published as a prerelease and never as `latest`. It is not the release:
 `v0.11.1` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
 still name it. It holds what is under Unreleased above: sandboxes on the managed platform, switched on in the BOM
-(#483; the code of #422, #423, #432 and #436 was in `v0.11.1`, switched off), the fourteen dependency updates (#484)
-and the kept BOM of 0.11.1 (#482). It exists so that the lab can run the drill of this code: nothing of it had run
-on a lab when it was tagged. The entries above are not repeated here. Not for a production site.
+(#483; the code of #422, #423, #432 and #436 was in `v0.11.1`, switched off), the fourteen dependency updates (#484),
+the kept BOM of 0.11.1 (#482) and the Workers column of a Service with its health check off in the customer console
+(#493): what `main` held at `65c24cc0`, where its notes were closed. A pull request merged after that commit and
+before the tag has its entry under Unreleased above and is not in the notes. It exists so that the lab can run the
+drill of this code: nothing of it had run on a lab when it was tagged. The entries above are not repeated here. Not
+for a production site.
 
 ### Changed
 
@@ -203,7 +206,7 @@ separate placement or the upgrade.
   `separate` the sandbox chart inside `pc-sandbox` is named by version, not by digest.
 - The provider sync fences every VM it finds in pool `proxcloud-sbx`, also one of another owner: closed, never
   opened.
-- The known issues of 0.11.1 stand: no change merged since answers one of them.
+- The known issues of 0.11.1 stand: no change merged up to `65c24cc0` answers one of them.
 - The full list is in `docs/releases/v0.12.0-rc.1.md`.
 
 ## [0.11.1] - 2026-11-26

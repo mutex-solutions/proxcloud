@@ -791,7 +791,8 @@ it was 0.1.16, and the component `sandbox`, chart `proxcloud-sandbox` 0.1.0, mar
 (`TestSandboxIsOffered`). No chart of the product differs from its newest tag (`git diff` against
 `proxmox-kamaji-cluster-v0.1.19`, `database-cluster-v0.5.2`, `proxcloud-platform-v0.1.3` and
 `proxcloud-sandbox-v0.1.0` prints nothing on its commit), so the BOM needs no new chart version. Since `v0.11.1`
-`main` took three pull requests: #482 (the kept BOM of 0.11.1), #484 (fourteen dependency updates) and #483; the
+`main` took four pull requests up to `65c24cc0`, where the candidate's notes were closed: #482 (the kept BOM of
+0.11.1), #484 (fourteen dependency updates), #483 and #493 (the Workers column of the customer console); the
 sandbox code itself (#422, #423, #432, #436) was in `v0.11.1`, switched off. The app chart, the installer's
 ProxCloud pin and `DEFAULT_VERSION` stay on `v0.11.1`. The pull request after its tag adds
 `deploy/platform/previous/0.12.0-rc.1.yaml` and sets the BOM on `main` back to `0.12.0-dev`. Nothing of it has run
