@@ -36,6 +36,7 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated:** c2-containers.md (the chart's node; trust boundaries: the row of the portal's identity in a
 function namespace, Planned).
+
 ## 2026-11-26: a balancer's row says when the platform tries a waiting change again (review of v0.11.1-rc.3, #490)
 
 **What changed:** no component, container, relation or wire field. One sentence of `statusMessage` and one log line.
