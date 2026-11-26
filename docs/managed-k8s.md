@@ -875,7 +875,8 @@ call for its own cluster, and minting it again rotates it.
   over that is answered `429` `TooManyRequests` with a `Retry-After` header before its body is read: nothing of it
   is stored, the cluster's balancer and every address stay as they are, and the next call that is taken carries the
   whole state, so a change arrives late and is never lost. A controller's turn is one call, two when a certificate
-  is asked for, and a quiet cluster sends one per 30 s: the limit is met by a cluster whose Services, Nodes or TLS
+  is asked for or a refused state is asked once more without its Services that are being deleted (above), and a
+  quiet cluster sends one per 30 s: the limit is met by a cluster whose Services, Nodes or TLS
   Secrets change about once a second for a minute (a Service that flaps), which costs a call a second since the
   controller watches (chart 0.1.19). The controller is the one of v0.11.1, unchanged: it says the refusal in a
   Warning Event `TooManyRequests` on each of its Services, with the seconds until the next call is taken, takes no
