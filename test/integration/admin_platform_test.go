@@ -1018,7 +1018,8 @@ func TestPlatformRegisterAndDisable(t *testing.T) {
 // TestPlatformFunctionWakeToken runs the write of a platform's function wake token against PostgreSQL: the token is on
 // the installation's sandbox provider row under its own key, sealed, and the provider as the sandbox service reads it
 // still has no sandbox wake token, so autoResume stays refused; a second write replaces it, "" takes it away, and a
-// row that is not that installation's sandbox provider is ErrProviderConflict and stays as it was.
+// row that is not that installation's sandbox provider is ErrProviderConflict and stays as it was (taking away from
+// such a row, or from none, changes nothing and is no error).
 func TestPlatformFunctionWakeToken(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
@@ -1092,6 +1093,17 @@ func TestPlatformFunctionWakeToken(t *testing.T) {
 	}
 	if s := secret(id); enc.Decrypt(s["functionWakeToken"].(string)) != "function-wake-token-two-0123456789" || secret(other)["functionWakeToken"] != nil {
 		t.Fatalf("a refused write changed a row: %v %v", s, secret(other))
+	}
+	// Taking it away: nothing of another's goes, a row that is gone is no error (a Remove must still end), and the
+	// installation's own token goes alone.
+	for name, call := range map[string]func() error{
+		"another installation":    func() error { return h.PlatformFunctionWakeToken(ctx, &platformlife.Installation{ID: "pi-2"}, id, "") },
+		"its Kubernetes provider": func() error { return h.PlatformFunctionWakeToken(ctx, in, other, "") },
+		"no such provider":        func() error { return h.PlatformFunctionWakeToken(ctx, in, "svc-none", "") },
+	} {
+		if err := call(); err != nil || secret(id)["functionWakeToken"] == nil {
+			t.Fatalf("taking away, %s: %v, the token is left: %v", name, err, secret(id)["functionWakeToken"] != nil)
+		}
 	}
 	if err := h.PlatformFunctionWakeToken(ctx, in, id, ""); err != nil || secret(id)["functionWakeToken"] != nil || secret(id)["kubeconfig"] == nil {
 		t.Fatalf("taking it away: %v %v", err, secret(id))

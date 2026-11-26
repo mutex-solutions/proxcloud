@@ -86,8 +86,8 @@ type SandboxSpec struct {
 	TLS    *SandboxTLS `json:"tls,omitempty"`
 	// System is the separate cluster's second group (sandbox-proxy, the agent-sandbox controller). Separate only.
 	System *SandboxMachines `json:"system,omitempty"`
-	// Functions is the function side of the sandboxes (sandbox_functions.go): nil or not enabled builds none of it. A PUT for
-	// an installed platform whose block names none keeps the stored one (KeepSandbox).
+	// Functions is the function side of the sandboxes (sandbox_functions.go): nil or not enabled builds none of it.
+	// A PUT for an installed platform whose block names none keeps the stored one (KeepSandbox).
 	Functions *SandboxFunctions `json:"functions,omitempty"`
 }
 

@@ -163,7 +163,9 @@ func (h *Handler) functionsOffRefused(ctx context.Context, old, next *platformli
 // the installation's sandbox provider, sealed; "" takes it away. It is the bearer sandbox-proxy sends to the portal's
 // function routes. secret.proxyWakeToken, the sandbox wake token, is not this token and is never written here: it
 // staying empty is what keeps autoResume refused on a platform's sandbox provider. A row that is not the installation's
-// sandbox provider answers platformlife.ErrProviderConflict and stays as it was.
+// sandbox provider answers platformlife.ErrProviderConflict and stays as it was. Taking the token away from a row that
+// is gone, or is not the installation's, is no error: there is nothing of the installation's to take, and a Remove
+// must still end.
 func (h *Handler) PlatformFunctionWakeToken(ctx context.Context, in *platformlife.Installation, providerID, token string) error {
 	return h.repo.db.WithTx(ctx, func(ctx context.Context) error {
 		if err := h.repo.db.LockXact(ctx, "platform-run:"+in.ID); err != nil {
@@ -173,10 +175,15 @@ func (h *Handler) PlatformFunctionWakeToken(ctx context.Context, in *platformlif
 		if err != nil {
 			return err
 		}
-		if doc == nil {
+		switch {
+		case doc == nil && token == "":
+			return nil
+		case doc == nil:
 			return serviceNotFoundErr(providerID)
-		}
-		if !setFunctionWakeToken(doc, in.ID, token, func(secret pgdoc.M, value string) { setSecretLeaf(h, secret, "functionWakeToken", value) }) {
+		case !setFunctionWakeToken(doc, in.ID, token, func(secret pgdoc.M, value string) { setSecretLeaf(h, secret, "functionWakeToken", value) }):
+			if token == "" {
+				return nil
+			}
 			return fmt.Errorf("%w: provider %s is not the sandbox provider of installation %s", platformlife.ErrProviderConflict, providerID, in.ID)
 		}
 		return h.repo.ReplaceDoc(ctx, externalServiceCollection, providerID, doc)

@@ -313,8 +313,7 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 	// platform's machines is refused while it exists or is asked for: it would leave pc-sandbox on the version it left.
 	if built := in.Status.Sandbox; machines && (in.Spec.sandboxMode() == SandboxSeparate || (built != nil && built.Placement == SandboxSeparate)) {
 		u.Blocking = append(u.Blocking, "spec.sandbox: "+later+"the sandbox cluster "+SandboxClusterName+" is not upgraded in place, and this upgrade changes the Kubernetes version or the node image. "+
-			"Set spec.sandbox.placement off and apply (every sandbox ends, the cluster and its machines are deleted), make this upgrade, then set placement separate again: the cluster is built new on the new version."+
-			in.functionsStop())
+			"Set spec.sandbox.placement off and apply (every sandbox ends, the cluster and its machines are deleted), make this upgrade, then set placement separate again: the cluster is built new on the new version")
 	}
 	// A roll renders every unit it has not reached at the version and the templates the platform left: a group that
 	// does not exist yet has neither. The group is added by an apply before the upgrade or after it.
