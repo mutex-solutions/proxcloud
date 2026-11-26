@@ -139,7 +139,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minute, by itself". The platform's own retries are six, 20 s apart (`lbRetry`); after the last one the row kept
   saying it while nothing tried again before the next services sync or the next change, which on a site without a
   scheduler is the next change, and the log had no line for it (review of `v0.11.1-rc.3`, finding 4; a known issue
-  of `v0.11.1`). The sentence is now true at any time: "the platform tries again by itself every 20 s for 2
+  of `v0.11.1` and of `v0.12.0-rc.1`). The sentence is now true at any time: "the platform tries again by itself every 20 s for 2
   minutes, and after that at the next services sync or at the next change". It is made of the loop's own figures
   (`lbRetrySays`, from `lbRetryEvery` and `lbRetryTries`), so it cannot drift from them; the rest of both messages
   is as before. A loop that ends after its six passes with the change still waiting writes one WARN line, "load

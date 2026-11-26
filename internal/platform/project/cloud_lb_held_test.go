@@ -178,8 +178,9 @@ func TestLBSingleTakesAChangeWhileAptRuns(t *testing.T) {
 }
 
 // What a row with a waiting change says of the retries is true at any time, and made of the loop's own figures: with
-// the ones a build ships (20 s, six tries) it reads "every 20 s for 2 minutes", and it moves with them. Until v0.11.1
-// it said "within half a minute", also after the last retry, when nothing tried again before the next sync or change.
+// the ones a build ships (20 s, six tries) it reads "every 20 s for 2 minutes", and it moves with them. Until
+// v0.12.0-rc.1 it said "within half a minute", also after the last retry, when nothing tried again before the next
+// sync or change.
 func TestLBRetrySaysWhatTheLoopDoes(t *testing.T) {
 	every, tries := lbRetryEvery, lbRetryTries
 	defer func() { lbRetryEvery, lbRetryTries = every, tries }()

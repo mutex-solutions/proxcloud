@@ -823,8 +823,8 @@ var (
 func lbHoldWindow() time.Duration { return time.Duration(lbRetryTries-1) * lbRetryEvery }
 
 // lbRetrySays is what a row with a waiting change says of what happens next. It is true at any time, also after the
-// last retry (until v0.11.1 the row kept saying "within half a minute" when nothing tried again), and its figures are
-// lbRetryEvery and lbRetryTries themselves, so the text cannot drift from the loop.
+// last retry (until v0.12.0-rc.1 the row kept saying "within half a minute" when nothing tried again), and its
+// figures are lbRetryEvery and lbRetryTries themselves, so the text cannot drift from the loop.
 func lbRetrySays() string {
 	span := func(d time.Duration) string {
 		if d >= time.Minute && d%time.Minute == 0 {
