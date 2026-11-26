@@ -33,8 +33,8 @@ accepted at a current site. Read the current boundaries below before following h
 > [managed-services.md](managed-services.md#sandboxes-on-the-platform), with what an operator does and what a tenant
 > sees. Offered from v0.12.0, whose platform BOM names the sandbox chart; not run on a lab yet. Section 6 below (the
 > sandbox registry) does not apply there: the platform path has no registry, its machines pull the built-in templates
-> from ghcr.io at the digests `deploy/templates/images.yaml` holds in the release's build, and those move with a
-> ProxCloud release and no other way.
+> from the registries `deploy/templates/images.yaml` names (ghcr.io, and docker.io for the `python` template) at the
+> digests that file holds in the release's build, and those move with a ProxCloud release and no other way.
 
 ## Current saved-lifecycle admission boundary
 
