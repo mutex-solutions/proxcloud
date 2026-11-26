@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-26: the load balancer controller steps down on `413` as on `400`, and sends a short keep-address value of a Service being deleted
+## 2026-11-26: the load balancer controller steps down on `413` as on `400`, and sends a short keep-address value of a Service being deleted (#487)
 
 **What changed:** no component, container, listener, route or wire field. Two behaviours of `cmd/lb-controller`,
 and the row of `controller.turn` and `gateway.put` in [c4-code.md](c4-code.md) says them.
@@ -24,6 +24,7 @@ gateway's 16 KiB for them: it answered `400`, and the request without `gone` dro
 valid ones too. The portal is not changed.
 
 **Diagrams updated:** none (no element of C1 to C4 moves); one table row of c4-code.md.
+
 ## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
 
 **What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23
