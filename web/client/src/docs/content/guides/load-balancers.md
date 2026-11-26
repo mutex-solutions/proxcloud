@@ -67,7 +67,7 @@ Pick one or more certificates on the listener. A client gets the certificate tha
 
 ### Certificates
 
-Upload a certificate on the **Certificates** page: a name, the certificate chain as PEM text (your server's certificate first, then each intermediate; this is `fullchain.pem` from most tools) and its private key (RSA of 2048 bits or more, or ECDSA P-256 or P-384, without a passphrase). The page then shows the names the certificate is valid for, when it expires, its SHA-256 fingerprint and which load balancers use it. An expired certificate is accepted with a warning: clients will refuse it.
+Upload a certificate on the **Certificates** page: a name, the certificate chain as PEM text (your server's certificate first, then each intermediate; this is `fullchain.pem` from most tools) and its private key (RSA of 2048 bits or more, or ECDSA P-256 or P-384, without a passphrase). Every certificate of the chain must be signed with SHA-256 or stronger: one signed with SHA-1 or MD5 is refused, and the answer names it by its place in the chain. A root certificate, which signed itself, is not held to that. The page then shows the names the certificate is valid for, when it expires, its SHA-256 fingerprint and which load balancers use it. An expired certificate is accepted with a warning: clients will refuse it.
 
 The page and each listener warn from 30 days before a certificate expires. Nothing renews a certificate for you.
 
