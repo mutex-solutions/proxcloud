@@ -1,12 +1,12 @@
 # CI, template builds and release operations
 
 This page describes the checked-in workflows, not a guarantee that a release has
-already been published. As of **2026-11-24**, GHCR has public development images,
+already been published. As of **2026-11-26**, GHCR has public development images,
 the `v0.4.0-rc.1` prerelease (tag 2026-11-11, images and app chart `0.4.0-rc.1`)
 and the first stable release `v0.4.0` (tag 2026-11-12, images and app chart
 `0.4.0`), then the stable `v0.5.0` (tag 2026-11-13), the patches `v0.5.1` and `v0.5.2` and the stable `v0.6.0` (tags 2026-11-14),
 the `v0.7.0-rc.1` prerelease and the stable `v0.7.0` (tags 2026-11-15), the stable `v0.8.0` (tag 2026-11-17) and the patches `v0.8.1` and `v0.8.2` (tags 2026-11-18), and the release candidates
-`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease, the stable `v0.10.0` and the two candidates of `v0.10.1`, `v0.10.1-rc.1` and `v0.10.1-rc.2`, prereleases (tags 2026-11-20), and the stable `v0.10.1`, the first candidate of `v0.10.2`, `v0.10.2-rc.1`, a prerelease, the stable `v0.10.2` and the first candidate of `v0.11.0`, `v0.11.0-rc.1`, a prerelease (tags 2026-11-21), and its second candidate, `v0.11.0-rc.2`, a prerelease, and the stable `v0.11.0` (tags 2026-11-22), and the first candidate of `v0.11.1`, `v0.11.1-rc.1`, a prerelease (tag 2026-11-23), and its second and third candidates, `v0.11.1-rc.2` and `v0.11.1-rc.3`, prereleases (tags 2026-11-24), and its fourth and fifth candidates, `v0.11.1-rc.4` and `v0.11.1-rc.5`, prereleases (tags 2026-11-25), and the stable `v0.11.1` (tag 2026-11-26). The next tag is the first candidate of `v0.12.0`, `v0.12.0-rc.1`; pushing it runs the app image/chart publication and GitHub Release
+`v0.9.0-rc.1` and `v0.9.0-rc.2`, prereleases, the stable `v0.9.0` and the patch `v0.9.1` (tags 2026-11-19; [Release candidates](#release-candidates)), and the first candidate of `v0.10.0`, `v0.10.0-rc.1`, a prerelease, the stable `v0.10.0` and the two candidates of `v0.10.1`, `v0.10.1-rc.1` and `v0.10.1-rc.2`, prereleases (tags 2026-11-20), and the stable `v0.10.1`, the first candidate of `v0.10.2`, `v0.10.2-rc.1`, a prerelease, the stable `v0.10.2` and the first candidate of `v0.11.0`, `v0.11.0-rc.1`, a prerelease (tags 2026-11-21), and its second candidate, `v0.11.0-rc.2`, a prerelease, and the stable `v0.11.0` (tags 2026-11-22), and the first candidate of `v0.11.1`, `v0.11.1-rc.1`, a prerelease (tag 2026-11-23), and its second and third candidates, `v0.11.1-rc.2` and `v0.11.1-rc.3`, prereleases (tags 2026-11-24), and its fourth and fifth candidates, `v0.11.1-rc.4` and `v0.11.1-rc.5`, prereleases (tags 2026-11-25), and the stable `v0.11.1` and the first candidate of `v0.12.0`, `v0.12.0-rc.1`, a prerelease (tags 2026-11-26). Pushing the next tag runs the app image/chart publication and GitHub Release
 creation.
 This source change does none of those operations, and installation from released
 artifacts and later controlled PVE template canaries remain separate steps. Read
@@ -425,7 +425,9 @@ so `main` could not be tagged until the next release commit dropped `-dev`: the 
 set the BOM on `main` to `0.12.0-dev` again and added `deploy/platform/previous/0.11.1.yaml`, so
 `main` could not be tagged until the next release commit dropped `-dev`: the commit of the candidate
 `v0.12.0-rc.1` sets the release to `0.12.0-rc.1` (checked on 2026-11-26 on that commit: `--release`
-prints `all pins match`, on the BOM and on the twenty-three previous BOMs). The gate does not
+prints `all pins match`, on the BOM and on the twenty-three previous BOMs). The pull request after that
+tag set the BOM on `main` to `0.12.0-dev` again and added `deploy/platform/previous/0.12.0-rc.1.yaml`,
+so `main` cannot be tagged until the next release commit drops `-dev`. The gate does not
 compare the BOM's release with the tag
 (below): a commit whose BOM has no `-dev` passes this part for any tag.
 
@@ -834,8 +836,10 @@ it was 0.1.16, and the component `sandbox`, chart `proxcloud-sandbox` 0.1.0, mar
 `main` took four pull requests up to `65c24cc0`, where the candidate's notes were closed: #482 (the kept BOM of
 0.11.1), #484 (fourteen dependency updates), #483 and #493 (the Workers column of the customer console); the
 sandbox code itself (#422, #423, #432, #436) was in `v0.11.1`, switched off. The app chart, the installer's
-ProxCloud pin and `DEFAULT_VERSION` stay on `v0.11.1`. The pull request after its tag adds
-`deploy/platform/previous/0.12.0-rc.1.yaml` and sets the BOM on `main` back to `0.12.0-dev`. Nothing of it has run
+ProxCloud pin and `DEFAULT_VERSION` stay on `v0.11.1`. Its tag is on the commit `18db7d78`; the `docker` and
+`helm` runs of the tag succeeded on the first attempt, and the GitHub Release is a prerelease, with `v0.11.1` still
+the latest (read on 2026-11-26). The pull request after it added `deploy/platform/previous/0.12.0-rc.1.yaml` and
+set the BOM on `main` back to `0.12.0-dev`, with the pins of the candidate. When it was cut nothing of it had run
 on a lab: only a spike of the method did, by hand, on a throwaway tenant cluster, before the code (2026-11-21), and
 the candidate exists for the drill
 ([managed-services.md](managed-services.md#not-verified-on-a-lab-yet)).
@@ -907,7 +911,7 @@ that no later build carries, so its platform is refused after an upgrade
 been removed yet; when one is, the platforms of that release are refused again,
 so it needs a release note.
 
-The previous BOMs are `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.1`, `0.10.2-rc.1`, `0.10.2`, `0.11.0-rc.1`, `0.11.0-rc.2`, `0.11.0`, `0.11.1-rc.1`, `0.11.1-rc.2`, `0.11.1-rc.3`, `0.11.1-rc.4`, `0.11.1-rc.5` and `0.11.1`. `0.8.0` was added by hand from its tag
+The previous BOMs are `0.8.0`, `0.8.1`, `0.8.2`, `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.1`, `0.10.2-rc.1`, `0.10.2`, `0.11.0-rc.1`, `0.11.0-rc.2`, `0.11.0`, `0.11.1-rc.1`, `0.11.1-rc.2`, `0.11.1-rc.3`, `0.11.1-rc.4`, `0.11.1-rc.5`, `0.11.1` and `0.12.0-rc.1`. `0.8.0` was added by hand from its tag
 (sha256 `8eb874987d3bbaf55f309295ee241ec320c0cf9e0805b3bd1812ef908b6600c6`, the
 value a platform installed by v0.8.0 records). `0.8.1` is the first one the
 procedure above added (sha256
@@ -1156,9 +1160,28 @@ on 2026-11-26. It sorts before `0.8.0` too. No platform is on it yet: a platform
 installed by `v0.11.1` or moved to its BOM records it, so a later build needs this
 file to go on with that platform.
 
+`0.12.0-rc.1` has the pins of `0.11.1` but two: the platform's own cluster chart,
+0.1.19 where `0.11.1` has 0.1.16, and the component `sandbox`, the first kept BOM
+that names it (sha256
+`19671c44e78f4888cb06a277bfd1a655b7d3622bb7f8e640f9c6b256f47479a1`). It was
+copied from the tag `v0.12.0-rc.1` (`18db7d78`), after the tag existed:
+`git show v0.12.0-rc.1:deploy/platform/platform-bom.yaml | sha256sum` gives that
+hash. Its goldens equal the current goldens at the tag, file for file (`cmp`),
+and differ from the 0.11.1 ones in the release (its label and, in the seed
+golden, the one description that names it) and in the cluster chart's version in
+the seed golden. They are the render of an installation without sandboxes, as
+the goldens of the BOM on `main` are (`BOM.For`): no Application of the sandbox
+chart is in them, and `TestRenderGoldenOfPreviousBOMs` renders every previous
+BOM that way. No golden holds what this BOM renders with `spec.sandbox`.
+`bom_verify.py --release` printed `all pins match` on the twenty-four previous BOMs
+on 2026-11-26. It sorts before `0.8.0` too. A platform moved to it (the drill of
+the candidate) records it, so a later build needs this file to go on with that
+platform, and it is the one kept BOM on which `spec.sandbox` is taken
+(`TestSandboxIsOffered`).
+
 Not verified: an apply on a platform that `v0.8.1` or `v0.8.2`
 installed, an install by `v0.8.1` or `v0.8.2`, and an apply on a platform that
-is on the BOM `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0`, `0.10.1-rc.2`, `0.10.1`, `0.10.2-rc.1`, `0.10.2`, `0.11.0-rc.1`, `0.11.0-rc.2`, `0.11.0`, `0.11.1-rc.1`, `0.11.1-rc.2`, `0.11.1-rc.3`, `0.11.1-rc.4`, `0.11.1-rc.5` or `0.11.1`, installed by that build or moved to it, and a whole move to `0.10.1-rc.1` (its drill on one lab, 2026-11-20, did part "seed" and stopped in part "platform").
+is on the BOM `0.9.0-rc.1`, `0.9.0-rc.2`, `0.9.0`, `0.9.1`, `0.10.0-rc.1`, `0.10.0`, `0.10.1-rc.2`, `0.10.1`, `0.10.2-rc.1`, `0.10.2`, `0.11.0-rc.1`, `0.11.0-rc.2`, `0.11.0`, `0.11.1-rc.1`, `0.11.1-rc.2`, `0.11.1-rc.3`, `0.11.1-rc.4`, `0.11.1-rc.5`, `0.11.1` or `0.12.0-rc.1`, installed by that build or moved to it, and a whole move to `0.10.1-rc.1` (its drill on one lab, 2026-11-20, did part "seed" and stopped in part "platform").
 One apply with a
 previous BOM was run on a lab (2026-11-18, a platform installed by the released
 `v0.8.0`, on the build `dev-751a190` of `main`): it succeeded and `status.bom`
@@ -1281,6 +1304,15 @@ What a release must do when it changes a pin, before its tag:
 5. Read the plan the release gives a platform of each earlier release: on a
    build of the release commit, `GET …/plan` of such an installation, or
    `PlanFor` in a test.
+
+The pairs of the BOM on `main` today (the twenty-three below and 0.12.0-rc.1 to it). `main` has the pins of the
+candidate `v0.12.0-rc.1`, the sandbox chart and the platform's cluster chart 0.1.19 among them, so the pair from
+0.12.0-rc.1 differs in the release line alone: `Classify` gives one change, the release, record only, with no
+`seed/pc-platform` row, no `workload/sandbox` row, no seed part and no machine replaced. The twenty-three older
+pairs are the ones the candidate had, below. `TestUpgradeRollsNoMachine` compares fifteen of the twenty-four and
+passes, none of them at step 0 of a roll, and `TestPreviousBOMsMoveAsTheirPinsDiffer` and
+`TestPreviousBOMsMoveCertManager` hold each pair to its answer (2026-11-26). A development BOM carries nothing, as
+before the candidates (below), and on `main` the release gate refuses `-dev` alone.
 
 The pairs of the BOM of the candidate `v0.12.0-rc.1` (the twenty-three previous BOMs to it). It has the pins of
 the release `v0.11.1` but the platform's own cluster chart, 0.1.19, and the sandbox chart, 0.1.0 (#483). `PlanFor`
