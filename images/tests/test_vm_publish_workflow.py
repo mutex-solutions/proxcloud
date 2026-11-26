@@ -618,6 +618,9 @@ class WorkflowSourceTests(unittest.TestCase):
         # Match a shell token, not the suffix of harmless prose such as "retrieval ".
         self.assertNotRegex(text, r"(?m)(?:^|[\s;|&])eval[\s(]")
         self.assertRegex(text, r"oras-project/setup-oras@[0-9a-f]{40}")
+        # setup-oras v2.0.4 sends the job token (packages: write here) with the CLI download unless the input is empty.
+        self.assertRegex(text, r"oras-project/setup-oras@[0-9a-f]{40} # v2\.0\.4\n        with:\n          version: 1\.3\.0\n"
+                               r"          #[^\n]+\n          token: ''\n")
         self.assertRegex(text, r"actions/checkout@[0-9a-f]{40}")
         self.assertEqual(len(re.findall(r"uses: ", text)), 2)
         # Inputs enter env and then strict Python validation, never a shell run interpolation; the run id
