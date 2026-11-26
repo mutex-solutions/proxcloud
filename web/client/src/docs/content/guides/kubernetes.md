@@ -92,6 +92,10 @@ The address shows in `kubectl get service` once it is ready, and `kubectl descri
 
 UDP ports, TLS from a Secret and the annotations below need the cluster on chart 0.1.19 or later. A cluster made earlier still runs the load balancer controller it was made with: a Service with a UDP port is refused there with `UDPNotSupported` ("For UDP, upgrade the cluster"), and no annotation but `proxcloud.io/lb-proxy-protocol` is read. The cluster page says so under **Load balancer**. Apply the **Platform update** offered on the cluster page: it moves the cluster to the current chart and with it to the current controller. If the page offers none, your operator has not made the new chart available on this site yet: ask them. Your Kubernetes version and your workloads do not change. Two kinds of Service do: one that carries `proxcloud.io/lb-internal` with a value other than `"false"` loses its public address (set it to `"false"` or remove it first where the address must stay), and one whose `proxcloud.io/lb-tls-secret` names no usable Secret stays as it is served and takes no change until the Secret is right. Every other Service that is served today stays as it is. A Service that was refused for its UDP port then gets a public address, which is billed and counted in your quota: delete the Services you do not want served first.
 
+### An update of the load balancer controller alone
+
+A release of the platform can change the load balancer controller and nothing else of your cluster. The cluster page then offers **Platform update available** with the words "the load balancer controller only: no machine is replaced". Applying it restarts the controller, which runs on the platform beside your cluster's control plane: no node is replaced, your workloads are not touched and the addresses that are served keep answering. For the moment of the restart a change to a Service of type LoadBalancer waits. A cluster without the controller is not offered this.
+
 ### TCP and UDP ports
 
 A Service may have TCP and UDP ports, also both on one port number (DNS on 53). SCTP is not served. UDP differs from TCP in four ways:

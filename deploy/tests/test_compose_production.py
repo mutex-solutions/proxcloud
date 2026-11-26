@@ -212,11 +212,23 @@ class ComposeFileTests(unittest.TestCase):
                 if "/proxcloud-" in image:
                     self.assertRegex(image, r"^ghcr\.io/mutex-solutions/proxcloud-(api|web|admin):\$\{PROXCLOUD_VERSION(:\?[^}]*)?\}$")
                 else:
-                    self.assertRegex(image, r":v?\d+[\w.-]*$")
+                    self.assertRegex(image, r":v?\d+[\w.-]*(@sha256:[0-9a-f]{64})?$")
                     self.assertNotIn("latest", image)
-        self.assertEqual({i for i in images if "/proxcloud-" not in i}, {
+        self.assertEqual({i.split("@")[0] for i in images if "/proxcloud-" not in i}, {
             "traefik:v3.7.18", "postgres:17.12-alpine", "quay.io/keycloak/keycloak:26.8.2",
             "docker.io/adorsys/keycloak-config-cli:6.5.1-26.5.5"})
+
+    def test_the_database_image_is_pinned_by_digest(self):
+        # The tag of a PostgreSQL version is rebuilt by its publisher. By the tag alone, the container an upgrade
+        # leaves running is the build that was pulled first, and whatever recreates it later (a changed line, a new
+        # host, "down" and "up") starts the build the tag names that day. The version stays in the line for the
+        # reader and for Dependabot, which moves both.
+        (image,) = re.findall(r"(?m)^  postgres:\n(?:    #.*\n)*    image: (.+)$", self.text)
+        self.assertRegex(image, r"^postgres:\d+\.\d+-alpine@sha256:[0-9a-f]{64}$")
+        # What the README's table and its upgrade section name is the line itself.
+        readme = (COMPOSE / "README.md").read_text()
+        self.assertIn("`%s@sha256:%s`" % tuple(image.split("@sha256:")), readme)
+        self.assertNotRegex(readme, r"`postgres:[\w.-]+`")
 
     def test_no_default_credentials(self):
         for name in SECRETS:

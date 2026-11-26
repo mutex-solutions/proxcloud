@@ -92,7 +92,9 @@ services:
     secrets: [cf-token]
 
   postgres:
-    image: postgres:17.12-alpine
+    # By digest as well as by version: its publisher rebuilds a version's tag, and a container made later
+    # from the tag alone would be another build than the one that ran (README.md, "Upgrade").
+    image: postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
     restart: unless-stopped
     logging: *logging
     environment:
