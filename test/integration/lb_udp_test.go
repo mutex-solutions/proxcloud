@@ -92,8 +92,8 @@ func TestLBApplianceUDP(t *testing.T) {
 			// iproute2 is on every image a VM boots from; socat here is the members' echo.
 			c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 				ContainerRequest: testcontainers.ContainerRequest{
-					Image:      image,
-					Cmd:        []string{"sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd-sysv procps iproute2 socat >/dev/null 2>&1 && rm -f /usr/sbin/policy-rc.d && exec /sbin/init"},
+					Image:      lbImage(image),
+					Cmd:        lbInit("systemd-sysv", "procps", "iproute2", "socat"),
 					Privileged: true,
 					Tmpfs:      map[string]string{"/run": "", "/run/lock": ""},
 				},
@@ -104,14 +104,7 @@ func TestLBApplianceUDP(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 			g := &guestAgent{t: t, c: c, runs: map[int]*guestRun{}}
-			for deadline := time.Now().Add(5 * time.Minute); ; time.Sleep(2 * time.Second) {
-				if code, out, _ := g.sh(ctx, "boot", "systemctl", "is-system-running"); code == 0 || strings.TrimSpace(out) == "degraded" {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("systemd did not come up in the container")
-				}
-			}
+			g.booted(ctx)
 			srv := httptest.NewServer(g)
 			defer srv.Close()
 			ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
@@ -158,8 +151,9 @@ func TestLBApplianceUDP(t *testing.T) {
 				return out
 			}
 
-			// 1. The pair as it is without UDP, through the product's own install: nothing of the UDP service is on
-			// the appliance, and the state read says what its two files hash to.
+			// 1. The pair as it is without UDP (on the plain image through the product's own install; the baked one
+			// has the packages): nothing of the UDP service is on the appliance, and the state read says what its two
+			// files hash to.
 			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(time.Second) {
 				err := ps.PushKeepalived(ctx, "n1", 100, keepalived, "pub0")
 				if err == nil {
@@ -203,8 +197,10 @@ func TestLBApplianceUDP(t *testing.T) {
 				t.Skip("the kernel has no IPVS (ip_vs): the lab drill is the gate for UDP listeners")
 			}
 
-			// 2. The first UDP listener: nftables through the product's own install line where the image lacks it,
-			// the table before forwarding, and the IPVS table holding the listener before the push answers.
+			// 2. The first UDP listener: nftables through the product's own install line where the image lacks it
+			// (the plain one; that line is shown at the end of TestLBApplianceServesWhatIsRecorded whatever image this
+			// test runs on), the table before forwarding, and the IPVS table holding the listener before the push
+			// answers.
 			for deadline := time.Now().Add(5 * time.Minute); ; time.Sleep(time.Second) {
 				err := ps.PushLVS(ctx, "n1", 100, lvs, "ten0")
 				if err == nil {
