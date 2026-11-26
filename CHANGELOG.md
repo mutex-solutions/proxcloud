@@ -138,6 +138,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check is off is not affected: its members are read from the kernel's table and read `UP` while they are in it.
   `web/client/e2e/kubernetes-lb-unchecked.spec.ts` fails on the page as it was, with "0 of 3 up".
 
+## [0.12.0-rc.1] - 2026-11-26
+
+The first release candidate of 0.12.0, published as a prerelease and never as `latest`. It is not the release:
+`v0.11.1` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
+still name it. It holds what is under Unreleased above: sandboxes on the managed platform, switched on in the BOM
+(#483; the code of #422, #423, #432 and #436 was in `v0.11.1`, switched off), the fourteen dependency updates (#484),
+the kept BOM of 0.11.1 (#482) and the Workers column of a Service with its health check off in the customer console
+(#493): what `main` held at `65c24cc0`, where its notes were closed. A pull request merged after that commit and
+before the tag has its entry under Unreleased above and is not in the notes. It exists so that the lab can run the
+drill of this code: nothing of it had run on a lab when it was tagged. The entries above are not repeated here. Not
+for a production site.
+
+### Changed
+
+- **The platform BOM's release is `0.12.0-rc.1`** (`deploy/platform/platform-bom.yaml`), with the pins `main` had:
+  those of `0.11.1` but the platform's own cluster chart, `proxmox-kamaji-cluster` 0.1.19
+  (`sha256:476950b5e841c9460c47960b1841ceac17998b5c06c7358c9966585f6602d5fa`, from 0.1.16), and the component
+  `sandbox`, chart `proxcloud-sandbox` 0.1.0
+  (`sha256:04300d336186e3b4c56e9213cf90e90a851b8c37b0da92cc911fb05dcb1bf2c7`, `feature: sandbox`). No chart of the
+  product differs from its newest tag
+  (`git diff proxmox-kamaji-cluster-v0.1.19 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster`,
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` and
+  `git diff proxcloud-sandbox-v0.1.0 -- deploy/charts/proxcloud-sandbox` print nothing), so no chart tag is needed.
+  It is a release BOM, and the release gate passes on it and on the twenty-three previous BOMs.
+- **The plan from each previous BOM** (`PlanFor`, one control plane machine and one machine per group). From 0.11.1
+  and its five candidates three changes: the release (record only), `seed/pc-platform` 0.1.16 to 0.1.19 (class chart,
+  stage `cluster`, wave 3) and `workload/sandbox` to 0.1.0 (class added, stage `workload-platform`, wave 4); allowed,
+  with no part, no seed row, no machines row and no seed backup; phrase `upgrade <name> to 0.12.0-rc.1`. From 0.11.0,
+  0.11.0-rc.1 and 0.11.0-rc.2 four: those and `tenantCharts.kubernetes` 0.1.17 to 0.1.19, record only. From 0.10.2
+  and 0.10.2-rc.1 the same four (the tenant chart from 0.1.16). From 0.10.1, 0.10.1-rc.1 and 0.10.1-rc.2 six: those
+  and `cert-manager` v1.20.2 to v1.21.3 on the seed and on the platform cluster (class chart, wave 1; from
+  0.10.1-rc.1 the tenant chart and `pc-platform` move from 0.1.15). From the nine BOMs on Kubernetes 1.35.10 a
+  refusal by the pair gate (22 changes from 0.10.0 and 0.10.0-rc.1, 23 from the four of 0.9, 26 from the three of
+  0.8). This BOM carries no unfinished replacement (`TestRollTowardAKeptCandidateGoesOn` passes under it unchanged).
+- **What the platform's upgrade does, and how it proves that no machine is replaced.** In stage `cluster` the run
+  applies the Application `pc-platform` at chart 0.1.19 without automated sync, waits for ArgoCD's comparison and
+  reads it (`rolloutGate`, `internal/platformlife/cluster.go`): a machine or bootstrap template that is new or would
+  change, or a control plane that would change, fails the run with `unexpected_rollout`, with nothing synced, every
+  machine as before and the Application left at the new version without automated sync; otherwise the stage's
+  receipt records `rolloutChecked` and the Application is applied as always. Without `spec.sandbox` the run makes no
+  pool, ACL row, token, sandbox Application or sandbox provider (`TestUpgradeFromTheLastReleaseBuildsNoSandbox`).
+- **What the platform's upgrade does not do.** It gives no existing platform sandboxes. A platform on an earlier BOM
+  is refused the block (`400 invalid_installation`, naming this release), so asking is possible only after the
+  upgrade, and only an apply after that save writes anything on Proxmox.
+- **A candidate moves nothing a final moves.** The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION`
+  stay on `v0.11.1`.
+
+### Verified on a lab
+
+Nothing of this code. Before the code was written, the method was tried by hand on a throwaway tenant cluster of the
+lab (the spike of 2026-11-21: Kubernetes 1.36.6 on the platform's node image, workers of 2 vCPU and 2 GiB): runsc
+20261116.0 installed in 33 s and a first gVisor pod was Ready in 3.0 s; a cold start of `base` took 127 s (the image
+pull) and a warm one 3 s; a node of 2 vCPU took one sandbox of one vCPU, and an idle sandbox cost about 35 to 50 MiB;
+with the planned policies a sandbox reached the internet on 443 and 587, not on 25, and no in-cluster or private
+target; an egress cap of 10 Mbit/s measured 9.4 Mbit/s; an admission policy saw `exec` and refused it outside the
+project namespaces. It is a spike of the method, not a test of this code, and it covered neither the platform
+cluster as the place of the group, nor the pool and its access, the VM firewall, the provider and its gates, the
+separate placement or the upgrade.
+
+### Not verified
+
+- Everything of this candidate, until its drill: the portal at the candidate on a platform of 0.11.1 (no block, the
+  refused save); the move to the BOM `0.12.0-rc.1` with every VM id, Machine, template name and address as before;
+  the rollout check on a real ArgoCD; `shared` from Check to a sandbox started with the E2B SDK (the pool and the ACL
+  row by the portal token, the chart and the nodes, the provider disabled, the fence, the four gates, the packets
+  from a fenced machine and from inside a sandbox, the identities and the admission policies, go-live, off);
+  `separate` the same; a switch of placement; a machine-replacing upgrade refused; a new install; Remove.
+- Any move to the BOM `0.12.0-rc.1` (plans read, not run), and the candidate's images and its tag's workflows: they
+  do not exist before the tag.
+- That Proxmox accepts the `shared` ACL row from the portal token: the tests' Proxmox evaluates no permission.
+- The new `setup-oras` pin (#484): no VM artifact was exported with it.
+- The sandbox invoice line on a sent bill.
+
+### Known issues
+
+- With `shared`, code that escapes a sandbox is root on a machine of the platform cluster, beside every tenant's
+  control plane and database; the pod network is open to it. `separate` limits the same escape to the sandbox
+  cluster. The install page prints the list and saves `shared` only with a tick.
+- A machine of 2 cores holds one sandbox of one vCPU, and a template of 2 vCPU (`code-interpreter-v1`,
+  `mcp-gateway`) is not expected to fit it (read in the code, not run).
+- No sandbox registry, no custom templates, no snapshots; pause and resume are held. No entry appliance: the way
+  from the internet to the proxy address is the operator's, and with `separate` that address takes any source on
+  443. A self-signed certificate only. Prices are placeholders until set.
+- The pool name `proxcloud-sbx` and the token name `capmox@pve!pc-sandbox` are fixed: two portals on one Proxmox
+  cluster collide.
+- Sandboxes cannot be asked for in the same step as the BOM move: the save is refused until the upgrade is done.
+- The sandbox chart pins its runtime at the tag `dev-d26edd2` and its proxy at `v0.11.0-rc.1`, both by digest; with
+  `separate` the sandbox chart inside `pc-sandbox` is named by version, not by digest.
+- The provider sync fences every VM it finds in pool `proxcloud-sbx`, also one of another owner: closed, never
+  opened.
+- The known issues of 0.11.1 stand: no change merged up to `65c24cc0` answers one of them.
+- The full list is in `docs/releases/v0.12.0-rc.1.md`.
+
 ## [0.11.1] - 2026-11-26
 
 The release after `v0.11.0`. It completes layer 4 of the load balancer: UDP listeners, TLS termination with
