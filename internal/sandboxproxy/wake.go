@@ -62,6 +62,10 @@ func NewWaker(url, token string) *Waker {
 const (
 	wakeNotFoundTTL = 10 * time.Second
 	wakeConcurrency = 32
+	// How many requests one replica holds for an instance of a function that has no ready pod
+	// (fnHeld): per function and in all. One over the bound is answered 503 at once.
+	heldPerFunction = 100
+	heldPerReplica  = 1000
 )
 
 // Wake resumes sandbox id: nil once it runs, ErrNotFound when it is not resumable, *WakeError
