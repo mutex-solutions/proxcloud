@@ -188,7 +188,7 @@ The [artifact verifier](<../images/vm_artifact.py>) is then called with **both r
 
 ## OCI upload and no-overwrite policy
 
-The official ORAS setup action is pinned to `22ce207df3b08e061f537244349aac6ae1d214f6` (official v1 revision supplied by independent owner review), requesting ORAS **1.3.0**. Checkout is also pinned to an immutable action revision. The tests are source-only: they are not proof of a successful hosted run.
+The official ORAS setup action is pinned to `ac735097e22fe643015b0d19645f7c9a69942128`, the commit of its `v2.0.4` tag, requesting ORAS **1.3.0** (the checksums the action holds for 1.3.0 are those of the `v1.2.4` pin it replaces, `22ce207df3b08e061f537244349aac6ae1d214f6`). Since `v2.0.4` the action sends the job's GitHub token with the download of the ORAS CLI from `github.com` unless its `token` input is empty: both workflows pass `token: ''`, so the download stays anonymous and the anonymous verification job still holds no token in any step. Checkout is also pinned to an immutable action revision. The tests are source-only: they are not proof of a successful hosted run.
 
 Only the job's short-lived GitHub token logs into GHCR via stdin; no PAT or PVE secret is requested. Package and unique tag come only from the verified manifest using the existing helper's plan. Native packages are `ghcr.io/mutex-solutions/proxcloud-vm-<os>`; tags are `<os>-os-<UTC build>-<12 source hex>`. The Kubernetes package is `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s` with `ubuntu-2604-k8s-<version>-<UTC build>-<12 source hex>` tags. `<UTC build>` is the export run's own time to the second, so exporting the same template again gives a new tag. There is no `latest`, mutable channel, caller tag or overwrite flag.
 

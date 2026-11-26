@@ -23,7 +23,11 @@ JOBS = dict(zip(re.findall(r"^  ([a-z]+):$", BODY, flags=re.M), re.split(r"^  [a
 EXPORT, PUBLISH, ATTEST, VERIFY = (JOBS[name] for name in ("export", "publish", "attest", "verify"))
 CHECKOUT = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2"
 UPLOAD = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2"
-ORAS = "oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1; official pin reviewed separately"
+ORAS = "oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128 # v2.0.4"
+# The whole step. setup-oras v2.0.4 sends the job token with the download of the ORAS CLI unless the input is empty.
+ORAS_STEP = ("uses: " + ORAS + "\n        with:\n          version: 1.3.0\n"
+             "          # Since v2.0.4 the action sends the job token with the download of the ORAS CLI unless told not to.\n"
+             "          token: ''\n")
 DOWNLOAD = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2"
 ATTESTATION = "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2"
 SECRETS = ["PVE_URL", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET", "PVE_NODES", "PVE_TEMPLATE_STORAGE", "PVE_IMPORT_STORAGE",
@@ -184,6 +188,8 @@ class PermissionTests(unittest.TestCase):
         self.assertEqual(found[1][1], (
             "uses: " + DOWNLOAD + "\n        with:\n          name: ${{ needs.export.outputs.artifact_name }}-evidence\n"
             "          path: ${{ runner.temp }}/evidence\n"))
+        # The job has no token of its own in any step: the ORAS setup is told to download without one.
+        self.assertEqual(found[2][1], ORAS_STEP)
         script = dict(steps(VERIFY))["name: Pull the digest anonymously, verify the three files and write the final summary"]
         order = ['reference="$(python3 images/vm_publish_stage.py reference)"', "printf '{\"auths\":{}}\\n' > \"$anonymous/config.json\"",
                  'env -i PATH="$PATH" HOME="$anonymous/home" DOCKER_CONFIG="$anonymous" XDG_CONFIG_HOME="$anonymous" \\\n',
