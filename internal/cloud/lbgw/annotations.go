@@ -169,12 +169,26 @@ func KeepsAddress(s *Service) bool {
 
 // GoneAnnotations are the annotations of ann that say something of a Service that is being deleted, which is what
 // the controller sends of one (Gone): the wish to keep its address. Every other one is about serving it.
+//
+// The value goes as its reader takes it (Annotation: without the spaces around it), and at most maxGoneValue
+// characters of it. A boolean has five at most ("false"), so every boolean goes whole; a longer value is none and is
+// sent as its beginning, which is none either: its last character is a "~", since a cut that ended in a space would
+// read as the boolean before it ("true    and more" as "true"). Sent as written, MaxGone values of
+// MaxAnnotationValue characters are over the gateway's part for these Services (maxGoneBody), which then refuses the
+// field, and the controller's next request leaves it out for every Service, the ones with a boolean too.
 func GoneAnnotations(ann map[string]string) map[string]string {
-	if v, ok := ann[OwnPrefix+KnobKeepAddress]; ok {
-		return map[string]string{OwnPrefix + KnobKeepAddress: v}
+	v, ok := ann[OwnPrefix+KnobKeepAddress]
+	if !ok {
+		return nil
 	}
-	return nil
+	if v = strings.TrimSpace(v); len(v) > maxGoneValue {
+		v = v[:maxGoneValue-1] + "~"
+	}
+	return map[string]string{OwnPrefix + KnobKeepAddress: v}
 }
+
+// maxGoneValue is how much of a keep-address value GoneAnnotations sends.
+const maxGoneValue = 8
 
 // Event is something the controller says on the Service, in the answer's order.
 type Event struct {
