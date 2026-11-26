@@ -519,6 +519,44 @@ func TestPatchService(t *testing.T) {
 	}
 }
 
+// The two writes a function needs beyond apply: the scale subresource alone (never the Deployment), and a merge patch
+// of a core object, which needs neither get nor delete on it. A missing object is NotFound for both.
+func TestSetScaleAndMergePatchCore(t *testing.T) {
+	var got []string
+	missing := false
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got = append(got, r.Method+" "+r.URL.Path+" "+r.Header.Get("Content-Type")+" "+string(body))
+		if missing {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"not found"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	})
+	ctx := context.Background()
+	if err := c.SetScale(ctx, "apps", "v1", "deployments", "fn-p1", "fn-0123456789abcdef", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.MergePatchCore(ctx, "secrets", "fn-p1", "fn-0123456789abcdef", map[string]any{"data": nil}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`PATCH /apis/apps/v1/namespaces/fn-p1/deployments/fn-0123456789abcdef/scale application/merge-patch+json {"spec":{"replicas":3}}`,
+		`PATCH /api/v1/namespaces/fn-p1/secrets/fn-0123456789abcdef application/merge-patch+json {"data":null}`,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("requests:\n%s", strings.Join(got, "\n"))
+	}
+	missing = true
+	if err := c.SetScale(ctx, "apps", "v1", "deployments", "fn-p1", "gone", 0); !NotFound(err) {
+		t.Fatalf("scale of a missing Deployment: %v", err)
+	}
+	if err := c.MergePatchCore(ctx, "secrets", "fn-p1", "gone", map[string]any{"data": nil}); !NotFound(err) {
+		t.Fatalf("patch of a missing Secret: %v", err)
+	}
+}
+
 // GetSecret is one GET of one name, and answers what the API server does for a Secret: its type, its data decoded,
 // "not found" as no Secret and no error, and a forbidden read as an error with its status.
 func TestGetSecret(t *testing.T) {
