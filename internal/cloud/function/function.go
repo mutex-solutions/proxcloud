@@ -145,10 +145,13 @@ func registryHost(host string) string {
 }
 
 // RegistryHost is the registry an image reference is pulled from, by Docker's rule: the first
-// component is a host when it has a '.' or a ':' or is localhost, anything else is on Docker Hub.
+// component is a host when it has a '.' or a ':', is localhost, or has an upper-case letter (a
+// repository path is lower case, so the kubelet and containerd read "Registry/app" as host
+// "Registry"); anything else is on Docker Hub. It must read a reference as they do: the check of
+// the registry's name (checkRegistryHost) is made on what this returns.
 func RegistryHost(image string) string {
 	host, _, found := strings.Cut(image, "/")
-	if !found || (!strings.ContainsAny(host, ".:") && host != "localhost") {
+	if !found || (!strings.ContainsAny(host, ".:") && host != "localhost" && strings.ToLower(host) == host) {
 		return "docker.io"
 	}
 	return registryHost(host)

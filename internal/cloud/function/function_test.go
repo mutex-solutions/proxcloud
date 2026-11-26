@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	distref "github.com/distribution/reference"
+
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 )
 
@@ -205,6 +207,9 @@ func TestImageRegistryMustBeADNSName(t *testing.T) {
 		"localhost/api:1",                  // the machine itself
 		"localhost:5000/api:1",             //
 		"LOCALHOST:5000/api:1",             //
+		"LOCALHOST/api:1",                  // upper case makes the first component a host for the kubelet and containerd
+		"Localhost/api@sha256:abc",         //
+		"Registry/api:1",                   // and that host has one label
 		"registry:5000/api:1",              // one label: the machine's hosts file or search domain decides
 		"registry.example.com.:5000/api:1", // an empty label
 		"registry..example.com/api:1",
@@ -278,6 +283,27 @@ func TestValidateSecrets(t *testing.T) {
 	} {
 		if err := ValidateSecrets(env, secrets); err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "hunter2") {
 			t.Errorf("%q: got %v", want, err)
+		}
+	}
+}
+
+// The registry's name is checked on what RegistryHost reads out of a reference, and the pull goes to what the kubelet
+// and containerd read out of it: the two must be one reading, or a reference passes the check under one host and is
+// pulled from another. The reference library here is the one both of them parse with.
+func TestRegistryHostReadsAReferenceAsTheRuntimeDoes(t *testing.T) {
+	digest := "@sha256:" + strings.Repeat("ab", 32)
+	for _, image := range []string{
+		"nginx", "nginx:1.27", "acme/api:1", "acme/api" + digest, "docker.io/acme/api:1", "index.docker.io/acme/api:1",
+		"ghcr.io/acme/api:1", "GHCR.io/acme/api:1", "registry.example.com:5000/team/api:1", "registry:5000/api:1",
+		"localhost/api:1", "localhost:5000/api:1", "LOCALHOST/api:1", "Localhost/api" + digest, "Registry/api:1",
+		"10.0.0.1/api:1", "127.0.0.1:5000/api:1", "2130706433:5000/api:1", "a/b/c:1", "registry.example.com/a/b/c:1",
+	} {
+		named, err := distref.ParseNormalizedNamed(image)
+		if err != nil {
+			t.Fatalf("%s: %v", image, err)
+		}
+		if got, want := RegistryHost(image), distref.Domain(named); got != want {
+			t.Errorf("RegistryHost(%q) = %q, the runtime pulls from %q", image, got, want)
 		}
 	}
 }
