@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -58,7 +59,18 @@ systemd-run -q --unit=lb-tls-echo socat TCP-LISTEN:19000,bind=127.0.0.1,fork,reu
 // state read finds and the next push puts right before a start of HAProxy would refuse the config; and the files a
 // config no longer names, gone after it is served.
 func TestLBApplianceTLS(t *testing.T) {
-	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
+	images := []string{"debian:trixie", "ubuntu:26.04"}
+	// Per certificate the upload refuses for its signature (step 1b): the images that were asked, and the ones whose
+	// HAProxy refused it.
+	sigAsked, sigRefused := map[string]int{}, map[string]int{}
+	defer func() {
+		for what, n := range sigAsked {
+			if n == len(images) && sigRefused[what] == 0 {
+				t.Errorf("%s: the upload refuses it for its signature and the HAProxy of no appliance image does", what)
+			}
+		}
+	}()
+	for _, image := range images {
 		t.Run(image, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 			defer cancel()
@@ -224,6 +236,110 @@ func TestLBApplianceTLS(t *testing.T) {
 					t.Errorf("haproxy -c on %s:\n%s", name, out)
 				}
 			}
+
+			// 1b. The signature of a certificate: the upload's check and this image's HAProxy, asked about the same
+			// bytes. The config is the product's own with the first certificate's file exchanged, so its TLS policy
+			// lines are in force; `haproxy -c` loads the file as a push's check does. The certificates signed with
+			// SHA-1 and SHA-256 are made here; the MD5, the DSA, the RSA-PSS, the SHA-224 and the RIPEMD-160 ones by
+			// the guest's openssl, which Go has no signer for. Go has no name either for the last four (RSA-PSS with
+			// SHA-1, SHA-224, RSA-PSS with SHA-256 and a salt of 20 bytes, RSA with RIPEMD-160): the upload reads the
+			// digest of the first from its parameters and the last by its identifier and refuses them, and takes the
+			// other two, as both HAProxy do. Held for every case on
+			// every image: what this HAProxy refuses, the upload refused (a certificate taken by the upload and
+			// refused at the push was the fault), and the controls are taken by both. The images do not agree on the weak ones (Ubuntu 26.04's OpenSSL refuses them, "ca md
+			// too weak"; Debian 13's loads them), so the other direction is held over the images together, at the
+			// end of the test: what the upload refuses, the HAProxy of one image at least refuses.
+			sigKey := lbcerttest.RSA(t, 2048)
+			sigged := func(sign lbcerttest.Sign) lbcerttest.Cert {
+				return lbcerttest.NewSigned(t, sigKey, until, sign, "sig.example.org")
+			}
+			first := func(chain string) string {
+				return chain[:strings.Index(chain, "-----END CERTIFICATE-----")+len("-----END CERTIFICATE-----\n")]
+			}
+			sha1Leaf, sha1RSA := sigged(lbcerttest.Sign{Leaf: x509.ECDSAWithSHA1}), sigged(lbcerttest.Sign{Leaf: x509.SHA1WithRSA, RSA: true})
+			sha1Mid, sha1Root := sigged(lbcerttest.Sign{Intermediate: x509.ECDSAWithSHA1}), sigged(lbcerttest.Sign{Root: x509.ECDSAWithSHA1})
+			sha256EC, sha256RSA := sigged(lbcerttest.Sign{}), sigged(lbcerttest.Sign{RSA: true})
+			selfSHA1 := lbcerttest.SelfSigned(t, sigKey, until, x509.SHA1WithRSA, "sig.example.org")
+			var ossl []string // by the guest's openssl: MD5, DSA with SHA-1, one that signed itself with MD5, RSA-PSS with SHA-1, SHA-224, RSA-PSS with SHA-256, their key, RIPEMD-160
+			for rest := []byte(g.run(ctx, `set -e; mkdir /root/sig; cd /root/sig; q() { "$@" >/dev/null 2>&1; }
+q openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -subj /CN=sig-ca -days 2
+q openssl dsaparam -genkey -out dsa.key 2048
+q openssl req -x509 -new -key dsa.key -sha256 -out dsa.pem -subj /CN=sig-dsa-ca -days 2
+q openssl req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj /CN=sig.example.org
+q openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -md5 -days 2 -out md5.pem
+q openssl x509 -req -in leaf.csr -CA dsa.pem -CAkey dsa.key -CAcreateserial -sha1 -days 2 -out dsasha1.pem
+q openssl req -x509 -new -key leaf.key -md5 -out self.pem -subj /CN=sig.example.org -days 2
+q openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -sha1 -sigopt rsa_padding_mode:pss -days 2 -out pss1.pem
+q openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -sha224 -days 2 -out sha224.pem
+q openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -sha256 -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:20 -days 2 -out pss256.pem
+q openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -ripemd160 -days 2 -out rmd160.pem
+cat md5.pem dsasha1.pem self.pem pss1.pem sha224.pem pss256.pem leaf.key rmd160.pem`)); ; {
+				var block *pem.Block
+				if block, rest = pem.Decode(rest); block == nil {
+					break
+				}
+				ossl = append(ossl, lbcerttest.PEM(block.Type, block.Bytes))
+			}
+			if len(ossl) != 8 {
+				t.Fatalf("the guest's openssl made %d PEM blocks, want seven certificates and a key", len(ossl))
+			}
+			for i, want := range map[int]x509.SignatureAlgorithm{0: x509.MD5WithRSA, 1: x509.DSAWithSHA1, 2: x509.MD5WithRSA, 3: x509.UnknownSignatureAlgorithm, 4: x509.UnknownSignatureAlgorithm, 5: x509.UnknownSignatureAlgorithm, 7: x509.UnknownSignatureAlgorithm} {
+				block, _ := pem.Decode([]byte(ossl[i]))
+				if got, err := x509.ParseCertificate(block.Bytes); err != nil {
+					t.Fatalf("certificate %d of the guest's openssl: %v", i+1, err)
+				} else if got.SignatureAlgorithm != want {
+					t.Fatalf("certificate %d of the guest's openssl is signed with %v, want %v", i+1, got.SignatureAlgorithm, want)
+				}
+			}
+			if err := c.CopyToContainer(ctx, []byte(strings.ReplaceAll(config, "/etc/haproxy/certs/"+fileA.Name+".pem", "/root/sig.pem")), "/root/sig.cfg", 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for _, sc := range []struct {
+				what, chain, key string
+				weak             bool // the upload refuses it for its signature
+			}{
+				{"SHA-256 of ECDSA authorities (the control)", sha256EC.Chain, sha256EC.Key, false},
+				{"SHA-256 of RSA authorities (the control)", sha256RSA.Chain, sha256RSA.Key, false},
+				{"a SHA-1 server certificate alone", first(sha1Leaf.Chain), sha1Leaf.Key, true},
+				{"a SHA-1 server certificate with its intermediate", sha1Leaf.Chain, sha1Leaf.Key, true},
+				{"a SHA-1 server certificate of an RSA authority", sha1RSA.Chain, sha1RSA.Key, true},
+				{"a SHA-1 intermediate", sha1Mid.Chain, sha1Mid.Key, true},
+				{"an MD5 server certificate", ossl[0], ossl[6], true},
+				{"a DSA with SHA-1 server certificate", ossl[1], ossl[6], true},
+				{"an RSA-PSS with SHA-1 server certificate", ossl[3], ossl[6], true},
+				{"a RIPEMD-160 server certificate", ossl[7], ossl[6], true},
+				{"a SHA-224 server certificate (Go has no name for it; the control)", ossl[4], ossl[6], false},
+				{"an RSA-PSS with SHA-256 and a salt of 20 bytes server certificate (Go has no name for it; the control)", ossl[5], ossl[6], false},
+				{"a SHA-1 certificate that signed itself", selfSHA1.Chain, selfSHA1.Key, false},
+				{"an MD5 certificate that signed itself", ossl[2], ossl[6], false},
+				{"a chain that ends in its SHA-1 root", sha1Root.Chain + sha1Root.Root, sha1Root.Key, false},
+			} {
+				_, _, _, refused := pve.CheckLBCertificate(sc.chain, sc.key, time.Now())
+				if err := c.CopyToContainer(ctx, []byte(sc.chain+sc.key), "/root/sig.pem", 0o600); err != nil {
+					t.Fatal(err)
+				}
+				code, out, _ := g.sh(ctx, "sig", "sh", "-c", "haproxy -c -f /root/sig.cfg 2>&1")
+				said := ""
+				if i := strings.Index(out, "unable to load"); i >= 0 {
+					said, _, _ = strings.Cut(out[i:], "\n")
+				}
+				t.Logf("%s: the upload %q; haproxy -c exit %d %s", sc.what, refused, code, said)
+				switch {
+				case code != 0 && !strings.Contains(out, "/root/sig.pem"):
+					t.Fatalf("%s: haproxy -c refuses the config for something else than the certificate:\n%s", sc.what, out)
+				case code != 0 && refused == "":
+					t.Errorf("%s: taken by the upload and refused by this HAProxy:\n%s", sc.what, out)
+				case (refused != "") != sc.weak || sc.weak && !strings.Contains(refused, "is signed with"):
+					t.Errorf("%s: the upload answers %q, want refused for its signature: %v", sc.what, refused, sc.weak)
+				}
+				if sc.weak {
+					sigAsked[sc.what]++
+					if code != 0 {
+						sigRefused[sc.what]++
+					}
+				}
+			}
+			g.run(ctx, "rm -rf /root/sig /root/sig.pem /root/sig.cfg")
 
 			// 2. The certificate a client gets, by the name it asks for. The chain verifies against the root alone, so
 			// the intermediate was sent.
