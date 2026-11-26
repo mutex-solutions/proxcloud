@@ -150,8 +150,8 @@ func TestSpecValidate(t *testing.T) {
 func TestSpecRefusesWhatIsNotOffered(t *testing.T) {
 	fc := sandbox.FunctionsConfig{Enabled: true}
 	for body, want := range map[string]string{
-		`{"name":"llm","image":"nginx:1","gpu":{"model":"nvidia-3090"}}`:                                         "gpu",
-		`{"name":"llm","image":"nginx:1","gpu":{}}`:                                                              "gpu",
+		`{"name":"render","image":"nginx:1","gpu":{"model":"nvidia-3090"}}`:                                      "gpu",
+		`{"name":"render","image":"nginx:1","gpu":{}}`:                                                           "gpu",
 		`{"name":"api","source":{"type":"github","installationId":7,"repo":"acme/api","branch":"main"}}`:         "source",
 		`{"name":"api","image":"nginx:1","source":{"repo":"acme/api"}}`:                                          "source",
 		`{"name":"api","image":"nginx:1","exposure":"public"}`:                                                   "exposure",
