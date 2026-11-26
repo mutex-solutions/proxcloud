@@ -216,7 +216,8 @@ func writeReportErr(w http.ResponseWriter, rep any, err error) bool {
 	return true
 }
 
-// kamajiClusterBumpAll re-pins EVERY managed cluster onto the provider's current chartVersion.
+// kamajiClusterBumpAll re-pins EVERY managed cluster onto the provider's current chartVersion, and moves the load
+// balancer controller of a cluster that is already on it onto the portal's image (kamaji.ClusterPin.Behind).
 // Best-effort per cluster; the response reports how many moved and any per-cluster errors.
 // ADMIN_SERVICE_MANAGE.
 func (h *Handler) kamajiClusterBumpAll(w http.ResponseWriter, r *http.Request) {
@@ -239,7 +240,7 @@ func (h *Handler) kamajiClusterBumpAll(w http.ResponseWriter, r *http.Request) {
 	bumped := 0
 	errs := map[string]string{}
 	for _, p := range pins {
-		if p.ChartVersion == pin {
+		if !p.Behind(pin) {
 			continue
 		}
 		if err := ks.SetChartVersion(r.Context(), p.ID, pin); err != nil {

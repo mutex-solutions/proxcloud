@@ -124,3 +124,32 @@ test("Enable load balancer controller on an existing cluster, and a gate that do
   await expect(dialog.getByRole("alert")).toContainText("sharedWorkers")
   expect(await calls(page, "POST", lbPath("pc-c-old"))).toHaveLength(1)
 })
+
+// A release that changes only the load balancer controller (v0.11.1's candidates did): prod is on the provider's
+// chart and its controller is the earlier release's. It counts as behind the pin, "Bump all" is there for it, and
+// its row says what is behind and has the action. Before, the card read 1 of 2 and "Bump all" left prod out.
+test("a cluster on the pin whose controller image is behind counts as behind and is bumped", async ({ page }) => {
+  const behind = { ...clusters, clusters: [{ ...clusters.clusters[0], lbControllerBehind: true }, { id: "pc-c-cur", name: "tools", projectId: "prj-1", chartVersion: "0.1.19", loadBalancer: "class-only" }] }
+  await open(page, {
+    "GET /admin/service/svc-k8s-01/k8s-clusters": behind,
+    "POST /admin/service/svc-k8s-01/k8s-clusters/bump-chart": { chartVersion: "0.1.19", bumped: 1, errors: {} },
+    "POST /admin/service/svc-k8s-01/k8s-clusters/pc-c-new/bump-chart": { chartVersion: "0.1.19" },
+  })
+  await expect(page.getByText("1 of 2 cluster(s) behind the pin.")).toBeVisible()
+  const prod = page.getByRole("row").filter({ hasText: "prod" })
+  await expect(prod).toContainText("current")
+  await expect(prod.getByTestId("lb-controller-behind")).toContainText("controller image behind")
+  // A cluster on the pin with the portal's controller keeps "Apply settings" and says nothing.
+  const tools = page.getByRole("row").filter({ hasText: "tools" })
+  await expect(tools.getByTestId("lb-controller-behind")).toHaveCount(0)
+  await expect(tools.getByRole("button", { name: "Apply the provider's settings to tools" })).toBeVisible()
+  await expect(page.getByText("restarts the controller's pod and replaces no machine")).toBeVisible()
+
+  await prod.getByRole("button", { name: "Update the load balancer controller of prod" }).click()
+  await expect.poll(() => calls(page, "POST", "/admin/service/svc-k8s-01/k8s-clusters/pc-c-new/bump-chart")).toHaveLength(1)
+  const all = page.getByRole("button", { name: "Bump all to 0.1.19" })
+  await expect(all).toBeEnabled()
+  await all.click()
+  await expect.poll(() => calls(page, "POST", "/admin/service/svc-k8s-01/k8s-clusters/bump-chart")).toHaveLength(1)
+  await expect(page.getByText("1 cluster(s) re-pinned to 0.1.19")).toBeVisible()
+})

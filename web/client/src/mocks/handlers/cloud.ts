@@ -206,6 +206,12 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     return ok("REPLACING")
   }
 
+  // The opt-in platform update: the cluster's next read carries no offer for its controller.
+  if (r?.type === "KUBERNETES_CLUSTER" && action === "APPLY_PLATFORM_UPDATE") {
+    delete r.data?.cluster?.lb_controller_update
+    return ok("UPDATING")
+  }
+
   // A cluster's load balancer: the controller's last call and the balancer its Services built (null: no controller).
   if (r?.type === "KUBERNETES_CLUSTER" && action === "GET_LOAD_BALANCER") {
     if (!r.data?.cluster?.load_balancer) return ok(null)
