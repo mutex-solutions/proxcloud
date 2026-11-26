@@ -480,8 +480,9 @@ func lbHash(config string) string {
 
 // pveLBApply brings one balancer in line with its row, and returns the status it ends on ("" = no such
 // row). It is the only writer of what an appliance runs, one at a time per balancer. A change an appliance could not
-// take now is tried again by the platform itself, within half a minute and for two minutes (lbRetry): the caller is
-// answered at once, and the row says what waits.
+// take now is tried again by the platform itself, every 20 s for two minutes (lbRetry), and after that at the next
+// services sync or change: the caller is answered at once, and the row says what waits and when it is tried again
+// (lbRetrySays).
 func (h *Handler) pveLBApply(ctx context.Context, es *externalservice.ExternalService, proj *Project, externalID string) (string, error) {
 	status, waiting, err := h.lbApplyOnce(ctx, es, proj, externalID)
 	if waiting {
@@ -650,7 +651,7 @@ func (h *Handler) lbApplyLocked(ctx context.Context, es *externalservice.Externa
 		case lb.AppliedHash == "":
 			lb.Status, lb.StatusMessage = lbStatusBuild, ""
 		case hash != lb.AppliedHash: // the last config is served meanwhile; one found not served keeps its message
-			lb.StatusMessage = "A change waits for the load balancer's VM: " + lbHeldWhy(err) + ". The configuration of before the change is served meanwhile; the platform tries again within half a minute, by itself."
+			lb.StatusMessage = "A change waits for the load balancer's VM: " + lbHeldWhy(err) + ". The configuration of before the change is served meanwhile; " + lbRetrySays() + "."
 			lb.waiting = true
 		default: // the config was found not served and cannot be loaded now: tried again too
 			lb.waiting = true
