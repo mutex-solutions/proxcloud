@@ -282,7 +282,19 @@ func (g *gateway) put(ctx context.Context, req *lbgw.Request) (*lbgw.Answer, err
 	if err != nil {
 		return nil, err
 	}
-	if status == http.StatusBadRequest && len(req.Gone) > 0 {
+	// shorter: the refusals a shorter request may not get. 400 is a field the portal does not know. 413 is the same
+	// portal when the state is near its limit: v0.11.0 and the candidates before v0.11.1-rc.3 measure the whole body
+	// against the state's 64 KiB before they look at a field, so the Services being deleted, or the fields of
+	// protocol 2, put a state that fits over it. Without this step such a portal took nothing while a Service was
+	// being deleted, and that Service stayed Terminating for as long as the rollback lasted. Only the two step-downs
+	// below ask: a 413 to a request that had nothing to leave out is one request, reported as it is.
+	// ponytail: against a portal of this release, which measures the Services being deleted apart from the state,
+	// a state that is really too large costs one more request a turn while a Service is being deleted (both are
+	// answered 413, and the second is reported). Tell the two apart by the answer if that request ever matters.
+	shorter := func(status int) bool {
+		return status == http.StatusBadRequest || status == http.StatusRequestEntityTooLarge
+	}
+	if shorter(status) && len(req.Gone) > 0 {
 		// A portal of before v0.11.1-rc.3 knows no Services that are being deleted and refuses the field. It gets the
 		// request without them, and goes by the state it last stored, as it did. A request refused for something
 		// else is refused again, and that answer is the one reported.
@@ -295,7 +307,7 @@ func (g *gateway) put(ctx context.Context, req *lbgw.Request) (*lbgw.Answer, err
 			return nil, err
 		}
 	}
-	if status == http.StatusBadRequest && peer > 0 && peer < lbgw.Protocol {
+	if shorter(status) && peer > 0 && peer < lbgw.Protocol {
 		old, err := json.Marshal(protocol1(req))
 		if err != nil {
 			return nil, err
