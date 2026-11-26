@@ -259,6 +259,8 @@ export function seedCloudResources(): CloudResource[] {
     // Three workers placed on three hosts: scaling to two empties one host.
     k8s("pc-c-healthy", "prod", {
       status: "READY", load_balancer: "default", addons: { metricsServer: true, nginxGatewayFabric: true },
+      // __mockLBControllerUpdate: an e2e spec's stand-in for a release that changed the controller's image alone.
+      ...((globalThis as { __mockLBControllerUpdate?: boolean }).__mockLBControllerUpdate ? { lb_controller_update: true } : {}),
       node_groups: [{ ...group("workers", 3, 3), image_id: "pve1=9201,pve2=9202,pve3=9203", placement: { pve1: 1, pve2: 1, pve3: 1 } }],
     }),
     k8s("pc-c-stuck", "staging", {

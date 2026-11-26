@@ -192,7 +192,17 @@ sequenceDiagram
   services list, `GET /api/v1/project/{id}/service`) and shows "Platform update available" with both versions on the cluster's
   page. The operator's provider page lists `chartVersion` per cluster next to `providerChartVersion`
   (`GET /api/v1/admin/service/{id}/k8s-clusters`) and counts the clusters behind. The cluster's own row in the
-  tenant API carries `chart_version` only: a script reads the provider's version from the services list. Neither
+  tenant API carries `chart_version` only: a script reads the provider's version from the services list. A
+  cluster with a load balancer controller is behind in a second way, which no chart version shows: its controller
+  runs another image than the portal pins now (a portal release that changed nothing in the chart). The portal
+  compares the image in the cluster's Application with its own (`PROXCLOUD_LB_CONTROLLER_IMAGE`) and asks no
+  cluster: the tenant's row then carries `lb_controller_update: true` (absent otherwise) and the page offers the
+  update with the words "the load balancer controller only: no machine is replaced"; the operator's row carries
+  `lbControllerBehind`, shows "controller image behind" and **Update controller**, and counts as behind. The
+  tenant's action, **Update controller** and **Bump all** are the same apply: the controller's image, and its one
+  pod is replaced (`TestChartControllerImageMovesTheControllerAlone`). The portal's image name carries its release,
+  so every portal upgrade puts each cluster with a controller behind in this way, whether or not the release
+  changed the controller; a portal that is rolled back offers the move back to its own image. Neither
   place says what a newer chart adds; for 0.1.13 to 0.1.14 that is the automatic replacement of a worker that
   does not join ("A worker that does not join" below), while Replace and the worker firewall work on any chart
   version. Nothing moves a cluster by itself: a platform upgrade changes the provider's version only.
@@ -437,7 +447,8 @@ Proxmox node and a new join.
   an upgrade, an add-on change), replaces a block the cluster already has, and removes it when the provider says
   `0`. A change of the provider's keys does not reach a cluster by itself: on the provider's page, **Apply
   settings** on the row of a cluster that is already on the provider's chart writes it now
-  (`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/bump-chart`; **Bump all** skips such clusters). This
+  (`POST /api/v1/admin/service/{id}/k8s-clusters/{clusterId}/bump-chart`; **Bump all** skips such clusters,
+  unless their load balancer controller's image is behind the portal's). This
   is the way to stop a loop of clones on one cluster: raise the timeout or set `0` on the provider, then Apply
   settings on that cluster. A block edited by hand in the ArgoCD Application is overwritten at the portal's next
   change of the cluster. There is no per-cluster setting.

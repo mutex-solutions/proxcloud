@@ -15,6 +15,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can be cancelled; it is deleted once the scheduler runs (`--scheduler` on a Compose install). An install with
   the scheduler on, or with the debug triggers on, sees no change.
 
+- **Managed Kubernetes: after this upgrade, and after every later one, each cluster with a load balancer controller
+  is offered an update of that controller.** The controller runs the portal's own image, and the image's name
+  carries the release (`PROXCLOUD_LB_CONTROLLER_IMAGE`, `ghcr.io/mutex-solutions/proxcloud-api:<version>`), so a
+  cluster's controller is the one of the release before until its cluster is moved. Up to 0.11.1 nothing showed
+  that when the provider's chart had not changed (see Fixed). Now the tenant's cluster page shows "Platform update
+  available" with the words "the load balancer controller only: no machine is replaced", the operator's provider
+  page counts the cluster as behind the pin with **Update controller** on its row, and **Bump all** moves it. This
+  holds whether or not a release changed the controller's code: the portal compares image names and cannot tell.
+  - *Nothing is applied by the upgrade itself.* Until someone acts, the cluster keeps the controller it has, as
+    before, and the portal's gateway keeps answering it.
+  - *What the action does:* one apply of the cluster's Application that changes the controller's image. The
+    controller's Deployment replaces its one pod (strategy `Recreate`); for that moment a change to a Service of
+    type LoadBalancer waits. No machine is replaced, no control plane rolls, no appliance is pushed and no address
+    moves (on the lab the operator's per-cluster action did exactly this for the candidate rc.3: first turn of the new pod 18 s later,
+    control plane, worker, credential, balancer row and appliances untouched). The apply also writes the
+    provider's worker repair setting, as every change of a cluster does.
+  - *A cluster without the controller* (MetalLB alone) is not offered it, and a portal without
+    `PROXCLOUD_LB_CONTROLLER_IMAGE` offers it to nobody.
+  - *After a rollback of the portal* the same offer appears for the clusters whose controller came from the newer
+    release: applying it moves them back to the portal's image. The note of 0.11.1 still holds: do not move a
+    cluster on chart 0.1.19 onto the image of 0.11.0.
+  - *A script that reads the tenant API:* a cluster's row carries `lb_controller_update: true` while this holds
+    (absent otherwise); the operator's cluster rows carry `lbControllerBehind`.
+  - Not run on a lab: the tenant's action and "Bump all" for a cluster that is on the provider's chart.
 - **Billing: the address of a tenant's own load balancer without a `FLOATING_IP` row gets one, billed from its
   allocation time.** Up to 0.11.1 that row was written by the services sync alone (see Fixed). After the upgrade a
   balancer that is live and has no row yet, which is one made since the last sync, or any on a site that runs no
@@ -51,6 +75,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A release that changed only the load balancer controller reached no cluster by itself.** The tenant's cluster
+  page offered "Platform update available" only when the cluster's chart version differed from the provider's, and
+  the operator's **Bump all** skipped every cluster whose chart was the provider's. The controller's image is pinned
+  by the same action (`kamaji.Service.SetChartVersion`), so a cluster on the provider's chart kept the controller of
+  the release it was last moved by: on the lab the controller was still the one of rc.2 after the portal and the
+  platform were on rc.3, the tenant was offered nothing, and only the operator's per-cluster **Apply settings**
+  moved it (drill of v0.11.1-rc.3, step F). The offer now follows what the action would change: the chart version,
+  or the controller's image the portal would pin now against the one in the cluster's Application
+  (`kamaji.Config.LBControllerBehind`; what is stored is compared, no cluster is asked). The tenant's row carries
+  `lb_controller_update`, set by the same read that refreshes the cluster list, and the page says what the update
+  changes; the tenant's action is unchanged and moves the image. The operator's rows carry `lbControllerBehind`,
+  the card counts such a cluster as behind and gives its row **Update controller**, and **Bump all** includes it
+  (`kamaji.ClusterPin.Behind`). A cluster without the controller, and one whose image is the portal's, is offered
+  nothing and is not applied. Tests: `TestLBControllerUpdateOffer` (who is behind, on both surfaces; the bump
+  changes the image and not one other byte of the Application; the others are not applied),
+  `TestChartControllerImageMovesTheControllerAlone` (the chart rendered with two images differs in one line, the
+  controller Deployment's), `TestClusterUpdateOfferedForTheControllerImage` (the tenant's list and action and the
+  operator's list and "Bump all" through the routes, with a real PostgreSQL and a fake management cluster that
+  holds the Applications), and a Playwright spec of each console on its mock. The Go tests fail with the offer,
+  the operator's row or the "Bump all" condition put back. Not run on a lab.
 - **The address of a tenant's own load balancer was listed and billed only after a services sync.** The
   `FLOATING_IP` row of a public address is what lists it for the tenant and bills it. Since 0.11.1 a cluster's
   balancer writes the rows of its Services' addresses in the pass that allocates them; a tenant's own balancer, on

@@ -4,6 +4,27 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-26: a cluster is offered its update when only the controller image changed (lab drill of v0.11.1-rc.3, step F)
+
+**What changed:** no component, container, route or relation. Two read fields, and what two existing actions go by.
+
+- `internal/cloud/kamaji/values.go`: `Config.LBControllerBehind` (new) says whether the image in a cluster's
+  `loadBalancer` block is another than the portal's (`Config.LBControllerImage`); `SetChartVersion` writes the
+  image by the same condition.
+- `internal/cloud/kamaji/service.go`: `ClusterPin.LBControllerBehind` (`lbControllerBehind` in
+  `GET /admin/service/{id}/k8s-clusters`) and `ClusterPin.Behind`, which the operator's "Bump all"
+  (`admin.kamajiClusterBumpAll`) now goes by where it compared chart versions.
+- `internal/cloud/kamaji/syncprovider.go`: the tenant's cluster data carries `lb_controller_update: true` while it
+  holds. The key is absent otherwise, so the row of a cluster that needs nothing does not change.
+- `web/client/src/pages/platform/KubernetesPage.tsx`, `web/admin/src/pages/system/CloudProviderDetailPage.tsx`: the
+  offer and what it says; the operator's row and count.
+
+**Why:** the offer compared chart versions only, and the controller's image moves with the same action: a release
+that changed only the controller reached a cluster on the provider's chart through the operator's per-cluster
+action alone.
+
+**Diagrams updated:** `c4-code.md`, the row of `LBController` / `SetChartVersion`. C1 to C3 are unchanged.
+
 ## 2026-11-26: a tenant balancer's floating address row is written with the allocation (lab drills of v0.11.1)
 
 **What changed:** no component, container, route or row field. Who writes one existing row, and when.
