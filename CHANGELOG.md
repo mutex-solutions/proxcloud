@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The billing engine can charge a resource by its running intervals**, for a resource that stops and starts
+  while its row lives. Nothing uses it yet: no provider sets the new fields, and a resource that sets none of them
+  is charged exactly as before. Three optional fields on a billing resource (`pkg/billingapi/resource.go`), all
+  omitted from the charge request when unset: `chargeFrom` (a minute or hour pass counts from the later of the bill
+  item's watermark and the start of the running interval, cut to the unit, so the idle time between two intervals
+  is not billed), `variableRate` (no money cap on minute and hour passes for a resource whose rate changes; the
+  unit limit still holds, and a month pass keeps the cap) and `earlierInterval` (a closed interval that ended
+  before the one reported after it, rated on minute passes only). The watermark still moves only forward, never
+  past the pass and never past a deletion. The month-end forecast follows the same two rules, and an external
+  billing service (`PROXCLOUD_BILLING_PROVIDER=external`) is never sent such a resource: it would bill the idle
+  gaps, so the resource bills nothing there. `docs/billing.md`, "Resources charged by their running intervals".
+  What shows that no existing bill moves: `test/integration/billing_equality_test.go` charges a row of every
+  billable type through 23 passes on PostgreSQL (a repeated pass, passes out of order, a stale meter, an archived
+  row, the month-closing passes) and compares every bill after every pass, to the last decimal, with a result
+  recorded from the engine before this change; `internal/platform/pricing/bill_legacy_test.go` compares the
+  accrual as it was with the engine over 2,000 random pass sequences. Not run on a lab or a site: the engine has
+  no caller of the new fields outside the tests.
 - **Sandboxes on the managed platform are offered** (#483, `deploy/platform/platform-bom.yaml`,
   [managed-services.md](docs/managed-services.md#sandboxes-on-the-platform)). The platform BOM names the sandbox
   chart, `proxcloud-sandbox` 0.1.0 at its published digest, as the component `sandbox` (`feature: sandbox`), and

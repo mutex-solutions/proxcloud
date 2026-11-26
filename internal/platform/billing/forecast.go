@@ -93,7 +93,12 @@ type ForecastResource struct {
 	CreatedAt *time.Time
 	// EndsAt is when it stops billing (a deleted row, a sandbox's end), nil when it runs on.
 	EndsAt *time.Time
-	Rates  []ForecastRate
+	// ChargeFrom and VariableRate are the charge's (billingapi.BillingResource): the start of the
+	// running interval the projection counts from when it is later than the watermark, and no money
+	// cap on minute and hour rules. Unset for a resource that is not charged by running intervals.
+	ChargeFrom   *time.Time
+	VariableRate bool
+	Rates        []ForecastRate
 }
 
 // ForecastUnratedResource is a billable resource the rules could not rate.
@@ -359,8 +364,8 @@ func ProjectMonthEnd(bills []pricing.Bill, in ForecastInput, now time.Time) *For
 		}
 		added := decimal.Zero
 		for _, rate := range sortedRates(res.Rates) {
-			units := unitsLeft(rate.TimeUnit, item, res.CreatedAt, monthStart, now, end)
-			add, held := pricing.ProjectedAccrual(in.Billing, rate.TimeUnit, rate.Results, item, net.Add(added), units)
+			units := unitsLeft(rate.TimeUnit, item, res.CreatedAt, res.ChargeFrom, monthStart, now, end)
+			add, held := pricing.ProjectedAccrual(in.Billing, rate.TimeUnit, rate.Results, item, net.Add(added), units, res.VariableRate)
 			if held {
 				mark(f.reasons, res.ProjectID, ForecastUsage)
 			}
@@ -497,8 +502,10 @@ func billingMonth(now time.Time) (time.Time, time.Time) {
 // so the passes still to come add ceil((end − watermark) / unit) together. Without a bill item, its
 // first charge starts at the resource's creation (not before the month start), or, without that, at
 // the unit in progress. A month rule has one unit while the resource has not ended
-// (ProjectedAccrual drops it when it has been charged this month already).
-func unitsLeft(timeUnit string, item *pricing.BillItem, createdAt *time.Time, monthStart, now, end time.Time) int64 {
+// (ProjectedAccrual drops it when it has been charged this month already). chargeFrom is the start
+// of a running interval (getTimeUnitsDiff): the count starts there, cut to the unit, when that is
+// later, so the idle time since the watermark of a resource that started again is not projected.
+func unitsLeft(timeUnit string, item *pricing.BillItem, createdAt, chargeFrom *time.Time, monthStart, now, end time.Time) int64 {
 	var unit time.Duration
 	var watermark *time.Time
 	switch timeUnit {
@@ -529,6 +536,11 @@ func unitsLeft(timeUnit string, item *pricing.BillItem, createdAt *time.Time, mo
 	}
 	if last.Before(monthStart) {
 		last = monthStart
+	}
+	if chargeFrom != nil {
+		if cf := chargeFrom.UTC().Truncate(unit); cf.After(last) {
+			last = cf
+		}
 	}
 	if !end.After(last) {
 		return 0

@@ -21,6 +21,18 @@ type BillingResource struct {
 	// back-billed (the cloud state behind it could not be observed).
 	SkipInterval        bool
 	BillingResourceType *BillingResourceType
+	// ChargeFrom, VariableRate and EarlierInterval describe a resource charged by its running
+	// intervals (billingapi.BillingResource has the contract). With none of them set the engine
+	// charges exactly as it did before they existed.
+	//
+	// ChargeFrom is the start of the running interval: a minute or hour charge counts from the later
+	// of the watermark and ChargeFrom cut to the unit (getTimeUnitsDiff).
+	ChargeFrom *time.Time
+	// VariableRate lifts the money cap on minute and hour charges (updateBillItems); never on month.
+	VariableRate bool
+	// EarlierInterval is a closed interval [ChargeFrom, DeletedAt] that ended before the one fed
+	// after it: rated on minute charges only (SaveChargingToBill).
+	EarlierInterval bool
 }
 
 // BillingResourceType declares the attributes (name→type) of a resource type.

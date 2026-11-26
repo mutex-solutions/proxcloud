@@ -240,3 +240,27 @@ func TestBillingContextRoundTrip(t *testing.T) {
 		t.Errorf("round-tripped limits = %v, want hour=720", out.TimeUnitLimits)
 	}
 }
+
+// The three running-interval fields cross the wire, and a resource that sets none of them serializes
+// without them: the charge request of every existing resource is byte for byte what it was (the
+// billing service keeps its own copy of that contract, billingclient/testdata).
+func TestWireRunningIntervalFields(t *testing.T) {
+	from, end := time.Date(2026, 11, 10, 10, 0, 20, 0, time.UTC), time.Date(2026, 11, 10, 10, 4, 0, 0, time.UTC)
+	got := acrossTheWire(t, []*billingapi.BillingResource{
+		{ResourceID: "f", ResourceType: "compute", ChargeFrom: &from, DeletedAt: &end, VariableRate: true, EarlierInterval: true},
+		{ResourceID: "plain", ResourceType: "compute"},
+	})
+	if f := got[0]; f.ChargeFrom == nil || !f.ChargeFrom.Equal(from) || !f.VariableRate || !f.EarlierInterval {
+		t.Errorf("the fields did not cross: %+v", f)
+	}
+	if p := got[1]; p.ChargeFrom != nil || p.VariableRate || p.EarlierInterval {
+		t.Errorf("a plain resource gained a field: %+v", p)
+	}
+	raw, err := json.Marshal(&billingapi.BillingResource{ResourceID: "plain", ResourceType: "compute"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"resourceId":"plain","projectId":"","resourceType":"compute","displayPrice":false,"notEligibleForBilling":false}`; string(raw) != want {
+		t.Errorf("a plain resource on the wire:\n got %s\nwant %s", raw, want)
+	}
+}

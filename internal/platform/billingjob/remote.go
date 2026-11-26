@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/billingresource"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billingclient"
+	"github.com/mutex-solutions/proxcloud/pkg/billingapi"
 )
 
 // remote.go is the charge path for the EXTERNAL billing provider
@@ -82,6 +84,14 @@ func (s *Service) ResolveByProfileID(ctx context.Context, profileID, timeUnit st
 		if err != nil {
 			return req, err
 		}
+		// A resource charged by its running intervals (ChargeFrom, VariableRate, EarlierInterval) is
+		// not posted. A rating service that does not know the fields would count from the watermark
+		// and bill every idle gap as running, and an earlier interval as a second copy of the
+		// resource. Left out, such a resource bills nothing under the external provider, which is
+		// the safe side of wrong.
+		resources = slices.DeleteFunc(resources, func(b *billingapi.BillingResource) bool {
+			return b.ChargeFrom != nil || b.VariableRate || b.EarlierInterval
+		})
 		// Services with no resources are included deliberately, not skipped. The in-process driver
 		// calls ChargeBillingResources once per external service regardless, and that call
 		// CREATES the current bill when absent. Dropping empty groups

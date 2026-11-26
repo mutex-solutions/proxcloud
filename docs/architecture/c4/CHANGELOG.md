@@ -4,6 +4,41 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-26: the billing engine can charge a resource by its running intervals (#495)
+
+**What changed:** no component, container, route, job or relation. Three optional fields on the wire contract of a
+billing resource and the engine's use of them; no provider sets them.
+
+- `pkg/billingapi/resource.go`, `internal/platform/pricing/resource.go`, `apiadapter.go`: `chargeFrom`,
+  `variableRate`, `earlierInterval`, all omitted when unset, so the charge request of every existing resource is
+  byte for byte what it was (`internal/platform/billingclient/testdata/charge_request.golden.json` is untouched).
+- `internal/platform/pricing/bill_build.go`: `getTimeUnitsDiff` counts from the later of the watermark and
+  `ChargeFrom` cut to the unit; `updateBillItems` lifts the money cap for a `VariableRate` resource on minute and
+  hour passes, never on a month pass; `SaveChargingToBill` rates an `EarlierInterval` on minute passes only and only
+  when it is closed; `ProjectedAccrual` takes the resource's `VariableRate`. `advanceWatermark`, the first watermark,
+  the cap and the two rounding functions are unchanged.
+- `internal/platform/billing/forecast.go`: `ForecastResource` carries `ChargeFrom` and `VariableRate`; `unitsLeft`
+  counts from the start of the running interval when that is after the watermark.
+- `internal/platform/billingjob/remote.go`: `ResolveByProfileID` does not post a resource that sets any of the
+  three fields to an external billing service.
+- Tests: `test/integration/billing_equality_test.go` with `testdata/billing_equality.golden.txt` (the bills of
+  every billable type after each of 23 passes, recorded before the engine changed),
+  `test/integration/billing_intervals_test.go`, `internal/platform/pricing/bill_legacy_test.go` (the accrual as it
+  was, compared over random pass sequences), `bill_interval_test.go`, `internal/platform/billing/forecast_interval_test.go`.
+
+**Why:** a resource that scales to zero and wakes again (the functions of v0.13.0) must be billed for the minutes
+it ran, on one bill item for its life. This engine's watermark moves only on a pass that charges or skips, never
+with the clock, so without the start of the interval every wake would be billed back to the end of the interval
+before it. One row per running interval (what a sandbox does) needs no engine change but charges a shared minute
+twice at every scale change and puts one item per interval on the invoice. The engine of the product these
+functions come from could not be carried: it counts whole units down and keeps a minute watermark that follows
+the clock, where this one counts started units up and keeps `SkipInterval`. The change stands alone, before any
+provider uses it, because it is on the path that bills every resource: the recorded bills and the old-against-new
+test show that no existing item moves.
+
+**Diagrams updated:** none (no element of C1 to C4 moves). `c4-code.md`: the two rows that name
+`getTimeUnitsDiff` say what it counts from, and their line hints are refreshed.
+
 ## 2026-11-26: the load balancer controller steps down on `413` as on `400`, and sends a short keep-address value of a Service being deleted (#487)
 
 **What changed:** no component, container, listener, route or wire field. Two behaviours of `cmd/lb-controller`,
