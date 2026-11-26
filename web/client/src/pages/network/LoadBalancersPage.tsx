@@ -121,8 +121,13 @@ export function ClusterServices({ lb, health, certificates }: { lb: LB; health?:
           // Service's health port, and a check that is turned off sees nothing at all.
           const udp = listeners.some((l) => protocolOf(l) === "UDP" &&
             ((lb.pools ?? []).find((p) => p.name === l.pool)?.healthCheck?.type ?? "udp-connect") === "udp-connect")
-          const up = workers.filter((a) => members.some((m) => m.address === a &&
-            health?.find((h) => h.pool === m.pool && h.address === m.address && h.port === m.port)?.status?.startsWith("UP"))).length
+          // A member of a pool whose check is off reads "no check" and always gets traffic: a worker with only such
+          // members is neither up nor down, and is left out of "X of Y up". One with a checked member counts by those.
+          const statusOf = (m: (typeof members)[number]) =>
+            health?.find((h) => h.pool === m.pool && h.address === m.address && h.port === m.port)?.status
+          const checked = workers.filter((a) => members.some((m) => m.address === a && statusOf(m) !== "no check"))
+          const up = checked.filter((a) => members.some((m) => m.address === a && statusOf(m)?.startsWith("UP"))).length
+          const unchecked = workers.length - checked.length
           return (
             <TableRow key={s.uid}>
               <TableCell className="font-mono text-xs">{s.namespace}/{s.name}</TableCell>
@@ -137,7 +142,8 @@ export function ClusterServices({ lb, health, certificates }: { lb: LB; health?:
                 ))}
               </TableCell>
               <TableCell className="whitespace-normal text-sm">
-                {!workers.length ? "—" : health ? `${up} of ${workers.length} up` : `${workers.length}`}
+                {!workers.length ? "—" : !health ? `${workers.length}` : !checked.length ? `${unchecked}, not checked`
+                  : `${up} of ${checked.length} up${unchecked ? `, ${unchecked} not checked` : ""}`}
                 {udp && workers.length > 0 && (
                   <div className="text-xs text-muted-foreground" data-testid="k8s-lb-udp-check">
                     UDP: a worker that is down leaves in about 10 s; a closed port may not be seen under traffic.
