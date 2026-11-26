@@ -24,6 +24,7 @@ longer than before.
 
 **Diagrams updated:** none (no element of C1 to C4 moves). The row of `Handler.lbApplyPair` in
 [c4-code.md](c4-code.md) names the sentence and the line.
+
 ## 2026-11-26: a node selector term with an empty key matches no node
 
 **What changed:** no component, container, wire field or relation. One function of the cluster's load balancer
