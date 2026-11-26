@@ -39,6 +39,7 @@ type lbGuest struct {
 	loaded     string // the config the running HAProxy read; not file after the package's own first start
 	applyFails string // what an apply's proof says when it fails: the file is not taken
 	keepalived bool
+	vrrpFails  string // what keepalived's apply says when it refuses its config: the file is not taken
 	role       string // MASTER or BACKUP while keepalived and HAProxy run
 	holds      bool
 	dead       []string          // members no check can reach, by address:port
@@ -343,6 +344,9 @@ func (f *pairWire) exec(vm string, g *lbGuest, cmd string) lbRun {
 		}
 		return lbRun{}
 	case strings.Contains(cmd, "keepalived -t"):
+		if g.vrrpFails != "" {
+			return lbRun{exit: 1, err: g.vrrpFails}
+		}
 		f.log = append(f.log, vm+" keepalived reload")
 		g.keepalived = true
 		g.moveIn(lbGuestPairFiles...)
