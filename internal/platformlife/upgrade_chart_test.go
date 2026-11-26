@@ -257,7 +257,7 @@ func TestCertManagerMoveRenders(t *testing.T) {
 		}
 		t.Skip("helm not installed")
 	}
-	apps, err := Applications(cur, renderInput())
+	apps, err := Applications(cur.For(Spec{}), renderInput())
 	if err != nil {
 		t.Fatal(err)
 	}
