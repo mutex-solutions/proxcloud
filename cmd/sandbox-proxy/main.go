@@ -2,6 +2,10 @@
 // TLS ends here: the wildcard certificate is a mounted Secret, read again when it is renewed. The public entry in
 // front only passes TCP through.
 //
+// With FUNCTION_DOMAIN set it also routes https://<name>-<6 hex>.<FUNCTION_DOMAIN> to the instances of a serverless
+// function, wakes a function that has none and tells the portal which functions have traffic. Every other host
+// takes the sandbox path as before.
+//
 //	sandbox-proxy [serve]     serve (in the sandbox cluster)
 //	sandbox-proxy cert-sync   copy the wildcard certificate from the services cluster to the sandbox cluster
 //	sandbox-proxy registry-users  keep the sandbox registry's accounts in step with the sandbox cluster's projects
@@ -53,8 +57,52 @@ func main() {
 	}
 }
 
+// handler is what serve listens with: the sandbox handler, and in front of it the function handler when
+// FUNCTION_DOMAIN is set. Function mode needs PROXCLOUD_FUNCTION_WAKE_URL (the portal's function routes,
+// .../internal/functions) and PROXCLOUD_FUNCTION_WAKE_TOKEN, a token of its own: the sandbox wake token is not
+// taken for it. Without them no function could start and all would be reaped as idle, so the mode stays off and the
+// log says so; the proxy does not exit, because sandboxes are served by the same process. drain ends the activity
+// reports with a last one; it is called once the listener has shut down.
+func handler(env func(string) string, k cluster, log *slog.Logger) (h http.Handler, drain func(), functions bool) {
+	cache := sandboxproxy.NewCache(sandboxproxy.K8sLookup(k), 2*time.Second, 2*time.Second) // short hits: a killed sandbox's IP may be reused by another pod
+	waker := sandboxproxy.NewWaker(env("PROXCLOUD_WAKE_URL"), env("PROXCLOUD_WAKE_TOKEN"))
+	h = sandboxproxy.WakingHandler(env("SANDBOX_DOMAIN"), cache.Lookup, waker, cache.Forget, log)
+	fnDomain := strings.ToLower(env("FUNCTION_DOMAIN"))
+	if fnDomain == "" {
+		return h, func() {}, false
+	}
+	fnWaker := sandboxproxy.NewWaker(env("PROXCLOUD_FUNCTION_WAKE_URL"), env("PROXCLOUD_FUNCTION_WAKE_TOKEN"))
+	if fnWaker == nil {
+		log.Error("FUNCTION_DOMAIN is set without PROXCLOUD_FUNCTION_WAKE_URL and PROXCLOUD_FUNCTION_WAKE_TOKEN: functions are not served")
+		return h, func() {}, false
+	}
+	// The activity reports outlive the listener: they go on while the requests drain, and end with a last one.
+	act := sandboxproxy.NewActivity()
+	actx, cancel := context.WithCancel(context.Background())
+	reported := make(chan struct{})
+	go func() {
+		defer close(reported)
+		act.Run(actx, fnWaker, sandboxproxy.FnActivityEvery, log)
+	}()
+	drain = func() {
+		cancel()
+		<-reported // never two reports at once: the last one must be the last to arrive
+		act.Stop(context.Background(), fnWaker, log)
+	}
+	fn := sandboxproxy.FunctionHandler(fnDomain, sandboxproxy.K8sFnLookup(k), sandboxproxy.K8sFnPods(k), fnWaker, act, log)
+	return sandboxproxy.WithFunctions(fnDomain, fn, h), drain, true
+}
+
+// cluster is what serve reads of the cluster: sandbox pods, and in function mode the function Deployments and
+// their pods.
+type cluster interface {
+	sandboxproxy.PodLister
+	sandboxproxy.FnLister
+}
+
 // serve: SANDBOX_DOMAIN (required); SANDBOX_TLS_DIR with tls.crt and tls.key (HTTPS on :8443; unset = plain HTTP on
-// :8080, for tests only); PROXCLOUD_WAKE_URL and PROXCLOUD_WAKE_TOKEN for E2B autoResume (unset = off). Health on :8081.
+// :8080, for tests only); PROXCLOUD_WAKE_URL and PROXCLOUD_WAKE_TOKEN for E2B autoResume (unset = off); FUNCTION_DOMAIN
+// with PROXCLOUD_FUNCTION_WAKE_URL and PROXCLOUD_FUNCTION_WAKE_TOKEN for functions (unset = off). Health on :8081.
 func serve(ctx context.Context, log *slog.Logger) error {
 	domain := os.Getenv("SANDBOX_DOMAIN")
 	if domain == "" {
@@ -92,11 +140,8 @@ func serve(ctx context.Context, log *slog.Logger) error {
 	health := &http.Server{Addr: ":8081", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go listen(health)
 
-	cache := sandboxproxy.NewCache(sandboxproxy.K8sLookup(k), 2*time.Second, 2*time.Second) // short hits: a killed sandbox's IP may be reused by another pod
-	waker := sandboxproxy.NewWaker(os.Getenv("PROXCLOUD_WAKE_URL"), os.Getenv("PROXCLOUD_WAKE_TOKEN"))
 	// No WriteTimeout/ReadTimeout: sandbox responses and WebSockets stream indefinitely.
-	proxy := &http.Server{Addr: ":8080", Handler: sandboxproxy.WakingHandler(domain, cache.Lookup, waker, cache.Forget, log),
-		ReadHeaderTimeout: 10 * time.Second}
+	proxy := &http.Server{Addr: ":8080", ReadHeaderTimeout: 10 * time.Second}
 	if dir := os.Getenv("SANDBOX_TLS_DIR"); dir != "" {
 		// The Secret is empty until cert-sync's first copy: wait for it rather than crash-loop into a long backoff.
 		var get func(*tls.ClientHelloInfo) (*tls.Certificate, error)
@@ -112,15 +157,21 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		proxy.Addr = ":8443"
 		proxy.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: get}
 	}
+	drain := func() {}
 	if ctx.Err() == nil {
+		// Built only now: in function mode it starts the activity reports, which tell the portal this replica serves.
+		var functions bool
+		proxy.Handler, drain, functions = handler(os.Getenv, k, log)
 		go listen(proxy)
 		ready.Store(true)
-		log.Info("sandbox-proxy started", "domain", domain, "addr", proxy.Addr, "tls", proxy.TLSConfig != nil, "wake", waker != nil)
+		log.Info("sandbox-proxy started", "domain", domain, "addr", proxy.Addr, "tls", proxy.TLSConfig != nil,
+			"wake", os.Getenv("PROXCLOUD_WAKE_URL") != "" && os.Getenv("PROXCLOUD_WAKE_TOKEN") != "", "functions", functions)
 	}
 	<-ctx.Done()
 	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	_ = proxy.Shutdown(sctx)
+	drain()
 	_ = health.Shutdown(sctx)
 	return nil
 }

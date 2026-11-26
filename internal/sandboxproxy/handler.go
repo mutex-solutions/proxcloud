@@ -24,12 +24,7 @@ func Handler(domain string, lookup Lookup, log *slog.Logger) http.Handler {
 // WakingHandler is Handler that, when a sandbox has no pod, asks waker to resume it (E2B
 // autoResume) and then forwards. forget drops the cached miss. waker nil = no wake.
 func WakingHandler(domain string, lookup Lookup, waker *Waker, forget func(id string), log *slog.Logger) http.Handler {
-	tr := &http.Transport{
-		DialContext:        (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		DisableCompression: true,
-		MaxIdleConns:       256,
-		IdleConnTimeout:    90 * time.Second,
-	}
+	tr := upstreamTransport()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, port, err := parseTarget(r, domain)
 		if err != nil {
@@ -128,6 +123,28 @@ func WakingHandler(domain string, lookup Lookup, waker *Waker, forget func(id st
 			},
 		}).ServeHTTP(w, r)
 	})
+}
+
+// WithFunctions serves function hosts (<name>-<6 hex>.<domain>) with fn and every other request,
+// unchanged, with next: the sandbox handler.
+func WithFunctions(domain string, fn, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := functionHost(r.Host, domain); ok {
+			fn.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// upstreamTransport is the transport to pods, one per handler.
+func upstreamTransport() *http.Transport {
+	return &http.Transport{
+		DialContext:        (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DisableCompression: true,
+		MaxIdleConns:       256,
+		IdleConnTimeout:    90 * time.Second,
+	}
 }
 
 func waitListening(ctx context.Context, hostport string, limit time.Duration) {
