@@ -830,18 +830,9 @@ func run() error {
 			}
 			return outcome, err
 		},
-		// Light pre-check before scheduling a project for deletion: the project must resolve (a
-		// deeper "no locked resources" gate could go here later).
-		CanDelete: func(ctx context.Context, projectID string) error {
-			p, err := projectSvc.GetProjectByID(ctx, projectID)
-			if err != nil {
-				return err
-			}
-			if p == nil {
-				return fmt.Errorf("project %s not found", projectID)
-			}
-			return nil
-		},
+		// Before a project is scheduled for deletion: the deletion job runs in this installation and the project
+		// resolves (a deeper "no locked resources" gate could go here later).
+		CanDelete: projectSvc.CanScheduleDeletion,
 		// Delete the project now: the deletion job's next sweep tears it down, and retries until it is clean.
 		DeleteNow: func(ctx context.Context, projectID string) error {
 			_, err := projectSvc.DeleteNow(ctx, projectID)

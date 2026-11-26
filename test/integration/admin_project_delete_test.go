@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,31 @@ func TestAdminProjectDeletionLegs(t *testing.T) {
 	// wired
 	repo := project.NewRepo(db)
 	svc := project.NewService(repo, nil, nil, nil, nil)
+
+	// Without the deletion job (scheduler and debug triggers off) a scheduled delete is refused as a delete-now is, with
+	// the same reason, and nothing is written: no job would ever carry it out (drill R4-o2 of v0.11.1). The pre-check
+	// is the one cmd/api wires.
+	reseed()
+	noJob := newH(&admin.ProjectCloudOps{
+		CanDelete: svc.CanScheduleDeletion,
+		DeleteNow: func(ctx context.Context, pid string) error { _, err := svc.DeleteNow(ctx, pid); return err },
+	})
+	svc.SetNoDeletionJob(true)
+	scheduled, now := do(noJob, "/admin/project/proj-1"), do(noJob, "/admin/project/proj-1/now")
+	if scheduled.Code != http.StatusConflict || !strings.Contains(scheduled.Body.String(), "scheduler is off") || status() != "ENABLED" {
+		t.Fatalf("schedule without the deletion job: status=%d project=%s body=%s", scheduled.Code, status(), scheduled.Body)
+	}
+	if now.Code != http.StatusConflict || scheduled.Body.String() != now.Body.String() {
+		t.Fatalf("the two routes give two answers:\nschedule %d %s\nnow      %d %s", scheduled.Code, scheduled.Body, now.Code, now.Body)
+	}
+	// With the job the same pre-check lets the project through, and refuses one that does not resolve.
+	svc.SetNoDeletionJob(false)
+	if w := do(noJob, "/admin/project/proj-1"); w.Code != 200 || status() != "SCHEDULED_FOR_DELETION" {
+		t.Fatalf("schedule with the deletion job: status=%d project=%s body=%s", w.Code, status(), w.Body)
+	}
+	if err := svc.CanScheduleDeletion(ctx, "no-such-project"); err == nil {
+		t.Fatal("a project that does not resolve passed the pre-check")
+	}
 	wired := newH(&admin.ProjectCloudOps{
 		CanDelete: func(context.Context, string) error { return nil },
 		DeleteNow: func(ctx context.Context, pid string) error { _, err := svc.DeleteNow(ctx, pid); return err },

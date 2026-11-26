@@ -151,6 +151,15 @@ func LBMode(values map[string]any) string {
 	return "class-only"
 }
 
+// LBControllerBehind says whether a cluster's load balancer controller runs another image than the portal pins now
+// (Config.LBControllerImage): what SetChartVersion would change on a cluster that is already on the provider's
+// chart. It compares what the cluster's Application carries, and asks no cluster. False for a cluster without a
+// controller, and while the portal has no controller image: nothing would be written then.
+func (c Config) LBControllerBehind(values map[string]any) bool {
+	lb, _ := values["loadBalancer"].(map[string]any)
+	return c.LBControllerImage != "" && digStr(lb, "secretName") != "" && digStr(lb, "image") != c.LBControllerImage
+}
+
 func anySlice(in []string) []any {
 	out := make([]any, 0, len(in))
 	for _, v := range in {

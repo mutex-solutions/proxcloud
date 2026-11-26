@@ -32,6 +32,76 @@ refused there.
 **Diagrams updated:** none (no element of C1 to C3 is added; the relations above are between existing elements).
 `c3-components.md`: the file lists of the two components.
 
+## 2026-11-26: a cluster is offered its update when only the controller image changed (lab drill of v0.11.1-rc.3, step F)
+
+**What changed:** no component, container, route or relation. Two read fields, and what two existing actions go by.
+
+- `internal/cloud/kamaji/values.go`: `Config.LBControllerBehind` (new) says whether the image in a cluster's
+  `loadBalancer` block is another than the portal's (`Config.LBControllerImage`); `SetChartVersion` writes the
+  image by the same condition.
+- `internal/cloud/kamaji/service.go`: `ClusterPin.LBControllerBehind` (`lbControllerBehind` in
+  `GET /admin/service/{id}/k8s-clusters`) and `ClusterPin.Behind`, which the operator's "Bump all"
+  (`admin.kamajiClusterBumpAll`) now goes by where it compared chart versions.
+- `internal/cloud/kamaji/syncprovider.go`: the tenant's cluster data carries `lb_controller_update: true` while it
+  holds and the provider has a chart pin (without one the tenant's action refuses). The key is absent otherwise, so
+  the row of a cluster that needs nothing does not change.
+- `web/client/src/pages/platform/KubernetesPage.tsx`, `web/admin/src/pages/system/CloudProviderDetailPage.tsx`: the
+  offer and what it says; the operator's row and count.
+
+**Why:** the offer compared chart versions only, and the controller's image moves with the same action: a release
+that changed only the controller reached a cluster on the provider's chart through the operator's per-cluster
+action alone.
+
+**Diagrams updated:** `c4-code.md`, the row of `LBController` / `SetChartVersion`. C1 to C3 are unchanged.
+
+## 2026-11-26: a tenant balancer's floating address row is written with the allocation (lab drills of v0.11.1)
+
+**What changed:** no component, container, route or row field. Who writes one existing row, and when.
+
+- `internal/platform/project/cloud_lb_pve.go`: `lbOwnAddressRows` (new) writes the `FLOATING_IP` row of each public
+  address a tenant's balancer holds that has none, through `lbAddressRows` of the cluster's pass. It is called by
+  `lbPlugPublic` (a single VM's address, taken before the first boot), by `pveCreateLBPair`
+  (`cloud_lb_pair_pve.go`, the pair's VIP) and by `lbApplyOnce` (every pass, for a balancer older than this).
+  `lbGiveBack` (new) is the release of an owner's addresses with the archive of their rows: `lbDestroy` used the two
+  calls for a pair, and a single VM's failed build now archives the row too.
+- `internal/platform/project/cloud_lb_address_rows_integration_test.go`: `TestLBTenantAddressRows`.
+
+**Why:** the provider sync alone wrote that row, so a tenant's list missed a live address for up to a sync interval
+and a balancer made and deleted between two syncs was never listed or billed. The cluster's balancer has written
+its rows with the allocation since #452.
+
+**Diagrams updated:** `c4-code.md`, the rows of `pveCreateLoadBalancer` / `lbPlugPublic` and of `pveCreateLBPair`.
+C1 to C3 are unchanged.
+
+## 2026-11-26: the Compose install's PostgreSQL image is pinned by digest (the site's upgrades to v0.11.0 and v0.11.1)
+
+**What changed:** no component, container or relation: the PostgreSQL container of the one-host install is the
+same container, named by one build.
+
+- `deploy/compose/compose.yaml`: `postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73`
+  where the version alone stood.
+- `deploy/tests/test_compose_production.py`: `test_the_database_image_is_pinned_by_digest`.
+- `deploy/compose/README.md`, `.github/dependabot.yml`: the line, and what a change of it does at an upgrade.
+
+**Why:** the publisher rebuilt the tag, and a site's running container was a build the tag no longer named: the
+next recreate would have started another build unasked.
+
+**Diagrams updated:** none (no element of C1 to C4 moves).
+
+## 2026-11-26: a project's scheduled delete is refused when no job will carry it out (lab drill of v0.11.1, R4-o2)
+
+**What changed:** no component, container, route or relation. One refusal more inside one code element.
+
+- `internal/platform/project/service.go`: `Service.ScheduleDeletion` refuses with `errNoDeletionJob`, the `409` of
+  `Service.DeleteNow`, when nothing in the installation runs the deletion job (`SetNoDeletionJob`: the job scheduler
+  and the debug triggers are off). `Service.CanScheduleDeletion` is the same check plus "the project resolves", and
+  `cmd/api` wires it as the operator API's pre-check (`admin.ProjectCloudOps.CanDelete`), where a closure that only
+  resolved the project stood.
+
+**Why:** with the scheduler off, `DELETE /project/{id}` answered `200 SCHEDULED_FOR_DELETION` for a delete that no
+job would ever carry out, while the delete-now route answered `409` and said why.
+
+**Diagrams updated:** none (no element of C1 to C4 moves).
 ## 2026-11-26: an appliance that joins waits for a first appliance that refused to be told of it (review of #446)
 
 **What changed:** no component, container, wire field, file on an appliance or relation. One condition of one pass.
