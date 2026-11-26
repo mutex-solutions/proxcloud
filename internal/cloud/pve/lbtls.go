@@ -22,6 +22,8 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -111,6 +113,43 @@ type LBCertificate struct {
 	File string `json:"file"`
 }
 
+// lbWeakSignature names the signature algorithm of c when it signs over MD2, MD5, SHA-1 or RIPEMD-160, and answers ""
+// for every other. Go names RSA-PSS with SHA-256, SHA-384 and SHA-512 (salt as long as the digest) and reads every
+// other signature it has no name for as unknown: SHA-224, which the HAProxy of both appliance images loads, and
+// RSA-PSS with SHA-1 and RSA with RIPEMD-160, which the one of Ubuntu 26.04 refuses like any SHA-1 signature. So an
+// unknown one is read from the certificate itself: RSA with RIPEMD-160 by its identifier, and the digest of RSA-PSS
+// from its parameters, where SHA-1 is the digest when they name none (RFC 4055).
+func lbWeakSignature(c *x509.Certificate) string {
+	switch c.SignatureAlgorithm {
+	case x509.MD2WithRSA, x509.MD5WithRSA, x509.SHA1WithRSA, x509.DSAWithSHA1, x509.ECDSAWithSHA1:
+		return c.SignatureAlgorithm.String()
+	case x509.UnknownSignatureAlgorithm:
+		var cert struct {
+			TBS asn1.RawValue
+			Alg pkix.AlgorithmIdentifier
+		}
+		var pss struct {
+			Hash pkix.AlgorithmIdentifier `asn1:"optional,explicit,tag:0"`
+		}
+		if _, err := asn1.Unmarshal(c.Raw, &cert); err != nil {
+			return ""
+		}
+		if cert.Alg.Algorithm.Equal(asn1.ObjectIdentifier{1, 3, 36, 3, 3, 1, 2}) {
+			return "RIPEMD160-RSA"
+		}
+		if !cert.Alg.Algorithm.Equal(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 10}) {
+			return ""
+		}
+		if _, err := asn1.Unmarshal(cert.Alg.Parameters.FullBytes, &pss); err != nil {
+			return ""
+		}
+		if len(pss.Hash.Algorithm) == 0 || pss.Hash.Algorithm.Equal(asn1.ObjectIdentifier{1, 3, 14, 3, 2, 26}) {
+			return "SHA1-RSAPSS"
+		}
+	}
+	return ""
+}
+
 // CheckLBCertificate checks an uploaded certificate: chainPEM holds the server's certificate first and then its
 // intermediates, keyPEM the private key. It answers what the certificate says, the file an appliance gets (the chain
 // and the key, written afresh so that the same upload gives the same bytes), warnings that do not refuse it, and a
@@ -186,6 +225,20 @@ func CheckLBCertificate(chainPEM, keyPEM string, now time.Time) (info LBCertific
 		info.KeyType = "ECDSA " + k.Curve.Params().Name
 	default:
 		return info, "", nil, kinds
+	}
+	// A signature over an MD2, MD5, SHA-1 or RIPEMD-160 digest. The HAProxy of an Ubuntu 26.04 appliance refuses the certificate
+	// file (OpenSSL: "ca md too weak", for the server's certificate as for an intermediate), so the config that names
+	// it was refused at the push; the one of a Debian 13 appliance loads it. The upload refuses on every site what
+	// one of the two refuses (TestLBApplianceTLS, step 1b, asks both). OpenSSL does not look at the signature of a
+	// certificate that signed itself, and neither does this: an old root at the end of a chain is taken.
+	// ponytail: "signed itself" is read from the two names alone, so a certificate issued under its own name by
+	// another key passes here and is refused by that appliance, as before; compare the key identifiers too if one
+	// turns up. This stands before the chain's order: Go refuses a SHA-1 signature there too, and the answer would be
+	// that the next certificate did not sign this one.
+	for i, c := range chain {
+		if alg := lbWeakSignature(c); alg != "" && !bytes.Equal(c.RawSubject, c.RawIssuer) {
+			return info, "", nil, fmt.Sprintf("Certificate %d of the chain is signed with %s, which the load balancer does not accept: have it issued again with SHA-256 or stronger", i+1, alg)
+		}
 	}
 	for i := 0; i+1 < len(chain); i++ {
 		if chain[i].CheckSignatureFrom(chain[i+1]) != nil {

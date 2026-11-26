@@ -14,6 +14,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -183,6 +184,67 @@ func TestCheckLBCertificate(t *testing.T) {
 		}
 		if strings.Contains(refused, keyBody) || strings.Contains(refused, "PRIVATE KEY-----") {
 			t.Errorf("%s: the answer holds the key", name)
+		}
+	}
+}
+
+// A signature an appliance's HAProxy refuses is refused at the upload, with the certificate's place in the chain and
+// the algorithm: SHA-1 (and MD5, MD2) on a certificate that did not sign itself. A certificate that signed itself is
+// taken whatever its digest, the old SHA-1 root at the end of a chain among them: OpenSSL does not look at that
+// signature. What HAProxy itself says of these certificates, and of an MD5 and a DSA one: TestLBApplianceTLS.
+func TestCheckLBCertificateSignature(t *testing.T) {
+	now, soon := time.Now(), time.Now().Add(72*time.Hour)
+	key := lbcerttest.RSA(t, 2048)
+	first := func(chain string) string {
+		return chain[:strings.Index(chain, "-----END CERTIFICATE-----")+len("-----END CERTIFICATE-----\n")]
+	}
+	sha1Leaf := lbcerttest.NewSigned(t, key, soon, lbcerttest.Sign{Leaf: x509.ECDSAWithSHA1}, "sha1.example.org")
+	sha1RSA := lbcerttest.NewSigned(t, key, soon, lbcerttest.Sign{Leaf: x509.SHA1WithRSA, RSA: true}, "sha1.example.org")
+	sha1Mid := lbcerttest.NewSigned(t, key, soon, lbcerttest.Sign{Intermediate: x509.ECDSAWithSHA1}, "sha1.example.org")
+	sha1Root := lbcerttest.NewSigned(t, key, soon, lbcerttest.Sign{Root: x509.ECDSAWithSHA1}, "sha1.example.org")
+	sha256RSA := lbcerttest.NewSigned(t, key, soon, lbcerttest.Sign{RSA: true}, "sha256.example.org")
+	sha256 := lbcerttest.New(t, key, soon, "sha256.example.org")
+	self := lbcerttest.SelfSigned(t, key, soon, x509.SHA1WithRSA, "self.example.org")
+	for _, c := range []struct{ name, chain, want string }{
+		{"a SHA-1 server certificate alone", first(sha1Leaf.Chain), "Certificate 1 of the chain is signed with ECDSA-SHA1"},
+		{"a SHA-1 server certificate with its intermediate", sha1Leaf.Chain, "Certificate 1 of the chain is signed with ECDSA-SHA1"},
+		{"a SHA-1 server certificate of an RSA authority", sha1RSA.Chain, "Certificate 1 of the chain is signed with SHA1-RSA"},
+		{"a SHA-1 intermediate", sha1Mid.Chain, "Certificate 2 of the chain is signed with ECDSA-SHA1"},
+		{"a SHA-1 certificate that signed itself", self.Chain, ""},
+		{"a chain that ends in its SHA-1 root", sha1Root.Chain + sha1Root.Root, ""},
+		{"SHA-256 (the control)", sha256.Chain, ""},
+		{"SHA-256 of an RSA authority (the control)", sha256RSA.Chain, ""},
+	} {
+		info, bundle, _, refused := CheckLBCertificate(c.chain, sha256.Key, now)
+		switch {
+		case c.want == "" && (refused != "" || bundle == "" || info.ChainLength != strings.Count(c.chain, "BEGIN CERTIFICATE")):
+			t.Errorf("%s: refused with %q, want it taken whole", c.name, refused)
+		case c.want != "" && (!strings.Contains(refused, c.want) || !strings.Contains(refused, "SHA-256") || bundle != ""):
+			t.Errorf("%s: %q, want %q", c.name, refused, c.want)
+		}
+	}
+}
+
+// The signatures Go has no name for (x509.UnknownSignatureAlgorithm), on certificates openssl made (testdata/sig-*.pem,
+// certificates only): RSA-PSS with SHA-1 is named, as the SHA-1 signature it is, and RSA with RIPEMD-160; SHA-224,
+// and RSA-PSS with SHA-256 and a salt of 20 bytes, are not. What the HAProxy of each appliance image says of the
+// four: TestLBApplianceTLS.
+func TestLBWeakSignatureUnnamed(t *testing.T) {
+	for file, want := range map[string]string{"sig-rsapss-sha1.pem": "SHA1-RSAPSS", "sig-ripemd160.pem": "RIPEMD160-RSA", "sig-sha224.pem": "", "sig-rsapss-sha256-salt20.pem": ""} {
+		text, err := os.ReadFile("testdata/" + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(text)
+		c, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.SignatureAlgorithm != x509.UnknownSignatureAlgorithm {
+			t.Fatalf("%s: Go names its signature %v, so it shows nothing here", file, c.SignatureAlgorithm)
+		}
+		if got := lbWeakSignature(c); got != want {
+			t.Errorf("%s: %q, want %q", file, got, want)
 		}
 	}
 }
