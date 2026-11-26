@@ -24,6 +24,34 @@ gateway's 16 KiB for them: it answered `400`, and the request without `gone` dro
 valid ones too. The portal is not changed.
 
 **Diagrams updated:** none (no element of C1 to C4 moves); one table row of c4-code.md.
+## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
+
+**What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23
+below ("dark") become reachable on a site. What moved is data the components read.
+
+- `deploy/platform/platform-bom.yaml`: the component `sandbox` (cluster workload, wave 4, namespace
+  `sandbox-system`, chart `proxcloud-sandbox` 0.1.0 at its published digest, `feature: sandbox`), and the platform's
+  own cluster chart `pc-platform` from `proxmox-kamaji-cluster` 0.1.16 to 0.1.19 (`upgradeFrom` gains 0.1.16), the
+  chart `tenantCharts.kubernetes` already names. `Platform installations` (C3) now takes `spec.sandbox` on a
+  platform of this BOM, and its refusal on an older BOM names the release to upgrade to
+  (`Installation.SandboxProblems`).
+- `internal/platform/admin/platform_sandbox.go`, `applySandboxSite`: a `config.sandbox` block of another owner is
+  refused also when it names no pool (it was overwritten; the trust boundary "a run writes only its own block" now
+  holds for every block that is not empty).
+- `deploy/templates/images.yaml`: the built-in template images of the Actions build of 2026-11-23 (run
+  45167180286, commit `57e85c5`). On the platform path these digests are what the sandbox provider's templates and
+  the chart's prepull name, and they move with a release only.
+
+**Why:** the BOM pins are the switch the plan of v0.12.0 leaves for last: with them an operator who asks for
+sandboxes gets them, and one who does not gets a platform that plans and renders as before. The cluster chart must
+move with the sandbox chart because a sandbox node group needs a pool, an address range and DNS servers of its own,
+which 0.1.18 added; 0.1.19 is taken so that the platform and the tenants are on one published chart (its one
+change over 0.1.18 is the load balancer controller's watch, which a cluster with a kubeadm control plane does not
+render). The move replaces no machine: for every previous BOM on chart 0.1.16 the full render of 0.1.19 is equal
+object for object, with that release's values and with this build's.
+
+**Diagrams updated:** `c3-components.md` (the `Platform installations` row: when the block is taken). No element
+of C1, C2 or C4 moves.
 
 ## 2026-11-25: a pair's push-order test asks for the order across appliances only (CI on the release PR of v0.11.1-rc.5)
 
