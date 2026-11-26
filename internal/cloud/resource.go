@@ -25,6 +25,7 @@ const (
 	TypeDatabaseCluster      = "DATABASE_CLUSTER"
 	TypeSandbox              = "SANDBOX"          // gVisor sandbox (sandbox provider), billed per minute while running
 	TypeSandboxSnapshot      = "SANDBOX_SNAPSHOT" // a sandbox's stored filesystem (pause, snapshot); billed per GB-hour (pause and snapshot, SB7)
+	TypeFunction             = "FUNCTION"         // a serverless function (internal/cloud/function): one row per function, billed per minute while instances run
 	TypeLoadBalancer         = "LOAD_BALANCER"
 	TypeFloatingIP           = "FLOATING_IP"
 	TypeNetwork              = "NETWORK"
