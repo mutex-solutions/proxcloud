@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -181,6 +184,172 @@ func TestGatewayPutWithoutGoneForAPortalThatKnowsNone(t *testing.T) {
 	}
 	if f.svc("shop", "web") == nil {
 		t.Fatal("the Service was let go though the portal took no state without it")
+	}
+}
+
+// A portal of before v0.11.1-rc.3 measures the whole body against the state's 64 KiB before it looks at a field
+// (v0.11.0: one MaxBytesReader, internal/cloud/lbgw/gateway.go:330 at the tag; rc.1 and rc.2: the body less its
+// certificates). With a state near that limit the Services being deleted put the request over it, and that portal
+// answers 413, not the 400 of a field it does not know. The controller sends it the request without them all the
+// same, in the same turn, and lets the Service go.
+//
+// The controls: a 413 to a request that names no Service being deleted is one request, and is said TooLarge on the
+// Services; a state that is too large by itself is still refused after the second request, and the Service is held.
+func TestGatewayPutWithoutGoneAfter413(t *testing.T) {
+	var bodies []string
+	full := false // the state alone is over the limit
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(lbgw.ProtocolHeader, "2")
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		if full || strings.Contains(string(raw), `"gone"`) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_ = json.NewEncoder(w).Encode(map[string]string{"reason": lbgw.ReasonTooLarge, "message": "The cluster's load balancer state is over 64 KiB and was not taken"})
+			return
+		}
+		var req lbgw.Request
+		_ = json.Unmarshal(raw, &req)
+		ans := lbgw.Answer{Services: []lbgw.ServiceStatus{}}
+		for _, s := range req.Services {
+			ans.Services = append(ans.Services, lbgw.ServiceStatus{UID: s.UID, State: lbgw.StateReady, Address: "203.0.113.5"})
+		}
+		_ = json.NewEncoder(w).Encode(ans)
+	}))
+	defer ts.Close()
+	f := &fakeTenant{services: map[string]map[string]any{}}
+	f.add("shop", "api", "u-api", "2026-11-23T10:00:00Z", lbSpec(Class, tcp(81, 30081)))
+	f.svc("shop", "api")["metadata"].(map[string]any)["finalizers"] = []any{Finalizer}
+	deleted := func(uid string) {
+		f.add("shop", "web", uid, "2026-11-23T10:00:00Z", lbSpec(Class, tcp(80, 30080)))
+		meta := f.svc("shop", "web")["metadata"].(map[string]any)
+		meta["finalizers"], meta["deletionTimestamp"] = []any{Finalizer}, "2026-11-23T11:00:00Z"
+		meta["annotations"] = map[string]any{keepAnnotation: "true"}
+	}
+	g := &gateway{url: ts.URL, dir: gatewayDir(t, ts)}
+	c := &controller{api: f, put: g.put, log: quiet()}
+	turn := func() ([]string, error) {
+		bodies, f.events = nil, nil
+		err := c.turn(context.Background())
+		return reasons(f.events), err
+	}
+
+	deleted("u-1")
+	if got, err := turn(); err != nil || slices.Contains(got, "api:TooLarge") {
+		t.Fatalf("a 413 to the request with the Services being deleted: %v, Events %v", err, got)
+	}
+	if len(bodies) != 2 || !strings.Contains(bodies[0], `"gone"`) || strings.Contains(bodies[1], `"gone"`) || !strings.Contains(bodies[1], `"u-api"`) {
+		t.Fatalf("requests %q: want the whole one, then the same state without the Services being deleted", bodies)
+	}
+	if f.svc("shop", "web") != nil {
+		t.Fatal("the Service is still held after the portal took the state without it")
+	}
+	if !hasIngress(ingress(f.svc("shop", "api")), "203.0.113.5") {
+		t.Fatal("the other Service was not served in that turn")
+	}
+
+	// Control: nothing is being deleted and the portal answers 413. One request, and the Services are told.
+	full = true
+	var rf *lbgw.Refusal
+	if got, err := turn(); !errors.As(err, &rf) || rf.Status != http.StatusRequestEntityTooLarge || len(bodies) != 1 || !slices.Equal(got, []string{"api:TooLarge"}) {
+		t.Fatalf("a 413 to a request with nothing to leave out: %v after %d requests, Events %v", err, len(bodies), got)
+	}
+	// Control: the state is too large without the Service being deleted too. Two requests, and the Service is held.
+	deleted("u-2")
+	if _, err := turn(); !errors.As(err, &rf) || rf.Status != http.StatusRequestEntityTooLarge || len(bodies) != 2 || strings.Contains(bodies[1], `"gone"`) {
+		t.Fatalf("a state that is too large by itself: %v after %d requests", err, len(bodies))
+	}
+	if f.svc("shop", "web") == nil {
+		t.Fatal("the Service was let go though the portal took no state without it")
+	}
+}
+
+// The same limit one protocol down. A portal rolled back to v0.11.0 reads the body under one limit of 64 KiB and
+// only then decodes it, strictly (internal/cloud/lbgw/gateway.go:330 at the tag: the handler below does the same).
+// A state that the annotations of protocol 2 put over the limit is answered 413 with that portal's protocol, where a
+// smaller one is answered 400 for the field. The request of protocol 1 has no annotations and fits.
+//
+// The controls: a request with nothing of protocol 2 is sent once, and one that is too large as the request of
+// protocol 1 too is refused in that form and not sent a third time.
+func TestGatewayPutStepsDownAfter413(t *testing.T) {
+	type oldService struct { // v0.11.0's Service
+		UID, Namespace, Name  string
+		Ports                 []lbgw.Port
+		ExternalTrafficPolicy string
+		HealthCheckNodePort   int
+		SourceRanges          []string
+		ProxyProtocol         bool
+		IPFamilies            []string
+	}
+	var (
+		statuses []int
+		got      []oldService
+	)
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(lbgw.ProtocolHeader, "1")
+		answer := func(status int, v any) {
+			statuses = append(statuses, status)
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(v)
+		}
+		var req struct {
+			Services []oldService
+			Nodes    []lbgw.Node
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				answer(http.StatusRequestEntityTooLarge, map[string]string{"reason": lbgw.ReasonTooLarge, "message": "lb gateway: the state takes at most 64 KiB"})
+				return
+			}
+			answer(http.StatusBadRequest, map[string]string{"reason": lbgw.ReasonInvalid, "message": "lb gateway: the body is not a state: " + err.Error()})
+			return
+		}
+		got = req.Services
+		answer(http.StatusOK, lbgw.Answer{Services: []lbgw.ServiceStatus{{UID: req.Services[0].UID, State: lbgw.StateReady, Address: "203.0.113.5"}}})
+	}))
+	defer ts.Close()
+	g := &gateway{url: ts.URL, dir: gatewayDir(t, ts)}
+	put := func(req *lbgw.Request) (*lbgw.Answer, error) {
+		statuses, got = nil, nil
+		return g.put(context.Background(), req)
+	}
+	svc := lbgw.Service{UID: "u-1", Ports: []lbgw.Port{{Protocol: "TCP", Port: 80, NodePort: 30080}}, Annotations: map[string]string{}}
+	for i := range 300 {
+		svc.Annotations[lbgw.OwnPrefix+"y"+strconv.Itoa(i)] = strings.Repeat("y", lbgw.MaxAnnotationValue)
+	}
+	req := &lbgw.Request{Services: []lbgw.Service{svc}}
+
+	// The condition of the test: a small request with a field of protocol 2 is the 400 the step-down knew.
+	small := &lbgw.Request{Services: []lbgw.Service{{UID: "u-1", Ports: svc.Ports, Annotations: map[string]string{lbgw.OwnPrefix + "y": "y"}}}}
+	if _, err := put(small); err != nil || !slices.Equal(statuses, []int{http.StatusBadRequest, http.StatusOK}) {
+		t.Fatalf("a small request of protocol 2: %v, answers %v", err, statuses)
+	}
+	ans, err := put(req)
+	if err != nil || !slices.Equal(statuses, []int{http.StatusRequestEntityTooLarge, http.StatusOK}) || len(ans.Services) != 1 || len(got) != 1 || got[0].Ports[0].NodePort != 30080 {
+		t.Fatalf("a state over the old portal's limit by its annotations: %+v %v, answers %v, the portal got %+v", ans, err, statuses, got)
+	}
+	// With a Service being deleted: without it first, which is still too large, then the request of protocol 1.
+	req.Gone = []lbgw.Gone{{UID: "u-2"}}
+	if _, err := put(req); err != nil || !slices.Equal(statuses, []int{http.StatusRequestEntityTooLarge, http.StatusRequestEntityTooLarge, http.StatusOK}) {
+		t.Fatalf("the same with a Service being deleted: %v, answers %v", err, statuses)
+	}
+	req.Gone = nil
+
+	// Control: nothing of protocol 2 in it. One request, and its 413 is the answer.
+	plain := &lbgw.Request{Services: []lbgw.Service{{UID: "u-1", Ports: svc.Ports}}}
+	for i := range 6000 {
+		plain.Services[0].SourceRanges = append(plain.Services[0].SourceRanges, "203.0."+strconv.Itoa(i%256)+".0/24")
+	}
+	var rf *lbgw.Refusal
+	if _, err := put(plain); !errors.As(err, &rf) || rf.Status != http.StatusRequestEntityTooLarge || rf.Reason != lbgw.ReasonTooLarge || len(statuses) != 1 {
+		t.Fatalf("a request with nothing of protocol 2: %v, answers %v", err, statuses)
+	}
+	// Control: too large as the request of protocol 1 too. Two requests, no third.
+	req.Services[0].SourceRanges = plain.Services[0].SourceRanges
+	if _, err := put(req); !errors.As(err, &rf) || rf.Status != http.StatusRequestEntityTooLarge || len(statuses) != 2 {
+		t.Fatalf("too large in both forms: %v, answers %v", err, statuses)
 	}
 }
 
