@@ -40,7 +40,9 @@ This is the request path as it is built in `sandbox-proxy` (its function mode, o
   domain: another project's function would be sent it.
 - **Each instance gets 1 GiB of its own disk** (`ephemeral-storage`, request and limit) beside its CPU and
   memory; one that writes more is evicted.
-- **An instance can reach the internet**, not private address ranges, not the platform, not another function.
+- **What an instance may reach on the network** is set by the cluster's policies for function namespaces. A
+  function namespace carries the tenant label of a sandbox namespace, so the sandbox chart's pod policy and egress
+  guardrail select it; the policy that opens the internet for function pods is not in the chart yet.
 
 ## The API
 
