@@ -118,6 +118,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cluster's load balancer controller lets a deleted Service go under a rolled-back portal whose state is near
+  64 KiB, and 50 deleted Services with long keep-address values keep their wishes** (`cmd/lb-controller`,
+  `internal/cloud/lbgw/annotations.go`; the portal's code is not changed). Two cases of a request that names
+  Services being deleted (`gone`, from `v0.11.1-rc.3`):
+  - **`413` is followed like `400`.** A portal of `v0.11.0` or of a candidate before `v0.11.1-rc.3` measures the
+    whole body against the state's 64 KiB before it reads a field. With a state within a few KiB of that limit,
+    the request with `gone` was answered `413` and not the `400` of a field it does not know, and the controller
+    stepped down only on `400`: every Service got the Warning `TooLarge`, no change reached the balancer, and the
+    Service that was being deleted stayed `Terminating` for as long as the portal was rolled back. The controller
+    now sends the request without `gone` after a `413` too, and the request of protocol 1 after a `413` from a
+    portal that names an older protocol (a state that the annotations of protocol 2 put over `v0.11.0`'s limit).
+    A `413` to a request that carried neither is one request and is reported as before. Against the portal of
+    this release, a state that is really over 64 KiB costs one more request a turn while a Service is being
+    deleted.
+  - **The keep-address value of a deleted Service is sent short.** The controller sent the value of
+    `proxcloud.io/lb-keep-address` as written, up to 257 characters. 50 Services deleted together with long
+    values (which are no booleans) were over the gateway's 16 KiB for the Services being deleted: the gateway
+    answered `400`, the controller sent the request without `gone`, and the Services among them with a valid value
+    lost their word too (their addresses then went by the state the portal last stored). The value now goes
+    without the spaces around it and with 8 characters at most. A boolean has 5 at most and goes whole; a longer
+    value is none and is sent as 7 characters and a `~`, so that the cut never reads as a boolean (`true    x`
+    cut after 8 characters would read as `true`).
+  For an upgrade: **the controller image carries both**, so a cluster gets them with the offered controller update
+  (the cluster's update to the provider's chart version, or "Enable load balancer controller" again) and behaves
+  as before until then. Nothing changes for a balancer, an address or a stored state, and a Service with a valid
+  keep-address value is read as before. Tests: `TestGatewayPutWithoutGoneAfter413` and
+  `TestGatewayPutStepsDownAfter413` (`cmd/lb-controller/gone_test.go`, the second against a handler that reads
+  the body as `v0.11.0` does) and `TestGoneAnnotationsAreShort` (`internal/cloud/lbgw/annotations_test.go`,
+  through the gateway's handler). Not run on a lab.
 - **A run no longer overwrites a provider's `config.sandbox` of another owner that names no pool**
   (`internal/platform/admin/platform_sandbox.go`). Such a block (what is left of an installer's sandbox cluster, a
   registry or an entry appliance) is inert for the sync, and it was replaced by the installation's own; the write

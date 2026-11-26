@@ -39,6 +39,27 @@ test show that no existing item moves.
 **Diagrams updated:** none (no element of C1 to C4 moves). `c4-code.md`: the two rows that name
 `getTimeUnitsDiff` say what it counts from, and their line hints are refreshed.
 
+## 2026-11-26: the load balancer controller steps down on `413` as on `400`, and sends a short keep-address value of a Service being deleted (#487)
+
+**What changed:** no component, container, listener, route or wire field. Two behaviours of `cmd/lb-controller`,
+and the row of `controller.turn` and `gateway.put` in [c4-code.md](c4-code.md) says them.
+
+- `gateway.put` (`cmd/lb-controller/main.go`): the two step-downs of a request, without the Services being deleted
+  (`gone`) and to the request of protocol 1, follow a `413` as they follow a `400`. A `413` to a request that had
+  neither is one request and is reported as it is.
+- `lbgw.GoneAnnotations` (`internal/cloud/lbgw/annotations.go`): the keep-address value of a Service that is being
+  deleted goes without the spaces around it and with 8 characters at most; a longer one ends in `~`, so that the
+  cut never reads as a boolean.
+
+**Why:** a portal of before v0.11.1-rc.3 (and v0.11.0) measures the whole body against the state's 64 KiB before
+it reads a field, so with a state near that limit the request that names a Service being deleted was answered
+`413`, no shorter request followed, every Service was told `TooLarge` and the Service stayed Terminating while the
+portal was rolled back. And 50 Services being deleted with keep-address values of 256 characters were over the
+gateway's 16 KiB for them: it answered `400`, and the request without `gone` dropped the wish of every one, the
+valid ones too. The portal is not changed.
+
+**Diagrams updated:** none (no element of C1 to C4 moves); one table row of c4-code.md.
+
 ## 2026-11-26: a node selector term with an empty key matches no node
 
 **What changed:** no component, container, wire field or relation. One function of the cluster's load balancer
