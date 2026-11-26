@@ -19,11 +19,10 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
-// sandboxBOM makes the build under test one whose BOM offers sandboxes: this build's BOM with the cluster chart that
-// gives a node group a pool and a range (0.1.18) for the platform and for tenants, and the sandbox chart as a
-// component marked with the feature. No release BOM is like that yet (TestSandboxIsDark): every test of a sandbox
-// that is built runs against this synthetic one, and the first real one arrives with the pull request that pins the
-// two charts.
+// sandboxBOM is this build's BOM, which offers sandboxes from 0.12.0 on (TestSandboxIsOffered): a cluster chart that
+// gives a node group a pool and a range for the platform and for tenants, and the sandbox chart as a component marked
+// with the feature. Every test of a sandbox that is built runs against the real pins; it stops here when a BOM change
+// takes the offer away.
 func sandboxBOM(t *testing.T) Embedded {
 	t.Helper()
 	cur, err := Current()
@@ -32,8 +31,10 @@ func sandboxBOM(t *testing.T) Embedded {
 	}
 	saved := *cur.BOM
 	t.Cleanup(func() { *cur.BOM = saved })
-	cur.Components = slices.Clone(cur.Components)
-	addSandbox(cur.BOM)
+	cur.Components = slices.Clone(cur.Components) // a test may edit a pin
+	if cur.Feature(FeatureSandbox) == nil || !kamaji.ChartHasGroupPool(ClusterChartVersion(cur.BOM)) || !kamaji.ChartHasGroupPool(cur.TenantCharts.Kubernetes.Version) {
+		t.Fatalf("release %s offers no sandboxes: its BOM needs the sandbox chart and cluster charts %s or newer", cur.Release, kamaji.GroupPoolChartVersion)
+	}
 	return cur
 }
 
@@ -52,6 +53,8 @@ func fixedSandboxPins(t *testing.T) {
 	}
 }
 
+// addSandbox makes b a BOM that offers sandboxes with pins that never move: for a BOM of before the offer (nextRelease
+// starts from 0.8.1's), and for the files of TestSandboxRenderGolden, which must not change with main's chart pins.
 func addSandbox(b *BOM) {
 	wave := 0
 	for i := range b.Components {
@@ -64,8 +67,12 @@ func addSandbox(b *BOM) {
 		}
 	}
 	b.TenantCharts.Kubernetes.Version, b.TenantCharts.Kubernetes.Digest = kamaji.GroupPoolChartVersion, "sha256:"+strings.Repeat("a", 64)
-	b.Components = append(b.Components, Component{Name: "sandbox", Cluster: ClusterWorkload, Wave: wave + 1, Install: InstallApplication, Namespace: sandboxNamespace,
-		Chart: Chart{Repo: "ghcr.io/mutex-solutions/charts", Name: "proxcloud-sandbox", Version: "0.1.0", Digest: "sha256:" + strings.Repeat("b", 64)}, Feature: FeatureSandbox})
+	chart := Chart{Repo: "ghcr.io/mutex-solutions/charts", Name: "proxcloud-sandbox", Version: "0.1.0", Digest: "sha256:" + strings.Repeat("b", 64)}
+	if c := b.Feature(FeatureSandbox); c != nil {
+		c.Chart = chart
+		return
+	}
+	b.Components = append(b.Components, Component{Name: "sandbox", Cluster: ClusterWorkload, Wave: wave + 1, Install: InstallApplication, Namespace: sandboxNamespace, Chart: chart, Feature: FeatureSandbox})
 }
 
 // shared and separate are the two blocks the tests start from, on validInstallation's network (10.200.200.0/24, nodes
@@ -82,48 +89,64 @@ func separateSandbox() *SandboxSpec {
 	return sb
 }
 
-// No BOM this build embeds has a sandbox chart, so every installation is refused the block at the save and in the
-// Check's spec row, and a run that met one stored anyway builds nothing: the feature is dark until a BOM pins the chart.
-func TestSandboxIsDark(t *testing.T) {
-	cur, err := Current()
-	if err != nil {
+// This build's BOM offers sandboxes: it names the sandbox chart, published and marked with the feature, after every
+// other component of the platform cluster, and cluster charts that give a node group a pool and a range of its own.
+// An installation on it is taken the block in both placements. No BOM of an earlier release names the chart, so a
+// platform one of them installed is refused the block at the save and in the Check's spec row until an upgrade has
+// moved it to this one, and the sentence names that upgrade. A build whose BOM takes the offer away fails here: its
+// release notes must then say so.
+func TestSandboxIsOffered(t *testing.T) {
+	cur := sandboxBOM(t)
+	c := cur.Feature(FeatureSandbox)
+	if c.Name != "sandbox" || c.Chart.Name != "proxcloud-sandbox" || c.Chart.Version != "0.1.0" || !strings.HasPrefix(c.Chart.Digest, "sha256:") || c.Namespace != sandboxNamespace || len(c.UpgradeFrom) != 0 {
+		t.Fatalf("the sandbox component: %+v", c)
+	}
+	for _, o := range cur.Components {
+		if o.Cluster == ClusterWorkload && o.Feature == "" && o.Wave >= c.Wave {
+			t.Errorf("workload/%s is in wave %d, the sandbox chart in %d: it goes after everything else of the cluster", o.Name, o.Wave, c.Wave)
+		}
+	}
+	if err := cur.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	prev, err := Previous()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, b := range append(prev, cur) {
-		if c := b.Feature(FeatureSandbox); c != nil {
-			t.Fatalf("release %s names the sandbox chart %s: this test and the release notes must then say that sandboxes are offered", b.Release, c.Chart.Version)
+	for _, b := range prev {
+		if b.Feature(FeatureSandbox) != nil {
+			t.Fatalf("release %s names a sandbox chart: no release before 0.12.0 offered sandboxes", b.Release)
 		}
-		for _, sb := range []*SandboxSpec{sharedSandbox(), separateSandbox()} {
+	}
+	for _, sb := range []*SandboxSpec{sharedSandbox(), separateSandbox()} {
+		// A new installation, and one this build's BOM installed.
+		for _, ref := range []*BOMRef{nil, {Release: cur.Release, SHA256: cur.SHA256}} {
 			in := validInstallation(t)
-			in.Spec.Sandbox = sb
-			if b.SHA256 != cur.SHA256 {
-				in.Status.BOM = &BOMRef{Release: b.Release, SHA256: b.SHA256}
+			in.Spec.Sandbox, in.Status.BOM = sb, ref
+			if err := in.Validate(); err != nil || in.SandboxProblems() != nil {
+				t.Errorf("placement %s on %+v: %v %v", sb.Placement, ref, err, in.SandboxProblems())
 			}
-			if err := in.Validate(); err != nil {
-				t.Fatalf("the block itself is valid: %v", err)
-			}
-			if p := in.SandboxProblems(); len(p) != 1 || !strings.Contains(p[0], "has no sandbox chart") {
-				t.Errorf("release %s, placement %s: %v", b.Release, sb.Placement, p)
+		}
+		for _, b := range prev {
+			in := validInstallation(t)
+			in.Spec.Sandbox, in.Status.BOM = sb, &BOMRef{Release: b.Release, SHA256: b.SHA256}
+			if p := in.SandboxProblems(); len(p) != 1 || !strings.Contains(p[0], "(release "+b.Release+") has no sandbox chart") || !strings.Contains(p[0], "Upgrade the platform to release "+cur.Release+" first") {
+				t.Errorf("installed by %s, placement %s: %v", b.Release, sb.Placement, p)
 			}
 		}
 	}
 	// Off and no block are never refused: an installation on any BOM says "no sandboxes".
-	in := validInstallation(t)
-	in.Spec.Sandbox = &SandboxSpec{Placement: SandboxOff}
-	if err := in.Validate(); err != nil || in.SandboxProblems() != nil {
-		t.Errorf("placement off: %v %v", err, in.SandboxProblems())
-	}
-	// With the chart pinned the block passes, and a cluster chart that cannot give a group a pool is named.
-	b := sandboxBOM(t)
-	in.Spec.Sandbox = sharedSandbox()
-	if p := in.SandboxProblems(); p != nil {
-		t.Errorf("a BOM with the sandbox chart: %v", p)
+	for _, b := range append(prev, cur) {
+		for _, sb := range []*SandboxSpec{nil, {Placement: SandboxOff}} {
+			in := validInstallation(t)
+			in.Spec.Sandbox, in.Status.BOM = sb, &BOMRef{Release: b.Release, SHA256: b.SHA256}
+			if err := in.Validate(); err != nil || in.SandboxProblems() != nil {
+				t.Errorf("release %s, block %+v: %v %v", b.Release, sb, err, in.SandboxProblems())
+			}
+		}
 	}
 	// An operator's certificate has no route that stores it: refused at the save, before a run builds a machine.
+	in := validInstallation(t)
 	for _, sb := range []*SandboxSpec{sharedSandbox(), separateSandbox()} {
 		sb.TLS = &SandboxTLS{Mode: TLSSecret}
 		in.Spec.Sandbox = sb
@@ -131,10 +154,19 @@ func TestSandboxIsDark(t *testing.T) {
 			t.Errorf("tls.mode secret, placement %s: %v", sb.Placement, p)
 		}
 	}
+	// A cluster chart that cannot give a group a pool is named, for the chart each placement is built with.
 	in.Spec.Sandbox = sharedSandbox()
-	comp(t, b.BOM, ClusterSeed, ClusterName).Chart.Version = "0.1.17"
+	comp(t, cur.BOM, ClusterSeed, ClusterName).Chart.Version = "0.1.17"
 	if p := in.SandboxProblems(); len(p) != 1 || !strings.Contains(p[0], "cluster chart 0.1.17") {
 		t.Errorf("an older cluster chart: %v", p)
+	}
+	in.Spec.Sandbox = separateSandbox()
+	if p := in.SandboxProblems(); p != nil {
+		t.Errorf("separate is built with the tenant chart: %v", p)
+	}
+	cur.TenantCharts.Kubernetes.Version = "0.1.17"
+	if p := in.SandboxProblems(); len(p) != 1 || !strings.Contains(p[0], "cluster chart 0.1.17") {
+		t.Errorf("an older tenant chart: %v", p)
 	}
 }
 
@@ -405,15 +437,16 @@ func TestSandboxFeatureComponent(t *testing.T) {
 			t.Errorf("%s: %d components of %d", name, len(got.Components), len(b.Components))
 		}
 	}
-	if plain := embedded(t); plain.For(none) != plain {
+	if plain := plain(t); plain.For(none) != plain || plain.For(shared) != plain {
 		t.Error("a BOM without a marked component is returned as it is")
 	}
 
 	// Classify: from a BOM without the component to one with it is class added and not refused; any other component
 	// that is new, and the marked one when it is taken away, stay refused.
-	from, to := embedded(t), embedded(t)
-	to.Components = append(to.Components, Component{Name: "sandbox", Cluster: ClusterWorkload, Wave: 9, Install: InstallApplication, Namespace: sandboxNamespace,
-		Chart: Chart{Repo: "ghcr.io/mutex-solutions/charts", Name: "proxcloud-sandbox", Version: "0.1.0", Digest: "sha256:" + strings.Repeat("b", 64)}, Feature: FeatureSandbox})
+	from, to := plain(t), embedded(t)
+	if last := to.Components[len(to.Components)-1]; last.Feature != FeatureSandbox {
+		t.Fatalf("the sandbox component is the BOM's last: %+v", last)
+	}
 	changes := Classify(from, to)
 	if len(changes) != 1 || changes[0].Class != ClassAdded || changes[0].Blocking != "" || changes[0].Name != "sandbox" || !strings.Contains(changes[0].Impact, "only when the settings ask for it") {
 		t.Fatalf("the feature component added: %+v", changes)
@@ -576,7 +609,7 @@ func sandboxRender(sb *SandboxSpec) RenderInput {
 // `go test ./internal/platformlife -run TestSandboxRenderGolden -update` rewrites the files.
 func TestSandboxRenderGolden(t *testing.T) {
 	fixedSandboxPins(t)
-	plain := embedded(t)
+	plain := plain(t)
 	b := embedded(t)
 	addSandbox(b)
 	// The bump of the two chart versions is the synthetic BOM's, not the sandbox's: both sides get it.
@@ -643,6 +676,7 @@ func TestSandboxRenderGolden(t *testing.T) {
 	}
 	// An older cluster chart ignores a group's pool and would put sandbox machines into proxcloud-system: refused.
 	old := embedded(t)
+	comp(t, old, ClusterSeed, ClusterName).Chart.Version = "0.1.17"
 	if _, err := ClusterValues(old, sandboxRender(shared)); err == nil || !strings.Contains(err.Error(), "cannot give a node group a pool") {
 		t.Errorf("cluster chart %s with a sandbox group: %v", ClusterChartVersion(old), err)
 	}

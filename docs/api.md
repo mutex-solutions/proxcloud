@@ -832,8 +832,9 @@ are several, `errors.details.problems`.
   need a BOM whose cluster chart is 0.1.14 or newer (the preflight's `spec` row). `controlPlane.nodes` (machines on
   several nodes) is refused unless it is `[node]`, and `spec.sandbox` (`{placement: shared|separate|off, nodes, count, cores, memoryMiB, diskGiB, nodeRange, dns,
   proxyAddress, domain, tls: {mode}, system}`: [managed-services.md](managed-services.md#presets-and-the-control-plane-count))
-  is refused while the installation's BOM names no sandbox chart, which no release's does yet
-  (`400 invalid_installation`, "has no sandbox chart"); `placement: off` and no block are always taken.
+  is taken from v0.12.0 on and refused while the installation's BOM names no sandbox chart: a platform that an
+  earlier release installed, until its upgrade (`400 invalid_installation`, "has no sandbox chart", with the release
+  to upgrade to); `placement: off` and no block are always taken.
   `tls.mode: secret` (an operator's own certificate) is refused at the save too: no route stores one yet. On an
   installed platform a PUT without the block keeps the stored one. `nodeRange` is one aligned IPv4 CIDR inside the
   platform network, apart from every other range, `cidrPool`, the blocked, management and public networks. Once a run
