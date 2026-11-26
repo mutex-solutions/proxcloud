@@ -156,7 +156,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that takes the `429` for an answer the portal stays one state behind and the test fails.
   **For an upgrade:** nothing to do, and no controller changes. A turn of the controller is one call, two when a
   certificate is asked for or a refused state is asked once more without its Services that are being deleted, and
-  a quiet cluster sends one per 30 s, so a cluster in normal use never meets the limit. A cluster that does (Services, Nodes or TLS Secrets changing about once a second for a minute) keeps its
+  a quiet cluster sends one per 30 s, so a cluster in normal use never meets the limit. A cluster that does
+  (Services, Nodes or TLS Secrets changing about once a second for a minute) keeps its
   balancer and its addresses as they are: the controller of `v0.11.1` (chart 0.1.19) reports the refusal as a
   Warning Event `TooManyRequests` on each of its Services, takes no address from that turn and sends its whole
   state again at the next change or, with none, after its interval (10 s), so the newest state arrives up to about
