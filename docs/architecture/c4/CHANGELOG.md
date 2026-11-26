@@ -25,6 +25,25 @@ longer than before.
 **Diagrams updated:** none (no element of C1 to C4 moves). The row of `Handler.lbApplyPair` in
 [c4-code.md](c4-code.md) names the sentence and the line.
 
+## 2026-11-26: an appliance that joins waits for a first appliance that refused to be told of it (review of #446)
+
+**What changed:** no component, container, wire field, file on an appliance or relation. One condition of one pass.
+
+- `Handler.lbApplyPair` (`internal/platform/project/cloud_lb_pair_pve.go`): an appliance keepalived never ran on
+  gets no keepalived push in a pass in which an appliance keepalived runs on refused its own keepalived push (any
+  error that is not `pve.ErrLBNotReady`). It reads `building`, "it waits for appliance N, which did not take the
+  change that tells it of this one", and the next pass tries both, in `lbPushOrder`'s order. Not for a push that is
+  held (the hold window is as it was, `HeldSince` untouched), not beside an appliance whose keepalived is stopped,
+  and not in a pair on which keepalived never ran at all.
+
+**Why:** `lbPushOrder` tells the appliance that served alone of its peer first, so that the peer's keepalived starts
+as a standby that hears a master. A refused push did not stop the pass from going on to the new appliance, which
+then heard nothing, became a second master and held the addresses beside the first until the next pass (known issue
+of v0.11.1). The guard is for a refusal only, which comes from an appliance that answers: one that hangs is held,
+and the new appliance goes ahead after the window, so it can still take over from it.
+
+**Diagrams updated:** none (no element of C1 to C4 moves). `c4-code.md`: the row of `Handler.lbApplyPair`.
+
 ## 2026-11-26: PR #494, sandbox-proxy gains a function mode (off: nothing sets `FUNCTION_DOMAIN`)
 
 **What changed**
