@@ -92,8 +92,8 @@ func TestLBFirstApplianceServesAlone(t *testing.T) {
 			// install line would bring.
 			c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 				ContainerRequest: testcontainers.ContainerRequest{
-					Image:      image,
-					Cmd:        []string{"sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd-sysv procps iproute2 socat openssl tcpdump nftables >/dev/null 2>&1 && rm -f /usr/sbin/policy-rc.d && exec /sbin/init"},
+					Image:      lbImage(image),
+					Cmd:        lbInit("systemd-sysv", "procps", "iproute2", "socat", "openssl", "tcpdump", "nftables"),
 					Privileged: true,
 					Tmpfs:      map[string]string{"/run": "", "/run/lock": ""},
 				},
@@ -104,14 +104,7 @@ func TestLBFirstApplianceServesAlone(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 			g := &guestAgent{t: t, c: c, runs: map[int]*guestRun{}}
-			for deadline := time.Now().Add(5 * time.Minute); ; time.Sleep(2 * time.Second) {
-				if code, out, _ := g.sh(ctx, "boot", "systemctl", "is-system-running"); code == 0 || strings.TrimSpace(out) == "degraded" {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("systemd did not come up in the container")
-				}
-			}
+			g.booted(ctx)
 			srv := httptest.NewServer(g)
 			defer srv.Close()
 			ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
