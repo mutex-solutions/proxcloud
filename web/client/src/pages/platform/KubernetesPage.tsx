@@ -1488,12 +1488,16 @@ function ClusterDetail({
   // Add-on picks stamped at create (absent = the platform defaults).
   const addonStates = (c.addons as Record<string, boolean>) ?? null
 
-  // Opt-in platform update: offered only when the provider's pinned platform version is known
-  // and this cluster sits on an older one. Applying is the customer's call, never automatic.
+  // Opt-in platform update: offered when the provider's pinned platform version is known and this cluster sits on
+  // another one, or when its load balancer controller is the one of an earlier release (lb_controller_update: the
+  // server compares the image the cluster carries with the one it would pin now). Applying is the customer's call,
+  // never automatic.
   const chartVersion = (c.chart_version as string) || ""
   const legacyIngress = addonStates?.ingress === true
   const gatewayFabricAvailable = gatewayFabricChartSupported(chartVersion) && gatewayFabricKubernetesSupported(String(c.version ?? ""))
-  const updateAvailable = !!platformVersion && !!chartVersion && chartVersion !== platformVersion
+  const chartUpdate = !!platformVersion && !!chartVersion && chartVersion !== platformVersion
+  const controllerUpdate = c.lb_controller_update === true
+  const updateAvailable = chartUpdate || controllerUpdate
   const [platformOpen, setPlatformOpen] = useState(false)
   const [upgradeOpen, setUpgradeOpen] = useState(false)
   const [rotateOpen, setRotateOpen] = useState(false)
@@ -1668,14 +1672,21 @@ function ClusterDetail({
           )}
 
           {updateAvailable && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-card p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-card p-4" data-testid="k8s-platform-update">
               <div>
                 <div className="text-sm font-medium">Platform update available</div>
-                <p className="text-xs text-muted-foreground">
-                  A newer version of the managed platform components is available
-                  (<span className="font-mono">{chartVersion}</span> → <span className="font-mono">{platformVersion}</span>).
-                  Your Kubernetes version, workloads and data are not changed.
-                </p>
+                {chartUpdate ? (
+                  <p className="text-xs text-muted-foreground">
+                    A newer version of the managed platform components is available
+                    (<span className="font-mono">{chartVersion}</span> → <span className="font-mono">{platformVersion}</span>).
+                    Your Kubernetes version, workloads and data are not changed.
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    This cluster's load balancer controller is not the one of the platform's current release. The update
+                    changes the load balancer controller only: no machine is replaced.
+                  </p>
+                )}
               </div>
               <Button size="sm" variant="outline" onClick={() => setPlatformOpen(true)}>
                 Apply platform update
@@ -1947,14 +1958,24 @@ function ClusterDetail({
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Apply platform update</DialogTitle>
-              <DialogDescription>
-                Updates the cluster's managed platform components from{" "}
-                <span className="font-mono">{chartVersion}</span> to{" "}
-                <span className="font-mono">{platformVersion}</span>. This does not migrate existing ingress traffic or convert Ingress resources to Gateway API. Components restart with a
-                rolling update; if the node template changed, worker nodes are replaced one at a
-                time (a new node comes up and is drained into before the old one is removed).
-                Your Kubernetes version, workloads and data are untouched.
-              </DialogDescription>
+              {chartUpdate ? (
+                <DialogDescription>
+                  Updates the cluster's managed platform components from{" "}
+                  <span className="font-mono">{chartVersion}</span> to{" "}
+                  <span className="font-mono">{platformVersion}</span>. This does not migrate existing ingress traffic or convert Ingress resources to Gateway API. Components restart with a
+                  rolling update; if the node template changed, worker nodes are replaced one at a
+                  time (a new node comes up and is drained into before the old one is removed).
+                  Your Kubernetes version, workloads and data are untouched.
+                </DialogDescription>
+              ) : (
+                <DialogDescription>
+                  Updates the load balancer controller only: no machine is replaced. The controller runs on the
+                  platform, beside the cluster's control plane, and its one pod is restarted on the platform's current
+                  release: for that moment a change to a Service of type LoadBalancer waits, and the addresses that are served
+                  keep answering. The platform version stays <span className="font-mono">{chartVersion}</span>; your
+                  Kubernetes version, nodes, workloads and data are untouched.
+                </DialogDescription>
+              )}
             </DialogHeader>
             <DialogFooter>
               <Button variant="outline" onClick={() => setPlatformOpen(false)}>Cancel</Button>
@@ -1962,7 +1983,7 @@ function ClusterDetail({
                 onClick={() => {
                   act("APPLY_PLATFORM_UPDATE")
                     .then(() => {
-                      onPatch({ chart_version: platformVersion, sync_status: "OutOfSync" })
+                      onPatch({ chart_version: platformVersion || chartVersion, lb_controller_update: false, sync_status: "OutOfSync" })
                       toast.success("Platform update started")
                       setPlatformOpen(false)
                     })

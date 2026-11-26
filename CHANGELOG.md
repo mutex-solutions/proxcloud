@@ -9,6 +9,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **A project's delete is refused while the job scheduler is off, with the grace period too.** Up to 0.11.1
+  `DELETE /project/{id}` answered `200` and `SCHEDULED_FOR_DELETION` on such an install; it now answers the `409`
+  of "Delete now" and changes nothing. A project that was scheduled under an earlier release stays scheduled and
+  can be cancelled; it is deleted once the scheduler runs (`--scheduler` on a Compose install). An install with
+  the scheduler on, or with the debug triggers on, sees no change.
+
+- **Managed Kubernetes: after this upgrade, and after every later one, each cluster with a load balancer controller
+  is offered an update of that controller.** The controller runs the portal's own image, and the image's name
+  carries the release (`PROXCLOUD_LB_CONTROLLER_IMAGE`, `ghcr.io/mutex-solutions/proxcloud-api:<version>`), so a
+  cluster's controller is the one of the release before until its cluster is moved. Up to 0.11.1 nothing showed
+  that when the provider's chart had not changed (see Fixed). Now the tenant's cluster page shows "Platform update
+  available" with the words "the load balancer controller only: no machine is replaced", the operator's provider
+  page counts the cluster as behind the pin with **Update controller** on its row, and **Bump all** moves it. This
+  holds whether or not a release changed the controller's code: the portal compares image names and cannot tell.
+  - *Nothing is applied by the upgrade itself.* Until someone acts, the cluster keeps the controller it has, as
+    before, and the portal's gateway keeps answering it.
+  - *What the action does:* one apply of the cluster's Application that changes the controller's image. The
+    controller's Deployment replaces its one pod (strategy `Recreate`); for that moment a change to a Service of
+    type LoadBalancer waits. No machine is replaced, no control plane rolls, no appliance is pushed and no address
+    moves (on the lab the operator's per-cluster action did exactly this for the candidate rc.3: first turn of the new pod 18 s later,
+    control plane, worker, credential, balancer row and appliances untouched). The apply also writes the
+    provider's worker repair setting, as every change of a cluster does.
+  - *A cluster without the controller* (MetalLB alone) is not offered it, and a portal without
+    `PROXCLOUD_LB_CONTROLLER_IMAGE` offers it to nobody. A tenant is offered it only on a provider with a chart
+    pin (`argocd.chartVersion`): without one the tenant's action refuses, as before.
+  - *After a rollback of the portal* the same offer appears for the clusters whose controller came from the newer
+    release: applying it moves them back to the portal's image. The note of 0.11.1 still holds: do not move a
+    cluster on chart 0.1.19 onto the image of 0.11.0.
+  - *A script that reads the tenant API:* a cluster's row carries `lb_controller_update: true` while this holds
+    (absent otherwise); the operator's cluster rows carry `lbControllerBehind`.
+  - Not run on a lab: the tenant's action and "Bump all" for a cluster that is on the provider's chart.
+- **Billing: the address of a tenant's own load balancer without a `FLOATING_IP` row gets one, billed from its
+  allocation time.** Up to 0.11.1 that row was written by the services sync alone (see Fixed). After the upgrade a
+  balancer that is live and has no row yet, which is one made since the last sync, or any on a site that runs no
+  sync, gets it at its next pass (the next change of the balancer, or the services sync, whichever comes first).
+  The row starts at the allocation's time, and its bill item is counted from that time or from the start of the
+  open bill's cycle, whichever is later (`getLastRateTime`), as the rows of a cluster's addresses are since
+  0.11.1. It is the row a services sync writes: to see the effect before the upgrade, run a services sync and read
+  each project's floating IPs and its open bill. A balancer deleted before the upgrade gets no row. A balancer that
+  has its row is not touched, and no appliance is pushed or reloaded for this. Not run on a lab.
+- **A Docker Compose install: this upgrade restarts the database once.** The PostgreSQL line of
+  `deploy/compose/compose.yaml` now names one build (`postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73`, see
+  Changed). `./proxcloud-up.sh upgrade` takes its backup, pulls, and then runs `docker compose up -d` for the
+  realm import and for the rest; neither is given `--no-deps`, so the first of the two already brings PostgreSQL
+  to the file's state. Compose recreates a container whose image line changed, **on every install, whether or not
+  the build it runs is the pinned one**: the container is stopped, removed and started from the pinned image on the
+  same volume. That is a restart of the portal's database and of Keycloak's: for a few seconds the API and Keycloak
+  have no database, and they connect again by themselves. Both builds are PostgreSQL 17.12, so the data directory
+  is read as it is; nothing is dumped and restored.
+  - *What the script's backup covers:* before anything is pulled, `upgrade` writes `pg_dumpall` of the running
+    container (both databases, roles included) and a copy of `.env` to `backups/`, and stops if the dump fails. The
+    recreate does not touch the volume `<project>_postgres-data`; the dump is for the case that the new container
+    does not come up on it (`README.md`, "Restore").
+  - *Later upgrades* leave the container alone until a release changes that line again, and a rebuild of the tag by
+    its publisher no longer reaches a site by itself.
+  - *Going back* to the previous release recreates it once more: that release's file names the tag alone, and the
+    container starts from the image the host's tag names then.
+  - Measured in a throwaway two-service Compose project on a workstation (Docker 29.10.0, Compose 5.8.0), not
+    with the product's stack and not on a lab: the line given the digest of the image that was already running,
+    container recreated; given the digest of another build of 17.12, recreated, 3.6 s until healthy again on an
+    empty database; a row written before was read back after both; a second `up` on the same line, "Running"; a
+    service that waits for the database (`depends_on`, `service_healthy`) kept its container and its start time
+    both times. Whether Keycloak's container is recreated with PostgreSQL's depends on the Compose version: a
+    production site saw it at the upgrade to 0.9.0.
 - **Load balancer certificates: a certificate signed over SHA-1, MD5, MD2 or RIPEMD-160 is refused when it arrives,
   on every site.** This is what the fix "a certificate whose signature an appliance's HAProxy refuses is refused at the
   upload" (see Fixed) does to what exists.
@@ -189,6 +253,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and they move with a release and no other way; on the installer path the next `make upgrade` mirrors them
   ([managed-sandbox.md](docs/managed-sandbox.md), section 6).
 
+- **The Docker Compose install pins PostgreSQL to one build, by digest**
+  (`postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73` in
+  `deploy/compose/compose.yaml`, before `postgres:17.12-alpine`). The publisher rebuilt the tag `17.12-alpine`
+  after 0.9.1 pinned it. `upgrade` pulls every image of the file, so the tag on a site's host moved to the new
+  build while Compose left the running container on the old one (seen on a production site at the upgrades to
+  0.11.0 and to 0.11.1: the container ran image `526f86d9...` while the host's tag named `f9cf3e1f...`). Whatever
+  recreated that container next, a changed line, a `down` and `up`, a restore on a new host, would have started
+  another build of the database without anyone having asked for it. The digest is the one the tag names on
+  2026-11-26 (the image index, so every architecture the tag has). The version stays in the line: it is what a
+  reader and Dependabot go by, and Dependabot now proposes a rebuild of the tag as a pull request
+  (`.github/dependabot.yml`). `test_the_database_image_is_pinned_by_digest` (`deploy/tests`) asks for the version
+  and a digest in that line and for the same line in the two places of `deploy/compose/README.md` that name it; it
+  fails on the line as it was. Left as they are: Traefik, Keycloak and its config CLI, pinned to a version
+  without a digest as before (a restart of those loses no state; they move by hand, with the chart), the
+  development `docker-compose.yml` at the repository root, and the app chart's CloudNativePG image.
+
 - **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.1.yaml`, sha256
   `b04cdabce8ffd004309fbb2e34ffe1a9871648db103553b4badc5bd17be69172`, the file of the tag byte for byte). The
@@ -266,6 +346,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A release that changed only the load balancer controller reached no cluster by itself.** The tenant's cluster
+  page offered "Platform update available" only when the cluster's chart version differed from the provider's, and
+  the operator's **Bump all** skipped every cluster whose chart was the provider's. The controller's image is pinned
+  by the same action (`kamaji.Service.SetChartVersion`), so a cluster on the provider's chart kept the controller of
+  the release it was last moved by: on the lab the controller was still the one of rc.2 after the portal and the
+  platform were on rc.3, the tenant was offered nothing, and only the operator's per-cluster **Apply settings**
+  moved it (drill of v0.11.1-rc.3, step F). The offer now follows what the action would change: the chart version,
+  or the controller's image the portal would pin now against the one in the cluster's Application
+  (`kamaji.Config.LBControllerBehind`; what is stored is compared, no cluster is asked). The tenant's row carries
+  `lb_controller_update`, set by the same read that refreshes the cluster list, and the page says what the update
+  changes; the tenant's action is unchanged and moves the image. The operator's rows carry `lbControllerBehind`,
+  the card counts such a cluster as behind and gives its row **Update controller**, and **Bump all** includes it
+  (`kamaji.ClusterPin.Behind`). A cluster without the controller, and one whose image is the portal's, is offered
+  nothing and is not applied. Tests: `TestLBControllerUpdateOffer` (who is behind, on both surfaces; the bump
+  changes the image and not one other byte of the Application; the others are not applied),
+  `TestChartControllerImageMovesTheControllerAlone` (the chart rendered with two images differs in one line, the
+  controller Deployment's), `TestClusterUpdateOfferedForTheControllerImage` (the tenant's list and action and the
+  operator's list and "Bump all" through the routes, with a real PostgreSQL and a fake management cluster that
+  holds the Applications), and a Playwright spec of each console on its mock. The Go tests fail with the offer,
+  the operator's row or the "Bump all" condition put back. Not run on a lab.
+- **The address of a tenant's own load balancer was listed and billed only after a services sync.** The
+  `FLOATING_IP` row of a public address is what lists it for the tenant and bills it. Since 0.11.1 a cluster's
+  balancer writes the rows of its Services' addresses in the pass that allocates them; a tenant's own balancer, on
+  two appliances or on one VM, still got its row from the sync alone. On the lab a pair's address was allocated at
+  11:47:50 and its row written at 14:31:36, by the sync, while the project's list showed five addresses and its
+  quota six (drill of v0.11.1-rc.3, step C), and a pair made and deleted between two syncs never had a row, so it
+  was never listed or billed (lab of v0.11.1, "Seen, not new"). Now the row is written with the allocation: for a
+  pair when the create takes the address, for a single VM when its public NIC is plugged before the first boot
+  (`lbOwnAddressRows`, by `lbAddressRows`, the helper of the cluster's pass). It is archived with the release, as
+  before, and now also when a create gives the address back because the build failed (`lbGiveBack`). The row is the
+  one the sync makes of the allocation (`FloatingIPRow`), written only where there is none (`InsertIfAbsent`), so a
+  sync after it changes nothing and an address never has two; it starts at the allocation's time. Every pass of a
+  tenant's balancer writes a row that is missing, which is what an existing site sees (Upgrade notes). A row that
+  cannot be written is logged and left to the next pass or sync: the allocation is the truth, and the create goes
+  on. `TestLBTenantAddressRows` (a real PostgreSQL; Proxmox is a fake, and no appliance is built): a pair's create
+  whose build fails leaves one archived row from the allocation to the release; the single VM's row is there once
+  its address is taken; a pair without a row gets it at its first pass, billed from the allocation and not from the
+  pass, a second pass and a sync after it change nothing. Each of the three fails with its call taken out. Not run
+  on a lab: a create that succeeds, on real appliances, and the bill of such a row.
+- **A project's delete with the grace period is refused when no job will carry it out.** With the job scheduler
+  and the debug triggers off, `DELETE /project/{id}` answered `200 SCHEDULED_FOR_DELETION` although the sweep that
+  deletes a scheduled project is one of the timed jobs, while `DELETE /project/{id}/now` answered `409` and said
+  why (lab drill of v0.11.1, finding R4-o2). Both routes of the customer API and both of the operator API
+  (`DELETE /admin/project/{id}` and `.../now`) now give the same `409` with the same text, which names the
+  scheduler and how to turn it on, and nothing is written (`project.Service.ScheduleDeletion`,
+  `project.Service.CanScheduleDeletion`, which is the operator route's pre-check). Both consoles show that text as
+  they show the one of "Delete now", with no change to them (`project-delete-refused.spec.ts` in each, on its mock). Not changed: the operator's `DELETE /admin/project/{id}` on a project that is
+  already scheduled still answers `200` with the project as it is, and writes nothing. Tests:
+  `TestScheduleDeletionRefusedWithoutDeletionJob` and the new leg of `TestAdminProjectDeletionLegs` (a real
+  PostgreSQL); both fail with the two new checks taken out. Not run on a lab.
 - **An appliance that joins a pair no longer takes the addresses beside the first one when that one refused to be
   told of it.** At a join the appliance that served alone is given its keepalived config first, so that it learns
   of its peer and sends it adverts, and the new one starts as a standby that hears a master (`lbPushOrder`). When
@@ -305,9 +435,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Without the method the first, the third and the fifth fail and the two controls hold.
   **For an upgrade:** nothing to do, and no stored row changes. What changes is the row of an address that is
   given back less than two minutes after it was taken, on the paths that leave the archive to the sync: a server
-  that is deleted, a server's public network that is detached, and the two rollbacks that release an address
-  without its row (a public network attach that fails before the NIC is plugged, a single-VM balancer whose build
-  fails). That row was archived by the next state sample, a minute later at most; it is now archived by the first
+  that is deleted, a server's public network that is detached, and the rollback that releases an address
+  without its row (a public network attach that fails before the NIC is plugged; a single-VM balancer whose build
+  fails archives its row itself in this release, see the entry on a tenant balancer's address above). That row
+  was archived by the next state sample, a minute later at most; it is now archived by the first
   sample or sync after the address is two minutes old, so such an address is listed and billed up to two minutes
   longer. The paths that archive the row themselves are not affected: a balancer's delete, a cluster's release, a
   Service's address given back, the delete of the address's own row, and a project's teardown.
