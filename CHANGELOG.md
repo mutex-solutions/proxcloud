@@ -422,6 +422,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`internal/platform/admin/platform_sandbox.go`). Such a block (what is left of an installer's sandbox cluster, a
   registry or an entry appliance) is inert for the sync, and it was replaced by the installation's own; the write
   now refuses it like a block with a pool, and the run stops at `sandbox_refused`. Found in the review of #436.
+- **The load balancer gateway bounds a cluster's calls** (`internal/cloud/lbgw`, `Handler.ServeHTTP`; Known issues
+  of `v0.11.1`: "The gateway has no rate limit per cluster"). The gateway took every `PUT /lb/v1/state` a cluster
+  sent, and since the controller watches (chart 0.1.19) a tenant whose Service flaps sends about one a second, each
+  one a credential lookup, a body of up to 64 KiB and a write of the state. Each cluster now has 30 calls at once
+  and one more every 2 s (30 a minute sustained; fixed, no setting). A call over that is answered `429`
+  `TooManyRequests` with `Retry-After`, after the credential is accepted and before the body is read: nothing is
+  stored, no converge starts, and the last call is not written as seen. A refused credential takes none of a
+  cluster's calls, so nobody who names a cluster can use up its limit. The API says a cluster over the limit in
+  one log line (`lb gateway: rate limit`) and one audit event of its project, at most once per cluster a minute.
+  The count is kept per API process: two API replicas take twice as many, and a restart starts every cluster at
+  30. `TestClusterRateLimit` runs it on the tests' clock (30 calls taken, the 31st refused with the portal not
+  called, one more 2 s later, the whole 30 after a quiet minute, a wrong secret before each call, one log line and
+  one event in a minute of refusals); its control is another cluster's call in the same instant, which is taken.
+  With the check taken out the 31st call is answered `200`; counted at a refused credential the 16th good call is
+  refused; with one count for all clusters the other cluster is refused.
+  `TestStateRefusedAtTheGatewaysLimitStillLands` (`cmd/lb-controller`) runs the controller with its watch against
+  the gateway itself: a Service that flaps until one of its states is answered `429`, then nothing more; the state
+  that was refused, the newest, is at the portal once a call has come back, with no further change in the cluster,
+  and the Service keeps its address. Without the limit no state is refused (200 in a row are taken); with a controller
+  that takes the `429` for an answer the portal stays one state behind and the test fails.
+  **For an upgrade:** nothing to do, and no controller changes. A turn of the controller is one call, two when a
+  certificate is asked for or a refused state is asked once more without its Services that are being deleted, and
+  a quiet cluster sends one per 30 s, so a cluster in normal use never meets the limit. A cluster that does
+  (Services, Nodes or TLS Secrets changing about once a second for a minute) keeps its
+  balancer and its addresses as they are: the controller of `v0.11.1` (chart 0.1.19) reports the refusal as a
+  Warning Event `TooManyRequests` on each of its Services, takes no address from that turn and sends its whole
+  state again at the next change or, with none, after its interval (10 s), so the newest state arrives up to about
+  10 s late and none is lost. A certificate the portal asks for is the second call of a turn, which a cluster at
+  the limit has refused, and the controller sends one Secret at most once a minute: a new or renewed certificate
+  of such a cluster is served up to a minute after its changes stop, and the old one until then. While the
+  changes go on, a Service's Events go between that Warning and `EnsuredLoadBalancer`. A controller of `v0.11.0`
+  (a turn every 10 s) cannot reach the limit. Not run on a lab.
 - **A balancer with a change that waits says truthfully when the platform tries again, and the log says when its
   own retries ended.** The row of a pair and of a balancer on one VM said "the platform tries again within half a
   minute, by itself". The platform's own retries are six, 20 s apart (`lbRetry`); after the last one the row kept
