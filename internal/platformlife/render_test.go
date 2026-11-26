@@ -141,7 +141,7 @@ func yamlDoc(t *testing.T, v any) []byte {
 // Every renderer's output for the fixture and the embedded BOM, so a change to a renderer or to the BOM shows up as a
 // diff to review. `go test ./internal/platformlife -run TestRenderGolden -update` rewrites them.
 func TestRenderGolden(t *testing.T) {
-	renderGolden(t, "", embedded(t))
+	renderGolden(t, "", plain(t))
 	manifest, err := BootstrapManifest(plantSeed.BootstrapToken, plantBoot.Now.Add(SeedBootstrapTTL))
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +179,7 @@ func renderGolden(t *testing.T, dir string, b *BOM) {
 // bootstrap secret in the seed's user-data. No Application, project, chart values, HelmChart, provider config or other
 // CD file carries any of them.
 func TestNoSecretOutsideItsPlace(t *testing.T) {
-	r := renderAll(t, embedded(t), renderInput())
+	r := renderAll(t, plain(t), renderInput())
 	scan := func(what string, v any, allowed ...string) {
 		t.Helper()
 		text, ok := v.(string)
@@ -219,7 +219,7 @@ func TestNoSecretOutsideItsPlace(t *testing.T) {
 
 // The integration contract of the proxcloud-platform chart (PR 4 review) and of ArgoCD itself.
 func TestApplicationsFollowTheContract(t *testing.T) {
-	b, in := embedded(t), renderInput()
+	b, in := plain(t), renderInput()
 	r := renderAll(t, b, in)
 	project := r.projects[0]["spec"].(map[string]any)
 	if r.projects[0]["metadata"].(map[string]any)["name"] != argoProject {
@@ -299,7 +299,7 @@ func TestApplicationsFollowTheContract(t *testing.T) {
 // The values the run passes to the proxcloud-platform chart are its examples, which chart_test.go renders: the examples
 // stand in for the BOM's clusterctl digest and the site's MetalLB range only.
 func TestPlatformChartValuesAreItsExamples(t *testing.T) {
-	b, in := embedded(t), renderInput()
+	b, in := plain(t), renderInput()
 	b.Images.Clusterctl = "ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@sha256:" + strings.Repeat("0", 64)
 	in.Cluster.MetalLBRange = "192.0.2.240-192.0.2.250"
 	apps, err := Applications(b, in)
@@ -447,7 +447,7 @@ func TestApplicationsRenderInsideTheProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, in := embedded(t), renderInput()
+	b, in := plain(t), renderInput()
 	b.Images.Clusterctl = "ghcr.io/mutex-solutions/proxcloud-clusterctl:v1.14.4-1@sha256:" + strings.Repeat("0", 64) // the chart refuses `pending`
 	apps, err := Applications(b, in)
 	if err != nil {
@@ -606,7 +606,7 @@ func sortedKeys(m map[string]bool) []string {
 // The providers read the bodies as stage 10 sends them (a JSON document): both validate, carry their placement, and the
 // database provider has its fence and no backup store.
 func TestProviderBodiesAreReadByTheProviders(t *testing.T) {
-	b, in := embedded(t), renderInput()
+	b, in := plain(t), renderInput()
 	decode := func(body map[string]any) *externalservice.ExternalService {
 		raw, err := json.Marshal(body)
 		if err != nil {
@@ -643,7 +643,7 @@ func TestProviderBodiesAreReadByTheProviders(t *testing.T) {
 
 // The workload ArgoCD carries the health checks of both providers' kinds, which installer stage 50 patches into argocd-cm.
 func TestWorkloadArgoCDCarriesTheTenantHealthChecks(t *testing.T) {
-	apps, err := Applications(embedded(t), renderInput())
+	apps, err := Applications(plain(t), renderInput())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -753,7 +753,7 @@ func TestSeedUserDataParses(t *testing.T) {
 // says skipCrds: without it two self-healing Applications own the same CRDs and take them from each other at every
 // sync. Only kamaji-crds may render them.
 func TestOnlyKamajiCRDsRendersTheKamajiCRDs(t *testing.T) {
-	apps, err := Applications(embedded(t), renderInput())
+	apps, err := Applications(plain(t), renderInput())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +769,7 @@ func TestOnlyKamajiCRDsRendersTheKamajiCRDs(t *testing.T) {
 // Neither ArgoCD runs the ApplicationSet controller. The argo-cd chart has no applicationSet.enabled (the key is
 // ignored and the controller runs); replicas 0 is what turns it off.
 func TestArgoCDRunsNoApplicationSetController(t *testing.T) {
-	b := embedded(t)
+	b := plain(t)
 	apps, err := Applications(b, renderInput())
 	if err != nil {
 		t.Fatal(err)
