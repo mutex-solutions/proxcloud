@@ -91,10 +91,10 @@ func separateSandbox() *SandboxSpec {
 
 // This build's BOM offers sandboxes: it names the sandbox chart, published and marked with the feature, after every
 // other component of the platform cluster, and cluster charts that give a node group a pool and a range of its own.
-// An installation on it is taken the block in both placements. No BOM of an earlier release names the chart, so a
-// platform one of them installed is refused the block at the save and in the Check's spec row until an upgrade has
-// moved it to this one, and the sentence names that upgrade. A build whose BOM takes the offer away fails here: its
-// release notes must then say so.
+// An installation on it is taken the block in both placements, and so is one on a kept BOM that offers them too
+// (0.12.0-rc.1, the first). No BOM of a release before 0.12.0 names the chart, so a platform one of them installed is
+// refused the block at the save and in the Check's spec row until an upgrade has moved it to this one, and the sentence
+// names that upgrade. A build whose BOM takes the offer away fails here: its release notes must then say so.
 func TestSandboxIsOffered(t *testing.T) {
 	cur := sandboxBOM(t)
 	c := cur.Feature(FeatureSandbox)
@@ -113,21 +113,31 @@ func TestSandboxIsOffered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A new installation, one this build's BOM installed, and one a kept BOM from 0.12.0-rc.1 on installed.
+	offering, before := []*BOMRef{nil, {Release: cur.Release, SHA256: cur.SHA256}}, []Embedded(nil)
 	for _, b := range prev {
-		if b.Feature(FeatureSandbox) != nil {
-			t.Fatalf("release %s names a sandbox chart: no release before 0.12.0 offered sandboxes", b.Release)
+		old := slices.ContainsFunc([]string{"0.8.", "0.9.", "0.10.", "0.11."}, func(p string) bool { return strings.HasPrefix(b.Release, p) })
+		if offers := b.Feature(FeatureSandbox) != nil; offers == old {
+			t.Fatalf("release %s names a sandbox chart = %v: no release before 0.12.0 offered sandboxes, and every kept one since does", b.Release, offers)
+		}
+		if old {
+			before = append(before, b)
+		} else {
+			offering = append(offering, &BOMRef{Release: b.Release, SHA256: b.SHA256})
 		}
 	}
+	if len(offering) < 3 || len(before) == 0 {
+		t.Fatalf("%d kept BOMs from before sandboxes, %d references that offer them: want 0.12.0-rc.1 among the kept", len(before), len(offering))
+	}
 	for _, sb := range []*SandboxSpec{sharedSandbox(), separateSandbox()} {
-		// A new installation, and one this build's BOM installed.
-		for _, ref := range []*BOMRef{nil, {Release: cur.Release, SHA256: cur.SHA256}} {
+		for _, ref := range offering {
 			in := validInstallation(t)
 			in.Spec.Sandbox, in.Status.BOM = sb, ref
 			if err := in.Validate(); err != nil || in.SandboxProblems() != nil {
 				t.Errorf("placement %s on %+v: %v %v", sb.Placement, ref, err, in.SandboxProblems())
 			}
 		}
-		for _, b := range prev {
+		for _, b := range before {
 			in := validInstallation(t)
 			in.Spec.Sandbox, in.Status.BOM = sb, &BOMRef{Release: b.Release, SHA256: b.SHA256}
 			if p := in.SandboxProblems(); len(p) != 1 || !strings.Contains(p[0], "(release "+b.Release+") has no sandbox chart") || !strings.Contains(p[0], "Upgrade the platform to release "+cur.Release+" first") {
