@@ -302,6 +302,11 @@ func (p *floatingIPProvider) Type() string          { return cloud.TypeFloatingI
 func (p *floatingIPProvider) ProjectID() string     { return p.projectID }
 func (p *floatingIPProvider) CompareKeys() []string { return []string{} }
 
+// VanishGrace: the list is read before the rows, so an address a balancer's pass took in between has its row and is
+// not in the list. Such a row is not archived while it is younger than the grace (its age is the allocation's), and
+// a row archived less than the grace ago is not written again for being still listed. The figure is pve's providers'.
+func (p *floatingIPProvider) VanishGrace() time.Duration { return 2 * time.Minute }
+
 func (p *floatingIPProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
 	if p.list == nil {
 		return nil, nil
