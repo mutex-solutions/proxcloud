@@ -71,6 +71,15 @@ func TestRegistryProjects(t *testing.T) {
 	}
 }
 
+// A function namespace carries the tenant label and the project too, but it is not a sandbox
+// namespace: it makes no registry account, whether or not the project also has sandboxes.
+func TestRegistryProjectsSkipsFunctionNamespaces(t *testing.T) {
+	got := RegistryProjects([]map[string]any{tenantNS("fn-a1", "a1"), tenantNS("sb-b2", "b2"), tenantNS("fn-b2", "b2"), tenantNS("fn-c3", "c3")})
+	if strings.Join(got, ",") != "b2" {
+		t.Fatalf("projects = %v, want only the one with a sandbox namespace", got)
+	}
+}
+
 func TestZotAccess(t *testing.T) {
 	ac := ZotAccess([]string{"a1"})
 	repos := ac["repositories"].(map[string]any)
