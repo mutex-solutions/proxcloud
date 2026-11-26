@@ -590,11 +590,89 @@ func TestParseSelector(t *testing.T) {
 		"public=":                {"public": ""},
 		"":                       {},
 		" , ":                    {},
-		" = edge":                {},
+		"pool=edge,":             {"pool": "edge"},
+		"a=b,,c":                 {"a": "b", "c": ""},
+		// A term with "=" and no key stays, under a key no node label has.
+		" = edge":      {"": "edge"},
+		"=edge":        {"": "edge"},
+		"=":            {"": ""},
+		"pool=edge,=x": {"pool": "edge", "": "x"},
 	} {
 		if got := parseSelector(in); !maps.Equal(got, want) {
 			t.Errorf("%q: %v, want %v", in, got, want)
 		}
+	}
+}
+
+// Which nodes a selector annotation leaves behind a Service. A term with an empty key selects no node, alone or next
+// to a term that matches, where it was dropped and a selector made only of such terms selected every node. The
+// controls read as before: a term with a key, spaces around "=", a trailing comma, an empty value, no selector.
+func TestSelectorSelects(t *testing.T) {
+	nodes := map[string]map[string]any{
+		"edge":      {"pool": "edge"},
+		"edge-zone": {"pool": "edge", "zone": "a"},
+		"core":      {"pool": "core", "zone": ""},
+		"bare":      nil,
+	}
+	all := []string{"bare", "core", "edge", "edge-zone"}
+	for _, tc := range []struct {
+		in   string
+		want []string
+	}{
+		{"=edge", nil},
+		{" = edge", nil},
+		{"=", nil},
+		{"pool=edge,=x", nil},
+		{"=x,pool=edge", nil},
+		{"pool=edge", []string{"edge", "edge-zone"}},
+		{"pool = edge, zone", []string{"edge-zone"}},
+		{"pool=edge,", []string{"edge", "edge-zone"}},
+		{"zone=", []string{"core", "edge-zone"}},
+		{"zone", []string{"core", "edge-zone"}},
+		{"pool=gone", nil},
+		// No selector: the turn does not narrow the nodes (len(sel) == 0).
+		{"", all},
+		{" , ", all},
+	} {
+		sel := parseSelector(tc.in)
+		var got []string
+		for _, name := range all {
+			if len(sel) == 0 || selects(sel, nodes[name]) {
+				got = append(got, name)
+			}
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%q selects %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A Service whose selector is one term with an empty key is sent with no node, not with every node, and says
+// UnAvailableLoadBalancer; the Service next to it without a selector keeps every node.
+func TestEmptySelectorKeyOfProtocol2(t *testing.T) {
+	f := &fakeTenant{services: map[string]map[string]any{}}
+	f.add("web", "typo", "u-1", "2026-11-23T10:00:00Z", lbSpec(Class, tcp(80, 30080)))
+	annotate(f.svc("web", "typo"), "proxcloud.io/lb-node-selector", "=edge")
+	f.add("web", "plain", "u-2", "2026-11-23T10:01:00Z", lbSpec(Class, tcp(80, 30081)))
+	f.nodes = []map[string]any{node("w1", "10.0.0.11", map[string]any{"pool": "edge"}), node("w2", "10.0.0.12", nil)}
+	g := &gatewayFake{}
+	ready2(g)
+	c := &controller{api: f, put: g.put, log: quiet()}
+	if err := c.turn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s := g.last.Services
+	if len(s) != 2 || len(g.last.Nodes) != 2 {
+		t.Fatalf("sent %+v", g.last)
+	}
+	if s[0].Nodes == nil || len(*s[0].Nodes) != 0 {
+		t.Errorf("a selector with an empty key: nodes %v, want an empty list", s[0].Nodes)
+	}
+	if s[1].Nodes != nil {
+		t.Errorf("a Service without a selector: nodes %v", *s[1].Nodes)
+	}
+	if got := reasons(f.events); !slices.Contains(got, "typo:UnAvailableLoadBalancer") || slices.Contains(got, "plain:UnAvailableLoadBalancer") {
+		t.Errorf("events %v", got)
 	}
 }
 

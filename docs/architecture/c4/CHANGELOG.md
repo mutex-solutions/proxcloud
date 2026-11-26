@@ -74,6 +74,22 @@ next recreate would have started another build unasked.
 job would ever carry out, while the delete-now route answered `409` and said why.
 
 **Diagrams updated:** none (no element of C1 to C4 moves).
+## 2026-11-26: a node selector term with an empty key matches no node
+
+**What changed:** no component, container, wire field or relation. One function of the cluster's load balancer
+controller reads one kind of term differently.
+
+- `cmd/lb-controller/main.go`, `parseSelector`: a term of `proxcloud.io/lb-node-selector` with `=` and no key
+  (`=edge`) is kept under the key `""` where it was dropped. `selects` then answers false for every node, the
+  Service is sent with an empty node list and gets `UnAvailableLoadBalancer`. Empty terms and an empty annotation
+  are read as before.
+
+**Why:** a selector made only of such terms parsed to an empty selector, which the turn reads as no selector
+(`len(sel) > 0`), so every node was put behind the Service; the upstream controller matches no node. An existing
+Service with such a selector loses its members at the controller's update (CHANGELOG, upgrade note).
+
+**Diagrams updated:** none (no element of C1 to C4 moves).
+
 ## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
 
 **What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23
