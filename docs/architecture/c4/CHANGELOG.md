@@ -19,6 +19,7 @@ controller reads one kind of term differently.
 Service with such a selector loses its members at the controller's update (CHANGELOG, upgrade note).
 
 **Diagrams updated:** none (no element of C1 to C4 moves).
+
 ## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
 
 **What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23
