@@ -151,14 +151,16 @@ func TestRenderGolden(t *testing.T) {
 
 // The same for each previous BOM, under testdata/previous/<release>/: what an apply renders for a platform that
 // release installed. The pins come from the previous BOM; the renderers are this build's, so a change to a renderer
-// that would change an installed platform at its next apply shows up here.
+// that would change an installed platform at its next apply shows up here. Like the goldens of this build's BOM
+// (plain), each is the render of an installation without sandboxes (BOM.For, as bomOf takes an installed BOM): the
+// fixtures ask for none, and 0.12.0-rc.1 is the first kept BOM that names the sandbox chart.
 func TestRenderGoldenOfPreviousBOMs(t *testing.T) {
 	prev, err := Previous()
 	if err != nil || len(prev) == 0 {
 		t.Fatalf("previous BOMs: %d, %v", len(prev), err)
 	}
 	for _, b := range prev {
-		renderGolden(t, filepath.Join("previous", b.Release), b.BOM)
+		renderGolden(t, filepath.Join("previous", b.Release), b.BOM.For(Spec{}))
 	}
 }
 
