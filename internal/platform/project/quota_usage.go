@@ -162,12 +162,12 @@ func (h *Handler) pveNetworkQuota(ctx context.Context, projectID, svcID string, 
 func pveQuotaMetrics(limits map[string]any, u pveQuotaDemand) (*computeQuota, *storageQuota) {
 	metric := func(key string, used int) quotaMetric { return quotaMetricOf(limits, key, used) }
 	return &computeQuota{
-			Instances: metric("servers", u.Servers),
-			Cores:     metric("vcpus", u.VCPUs),
-			RAMMb:     metric("ramMb", u.RAMMb),
-		}, &storageQuota{
-			Gigabytes: metric("diskGb", u.DiskGb),
-		}
+		Instances: metric("servers", u.Servers),
+		Cores:     metric("vcpus", u.VCPUs),
+		RAMMb:     metric("ramMb", u.RAMMb),
+	}, &storageQuota{
+		Gigabytes: metric("diskGb", u.DiskGb),
+	}
 }
 
 // quotaUsage reports the ProxCloud-managed quota (GPU + resource keys) with usage
