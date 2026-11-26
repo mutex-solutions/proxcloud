@@ -4,6 +4,27 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-26: a balancer's row says when the platform tries a waiting change again (review of v0.11.1-rc.3, #490)
+
+**What changed:** no component, container, relation or wire field. One sentence of `statusMessage` and one log line.
+
+- `internal/platform/project/cloud_lb_pair_pve.go`, `lbRetrySays`: what a row with a waiting change says of the
+  retries, built from `lbRetryEvery` and `lbRetryTries`, the values `Handler.lbRetry` runs on: "the platform tries
+  again by itself every 20 s for 2 minutes, and after that at the next services sync or at the next change".
+  `lbPairStatus` (a tenant's pair and a cluster's pair) and `Handler.lbApplyLocked` (a balancer on one VM) end
+  their message with it.
+- `Handler.lbRetry`: a loop that ends after its last pass with the change still waiting writes one WARN line with
+  the balancer's key and the number of tries. A loop that a pass ended writes none.
+
+**Why:** the row said "the platform tries again within half a minute, by itself", also after the sixth and last
+retry, when nothing tried again before the next services sync or the next change; on a site without a scheduler
+that is the next change. The log had no line for the end of the retries either (review of `v0.11.1-rc.3`, open
+finding 4; a known issue in the release notes of v0.11.1). No state was added and nothing tries more often or
+longer than before.
+
+**Diagrams updated:** none (no element of C1 to C4 moves). The row of `Handler.lbApplyPair` in
+[c4-code.md](c4-code.md) names the sentence and the line.
+
 ## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
 
 **What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23
