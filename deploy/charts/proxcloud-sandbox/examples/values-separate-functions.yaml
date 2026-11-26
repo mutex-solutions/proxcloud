@@ -1,0 +1,27 @@
+# Mode separate with serverless functions: values-separate.yaml and the functions block. The proxy's machines are
+# fenced there, so the portal is named by its address, and its certificate is signed by the site's own CA (an example
+# certificate, no key belongs to it).
+mode: separate
+guardrail:
+  extraDeny: [192.0.2.0/24]
+prepull:
+  - ghcr.io/mutex-solutions/sandbox-base:20261119-8be6a47@sha256:b6ad7cf4414befbe3614b8095d4dda67082ce4bf7c6a2f54c999766977cd9cec
+proxy:
+  address: 192.0.2.151
+  domain: sbx.example.org
+functions:
+  enabled: true
+  wakeURL: https://192.0.2.10/api/v1/internal/functions
+  wakeTokenVersion: "1"
+  portalCA: |
+    -----BEGIN CERTIFICATE-----
+    MIIBjDCCATOgAwIBAgIUWarbXMlmQKFq8QahjnGcSIU6Ze8wCgYIKoZIzj0EAwIw
+    HDEaMBgGA1UEAwwRZXhhbXBsZSBwb3J0YWwgQ0EwHhcNMjYxMTI2MjE1MjI3WhcN
+    MzYxMTIzMjE1MjI3WjAcMRowGAYDVQQDDBFleGFtcGxlIHBvcnRhbCBDQTBZMBMG
+    ByqGSM49AgEGCCqGSM49AwEHA0IABJQ3Q7Ie5MyxBWXbuzxWYLG3XYuvv2kBS1L2
+    IpcQnnV6lAg7Goc1DJKc/2VR0c6VW01F96k5d4oRUUccRHJeZm6jUzBRMB0GA1Ud
+    DgQWBBQPnFUAPkDHq+4hwVCKSlsUHTU/RTAfBgNVHSMEGDAWgBQPnFUAPkDHq+4h
+    wVCKSlsUHTU/RTAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIHWO
+    fU2Kz47uq+Uq7qZBcTA/C8mW3Bx9xIa8RseNekoRAiAgdSbCGLC5uTZkSC4l2vIQ
+    a1EWE9nLaa0KALUA1DC3RA==
+    -----END CERTIFICATE-----

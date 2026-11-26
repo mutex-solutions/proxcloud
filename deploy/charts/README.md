@@ -93,7 +93,21 @@ Five charts live here:
   with `scheduling`, a CiliumNodeConfig, the portal's two identities and the admission policies that narrow them in
   shared mode. Bare defaults do not render (`proxy.address`, `proxy.domain`); `examples/values-{shared,separate}.yaml`
   do. `internal/cloud/sandbox/chart_test.go` pins both renders and keeps what it shares with `deploy/sandbox-cluster`
-  equal; `test/policy` runs its policies through the API server's CEL. Not pinned by the platform BOM yet.
+  equal; `test/policy` runs its policies through the API server's CEL. The platform BOM pins 0.1.0.
+
+  0.2.0 adds what serverless functions need on that cluster, behind `functions.enabled` (default `false`):
+  ClusterRole `proxcloud-function-namespace` (Deployments, their scale, Secrets write-only, pod lists, logs, the
+  quota; bound by the portal in each `fn-*` namespace in mode shared, part of its cluster-wide rules in mode
+  separate), the `fn-` prefix in the namespace and RoleBinding policies of mode shared, two rules of the pod policy
+  for `fn-*` (no mounted token, no volume), policy `proxcloud-function-objects` in both modes (the portal identity's
+  Deployments, scales and Secrets only in `fn-*` tenant namespaces, Secrets only `Opaque` or
+  `kubernetes.io/dockerconfigjson`), CiliumClusterwideNetworkPolicy `function-tenant-egress-internet`, and the
+  proxy's function mode (`FUNCTION_DOMAIN`, `PROXCLOUD_FUNCTION_WAKE_URL`, a list of Deployments, `functions.portalCA`
+  as `SSL_CERT_FILE`, `functions.wakeTokenVersion` as a pod template annotation). The proxy image is the build of
+  `main` `fd0afa97`, by digest. With the value off the render is what 0.1.0 gave but for that image, node-setup's
+  DaemonSet included, so a platform moved to it rolls sandbox-proxy and nothing else
+  (`TestSandboxChartWithoutFunctionsIsChart010`). `examples/values-{shared,separate}-functions.yaml` render with it
+  on. Not published and not pinned by the platform BOM yet.
 
   0.1.18 of `proxmox-kamaji-cluster` reads three optional keys of a node group: `pool` (its Proxmox pool instead of
   `proxmox.pool`), `addresses` (its own ranges: an `InClusterIPPool` `<release>-<group>` with the network's prefix and
@@ -131,7 +145,7 @@ pullable; see [release readiness](../../docs/release-readiness.md).
 For `database-cluster`, `proxmox-kamaji-cluster` and `proxcloud-platform`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
 the matching tag. The current source versions are database `0.5.2`, Kubernetes `0.1.19`, platform
-`0.1.3` and sandbox `0.1.0` (not published yet). All three are published and pinned by the platform
+`0.1.3` and sandbox `0.2.0` (not published yet; the BOM pins the published `0.1.0`). All three are published and pinned by the platform
 BOM (database `0.5.2`: no
 disruption budget for a PostgreSQL of one instance; Kubernetes `0.1.19` for new tenant clusters: the load
 balancer controller with its watch, and `0.1.16` for the platform cluster: the node deletion

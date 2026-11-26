@@ -18,12 +18,24 @@ In both modes the pod policy holds every pod of a tenant namespace (label proxcl
 (the agent-sandbox controller, from a Sandbox CR), to the RuntimeClass, so the RuntimeClass's scheduling keeps it on a
 sandbox node, and to no host access but the read-only runtime directory. No Pod Security label: baseline refuses the
 hostPath every sandbox mounts.
+
+With functions.enabled the same identity also writes serverless functions: Deployments fn-<16 hex>, their scale and
+their Secrets, in fn-<projectId> namespaces. Those carry the tenant label too, so the pod policy and the guardrail hold
+there as they are, and in fn-* the pod policy asks for more (no mounted token, no volume). Its rights there are a
+second ClusterRole, proxcloud-function-namespace (no exec, no Sandbox kind, no read of a Secret), which in mode shared
+it binds in fn-* and nowhere else: the RoleBinding policy holds each role to its prefix. Mode separate adds the same
+rules to its cluster-wide list, where no RoleBinding narrows them, so policy proxcloud-function-objects (both modes)
+holds its Deployments, scales and Secrets to fn-* tenant namespaces: a Deployment anywhere else would be a pod outside
+gVisor that could mount the proxy's key. Off, nothing of this renders.
 */ -}}
 {{- $shared := include "sbx.shared" . }}
 {{- $ns := .Release.Namespace }}
 {{- $portal := include "sbx.sa" (dict "root" . "name" "proxcloud-sandbox") }}
 {{- $firewall := include "sbx.sa" (dict "root" . "name" "proxcloud-sandbox-firewall") }}
-{{- $tenantNS := `request.namespace.startsWith("sb-") && namespaceObject != null && has(namespaceObject.metadata.labels) && namespaceObject.metadata.labels[?"proxcloud.io/tenant"].orValue("") == "true"` }}
+{{- $fn := .Values.functions.enabled }}
+{{- $labelled := `namespaceObject != null && has(namespaceObject.metadata.labels) && namespaceObject.metadata.labels[?"proxcloud.io/tenant"].orValue("") == "true"` }}
+{{- $tenantNS := printf "%s && %s" (ternary `(request.namespace.startsWith("sb-") || request.namespace.startsWith("fn-"))` `request.namespace.startsWith("sb-")` $fn) $labelled }}
+{{- $functionNS := printf "%s && %s" `request.namespace.startsWith("fn-")` $labelled }}
 {{- $namespaced := list
   (dict "apiGroups" (list "") "resources" (list "resourcequotas" "limitranges") "verbs" (list "get" "list" "create" "patch"))
   (dict "apiGroups" (list "") "resources" (list "pods") "verbs" (list "get" "list" "watch"))
@@ -32,6 +44,17 @@ hostPath every sandbox mounts.
   (dict "apiGroups" (list "agents.x-k8s.io") "resources" (list "sandboxes") "verbs" (list "get" "list" "watch" "create" "patch" "delete"))
   (dict "apiGroups" (list "extensions.agents.x-k8s.io") "resources" (list "sandboxclaims" "sandboxtemplates" "sandboxwarmpools") "verbs" (list "get" "list" "watch" "create" "patch" "delete"))
   (dict "apiGroups" (list "cilium.io") "resources" (list "ciliumnetworkpolicies") "verbs" (list "get" "list" "create" "patch" "delete")) }}
+{{- /* What internal/cloud/function calls in a function namespace, and no more (roleVerbs of its service_test.go is this
+list, and TestSandboxChartFunctionRole holds the render to it): a server-side apply is patch, and create when the
+object is new. No watch, no read of a scale, and of a Secret neither read nor delete: the two Secrets of a function
+are owned by its Deployment and collected with it. */}}
+{{- $functionRules := list
+  (dict "apiGroups" (list "apps") "resources" (list "deployments") "verbs" (list "get" "list" "create" "patch" "delete"))
+  (dict "apiGroups" (list "apps") "resources" (list "deployments/scale") "verbs" (list "patch"))
+  (dict "apiGroups" (list "") "resources" (list "secrets") "verbs" (list "create" "patch"))
+  (dict "apiGroups" (list "") "resources" (list "pods") "verbs" (list "list"))
+  (dict "apiGroups" (list "") "resources" (list "pods/log") "verbs" (list "get"))
+  (dict "apiGroups" (list "") "resources" (list "resourcequotas") "verbs" (list "create" "patch")) }}
 {{- $nodesRead := dict "apiGroups" (list "") "resources" (list "nodes") "verbs" (list "get" "list") }}
 apiVersion: v1
 kind: ServiceAccount
@@ -53,7 +76,7 @@ metadata: {name: proxcloud-sandbox}
 rules:
   - {apiGroups: [""], resources: [namespaces], verbs: [get, list, create, patch, delete]}
   - {apiGroups: [rbac.authorization.k8s.io], resources: [rolebindings], verbs: [get, create, patch, delete]}
-  - {apiGroups: [rbac.authorization.k8s.io], resources: [clusterroles], verbs: [bind], resourceNames: [proxcloud-sandbox-namespace]}
+  - {apiGroups: [rbac.authorization.k8s.io], resources: [clusterroles], verbs: [bind], resourceNames: [proxcloud-sandbox-namespace{{ if $fn }}, proxcloud-function-namespace{{ end }}]}
   - {{ toJson $nodesRead }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -63,11 +86,26 @@ rules:
 {{- range $namespaced }}
   - {{ toJson . }}
 {{- end }}
+{{- if $fn }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: proxcloud-function-namespace}
+rules:
+{{- range $functionRules }}
+  - {{ toJson . }}
+{{- end }}
+{{- end }}
 {{- else }}
 rules:
   - {apiGroups: [""], resources: [namespaces], verbs: [get, list, create, patch, delete]}
 {{- range $namespaced }}
   - {{ toJson . }}
+{{- end }}
+{{- if $fn }}
+{{- range $functionRules }}
+  - {{ toJson . }}
+{{- end }}
 {{- end }}
   - {{ toJson $nodesRead }}
 {{- end }}
@@ -202,6 +240,15 @@ spec:
   # VM firewall is not written yet) or every taint at once.
   - expression: '!has(object.spec.tolerations) || object.spec.tolerations.all(t, has(t.key) && t.key != "" && t.key != "proxcloud.io/unsecured")'
     message: tenant pods may not tolerate proxcloud.io/unsecured or every taint
+  {{- if $fn }}
+  # A function pod (the fn-* namespaces) gets less than a sandbox pod: no service account token and no volume of any
+  # kind. A volume is how a Secret, a projected token or a host path would get into it; its own secrets arrive as
+  # environment, and it mounts no runtime directory.
+  - expression: '!request.namespace.startsWith("fn-") || (has(object.spec.automountServiceAccountToken) && !object.spec.automountServiceAccountToken)'
+    message: function pods must set automountServiceAccountToken false
+  - expression: '!request.namespace.startsWith("fn-") || !has(object.spec.volumes) || size(object.spec.volumes) == 0'
+    message: function pods may have no volume
+  {{- end }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -234,9 +281,39 @@ metadata: {name: proxcloud-noderestriction-probe-dry-run-only}
 spec:
   policyName: proxcloud-noderestriction-probe-dry-run-only
   validationActions: ["Deny"]
+{{- if $fn }}
+---
+{{- /* The portal's identity, in both modes: Deployments, their scale and Secrets only in fn-* tenant namespaces (so
+every pod they make is under the pod policy above), and a Secret only of the two types a function has: its
+environment (Opaque) and its registry login. Not a service account token, which the cluster would fill in. In mode
+shared RBAC already holds the three to the namespaces it bound the function role in; in mode separate this policy is
+what does. */}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata: {name: proxcloud-function-objects}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - {apiGroups: [apps], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [deployments, deployments/scale]}
+    - {apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [secrets]}
+  matchConditions:
+  - {name: portal-identity, expression: 'request.userInfo.username == {{ $portal | quote }}'}
+  validations:
+  - expression: {{ $functionNS | quote }}
+    message: the sandbox identity may write Deployments, their scale and Secrets only inside fn-* tenant namespaces
+  - expression: 'request.resource.resource != "secrets" || request.operation == "DELETE" || (has(object.type) && (object.type == "Opaque" || object.type == "kubernetes.io/dockerconfigjson"))'
+    message: the sandbox identity may write only Opaque and kubernetes.io/dockerconfigjson Secrets
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata: {name: proxcloud-function-objects}
+spec: {policyName: proxcloud-function-objects, validationActions: [Deny]}
+{{- end }}
 {{- if $shared }}
 ---
-{{- /* The portal's identity: namespaces named sb-* only, labelled proxcloud.io/tenant=true, and the label stays. */}}
+{{- /* The portal's identity: namespaces named sb-* only (with functions.enabled also fn-*), labelled
+proxcloud.io/tenant=true, and the label stays. */}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata: {name: proxcloud-sandbox-namespaces}
@@ -248,10 +325,10 @@ spec:
   matchConditions:
   - {name: portal-identity, expression: 'request.userInfo.username == {{ $portal | quote }}'}
   validations:
-  - expression: 'request.name.startsWith("sb-")'
-    message: the sandbox identity may only manage sb-* namespaces
+  - expression: 'request.name.startsWith("sb-"){{ if $fn }} || request.name.startsWith("fn-"){{ end }}'
+    message: the sandbox identity may only manage sb-*{{ if $fn }} and fn-*{{ end }} namespaces
   - expression: 'request.operation == "DELETE" || (has(object.metadata.labels) && object.metadata.labels[?"proxcloud.io/tenant"].orValue("") == "true")'
-    message: an sb-* namespace must carry proxcloud.io/tenant=true
+    message: an sb-*{{ if $fn }} or fn-*{{ end }} namespace must carry proxcloud.io/tenant=true
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -259,7 +336,8 @@ metadata: {name: proxcloud-sandbox-namespaces}
 spec: {policyName: proxcloud-sandbox-namespaces, validationActions: [Deny]}
 ---
 {{- /* The portal's identity: RoleBindings only in sb-* tenant namespaces, only of ClusterRole
-proxcloud-sandbox-namespace, and only to itself. */}}
+proxcloud-sandbox-namespace, and only to itself. With functions.enabled also in fn-* tenant namespaces, and there only
+of ClusterRole proxcloud-function-namespace: each role in the namespaces of its own prefix, never in the other's. */}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata: {name: proxcloud-sandbox-rolebindings}
@@ -272,9 +350,14 @@ spec:
   - {name: portal-identity, expression: 'request.userInfo.username == {{ $portal | quote }}'}
   validations:
   - expression: {{ $tenantNS | quote }}
-    message: the sandbox identity may bind only inside sb-* tenant namespaces
+    message: the sandbox identity may bind only inside sb-*{{ if $fn }} and fn-*{{ end }} tenant namespaces
+  {{- if $fn }}
+  - expression: 'request.operation == "DELETE" || (object.roleRef.apiGroup == "rbac.authorization.k8s.io" && object.roleRef.kind == "ClusterRole" && ((request.namespace.startsWith("sb-") && object.roleRef.name == "proxcloud-sandbox-namespace") || (request.namespace.startsWith("fn-") && object.roleRef.name == "proxcloud-function-namespace")))'
+    message: the sandbox identity may bind only ClusterRole proxcloud-sandbox-namespace in an sb-* namespace and proxcloud-function-namespace in an fn-* namespace
+  {{- else }}
   - expression: 'request.operation == "DELETE" || (object.roleRef.apiGroup == "rbac.authorization.k8s.io" && object.roleRef.kind == "ClusterRole" && object.roleRef.name == "proxcloud-sandbox-namespace")'
     message: the sandbox identity may bind only ClusterRole proxcloud-sandbox-namespace
+  {{- end }}
   - expression: 'request.operation == "DELETE" || (has(object.subjects) && object.subjects.all(s, s.kind == "ServiceAccount" && s.name == "proxcloud-sandbox" && has(s.namespace) && s.namespace == {{ $ns | quote }}))'
     message: the sandbox identity may bind only itself
 ---

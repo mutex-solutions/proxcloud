@@ -31,6 +31,16 @@ const (
 // renderSandboxChart renders the chart with one of its examples, in namespace sandbox-system, as ArgoCD does.
 func renderSandboxChart(t *testing.T, mode string, set ...string) string {
 	t.Helper()
+	out, err := helmSandboxChart(t, mode, set...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// helmSandboxChart is renderSandboxChart for a render that may be refused: the error carries what helm said.
+func helmSandboxChart(t *testing.T, mode string, set ...string) (string, error) {
+	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
 		if os.Getenv("CI") != "" {
@@ -44,9 +54,9 @@ func renderSandboxChart(t *testing.T, mode string, set ...string) string {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("helm %v: %v\n%s", args, err, stderr.String())
+		return "", fmt.Errorf("helm %v: %v\n%s", args, err, stderr.String())
 	}
-	return string(out)
+	return string(out), nil
 }
 
 func yamlDocs(t *testing.T, text string) []map[string]any {
@@ -99,10 +109,11 @@ func elideVendored(out string) string {
 	return strings.Join(parts, "\n---\n")
 }
 
-// The chart's whole output in both modes. `go test ./internal/cloud/sandbox -run TestSandboxChartGolden -update`
-// rewrites the goldens (with the Helm of internal/cloud/kamaji goldenHelm).
+// The chart's whole output in both modes, without functions and with them (the four examples).
+// `go test ./internal/cloud/sandbox -run TestSandboxChartGolden -update` rewrites the goldens (with the Helm of
+// internal/cloud/kamaji goldenHelm).
 func TestSandboxChartGolden(t *testing.T) {
-	for _, mode := range []string{"shared", "separate"} {
+	for _, mode := range []string{"shared", "separate", "shared-functions", "separate-functions"} {
 		t.Run(mode, func(t *testing.T) {
 			got := elideVendored(renderSandboxChart(t, mode))
 			golden := filepath.Join("testdata", "chart-"+mode+".golden.yaml")

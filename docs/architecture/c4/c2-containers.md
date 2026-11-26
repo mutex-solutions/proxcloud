@@ -246,7 +246,7 @@ flowchart LR
   platchart["Chart proxcloud-platform<br/>clusterctl hook, provider RBAC, AppProjects,<br/>MetalLB pool"]:::impl
   dbchart["Chart database-cluster<br/>DBaaS engines"]:::impl
   k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters;<br/>kubeadm mode: platform cluster (unused yet)"]:::impl
-  sbxchart["Chart proxcloud-sandbox<br/>gVisor runtime, guardrail, identities,<br/>sandbox-proxy (not pinned yet)"]:::impl
+  sbxchart["Chart proxcloud-sandbox<br/>gVisor runtime, guardrail, identities,<br/>sandbox-proxy; function objects<br/>behind functions.enabled (0.2.0, not pinned)"]:::impl
   inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
   compose["One-host Compose install<br/>deploy/compose, proxcloud-up.sh"]:::impl
   host["Single Docker host<br/>portal only"]:::impl
@@ -387,6 +387,7 @@ boundaries rather than an unqualified `Implemented` component label.
 | E2B SDK to `/e2b` | A project's `e2b_` sandbox API key (SHA-256 stored); its creator's project rights are checked on every call | Implemented |
 | sandbox-proxy to the wake endpoint | The sandbox provider's `proxyWakeToken` (bearer) | Implemented |
 | sandbox-proxy to the function routes (wake, activity) | A token of its own, `PROXCLOUD_FUNCTION_WAKE_TOKEN` (bearer), never the sandbox wake token. The proxy's side exists and is off (`FUNCTION_DOMAIN` unset); the portal's routes and the token's provider field do not exist yet | Planned |
+| The portal's sandbox identity in a function namespace (`fn-*`) | ClusterRole `proxcloud-function-namespace` of the sandbox chart: Deployments, their scale, Secrets write-only, pod lists, logs, the quota. Shared placement: a RoleBinding per namespace, which an admission policy holds to `fn-*` and to that role; separate placement: cluster-wide rules. Policy `proxcloud-function-objects` holds its Deployments, scales and Secrets to `fn-*` tenant namespaces in both. In the chart source (0.2.0) behind `functions.enabled`; no BOM pins it and no platform renders it | Planned |
 | A VM or a browser console to `/api/v1/nocloud/`, `/api/v1/console/` | A per-VM seed token or a console token in the path | Implemented |
 | Management port `:8081` | On the cluster Service only, never on the gateway or ingress. Billing callbacks are mounted only when a shared token is configured | Implemented |
 | API to Proxmox | Privilege-separated API token with the `ProxCloudPlatform` role; test connection warns on missing privileges and on `root@pam`. With `PROXCLOUD_PLATFORM_ENABLED` the API also holds the managed-services platform's `capmox@pve!capi` and `csi@pve!csi`, pasted write-only and sealed with the data key in `platformSecret` (never returned or audited); the preflight reads with both; a platform run (`platform.run/v1`, behind the flag and `PROXCLOUD_TEMPLATE_UPDATES_VM_ENABLED`) clones, configures, firewalls and deletes the seed VM in `proxcloud-seed` and uploads and deletes its `pcplat-` CD with the CAPI token. The API then reaches the seed's k3s API on 6443 over TLS pinned to a CA it generated, with a 3-hour bootstrap token, then the seed's stored service-account token | Implemented (platform run: not run against a real Proxmox) |

@@ -507,7 +507,7 @@ spec:
       securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: proxy
-          image: ghcr.io/mutex-solutions/proxcloud-sandbox-proxy:v0.11.0-rc.1@sha256:afc0e6e53262ce517d341c428093f7e81106272dda9af0dda6297498bca0e37e
+          image: ghcr.io/mutex-solutions/proxcloud-sandbox-proxy:dev-fd0afa9@sha256:e80c082ee158a7d98528ce45927a86c2bffe80bbce082f9ef0aa04db7f3cd0d0
           env:
             - {name: SANDBOX_TLS_DIR, value: /etc/sandbox-proxy/tls}
           envFrom:

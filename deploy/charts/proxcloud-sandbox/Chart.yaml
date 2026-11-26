@@ -4,8 +4,11 @@ description: >-
   The sandbox runtime of the managed platform: gVisor and the network guard on the sandbox nodes, the RuntimeClass
   that keeps sandboxes there, the Cilium guardrail, agent-sandbox, sandbox-proxy and the portal's two identities with
   the admission policies that narrow them. Mode shared runs it on a node group of the platform cluster, mode separate
-  on the platform-owned sandbox cluster (installed there by the cluster chart's addons.sandbox).
+  on the platform-owned sandbox cluster (installed there by the cluster chart's addons.sandbox). With functions.enabled
+  it also carries what serverless functions need there: their namespaced role and policies, internet egress, and the
+  proxy's function mode.
 type: application
 # The installer path applies deploy/sandbox-cluster/ instead; internal/cloud/sandbox/chart_test.go keeps the node-setup
 # script, the guardrail and the RuntimeClass handler equal to those files. Published by tag proxcloud-sandbox-v<version>.
-version: 0.1.0
+# 0.2.0: the function objects, behind functions.enabled (off: the render of 0.1.0 but for the proxy image).
+version: 0.2.0

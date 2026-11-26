@@ -1,0 +1,17 @@
+# Mode shared with serverless functions: values-shared.yaml and the functions block, as the platform's run renders it
+# for an installation whose spec.sandbox.functions is enabled. The portal's certificate is publicly signed here, so no
+# portalCA. The wake token itself is never a value: the run writes it into Secret sandbox-proxy-wake.
+mode: shared
+guardrail:
+  extraDeny: [192.0.2.0/24]
+prepull:
+  - ghcr.io/mutex-solutions/sandbox-base:20261119-8be6a47@sha256:b6ad7cf4414befbe3614b8095d4dda67082ce4bf7c6a2f54c999766977cd9cec
+  - ghcr.io/mutex-solutions/sandbox-code-interpreter:20261119-8be6a47@sha256:280fd008ba71827850d559c62bbe4fd522c943e3558b89a00fde058e9f68ecfe
+proxy:
+  address: 192.0.2.150
+  domain: sbx.example.org
+  wakeURL: https://api.example.org/api/v1/internal/sandboxes
+functions:
+  enabled: true
+  wakeURL: https://api.example.org/api/v1/internal/functions
+  wakeTokenVersion: "1"
