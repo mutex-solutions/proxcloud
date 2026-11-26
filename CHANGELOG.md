@@ -98,6 +98,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     loaded from such a host on that. The console stays on 1.36.0 until the owner has decided.
   Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
   pull request).
+- **The real-guest load balancer tests run on images that already hold their packages** (#499,
+  `test/integration/images`, `test/integration/lb_guest_test.go`, the `go-test` job; no product code). Each of the
+  eight tests installed systemd, HAProxy, keepalived, nftables and its tools from the distribution's mirror while it
+  ran, in each of two guests: on 2026-11-26 a mirror that did not answer failed `go-test` on `main` and on a dozen
+  pull requests for an hour ("systemd did not come up in the container"). The job now builds two images once per
+  run, `debian:trixie` and `ubuntu:26.04` pinned by digest with those packages at the versions the distribution
+  ships that week (the ISO week is part of the package layer's cache key; nothing is pinned or held), and names them
+  to the tests (`LB_TEST_IMAGE_DEBIAN`, `LB_TEST_IMAGE_UBUNTU`). Same systemd as PID 1, same privileged mode, same
+  packages; without the variables a test installs what is missing as before
+  ([CONTRIBUTING.md](CONTRIBUTING.md#the-guest-images-of-the-load-balancer-tests)).
+  - **The product's own install is still shown on a plain image**, by one test that reads no variable and cannot
+    skip: `TestLBApplianceServesWhatIsRecorded` (the pair's install line at its start, as before, and now the UDP
+    service's at its end: nftables, with HAProxy and keepalived keeping their processes). That test still needs
+    the mirror; a failure of the install says `mirror` when the mirror does not answer the guest.
+  - **Not shown in a real guest any more:** the install line of a single appliance (`haproxy socat iproute2`, a
+    subset of the pair's line, and the same command otherwise), which `TestLBApplianceTLS` ran on the plain image.
+    A run without the two variables still runs it.
 
 ### Fixed
 

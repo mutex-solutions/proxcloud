@@ -139,6 +139,35 @@ database, so a new CVE in a sandbox template showed up on the next pull request 
   them; and `security-scan.yml` scans images built from the source at that commit, not the
   digests published in `deploy/templates/images.yaml`.
 
+### The guest images of the load balancer tests
+
+The real-guest load balancer tests of `test/integration` run in privileged systemd
+containers of `debian:trixie` and `ubuntu:26.04`. `go-test` builds one image per
+distribution before the integration step (`test/integration/images`, `docker buildx`
+through `docker/build-push-action`, loaded into the runner's Docker, pushed nowhere)
+and names them to the tests with `LB_TEST_IMAGE_DEBIAN` and `LB_TEST_IMAGE_UBUNTU`, so
+that no test installs from a distribution mirror while it runs.
+
+- **Current packages, from a cache.** The base is pinned by digest (Dependabot moves
+  it). The package layer installs what the mirror serves, with no version pinned, and
+  its cache key holds the build argument `REFRESH`, which the job sets to the ISO week:
+  the first run of a week installs again, every other run takes the layer from the
+  Actions cache (scopes `lb-test-debian-trixie` and `lb-test-ubuntu-26.04`). The step
+  "What the appliance test images hold" prints the versions in every run.
+- **A mirror failure reads as one.** The package step tries three times and then fails
+  with a line that starts with `mirror`; the job adds the annotation "Appliance test
+  images not built" and runs no integration test. That is the mirror: run the job
+  again. A failed test after that step is a test.
+- **One test still needs the mirror, on purpose.** `TestLBApplianceServesWhatIsRecorded`
+  runs on the plain distribution image whatever the variables say, because the
+  product's own install is what it shows; it reads no variable and has no skip. When
+  the install does not end, its failure says `mirror` if the mirror does not answer
+  the guest.
+- **A package a test needs and the images lack fails that test**, with the files to add
+  it to. Without that, the test would install it from the mirror in every run, unseen.
+
+Building them locally: [CONTRIBUTING.md](../CONTRIBUTING.md#the-guest-images-of-the-load-balancer-tests).
+
 ## Container images and chart versions
 
 Five app-release image repositories are used:
