@@ -73,6 +73,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     both times. Whether Keycloak's container is recreated with PostgreSQL's depends on the Compose version: a
     production site saw it at the upgrade to 0.9.0.
 
+### Added
+
+- **Sandboxes on the managed platform are offered** (#483, `deploy/platform/platform-bom.yaml`,
+  [managed-services.md](docs/managed-services.md#sandboxes-on-the-platform)). The platform BOM names the sandbox
+  chart, `proxcloud-sandbox` 0.1.0 at its published digest, as the component `sandbox` (`feature: sandbox`), and
+  moves the platform's own cluster chart from `proxmox-kamaji-cluster` 0.1.16 to 0.1.19, the chart the tenants are
+  on already and the first pin with a node group's own pool, address range and DNS servers. The code of #420, #422,
+  #423, #432 and #436 was in the build and switched off; with these pins an installation whose settings hold
+  `spec.sandbox` gets its sandbox machines (a node group of the platform cluster, or the cluster `pc-sandbox`), the
+  sandbox chart and a sandbox provider that is registered disabled and goes live only through its release gates.
+  The install page and the settings of a ready platform show the **Sandboxes** block with the texts of #436: Off
+  is where every installation starts, and a shared node group is saved only with the tick under what it gives up.
+  - **An installation without the block plans and renders as before**, and a run makes no pool, ACL row, token,
+    machine, Application or provider for sandboxes (`TestApplyWithoutSandboxWritesNothingOfIt`, now against the
+    real BOM; `TestSandboxRenderGolden`).
+  - **A platform that an earlier release installed gets nothing until its operator asks.** It stays on its BOM,
+    where the block is refused (`400 invalid_installation`; the answer now names the release to upgrade to) and
+    the page shows no block. Its upgrade to this BOM has two rows more than the release: `seed/pc-platform`, class
+    chart (0.1.16 to 0.1.19), and `workload/sandbox`, class added, which nothing renders without the block. No
+    machines row. Then the block is taken, and an apply builds the group beside the existing ones
+    (`TestUpgradeFromTheLastReleaseBuildsNoSandbox`, the real BOM of 0.11.1 to this one on fakes;
+    `TestPreviousBOMsMoveCertManager` states both rows for each of the fourteen previous BOMs an upgrade is
+    allowed from).
+  - **The move of the cluster chart replaces no machine.** `TestUpgradeRollsNoMachine` compares those fourteen
+    BOMs. A render of the published charts by hand, every object and not only the machine objects: for the
+    thirteen BOMs on 0.1.16 (0.10.1-rc.2 to 0.11.1) chart 0.1.19 renders the same objects, with that release's
+    values and with this build's; for 0.10.1-rc.1 (chart 0.1.15) the one difference is the node deletion timeout
+    of 0.1.16, which the run's check leaves out as before and no machine is replaced for.
+  - **`TestSandboxIsDark` and `TestSandboxRunIsDark` are gone on purpose.** `TestSandboxIsOffered` states the
+    opposite (this BOM names the chart after every other component of the cluster, both placements are taken on
+    it, every previous BOM is refused with the upgrade named), and `TestSandboxRunRefusedOnABOMWithoutTheChart`
+    keeps the run's refusal for a platform still on the BOM of 0.11.1. The tests of what a run builds, plans,
+    checks and refuses for sandboxes (#432, #436) no longer run against a synthetic BOM: they run against this
+    one.
+  - **Nothing of it ran on a lab**: Proxmox, ArgoCD, Cluster API, CAPMOX, Kamaji and the clusters are fakes in
+    these tests, and the charts are rendered, not installed. The release candidate's drill is the first run
+    ([Not verified on a lab yet](docs/managed-services.md#not-verified-on-a-lab-yet)).
+
+### Changed
+
+- **The built-in sandbox template images are those of the Actions build of 2026-11-23** (`deploy/templates/images.yaml`,
+  run 45167180286 of `sandbox-templates` on commit `57e85c5`; the commit of #443, carried here so that the checks run
+  on it). No file under `deploy/templates` or `cmd/mcp-gateway` changed between that commit and this one. On the
+  managed platform these digests are the sandbox provider's templates and the chart's prepull, pulled from ghcr.io,
+  and they move with a release and no other way; on the installer path the next `make upgrade` mirrors them
+  ([managed-sandbox.md](docs/managed-sandbox.md), section 6).
+
+- **The Docker Compose install pins PostgreSQL to one build, by digest**
+  (`postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73` in
+  `deploy/compose/compose.yaml`, before `postgres:17.12-alpine`). The publisher rebuilt the tag `17.12-alpine`
+  after 0.9.1 pinned it. `upgrade` pulls every image of the file, so the tag on a site's host moved to the new
+  build while Compose left the running container on the old one (seen on a production site at the upgrades to
+  0.11.0 and to 0.11.1: the container ran image `526f86d9...` while the host's tag named `f9cf3e1f...`). Whatever
+  recreated that container next, a changed line, a `down` and `up`, a restore on a new host, would have started
+  another build of the database without anyone having asked for it. The digest is the one the tag names on
+  2026-11-26 (the image index, so every architecture the tag has). The version stays in the line: it is what a
+  reader and Dependabot go by, and Dependabot now proposes a rebuild of the tag as a pull request
+  (`.github/dependabot.yml`). `test_the_database_image_is_pinned_by_digest` (`deploy/tests`) asks for the version
+  and a digest in that line and for the same line in the two places of `deploy/compose/README.md` that name it; it
+  fails on the line as it was. Left as they are: Traefik, Keycloak and its config CLI, pinned to a version
+  without a digest as before (a restart of those loses no state; they move by hand, with the chart), the
+  development `docker-compose.yml` at the repository root, and the app chart's CloudNativePG image.
+
+- **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.1.yaml`, sha256
+  `b04cdabce8ffd004309fbb2e34ffe1a9871648db103553b4badc5bd17be69172`, the file of the tag byte for byte). The
+  `v0.11.1` release commit left the BOM at `0.11.1`, and the release gate refuses only `-dev`. For an upgrade: a
+  platform installed by `v0.11.1` or moved to its BOM is not refused (`bom_unsupported`) under a later build while
+  the file is carried. Its pins were those of `main` until the sandbox pins above, so the plan from it now has
+  three changes: the release (record only), the platform's cluster chart (class chart) and the sandbox chart
+  (class added); no seed part, no machine replaced. `TestPreviousBOMsMoveCertManager` states that answer, and
+  `TestUpgradeRollsNoMachine` compares fourteen of the twenty-three previous BOMs with the BOM on `main`, none of
+  them rolling. No move to that BOM and no apply on such a platform was run on a lab.
+- **Fourteen dependency updates (November)**, the open Dependabot pull requests taken together. Go modules:
+  `aws-sdk-go-v2/service/s3` 1.116.0, `aws-sdk-go-v2/service/ecr` 1.69.0, `aws-sdk-go-v2/credentials` 1.21.3,
+  `golang.org/x/crypto` 0.59.0 (with `x/sys` 0.50.0 and `x/text` 0.44.0) and `golang.org/x/sync` 0.25.0; the module
+  minimum stays `go 1.26.0`. Customer console (`web/client`): `recharts` 3.11.0, `@tanstack/react-query` 5.108.2,
+  `@vitejs/plugin-react` 6.3.0 and `@axe-core/playwright` 4.14.0. Operator console (`web/admin`): `recharts` 3.11.0,
+  `@tanstack/react-query` 5.108.2, `react-router-dom` 7.18.6 and `lucide-react` 1.77.0. Workflows:
+  `oras-project/setup-oras` v2.0.4. What changes with them:
+  - **An `ssh-dss` public key is refused.** `x/crypto` 0.59.0 removed DSA from its `ssh` package, so a key pair
+    import and the SSH keys of a platform installation refuse such a key, where they accepted it before. The key
+    pair import answers 400 "ssh-dss (DSA) keys are no longer accepted: use an ed25519, ecdsa or rsa key"
+    (`TestKeypairImportRefusesDSA`, which generates a DSA key; the same test passes the key on `x/crypto` 0.58.0);
+    a platform installation answers that the entry "is not an SSH public key". OpenSSH itself no longer accepts
+    these keys.
+  - **`setup-oras` downloads the ORAS CLI without a token.** Since v2.0.4 the action sends the job token with the
+    download by default; the two workflows that publish and verify a VM artifact pass `token: ''`, and their tests
+    assert the whole step (`images/tests/test_vm_export_workflow.py`, `images/tests/test_vm_publish_workflow.py`).
+    The action runs on node24, which the hosted runners already forced on the node20 build of v1.2.4.
+  - **`@axe-core/playwright` 4.14.0 declares Node 22.12 or newer** (a development dependency of the customer
+    console: its accessibility specs). Builds and CI use Node 24.22.2.
+  - **`@vitejs/plugin-react` 6.3.0 in `web/client` needed `npm install --force`**: npm refuses it alone over an
+    optional peer that is not installed (`@rolldown/plugin-babel` 0.3 wants `@babel/core` 8, `shadcn` keeps 7). The
+    lockfile is the one Dependabot produced, and `web/admin` already had the same pair.
+  - **Not taken: `tailwind-merge` 3.7.1 in `web/admin`.** It keeps an earlier `leading-*` class when a font size
+    follows, so every card title that passes a text size renders at line-height 1 and the content under it moves up
+    8 px: 75 of the 202 screenshots of the operator console differed by more than 20000 pixels, and none of the
+    twenty sampled ones once this package was put back. The customer console would have stayed on 3.7.0.
+  - **Not taken: `@airwallex/components-sdk` 1.37.1 in `web/client`.** Since 1.37.0 the SDK loads its script from
+    `checkout.openpay.com` and `static.openpay.com` when the Airwallex host does not answer. That `openpay.com` is
+    Airwallex's own could not be established from public sources: its registrant is hidden behind a privacy
+    service, no Airwallex or OpenPay page names the domain (OpenPay, which Airwallex bought in 2025, publishes
+    under `getopenpay.com`), and the only source is the SDK's own changelog. A script that takes card data is not
+    loaded from such a host on that. The console stays on 1.36.0 until the owner has decided.
+  Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
+  pull request).
+
 ### Fixed
 
 - **A release that changed only the load balancer controller reached no cluster by itself.** The tenant's cluster
@@ -126,67 +234,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestScheduleDeletionRefusedWithoutDeletionJob` and the new leg of `TestAdminProjectDeletionLegs` (a real
   PostgreSQL); both fail with the two new checks taken out. Not run on a lab.
 
-### Changed
+- **A run no longer overwrites a provider's `config.sandbox` of another owner that names no pool**
+  (`internal/platform/admin/platform_sandbox.go`). Such a block (what is left of an installer's sandbox cluster, a
+  registry or an entry appliance) is inert for the sync, and it was replaced by the installation's own; the write
+  now refuses it like a block with a pool, and the run stops at `sandbox_refused`. Found in the review of #436.
 
-- **The Docker Compose install pins PostgreSQL to one build, by digest**
-  (`postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73` in
-  `deploy/compose/compose.yaml`, before `postgres:17.12-alpine`). The publisher rebuilt the tag `17.12-alpine`
-  after 0.9.1 pinned it. `upgrade` pulls every image of the file, so the tag on a site's host moved to the new
-  build while Compose left the running container on the old one (seen on a production site at the upgrades to
-  0.11.0 and to 0.11.1: the container ran image `526f86d9...` while the host's tag named `f9cf3e1f...`). Whatever
-  recreated that container next, a changed line, a `down` and `up`, a restore on a new host, would have started
-  another build of the database without anyone having asked for it. The digest is the one the tag names on
-  2026-11-26 (the image index, so every architecture the tag has). The version stays in the line: it is what a
-  reader and Dependabot go by, and Dependabot now proposes a rebuild of the tag as a pull request
-  (`.github/dependabot.yml`). `test_the_database_image_is_pinned_by_digest` (`deploy/tests`) asks for the version
-  and a digest in that line and for the same line in the two places of `deploy/compose/README.md` that name it; it
-  fails on the line as it was. Left as they are: Traefik, Keycloak and its config CLI, pinned to a version
-  without a digest as before (a restart of those loses no state; they move by hand, with the chart), the
-  development `docker-compose.yml` at the repository root, and the app chart's CloudNativePG image.
-
-- **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1`**
-  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.1.yaml`, sha256
-  `b04cdabce8ffd004309fbb2e34ffe1a9871648db103553b4badc5bd17be69172`, the file of the tag byte for byte). The
-  `v0.11.1` release commit left the BOM at `0.11.1`, and the release gate refuses only `-dev`. For an upgrade: a
-  platform installed by `v0.11.1` or moved to its BOM is not refused (`bom_unsupported`) under a later build while
-  the file is carried, and its pins are those of `main`, so the plan from it has one change, the release, record
-  only: no seed part, no machine replaced. `TestPreviousBOMsMoveCertManager` states that answer, and
-  `TestUpgradeRollsNoMachine` compares fourteen of the twenty-three previous BOMs with the BOM on `main`, none of
-  them rolling. No move to that BOM and no apply on such a platform was run on a lab.
-- **Fourteen dependency updates (November)**, the open Dependabot pull requests taken together. Go modules:
-  `aws-sdk-go-v2/service/s3` 1.116.0, `aws-sdk-go-v2/service/ecr` 1.69.0, `aws-sdk-go-v2/credentials` 1.21.3,
-  `golang.org/x/crypto` 0.59.0 (with `x/sys` 0.50.0 and `x/text` 0.44.0) and `golang.org/x/sync` 0.25.0; the module
-  minimum stays `go 1.26.0`. Customer console (`web/client`): `recharts` 3.11.0, `@tanstack/react-query` 5.108.2,
-  `@vitejs/plugin-react` 6.3.0 and `@axe-core/playwright` 4.14.0. Operator console (`web/admin`): `recharts` 3.11.0,
-  `@tanstack/react-query` 5.108.2, `react-router-dom` 7.18.6 and `lucide-react` 1.77.0. Workflows:
-  `oras-project/setup-oras` v2.0.4. What changes with them:
-  - **An `ssh-dss` public key is refused.** `x/crypto` 0.59.0 removed DSA from its `ssh` package, so a key pair
-    import and the SSH keys of a platform installation refuse such a key, where they accepted it before. The key
-    pair import answers 400 "ssh-dss (DSA) keys are no longer accepted: use an ed25519, ecdsa or rsa key"
-    (`TestKeypairImportRefusesDSA`, which generates a DSA key; the same test passes the key on `x/crypto` 0.58.0);
-    a platform installation answers that the entry "is not an SSH public key". OpenSSH itself no longer accepts
-    these keys.
-  - **`setup-oras` downloads the ORAS CLI without a token.** Since v2.0.4 the action sends the job token with the
-    download by default; the two workflows that publish and verify a VM artifact pass `token: ''`, and their tests
-    assert the whole step (`images/tests/test_vm_export_workflow.py`, `images/tests/test_vm_publish_workflow.py`).
-    The action runs on node24, which the hosted runners already forced on the node20 build of v1.2.4.
-  - **`@axe-core/playwright` 4.14.0 declares Node 22.12 or newer** (a development dependency of the customer
-    console: its accessibility specs). Builds and CI use Node 24.22.2.
-  - **`@vitejs/plugin-react` 6.3.0 in `web/client` needed `npm install --force`**: npm refuses it alone over an
-    optional peer that is not installed (`@rolldown/plugin-babel` 0.3 wants `@babel/core` 8, `shadcn` keeps 7). The
-    lockfile is the one Dependabot produced, and `web/admin` already had the same pair.
-  - **Not taken: `tailwind-merge` 3.7.1 in `web/admin`.** It keeps an earlier `leading-*` class when a font size
-    follows, so every card title that passes a text size renders at line-height 1 and the content under it moves up
-    8 px: 75 of the 202 screenshots of the operator console differed by more than 20000 pixels, and none of the
-    twenty sampled ones once this package was put back. The customer console would have stayed on 3.7.0.
-  - **Not taken: `@airwallex/components-sdk` 1.37.1 in `web/client`.** Since 1.37.0 the SDK loads its script from
-    `checkout.openpay.com` and `static.openpay.com` when the Airwallex host does not answer. That `openpay.com` is
-    Airwallex's own could not be established from public sources: its registrant is hidden behind a privacy
-    service, no Airwallex or OpenPay page names the domain (OpenPay, which Airwallex bought in 2025, publishes
-    under `getopenpay.com`), and the only source is the SDK's own changelog. A script that takes card data is not
-    loaded from such a host on that. The console stays on 1.36.0 until the owner has decided.
-  Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
-  pull request).
 
 ## [0.11.1] - 2026-11-26
 

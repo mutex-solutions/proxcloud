@@ -195,7 +195,7 @@ func TestApplyBuildsThePlatform(t *testing.T) {
 	run, in, _ := p.state.snapshot()
 	cur, _ := Current()
 	if run.State != RunSucceeded || in.Status.Phase != PhaseReady || in.Status.BOM == nil || in.Status.BOM.SHA256 != cur.SHA256 ||
-		len(in.Status.Components) != len(cur.Components) || !in.Status.Components[0].Managed {
+		len(in.Status.Components) != len(cur.For(in.Spec).Components) || !in.Status.Components[0].Managed {
 		t.Fatalf("run %s, status %+v", run.State, in.Status)
 	}
 	if !slices.Equal(p.seed.syncs, []string{"capi", "pc-platform-capi-tenant"}) {
