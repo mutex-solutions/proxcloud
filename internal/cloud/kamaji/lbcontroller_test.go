@@ -3,6 +3,7 @@ package kamaji
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -203,5 +204,152 @@ func TestLBModeReadBack(t *testing.T) {
 	delete(dig(app, "spec", "source", "helm", "valuesObject").(map[string]any), "loadBalancer")
 	if c := clusterData(app, nil, nil)["cluster"].(map[string]any); c["load_balancer"] != nil {
 		t.Fatalf("a cluster without a controller reads %v", c["load_balancer"])
+	}
+}
+
+// A release that changes only the load balancer controller reaches a cluster that is already on the provider's chart:
+// the cluster reads as behind (what the tenant's page and the operator's "Bump all" go by), a bump changes its
+// controller's image and nothing else of its Application, and a cluster that would not change is neither offered an
+// update nor applied. What is compared is what the Application carries; no cluster is asked. Lab drill of
+// v0.11.1-rc.3, step F: the controller stayed on the earlier candidate because the chart had not moved.
+func TestLBControllerUpdateOffer(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeAPI()
+	cfg := testCfg()
+	cfg.ChartVersion = "0.1.19"
+	cfg.LBControllerImage = "img:v2"
+	svc := NewWithAPI(api, cfg, "svc-1")
+	app := func(id string) map[string]any { return api.apps[cfg.ArgoNamespace+"/"+id] }
+	for id, image := range map[string]string{"pc-c-behind": "img:v1", "pc-c-current": "img:v2", "pc-c-plain": "", "pc-c-oldchart": "img:v1"} {
+		spec := testSpec()
+		spec.ID = id
+		if image != "" {
+			spec.Infra.LoadBalancer = &LBController{Image: image, GatewayURL: "https://192.0.2.7:8444", Default: true}
+		}
+		if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dig(app("pc-c-oldchart"), "spec", "source").(map[string]any)["targetRevision"] = "0.1.18"
+
+	// read is what each surface says of each cluster: the operator's row, and the tenant's cluster data.
+	read := func(svc *Service) (behindPin, imageBehind, offered map[string]bool) {
+		t.Helper()
+		behindPin, imageBehind, offered = map[string]bool{}, map[string]bool{}, map[string]bool{}
+		pins, err := svc.ListClusterPins(ctx)
+		if err != nil || len(pins) != 4 {
+			t.Fatalf("pins = %+v, %v", pins, err)
+		}
+		for _, p := range pins {
+			behindPin[p.ID], imageBehind[p.ID] = p.Behind(cfg.ChartVersion), p.LBControllerBehind
+		}
+		rows, err := svc.SyncProvider("az1", "p1").List(ctx)
+		if err != nil || len(rows) != 4 {
+			t.Fatalf("rows = %+v, %v", rows, err)
+		}
+		for _, r := range rows {
+			c := r.Data["cluster"].(map[string]any)
+			if v, said := c["lb_controller_update"]; said {
+				offered[r.ExternalID] = v.(bool)
+			}
+		}
+		return
+	}
+	want := func(what string, got, want map[string]bool) {
+		t.Helper()
+		for id, w := range want {
+			if got[id] != w {
+				t.Errorf("%s: %s = %v, want %v (%v)", what, id, got[id], w, got)
+			}
+		}
+	}
+	behindPin, imageBehind, offered := read(svc)
+	want("behind the pin", behindPin, map[string]bool{"pc-c-behind": true, "pc-c-current": false, "pc-c-plain": false, "pc-c-oldchart": true})
+	want("controller image behind", imageBehind, map[string]bool{"pc-c-behind": true, "pc-c-current": false, "pc-c-plain": false, "pc-c-oldchart": true})
+	// The tenant's data says it only where it is true: the row of a cluster that needs nothing is the row it had.
+	if len(offered) != 2 || !offered["pc-c-behind"] || !offered["pc-c-oldchart"] {
+		t.Errorf("lb_controller_update on %v, want pc-c-behind and pc-c-oldchart alone", offered)
+	}
+	// A portal without a controller image would write none: no cluster is behind by it.
+	noImage := cfg
+	noImage.LBControllerImage = ""
+	behindPin, imageBehind, offered = read(NewWithAPI(api, noImage, "svc-1"))
+	want("no portal image: behind the pin", behindPin, map[string]bool{"pc-c-behind": false, "pc-c-oldchart": true})
+	if len(offered) != 0 || imageBehind["pc-c-behind"] || imageBehind["pc-c-oldchart"] {
+		t.Errorf("no portal image: image behind %v, offered %v", imageBehind, offered)
+	}
+	// A provider without a chart pin: the tenant's action would answer its 400, so the tenant is offered nothing. The
+	// operator's row still says what it sees.
+	noPin := cfg
+	noPin.ChartVersion = ""
+	if _, imageBehind, offered = read(NewWithAPI(api, noPin, "svc-1")); len(offered) != 0 || !imageBehind["pc-c-behind"] {
+		t.Errorf("no chart pin: image behind %v, offered to the tenant %v, want none offered", imageBehind, offered)
+	}
+
+	// The bump of every cluster that is behind, as the operator's "Bump all" does it (the tenant's action is the same
+	// call for one cluster). Applies are counted by the object: an apply puts a new one in the fake.
+	before := map[string]string{}
+	objs := map[string]map[string]any{}
+	for _, id := range []string{"pc-c-behind", "pc-c-current", "pc-c-plain", "pc-c-oldchart"} {
+		before[id], objs[id] = mustJSON(app(id)), app(id)
+	}
+	pins, _ := svc.ListClusterPins(ctx)
+	for _, p := range pins {
+		if p.Behind(cfg.ChartVersion) {
+			if err := svc.SetChartVersion(ctx, p.ID, cfg.ChartVersion); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, id := range []string{"pc-c-current", "pc-c-plain"} {
+		if mustJSON(app(id)) != before[id] || reflect.ValueOf(app(id)).Pointer() != reflect.ValueOf(objs[id]).Pointer() {
+			t.Errorf("%s needed nothing and was applied", id)
+		}
+	}
+	// pc-c-behind: its controller's image, and not one other byte of its Application (chart, node groups, versions).
+	if got := strings.ReplaceAll(mustJSON(app("pc-c-behind")), `"image":"img:v2"`, `"image":"img:v1"`); got != before["pc-c-behind"] {
+		t.Errorf("the bump of a cluster on the pin changed more than the controller's image:\nbefore %s\nafter  %s", before["pc-c-behind"], mustJSON(app("pc-c-behind")))
+	}
+	if digStr(app("pc-c-behind"), "spec", "source", "helm", "valuesObject", "loadBalancer", "image") != "img:v2" ||
+		digStr(app("pc-c-oldchart"), "spec", "source", "targetRevision") != "0.1.19" ||
+		digStr(app("pc-c-oldchart"), "spec", "source", "helm", "valuesObject", "loadBalancer", "image") != "img:v2" {
+		t.Errorf("after the bump: %s\n%s", mustJSON(app("pc-c-behind")), mustJSON(app("pc-c-oldchart")))
+	}
+	behindPin, _, offered = read(svc)
+	if len(offered) != 0 || behindPin["pc-c-behind"] || behindPin["pc-c-oldchart"] {
+		t.Errorf("after the bump: behind %v, offered %v", behindPin, offered)
+	}
+}
+
+// What that bump rolls: the chart rendered with one controller image and with another differs in one line, the image
+// of the controller's Deployment (strategy Recreate: its one pod is replaced). No machine template, no control plane
+// and no add-on moves, so no machine is replaced.
+func TestChartControllerImageMovesTheControllerAlone(t *testing.T) {
+	values := lbGoldenValues(true) + "addons:\n  nginxGatewayFabric: {enabled: true}\n"
+	was := strings.Split(helmTemplate(t, "pc-c-abcd1234", "pc-p1", values), "\n")
+	now := strings.Split(helmTemplate(t, "pc-c-abcd1234", "pc-p1", strings.ReplaceAll(values, "proxcloud-api:v0.11.0", "proxcloud-api:v0.11.1")), "\n")
+	if len(was) != len(now) {
+		t.Fatalf("the render has %d lines with one image and %d with the other", len(was), len(now))
+	}
+	var moved []int
+	for i := range was {
+		if was[i] != now[i] {
+			moved = append(moved, i)
+		}
+	}
+	if len(moved) != 1 || strings.TrimSpace(now[moved[0]]) != `image: "ghcr.io/mutex-solutions/proxcloud-api:v0.11.1"` {
+		t.Fatalf("lines that moved: %v", moved)
+	}
+	// The line is the controller Deployment's: the last "kind:" and "name:" above it.
+	kind, name := "", ""
+	for i := moved[0]; i >= 0 && (kind == "" || name == ""); i-- {
+		if line := strings.TrimSpace(was[i]); kind == "" && strings.HasPrefix(was[i], "kind: ") {
+			kind = line
+		} else if name == "" && strings.HasPrefix(was[i], "  name: ") {
+			name = line
+		}
+	}
+	if kind != "kind: Deployment" || name != "name: pc-c-abcd1234-lb-controller" {
+		t.Fatalf("the image line belongs to %q %q", kind, name)
 	}
 }

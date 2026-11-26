@@ -120,3 +120,35 @@ test("a cluster without the controller keeps its private addresses and says so",
   await page.getByRole("button", { name: "Manage add-ons" }).click()
   await expect(page.getByRole("dialog").getByTestId("ngf-public-address")).toHaveCount(0)
 })
+
+// A release that changes only the load balancer controller (v0.11.1's candidates did): the cluster is on the
+// provider's platform version, so there is no version to compare, and the page offers the update all the same and
+// says what it changes. The mock's __mockLBControllerUpdate stands for the server's lb_controller_update.
+test("a cluster on the platform's version is offered the update of its load balancer controller alone", async ({ page }) => {
+  await page.goto(`${SITE}/kubernetes/res-pc-c-healthy`)
+  await expect(page.getByTestId("k8s-lb")).toBeVisible()
+  await expect(page.getByTestId("k8s-platform-update")).toHaveCount(0)
+
+  await page.addInitScript(() => {
+    ;(globalThis as { __mockLBControllerUpdate?: boolean }).__mockLBControllerUpdate = true
+  })
+  await page.goto(`${SITE}/kubernetes/res-pc-c-healthy`)
+  const offer = page.getByTestId("k8s-platform-update")
+  await expect(offer).toContainText("The update changes the load balancer controller only: no machine is replaced.")
+  // No version moves: the offer names none.
+  await expect(offer).not.toContainText("→")
+  // A cluster without the controller is offered nothing for it.
+  await page.goto(`${SITE}/kubernetes/res-pc-c-stuck`)
+  await expect(page.getByRole("button", { name: "Delete" })).toBeVisible()
+  await expect(page.getByTestId("k8s-platform-update")).toHaveCount(0)
+
+  await page.goto(`${SITE}/kubernetes/res-pc-c-healthy`)
+  await offer.getByRole("button", { name: "Apply platform update" }).click()
+  const dialog = page.getByRole("dialog")
+  await expect(dialog).toContainText("Updates the load balancer controller only: no machine is replaced.")
+  await expect(dialog).toContainText("the addresses that are served keep answering")
+  await expect(dialog).not.toContainText("worker nodes are replaced")
+  await dialog.getByRole("button", { name: "Apply update" }).click()
+  await expect(page.getByText("Platform update started")).toBeVisible()
+  await expect(page.getByTestId("k8s-platform-update")).toHaveCount(0)
+})

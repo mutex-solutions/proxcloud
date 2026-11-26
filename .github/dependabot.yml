@@ -28,8 +28,9 @@ updates:
       react:
         patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
 
-  # Docker Compose install: PostgreSQL alone. It is pinned to a minor release so that an upgrade does not
-  # restart the database unasked; a new major needs a dump and restore. Traefik, Keycloak and its config CLI
+  # Docker Compose install: PostgreSQL alone. It is pinned to a minor release and to its digest so that an upgrade
+  # does not restart the database unasked: a rebuild of the tag arrives as a pull request here, with the README's two
+  # mentions to move by hand (the test names them). A new major needs a dump and restore. Traefik, Keycloak and its config CLI
   # move by hand, together with the chart (deploy/tests/test_compose_production.py compares them).
   - package-ecosystem: "docker-compose"
     directory: "/deploy/compose"

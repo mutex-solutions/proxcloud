@@ -142,6 +142,7 @@ func (h *Handler) pveCreateLBPair(w http.ResponseWriter, r *http.Request, u *use
 		return
 	}
 	lb.VIPs, lb.PublicIP = []string{vip.IP}, vip.IP
+	h.lbOwnAddressRows(ctx, es, proj, lb)
 	if err := h.lbSave(ctx, row, lb); err != nil {
 		h.fail(w, err)
 		return
