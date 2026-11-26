@@ -28,6 +28,32 @@ whole state again later. The count is per API process, so two replicas take twic
 database is the step after, if that shows.
 
 **Diagrams updated:** none (no element of C1 to C3 moves). [c4-code.md](c4-code.md): the `lbgw.Handler` row.
+## 2026-11-26: PR #494, sandbox-proxy gains a function mode (off: nothing sets `FUNCTION_DOMAIN`)
+
+**What changed**
+
+- Component `Sandbox proxy` (`cmd/sandbox-proxy`, `internal/sandboxproxy/fn.go`, new): behaviour added behind an
+  environment variable. With `FUNCTION_DOMAIN` the same process also routes `<name>-<6 hex>.<domain>` to a ready pod
+  of a function's Deployment (`WithFunctions` in `handler.go` in front of the unchanged sandbox handler,
+  `functionHost` in `target.go` as the only rule that sends a request there). It reads the cluster only: one list of
+  `apps/v1` Deployments carrying `proxcloud.io/function-host`, kept 2 s (`K8sFnLookup`), and the pods of one
+  function in its `fn-*` namespace (`K8sFnPods`).
+- New relation, proxy side only: `sandbox-proxy` to the portal's function routes, `POST .../internal/functions/{id}/wake`
+  and `POST .../internal/functions/activity`, with `PROXCLOUD_FUNCTION_WAKE_TOKEN`. The routes do not exist in the
+  portal yet: Planned in the trust table.
+- No container, chart object, route, collection or job is added, and the sandbox chart renders as before.
+
+**Why**
+
+- Serverless functions (v0.13.0) are served on the sandbox proxy's address under the sandbox domain, one proxy and
+  one certificate, and scale to zero: the proxy is where a request for a sleeping function is held and where
+  traffic is seen. The proxy ends TLS and is reachable by whoever reaches its address, so the mode is built for an
+  edge: no lookup per made-up name, a bound on held requests, a wake token apart from the sandbox one (filling the
+  sandbox token would lift a guard of sandbox auto-resume), and no client header taken for the client's address.
+
+**Diagrams updated:** c3-components.md (C3e: the `sandbox-proxy` node and the `Sandbox proxy` row), c2-containers.md
+(trust boundaries: the row for the function routes, Planned).
+
 ## 2026-11-26: the load balancer controller steps down on `413` as on `400`, and sends a short keep-address value of a Service being deleted (#487)
 
 **What changed:** no component, container, listener, route or wire field. Two behaviours of `cmd/lb-controller`,
