@@ -1015,6 +1015,89 @@ func TestPlatformRegisterAndDisable(t *testing.T) {
 	}
 }
 
+// TestPlatformFunctionWakeToken runs the write of a platform's function wake token against PostgreSQL: the token is on
+// the installation's sandbox provider row under its own key, sealed, and the provider as the sandbox service reads it
+// still has no sandbox wake token, so autoResume stays refused; a second write replaces it, "" takes it away, and a
+// row that is not that installation's sandbox provider is ErrProviderConflict and stays as it was.
+func TestPlatformFunctionWakeToken(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	enc := textcrypt.New("test-key")
+	repo := admin.NewRepo(db)
+	esSvc := externalservice.NewService(externalservice.NewRepo(db), enc)
+	h := admin.NewHandler(repo, nil, nil, nil, nil, nil, nil, nil, audit.NewService(audit.NewRepo(db), slog.Default()), esSvc, "", "", "")
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-pve", "name": "lab", "type": "CLOUD", "status": "PUBLIC", "config": pgdoc.M{"provider": "proxmox", "region": "lab"}})
+	cur, err := platformlife.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := platformlife.RenderInput{ID: "pi-1", Name: "lab", Region: "lab", RegionName: "Lab", PVEAPIURL: "https://10.200.200.2:8006",
+		Sandbox: &platformlife.RenderSandbox{Mode: platformlife.SandboxShared, Domain: "sbx.example.org", ProxyAddress: "10.200.200.210", NodeRange: "10.200.200.64/28"}}
+	body, err := platformlife.SandboxProviderBody(render, "svc-pve", "kubeconfig-0123456789")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := h.PlatformRegister(ctx, body)
+	if err != nil || id == "" {
+		t.Fatalf("the sandbox provider: %q %v", id, err)
+	}
+	k8s, _ := platformlife.ProviderBodies(cur.BOM, render, "kubeconfig-0123456789")
+	other, err := h.PlatformRegister(ctx, k8s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := func(id string) map[string]any {
+		t.Helper()
+		rows, err := repo.ListRaw(ctx, "externalService")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows {
+			if r["_id"] == id {
+				s, _ := r["secret"].(map[string]any)
+				return s
+			}
+		}
+		t.Fatalf("no row %s", id)
+		return nil
+	}
+	in := &platformlife.Installation{ID: "pi-1"}
+	for _, token := range []string{"function-wake-token-one-0123456789", "function-wake-token-two-0123456789"} {
+		if err := h.PlatformFunctionWakeToken(ctx, in, id, token); err != nil {
+			t.Fatal(err)
+		}
+		s := secret(id)
+		stored, _ := s["functionWakeToken"].(string)
+		if stored == "" || strings.Contains(stored, token) || enc.Decrypt(stored) != token || s["proxyWakeToken"] != nil || enc.Decrypt(s["kubeconfig"].(string)) != "kubeconfig-0123456789" {
+			t.Fatalf("the row's secret after %s: keys %v", token[:23], s)
+		}
+	}
+	es, err := esSvc.Get(ctx, id)
+	if err != nil || es == nil || !es.IsSandbox() || es.SandboxConfig().ProxyWakeToken != "" {
+		t.Fatalf("the provider as the sandbox service reads it has a sandbox wake token: %v", err)
+	}
+	// Not the installation's sandbox provider: another installation's call, another provider of the same one, no row.
+	for name, call := range map[string]func() error{
+		"another installation": func() error {
+			return h.PlatformFunctionWakeToken(ctx, &platformlife.Installation{ID: "pi-2"}, id, "x-0123456789")
+		},
+		"its Kubernetes provider": func() error { return h.PlatformFunctionWakeToken(ctx, in, other, "x-0123456789") },
+	} {
+		if err := call(); !errors.Is(err, platformlife.ErrProviderConflict) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if err := h.PlatformFunctionWakeToken(ctx, in, "svc-none", "x-0123456789"); err == nil {
+		t.Error("a provider that does not exist took the token")
+	}
+	if s := secret(id); enc.Decrypt(s["functionWakeToken"].(string)) != "function-wake-token-two-0123456789" || secret(other)["functionWakeToken"] != nil {
+		t.Fatalf("a refused write changed a row: %v %v", s, secret(other))
+	}
+	if err := h.PlatformFunctionWakeToken(ctx, in, id, ""); err != nil || secret(id)["functionWakeToken"] != nil || secret(id)["kubeconfig"] == nil {
+		t.Fatalf("taking it away: %v %v", err, secret(id))
+	}
+}
+
 // TestPlatformClusterKubeconfig drives GET …/platform-kubeconfig against PostgreSQL with the seed and the platform
 // cluster on fakes: SUPPORT is refused before anything is asked of a cluster; ADMIN gets a kubeconfig whose token is the
 // one-hour token of the break-glass account, not the admin credential the seed holds; the audit log gets one

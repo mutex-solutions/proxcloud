@@ -4,6 +4,34 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-27: PR #PRNUM, a platform run builds the function side of its sandboxes (off: no BOM pins the chart)
+
+**What changed:** no new container or component. Components "Platform installations" and "Platform runs" gain
+`internal/platformlife/sandbox_functions.go` (new):
+
+- `spec.sandbox.functions {enabled, portalURL, portalCA}` and `status.sandbox.functions {portalURL, tokenVersion}`
+  on the installation; `functionWake {token, version}` in `platformSecret`, the token sealed.
+- Platform run to the cluster that runs the sandbox chart: one more Secret, `sandbox-system/sandbox-proxy-wake`
+  (the functions' wake token), written before the chart's values carry `functions`, and deleted when functions are
+  switched off.
+- Platform run to the provider rows: `secret.functionWakeToken` of the sandbox provider
+  (`admin.PlatformFunctionWakeToken`, through `Runner.FunctionWakeToken`), and with placement `separate`
+  `config.sandbox.portal {address, port}` of the Proxmox provider, which the provider sync already reads for the
+  fence and the isolation rules.
+- Platform run to the functions API, two calls behind `Runner.FunctionsExist` and `Runner.EndFunctions` (whether the
+  sandbox provider holds a function record; end every running interval in the records before a cluster is
+  deleted). Nothing implements them in this build: a run that needs one refuses.
+- `plan.go`: the row of a feature component's chart move is made per installation (`featureRows`), and the plan of
+  the settings gains the row `sandbox-functions`.
+
+**Why:** functions run on the sandbox machines behind sandbox-proxy, which must reach the portal with a token of its
+own to wake a function and to report activity. On the managed platform nothing wrote a wake URL, a token or a path
+through the fence. The token is a second one because the sandbox wake token staying empty is what keeps autoResume
+refused there.
+
+**Diagrams updated:** none (no element of C1 to C3 is added; the relations above are between existing elements).
+`c3-components.md`: the file lists of the two components.
+
 ## 2026-11-26: an appliance that joins waits for a first appliance that refused to be told of it (review of #446)
 
 **What changed:** no component, container, wire field, file on an appliance or relation. One condition of one pass.

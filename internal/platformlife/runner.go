@@ -88,6 +88,20 @@ type Runner struct {
 	// (SandboxSite), or takes it away (a nil Config). ErrProviderConflict when the provider holds a sandbox pool or a
 	// sandbox network that is not this installation's. The admin handler implements it. Nil in tests: nothing is written.
 	SandboxSite func(ctx context.Context, in *Installation, site *SandboxSite) error
+	// The three calls a run makes about functions (sandbox_functions.go); the portal's function records are not this
+	// package's. providerID is the installation's sandbox provider.
+	//
+	// FunctionsExist reports whether the provider holds a function record: functions are not taken away from sandboxes
+	// that stay while it does. EndFunctions ends every running interval of the provider's functions in the records,
+	// with or without a cluster that answers, before a run deletes their cluster or their objects; the records stay.
+	// A run that needs one of the two and finds it nil refuses and changes nothing.
+	//
+	// FunctionWakeToken stores token as secret.functionWakeToken of the provider, sealed ("" takes it away), and never
+	// touches secret.proxyWakeToken. ErrProviderConflict when the row is not the installation's sandbox provider. The
+	// admin handler implements it. Nil in tests: nothing is written.
+	FunctionsExist    func(ctx context.Context, providerID string) (bool, error)
+	EndFunctions      func(ctx context.Context, providerID string) error
+	FunctionWakeToken func(ctx context.Context, in *Installation, providerID, token string) error
 	// Attach applies an attach choice (AttachAll, AttachNew, AttachNone) to one provider of the installation: the
 	// attach policy, and for AttachAll a bulk attach of every project. done=false with a note when it could not be
 	// applied yet (the provider is disabled); the register stage then tries again at the next apply. Nil: no choice is
@@ -635,6 +649,9 @@ func (x *acq) secrets() []string {
 		add(sec.SeedKubeconfig.Token)
 	}
 	add(sec.SandboxTLSKey)
+	if sec.FunctionWake != nil {
+		add(sec.FunctionWake.Token)
+	}
 	for _, t := range []*TokenCredential{sec.CAPI, sec.CSI, sec.Sandbox} {
 		if t != nil {
 			add(t.Secret)

@@ -121,3 +121,95 @@ func TestPlatformSandboxProviderNeedsTheScheduler(t *testing.T) {
 		t.Fatalf("live with the scheduler on: %+v", herr)
 	}
 }
+
+// The wake token of a platform's functions on its sandbox provider: stored under its own key, taken away by "", and
+// never on a row that is not that installation's sandbox provider. The sandbox wake token is not touched: the provider
+// read by the sandbox service still has none, which keeps autoResume refused.
+func TestSetFunctionWakeToken(t *testing.T) {
+	seal := func(secret pgdoc.M, v string) { secret["functionWakeToken"] = "sealed(" + v + ")" }
+	doc := pgdoc.M{"_id": "svc-sandbox", "type": "CLOUD", "config": map[string]any{"provider": "sandbox", platformlife.ProviderMarker: "pi-1", "sandbox": map[string]any{"mode": "shared"}},
+		"secret": map[string]any{"kubeconfig": "sealed-kubeconfig"}}
+	if !setFunctionWakeToken(doc, "pi-1", "TOKEN", seal) {
+		t.Fatal("the installation's own sandbox provider was refused")
+	}
+	secret := doc["secret"].(map[string]any)
+	if len(secret) != 2 || secret["functionWakeToken"] != "sealed(TOKEN)" || secret["kubeconfig"] != "sealed-kubeconfig" {
+		t.Fatalf("secret keys %v", secret)
+	}
+	es := &externalservice.ExternalService{Type: externalservice.TypeCloud, Config: doc["config"].(map[string]any), Secret: map[string]any{"kubeconfig": "KUBECONFIG", "functionWakeToken": "TOKEN"}}
+	if cfg := es.SandboxConfig(); cfg.ProxyWakeToken != "" {
+		t.Fatal("the functions' token became the sandbox wake token: autoResume would no longer be refused")
+	}
+	if !setFunctionWakeToken(doc, "pi-1", "", seal) || len(secret) != 1 || secret["kubeconfig"] != "sealed-kubeconfig" {
+		t.Fatalf("taking it away: %v", secret)
+	}
+	for name, other := range map[string]pgdoc.M{
+		"another installation's": {"config": map[string]any{"provider": "sandbox", platformlife.ProviderMarker: "pi-2"}},
+		"the installer's":        {"config": map[string]any{"provider": "sandbox"}},
+		"a Kubernetes provider":  {"config": map[string]any{"provider": "kamaji", platformlife.ProviderMarker: "pi-1"}},
+	} {
+		if setFunctionWakeToken(other, "pi-1", "TOKEN", seal) || other["secret"] != nil {
+			t.Errorf("%s provider took the token: %v", name, other)
+		}
+	}
+}
+
+// Functions a run built are not switched off at the save while their provider holds a function, nor by a build that
+// cannot read the records. Sandboxes switched off as a whole, and functions never built, are not this refusal's.
+func TestFunctionsOffRefused(t *testing.T) {
+	old := &platformlife.Installation{}
+	old.Spec.Sandbox = &platformlife.SandboxSpec{Placement: platformlife.SandboxShared, Functions: &platformlife.SandboxFunctions{Enabled: true, PortalURL: "https://portal.example.org"}}
+	old.Status.Sandbox = &platformlife.SandboxStatus{Placement: platformlife.SandboxShared, Functions: &platformlife.FunctionsStatus{PortalURL: "https://portal.example.org", TokenVersion: "pr-1"}}
+	old.Status.Providers = &platformlife.ProviderIDs{Sandbox: "svc-sandbox"}
+	off := &platformlife.Installation{}
+	off.Spec.Sandbox = &platformlife.SandboxSpec{Placement: platformlife.SandboxShared, Functions: &platformlife.SandboxFunctions{}}
+	h := &Handler{}
+	if why := h.functionsOffRefused(context.Background(), old, off); !strings.Contains(why, "cannot read the function records") {
+		t.Fatalf("without a read of the records: %q", why)
+	}
+	exist, asked := true, ""
+	h.SetPlatformFunctions(func(_ context.Context, id string) (bool, error) { asked = id; return exist, nil })
+	if why := h.functionsOffRefused(context.Background(), old, off); why != platformlife.FunctionsOffBlocked || asked != "svc-sandbox" {
+		t.Fatalf("with a function: %q (asked %q)", why, asked)
+	}
+	exist = false
+	if why := h.functionsOffRefused(context.Background(), old, off); why != "" {
+		t.Fatalf("no function left: %q", why)
+	}
+	h.SetPlatformFunctions(func(context.Context, string) (bool, error) { return false, errors.New("no answer") })
+	if why := h.functionsOffRefused(context.Background(), old, off); !strings.Contains(why, "could not be read") {
+		t.Fatalf("a failed read: %q", why)
+	}
+	h.SetPlatformFunctions(func(context.Context, string) (bool, error) { t.Fatal("asked"); return true, nil })
+	gone := &platformlife.Installation{}
+	gone.Spec.Sandbox = &platformlife.SandboxSpec{Placement: platformlife.SandboxOff}
+	never := &platformlife.Installation{Spec: old.Spec}
+	never.Status.Sandbox = &platformlife.SandboxStatus{Placement: platformlife.SandboxShared}
+	for name, pair := range map[string][2]*platformlife.Installation{"functions stay": {old, old}, "sandboxes off as a whole": {old, gone}, "never built": {never, off}} {
+		if why := h.functionsOffRefused(context.Background(), pair[0], pair[1]); why != "" {
+			t.Errorf("%s: %q", name, why)
+		}
+	}
+}
+
+// Functions that name no portal URL get the API's own at the save, and only they do.
+func TestDefaultPortalURL(t *testing.T) {
+	spec := func(fn *platformlife.SandboxFunctions) *platformlife.Spec {
+		return &platformlife.Spec{Sandbox: &platformlife.SandboxSpec{Placement: platformlife.SandboxShared, Functions: fn}}
+	}
+	for name, tc := range map[string]struct {
+		fn   *platformlife.SandboxFunctions
+		want string
+	}{
+		"enabled, none named": {&platformlife.SandboxFunctions{Enabled: true}, "https://api.example.org"},
+		"enabled, one named":  {&platformlife.SandboxFunctions{Enabled: true, PortalURL: "https://10.0.0.5"}, "https://10.0.0.5"},
+		"not enabled":         {&platformlife.SandboxFunctions{}, ""},
+	} {
+		s := spec(tc.fn)
+		if defaultPortalURL(s, "https://api.example.org"); s.Sandbox.Functions.PortalURL != tc.want {
+			t.Errorf("%s: %q", name, s.Sandbox.Functions.PortalURL)
+		}
+	}
+	defaultPortalURL(spec(nil), "https://api.example.org")
+	defaultPortalURL(&platformlife.Spec{}, "https://api.example.org")
+}

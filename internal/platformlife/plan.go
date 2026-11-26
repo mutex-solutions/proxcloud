@@ -295,7 +295,7 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 	case !ok || (want != cur.SHA256 && (pending == nil || want != pending.SHA256)):
 		return Embedded{}, nil, ErrBadTarget
 	}
-	u := &Upgrade{From: refOf(from), To: refOf(to), Changes: Classify(from.BOM, to.BOM), Blocking: []string{}}
+	u := &Upgrade{From: refOf(from), To: refOf(to), Changes: in.featureRows(Classify(from.BOM, to.BOM), to.BOM), Blocking: []string{}}
 	if strings.HasSuffix(to.Release, "-dev") {
 		u.Blocking = append(u.Blocking, fmt.Sprintf("release %s is a development BOM: no later build embeds it, so a platform moved to it could be applied by "+
 			"this build alone. Only the BOM of a release is a target (docs/ci-release.md, \"Upgrade drill builds\")", to.Release))
@@ -313,7 +313,8 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 	// platform's machines is refused while it exists or is asked for: it would leave pc-sandbox on the version it left.
 	if built := in.Status.Sandbox; machines && (in.Spec.sandboxMode() == SandboxSeparate || (built != nil && built.Placement == SandboxSeparate)) {
 		u.Blocking = append(u.Blocking, "spec.sandbox: "+later+"the sandbox cluster "+SandboxClusterName+" is not upgraded in place, and this upgrade changes the Kubernetes version or the node image. "+
-			"Set spec.sandbox.placement off and apply (every sandbox ends, the cluster and its machines are deleted), make this upgrade, then set placement separate again: the cluster is built new on the new version")
+			"Set spec.sandbox.placement off and apply (every sandbox ends, the cluster and its machines are deleted), make this upgrade, then set placement separate again: the cluster is built new on the new version."+
+			in.functionsStop())
 	}
 	// A roll renders every unit it has not reached at the version and the templates the platform left: a group that
 	// does not exist yet has neither. The group is added by an apply before the upgrade or after it.

@@ -84,11 +84,28 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 		if err := x.sandboxOffAllowed(ctx); err != nil {
 			return err
 		}
+		// Before the cluster goes: no function may stay recorded as running on it.
+		if err := x.endFunctions(ctx); err != nil {
+			return err
+		}
 		return x.sandboxAppsGone(ctx, seed, built.Placement)
 	case built != nil && built.Placement != want:
 		return permanent(CodeSandboxRefused, "A run built sandboxes with placement %s and the settings say %s. Nothing was changed. Set spec.sandbox.placement off and apply, then set %s.", built.Placement, want, want)
 	case x.full.Feature(FeatureSandbox) == nil:
 		return permanent(CodeSandboxRefused, "The BOM of release %s has no sandbox chart, so this run builds no sandboxes. Nothing was changed: leave spec.sandbox out or set placement off.", x.full.Release)
+	}
+	// A record written past the save (which refuses both): functions under a chart without them, or a portal URL that
+	// is none. Before anything is built, as for the chart itself.
+	if why := functionsChartProblem(sp, x.full); why != "" {
+		return permanent(CodeSandboxRefused, "%s. Nothing was changed.", why)
+	}
+	if fn := sp.functions(); fn != nil {
+		if p, err := parsePortal(fn.PortalURL); err != nil || (want == SandboxSeparate && !p.addr.IsValid()) {
+			return permanent(CodeSandboxRefused, "spec.sandbox.functions.portalURL %q is not the portal's URL as sandbox-proxy reaches it (with placement separate: an IPv4 address). Nothing was changed.", fn.PortalURL)
+		}
+	}
+	if err := x.functionsOff(ctx); err != nil {
+		return err
 	}
 	if err := x.check(ctx); err != nil {
 		return err
@@ -102,7 +119,7 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 	// has placed, and the capacity row must fail for them again (sandboxGrowth).
 	next := SandboxStatus{Placement: want, NodeRange: sb.NodeRange, ProxyAddress: sb.ProxyAddress, Count: sb.Count, Nodes: slices.Clone(sb.Nodes)}
 	if built != nil {
-		next.ChartVersion, next.Certificate, next.BuiltAt = built.ChartVersion, built.Certificate, built.BuiltAt
+		next.ChartVersion, next.Certificate, next.BuiltAt, next.Functions = built.ChartVersion, built.Certificate, built.BuiltAt, built.Functions
 	}
 	if want == SandboxSeparate {
 		if next.SystemCount, next.SystemNodes = sb.System.Count, slices.Clone(sb.System.Nodes); next.ChartVersion == "" {
@@ -245,6 +262,12 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 	if err := (&pve.Service{C: x.portal}).RemoveSandboxFirewall(ctx, pve.SandboxPool); err != nil {
 		return classify(CodeSandboxAccessFailed, err)
 	}
+	// The provider stays, disabled: it must not go on taking the wake token of a cluster that is gone.
+	if built.Functions != nil || x.sec.FunctionWake != nil {
+		if err := x.providerWakeToken(ctx, sandboxProviderID(x.in), ""); err != nil {
+			return err
+		}
+	}
 	if built.Placement == SandboxShared {
 		err = x.portal.SetSandboxPoolAccess(ctx, true)
 	} else {
@@ -257,7 +280,7 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 		return asAccess(err)
 	}
 	return x.save(ctx, func(_ *Run, in *Installation, sec *Secrets) {
-		in.Status.Sandbox, sec.Sandbox, sec.SandboxTLSCert, sec.SandboxTLSKey = nil, nil, "", ""
+		in.Status.Sandbox, sec.Sandbox, sec.SandboxTLSCert, sec.SandboxTLSKey, sec.FunctionWake = nil, nil, "", "", nil
 	})
 }
 
@@ -390,6 +413,17 @@ func (x *acq) sandboxCluster(ctx context.Context, seed, wl *kamajik8s.Client) er
 	}
 	if err := x.applySandboxTLS(ctx, sc); err != nil {
 		return sandboxStarting(err)
+	}
+	// The wake token of functions inside pc-sandbox, then the Application again when that changed its render: the
+	// functions block and the token's version are in addons.sandbox.values only once the Secret is there, and the
+	// add-on controller upgrades the release in place.
+	if err := x.functionWake(ctx, sc); err != nil {
+		return sandboxStarting(err)
+	}
+	if again, err := SandboxApplication(x.full, x.renderInput()); err == nil && !reflect.DeepEqual(app, again) {
+		if err := seed.ApplyApplication(ctx, again); err != nil {
+			return classify(CodeComponentUnhealthy, err)
+		}
 	}
 	machines, err := wl.ListCRs(ctx, capiGroup, capiVersion, "machines", SandboxClusterName, "")
 	if err != nil {

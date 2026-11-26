@@ -317,6 +317,7 @@ func (h *Handler) checked(r *http.Request, in *platformlife.Installation, preset
 	if in.Spec.Storage.Import == "" {
 		in.Spec.Storage.Import = es.PVEImportStorage()
 	}
+	defaultPortalURL(&in.Spec, h.apiBaseURL)
 	in.Normalize()
 	var problems []string
 	if err := in.Validate(); err != nil {
@@ -408,6 +409,9 @@ func (h *Handler) platformUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if why := h.sandboxOffRefused(r.Context(), &old, &next); why != "" {
 			return nil, &invalidInstallation{status: http.StatusConflict, code: "sandbox_provider_live", msg: why, problems: []string{"spec.sandbox.placement"}}
+		}
+		if why := h.functionsOffRefused(r.Context(), &old, &next); why != "" {
+			return nil, &invalidInstallation{status: http.StatusConflict, code: "functions_exist", msg: why, problems: []string{"spec.sandbox.functions.enabled"}}
 		}
 		if err := h.checked(r, &next, req.Preset, &old.Spec); err != nil {
 			return nil, err

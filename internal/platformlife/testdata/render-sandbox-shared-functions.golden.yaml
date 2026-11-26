@@ -1,0 +1,71 @@
+application:
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    labels:
+      app.kubernetes.io/managed-by: proxcloud-platform
+      proxcloud.io/bom-release: 0.0.0-synthetic
+      proxcloud.io/component: sandbox
+      proxcloud.io/platform-installation: pi-0123abcd
+    name: pc-platform-sandbox
+    namespace: argocd
+  spec:
+    destination:
+      namespace: sandbox-system
+      server: https://192.0.2.10:6443
+    project: proxcloud-platform
+    source:
+      chart: proxcloud-sandbox
+      helm:
+        releaseName: sandbox
+        valuesObject:
+          functions:
+            enabled: true
+            portalCA: |
+              -----BEGIN CERTIFICATE-----
+              MIIB
+              -----END CERTIFICATE-----
+            wakeTokenVersion: pr-0123456789abcdef
+            wakeURL: https://portal.example.org/api/v1/internal/functions
+          guardrail:
+            extraDeny:
+              - 192.0.2.0/24
+          mode: shared
+          prepull:
+            - registry.example/sandbox-base:test@sha256:0000000000000000000000000000000000000000000000000000000000000001
+            - registry.example/sandbox-code-interpreter:test@sha256:0000000000000000000000000000000000000000000000000000000000000002
+          proxy:
+            address: 192.0.2.245
+            domain: sbx.example.org
+      repoURL: ghcr.io/mutex-solutions/charts
+      targetRevision: 0.2.0
+    syncPolicy:
+      automated:
+        prune: true
+        selfHeal: true
+      retry:
+        backoff:
+          duration: 30s
+          factor: 2
+          maxDuration: 5m
+        limit: 10
+      syncOptions:
+        - CreateNamespace=true
+        - ServerSideApply=true
+site:
+  bridge: vmbr1
+  deny:
+    - 192.0.2.0/24
+  dns:
+    - 192.0.2.53
+  kubeletSources:
+    - 192.0.2.20-192.0.2.39
+  mode: shared
+  nodes:
+    - 192.0.2.64/28
+  peers:
+    - 192.0.2.20-192.0.2.39
+  platformInstallationId: pi-0123abcd
+  pool: proxcloud-sbx
+  unsecuredMinAgeMinutes: 20
+  vlan: 0

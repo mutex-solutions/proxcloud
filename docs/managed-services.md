@@ -1279,6 +1279,111 @@ cluster's Services only); the scheduler split into sandbox jobs and charging.
 6. Out of this release, for the one that spreads the control plane: one template on a shared
    store, `allowedNodes` of three nodes and `storage` a shared store, and etcd's write times there.
 
+#### Functions on the sandbox machines
+
+**Not offered by this build.** Functions need sandbox chart 0.2.0, and every BOM this build embeds
+pins 0.1.0 or none: the save refuses `spec.sandbox.functions` with `enabled: true` ("pins sandbox
+chart 0.1.0, which has no functions"), the Check's `spec` row says the same, and a run that finds
+the block in a record all the same stops in stage `cluster` with `sandbox_refused` before it writes
+anything. What follows is what a run builds once a release pins that chart; it has run against
+fakes only.
+
+Functions are serverless functions from container images: one Deployment per function, under
+gVisor, on the machines sandboxes run on (`shared`: the node group `sandbox` of the platform
+cluster; `separate`: `pc-sandbox`). They answer at `https://<name>-<6 hex>.<domain>` on the proxy
+address, under the sandboxes' certificate, through the same `sandbox-proxy`. There is no second
+cluster, address, certificate or DNS name.
+
+**The settings.** `spec.sandbox.functions`:
+
+| Key | Meaning |
+|---|---|
+| `enabled` | Build the function side. `false`, or no block, builds none of it. |
+| `portalURL` | The portal's API as `sandbox-proxy` reaches it, `https://host[:port]`. Empty: the save fills in the API's own base URL (`PROXCLOUD_SELF_API_BASE_URL`) and stores it. Plain `http` is refused: the proxy sends a bearer token there. With `separate` the host is an IPv4 address outside `nodeRange`, the cluster's `metallbRange` and the proxy address. |
+| `portalCA` | PEM certificates the proxy trusts the portal by, for a portal whose certificate no public authority signed. Public data. With `separate` the portal's certificate must name the address in `portalURL`. |
+
+A PUT whose `spec.sandbox` names no `functions` keeps the stored block, so a console from before
+functions does not switch them off; `enabled: false` is the explicit off.
+
+**What a run adds to the sandboxes it builds.**
+
+1. *The wake token.* 32 random bytes. The run keeps it sealed with the installation's other
+   secrets, writes it as Secret `sandbox-system/sandbox-proxy-wake` (key
+   `PROXCLOUD_FUNCTION_WAKE_TOKEN`) on the cluster that runs the sandbox chart, and in stage
+   `register` stores it as `secret.functionWakeToken` of the sandbox provider. It is in no
+   Application, no value of a chart, no message of a run and no answer of a route. It is the bearer
+   `sandbox-proxy` sends to `<portalURL>/api/v1/internal/functions` to wake a function and to
+   report activity. It is not the sandbox wake token: `secret.proxyWakeToken` is never written on a
+   platform's sandbox provider, which is one of the two things that keep autoResume refused there.
+2. *The chart's values.* `functions: {enabled: true, wakeURL, portalCA, wakeTokenVersion}`, in the
+   Application `pc-platform-sandbox` (`shared`) or in `addons.sandbox.values` of the Application
+   `pc-sandbox` (`separate`). The block is rendered only after the token's Secret is on that
+   cluster: the proxy reads the token when it starts. With `separate` that means the cluster's
+   Application is applied a second time once `pc-sandbox` answers, and the add-on is upgraded in
+   place. `wakeTokenVersion` is the id of the run that minted the token (`status.sandbox.functions.
+   tokenVersion`); the chart puts it on the proxy's pods, so a new token replaces them.
+3. *With `separate`, one address in the fence.* `sandbox-proxy` runs there on fenced machines. The
+   run adds `portal: {address, port}` to `config.sandbox` of the Proxmox provider, and the provider
+   sync opens that one address and TCP port in the VM firewall of the sandbox pool's machines and
+   in the isolation rules. It is open to every machine of the pool, not only to the proxy's; a
+   function or sandbox pod is still held by the chart's egress guardrail, which denies private
+   ranges and the platform network. A portal on a public address is reachable from a function pod
+   as from the internet at large, and its internal routes answer 401 without the token. With
+   `shared` nothing is opened: the proxy runs on the system group, outside the fence.
+
+The provider's own `functions` block (limits, idle time, `enabled`) is the operator's, on the
+provider's page. A run never writes it, and tenants get functions only once it is enabled there.
+
+**Every apply replaces the token.** A run mints a token of its own, once, whatever else it
+changes; this is also how a leaked token is replaced. The proxy's replicas are replaced one at a
+time to read it: a connection open through the replaced replica, to a sandbox or to a function, is
+cut once. The provider takes the new token in stage `register`, after the chart's wave, so a run
+that fails before the proxy is replaced leaves functions as they were. Between a replica's start
+with the new token and stage `register` that replica's wakes and reports are refused: a request it
+holds for a sleeping function is answered 503 for that time. The plan of an installation with
+functions therefore always holds the row `sandbox-functions`. A run that fails after it wrote the
+new Secret and before the proxy was replaced leaves one more case: a replica that restarts for
+another reason reads the new token, which the provider does not hold yet; Retry ends it.
+
+**What an escape reads.** Code that escapes gVisor on a sandbox machine reads, through the
+kubelet's credential, the Secrets of the pods bound to that machine: the environment secrets and
+registry logins of every function with an instance there, of every tenant. With `shared` it is
+also what the section above says of the platform cluster. The cluster's copy of those Secrets is
+not encrypted in etcd; with `separate` that etcd is the Kamaji datastore on the platform cluster.
+
+**Machine rotation.** With `separate` a running function instance holds a rotation of the sandbox
+machines back as a sandbox does (the rotation's message says "sandboxes"). With `shared` a
+rotation does not wait for function instances: they end with the machine, and their Deployment
+starts them again.
+
+**Switching off.**
+
+- *Functions off, sandboxes stay* (`enabled: false`): refused while the sandbox provider holds a
+  function record, at the save (`409 functions_exist`) and again by the run (`sandbox_refused`,
+  nothing changed), because the role and the policies the functions' Deployments need go with the
+  chart's function objects. A project deletes its own functions; they stay deletable with the
+  provider's functions block off. Then the run renders the chart without the objects, and the
+  token goes from the provider, the cluster, the sealed secrets and the status.
+- *Sandboxes off* (`placement: off`), which is also how `pc-sandbox` is rebuilt for another
+  Kubernetes version: allowed with the sandbox provider DISABLED, as before. The function records
+  stay. Before the cluster's Application is deleted the run ends every running interval of every
+  function in the portal's records, so none is billed while its cluster is gone; when sandboxes
+  are built again with functions, the portal deploys the functions again from its records.
+- *Remove*: the same ending of intervals, right after the providers are disabled and before
+  anything of a cluster is deleted, also when the platform cluster no longer answers.
+
+A build that has no read of the function records refuses each of the three for a platform on which
+a run built functions, and says so.
+
+**The upgrade that brings the chart.** The move from sandbox chart 0.1.0 to 0.2.0 is a `chart` row
+of the upgrade plan for an installation whose sandboxes a run built: with `shared` the Application
+`pc-platform-sandbox` moves to the new version; with `separate` the run writes the new version into
+`addonCharts.sandbox.version` of the Application `pc-sandbox`, and the add-on controller upgrades
+the release inside `pc-sandbox` in place. Where the new chart changes `sandbox-proxy`, its replicas
+are replaced one at a time. No machine is replaced, so the move is not refused for a `separate`
+cluster. An installation without sandboxes has no row: nothing of the chart runs there. The move
+alone builds nothing of functions; the tick comes after it.
+
 ### Step 2: Proxmox identities
 
 [Section 3](#3-proxmox-identities). Paste the command into a root shell on one node, then paste its last
@@ -3574,6 +3679,17 @@ on an installed platform with no other machine replaced; the sandbox chart Healt
 run's certificate; `pc-sandbox` built on the kamaji group and the memory its control plane takes
 there; `off` taking all of it away, and Remove in the order it promises; a roll with a `shared`
 group as its last unit; the mint on a platform network that is an SDN vnet.
+
+**Functions on the sandbox machines (`spec.sandbox.functions`)** have run on no site, and no BOM
+of this build lets them. Run against fakes and compared as renders: the token's path (sealed,
+Secret, provider), the values of both placements, the fence input, the plan rows and the upgrade
+run that moves the chart. The chart that takes those values is not in this build. A lab must still
+show: `sandbox-proxy` reaching the portal from the system group (`shared`) and from a fenced
+machine with the one address open (`separate`), and which certificate it meets there; the add-on
+controller upgrading the release inside `pc-sandbox` in place for a changed value and for a new
+chart version, with the node setup of the sandbox machines not restarting; the proxy's replicas
+replaced one at a time when the token changes, and for how long a wake is refused; that the
+function records' intervals are ended before `off` and Remove delete a cluster.
 
 **The sandbox provider and the fence on the platform network** were run against fakes only: a fake
 Proxmox for the VM firewall (it stores rules and does not filter a packet), fake clusters for the

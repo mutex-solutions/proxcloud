@@ -843,7 +843,18 @@ are several, `errors.details.problems`.
   builtAt}`), `placement` changes only to `off` and `nodeRange` and `proxyAddress` not at all (`409 fixed_fields`).
   `placement: off` (or an emptied placement) on a platform with built sandboxes is refused while the sandbox provider
   a run registered (`status.providers.sandbox`) is not DISABLED: `409 sandbox_provider_live`, problems
-  `["spec.sandbox.placement"]`. A provider that already holds a `config.sandbox` of another owner (the installer's
+  `["spec.sandbox.placement"]`.
+  `spec.sandbox.functions` (`{enabled, portalURL, portalCA}`: [managed-services.md](managed-services.md#functions-on-the-sandbox-machines))
+  asks a run for the function side of the sandboxes. `enabled: true` is refused while the installation's BOM pins a
+  sandbox chart older than 0.2.0 (`400 invalid_installation`, "pins sandbox chart 0.1.0, which has no functions"):
+  under every BOM this build embeds. `portalURL` is the portal's API as sandbox-proxy reaches it, `https` only; left
+  empty, the save stores the API's own base URL (`PROXCLOUD_SELF_API_BASE_URL`), and with neither the block is
+  refused. With `placement: separate` its host is an IPv4 address outside `nodeRange`, the cluster's `metallbRange`
+  and `proxyAddress`. `portalCA` is PEM certificates only, at most 64 KiB. A PUT whose `spec.sandbox` names no
+  `functions` keeps the stored block. Once a run built functions (`status.sandbox.functions {portalURL,
+  tokenVersion}`; the token itself is in no answer), `enabled: false` with sandboxes that stay is refused while the
+  sandbox provider holds a function record, or while this build has no read of those records:
+  `409 functions_exist`, problems `["spec.sandbox.functions.enabled"]`. A provider that already holds a `config.sandbox` of another owner (the installer's
   sandbox cluster, or another installation) or another `sandboxCidrs` entry refuses the save (`400
   invalid_installation`). A run registers the sandbox provider in stage `register`, DISABLED, records its id in
   `status.providers.sandbox` and the attach choice applied to it in `status.sandboxAttach`; it writes on the
@@ -1028,7 +1039,13 @@ are several, `errors.details.problems`.
   `{cluster, name: "sandbox", from, to, class: "machines", stage: "cluster", impact}` with
   `{name: "sandbox-pool", class: "site"}` and `{name: "sandbox-access", class: "site"}` while `spec.sandbox` differs
   from what a run built (adding lists the machines per node, the pool and the ACL row or token; `to: "off"` lists what
-  is deleted; another placement than the built one is `class: "refused"` with `blocking`), and
+  is deleted; another placement than the built one is `class: "refused"` with `blocking`),
+  `{cluster, name: "sandbox-functions", from, to, class: "chart", stage: "workload-platform", impact}` while the
+  settings ask for functions or a run built them (`to: "on (<portalURL>)"` lists what is rendered, the wake token and,
+  with `separate`, the address the fence opens; on an installation with functions the row is always there, because
+  every apply replaces the token and with it the replicas of sandbox-proxy; `to: "off"` says what is deleted and that
+  it is refused while a function exists; the `sandbox` row to `off` then also says that every running interval of
+  the functions is ended first), and
   `{name: "pve-api-rule", to, class: "site", stage: "seed-vm", impact}` while the cluster firewall of
   Proxmox does not hold the rule `proxcloud:pve-api:<installation>` as the settings name it (a platform
   installed by 0.8.x, or a rule deleted or changed by hand): the run writes that one rule in stage 3.
@@ -1174,8 +1191,10 @@ are several, `errors.details.problems`.
   Stage 9 fails with `argocd_address_unavailable` when the spec names an ArgoCD address and MetalLB did not give it
   to the platform cluster's `argocd-server` Service before the wave's deadline; the message names the Service that
   holds it when one does.
-  Stage 7 fails with `sandbox_refused` when the settings ask for another placement than the one a run built or the
-  run's BOM has no sandbox chart, and with `sandbox_access_failed` when Proxmox refuses the pool, the ACL row or the
+  Stage 7 fails with `sandbox_refused` when the settings ask for another placement than the one a run built, the
+  run's BOM has no sandbox chart, the settings ask for functions under a sandbox chart without them, functions are
+  switched off while the sandbox provider holds a function, or a run must end the functions' running intervals and
+  this build has no way to, and with `sandbox_access_failed` when Proxmox refuses the pool, the ACL row or the
   token of the sandbox machines; nothing of the cluster was changed in either case.
   An upgrade run has `fromBom`; its codes `unexpected_rollout`, `capacity_short` and `rollout_stalled` (stage 7) and
   `tenants_unhealthy` (stage 9, and stage 7 between two units of a replacement of machines) are in

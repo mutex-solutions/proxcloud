@@ -41,8 +41,10 @@ type Secrets struct {
 	// Sandbox is the token of the separate sandbox cluster, capmox@pve!pc-sandbox, which a run mints (sandbox_run.go).
 	Sandbox *TokenCredential `json:"sandbox,omitempty"`
 	// SandboxTLSCert and SandboxTLSKey are the self-signed certificate of sandbox-proxy a run made, and its key.
-	SandboxTLSCert string          `json:"sandboxTlsCert,omitempty"`
-	SandboxTLSKey  string          `json:"sandboxTlsKey,omitempty"`
+	SandboxTLSCert string `json:"sandboxTlsCert,omitempty"`
+	SandboxTLSKey  string `json:"sandboxTlsKey,omitempty"`
+	// FunctionWake is the wake token of functions a run minted (sandbox_functions.go); its Token is sealed.
+	FunctionWake   *FunctionWake   `json:"functionWake,omitempty"`
 	K3sToken       string          `json:"k3sToken,omitempty"`
 	SeedKubeconfig *SeedKubeconfig `json:"seedKubeconfig,omitempty"`
 	BootstrapToken string          `json:"bootstrapToken,omitempty"` // wiped once the seed's identity is stored
@@ -270,6 +272,11 @@ func (s *Store) seal(sec Secrets, f func(string) string) Secrets {
 		return f(v)
 	}
 	sec.SandboxTLSKey = opt(sec.SandboxTLSKey)
+	if sec.FunctionWake != nil {
+		w := *sec.FunctionWake
+		w.Token = opt(w.Token)
+		sec.FunctionWake = &w
+	}
 	for _, t := range []**TokenCredential{&sec.CAPI, &sec.CSI, &sec.Sandbox} {
 		if *t != nil {
 			c := **t
