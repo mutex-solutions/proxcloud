@@ -71,8 +71,10 @@ const (
 	// fnPoll is how often a held request looks for a ready pod, and how long "no ready pod" is
 	// remembered.
 	fnPoll = 100 * time.Millisecond
-	// fnActivityBatch is the most ids the portal takes in one activity report.
-	fnActivityBatch = 1000
+	// fnActivityBatch is the most functions one activity request names. The portal reads no more
+	// than 64 KiB of a body on its internal routes and takes at most 1000 ids: a request with this
+	// many ids and as many loads stays below both.
+	fnActivityBatch = 500
 )
 
 // FnActivityEvery is the period of the activity report. The portal is told it with every report.

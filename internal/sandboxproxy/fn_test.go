@@ -639,6 +639,32 @@ func TestFnActivityBatches(t *testing.T) {
 	}
 }
 
+// The portal reads no more than 64 KiB of a body on its internal routes (project/sandbox_wake.go):
+// the largest activity request, a full batch of ids with a load for each, must fit, or every
+// report of a busy replica would be refused and its functions taken for idle.
+func TestFnActivityRequestFitsThePortalBodyCap(t *testing.T) {
+	const portalBodyCap = 64 << 10
+	var most int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		most = max(most, len(b))
+		w.WriteHeader(204)
+	}))
+	defer api.Close()
+	act := NewActivity()
+	act.replica = strings.Repeat("r", 253) // the longest host name
+	for i := range fnActivityBatch {
+		id := fmt.Sprintf("fn-%016x", i)
+		act.begin(id)
+		act.end(id)
+		act.peak[id], act.requests[id] = 1_000_000, 1_000_000_000
+	}
+	act.Report(context.Background(), NewWaker(api.URL, "tok"), quiet)
+	if most == 0 || most > portalBodyCap {
+		t.Fatalf("the largest activity request is %d bytes, the portal reads %d", most, portalBodyCap)
+	}
+}
+
 func TestFnWebSocketUpgrade(t *testing.T) {
 	_, port := upstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Upgrade") != "websocket" {
