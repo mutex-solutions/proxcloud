@@ -7,7 +7,7 @@
 // prj-aurora previews a location that runs functions; every other project one that does not.
 // The mock keeps no secret value and no registry password: only names and when each was set.
 import { ApiError } from "@/lib/api"
-import { registryHost, serverHost } from "@/lib/format"
+import { imageHostOk, registryHost, serverHost } from "@/lib/format"
 import type { CloudFunction, FunctionDeployment, FunctionLimits } from "@/lib/types"
 import { PID } from "../fixtures/platform"
 import { on } from "../router"
@@ -74,8 +74,7 @@ function checkOffered(b: Body) {
 }
 // The machines pull from the host the image names: a DNS name, never an address or localhost.
 function checkImage(image: string) {
-  const host = registryHost(image).replace(/:\d+$/, "")
-  if (!image || /\s/.test(image) || host === "localhost" || /^\d+(\.\d+){3}$/.test(host) || /[[:]/.test(host)) throw new ApiError(400, 400, "image: the registry must be a DNS name (not an IP address, not localhost)")
+  if (!image || /\s/.test(image) || !imageHostOk(image)) throw new ApiError(400, 400, "image: the registry must be a DNS name (not an IP address, not localhost)")
 }
 // registryAuth as a request gives it → as a snapshot keeps it. The password is dropped here.
 function describeRegistry(r: NonNullable<RegistryAuthReq>, image: string): Snapshot["registryAuth"] {

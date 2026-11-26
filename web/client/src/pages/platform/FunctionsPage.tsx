@@ -28,7 +28,7 @@ import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch } from "@/lib/api"
-import { registryHost, serverHost, timeAgo } from "@/lib/format"
+import { imageHostOk, registryHost, serverHost, timeAgo } from "@/lib/format"
 import { useProjectId, useProjectServices } from "@/lib/hooks"
 import type { CloudFunction, FunctionDeployment, FunctionLimits, ProjectService } from "@/lib/types"
 
@@ -49,11 +49,6 @@ const cpuSizes = (max: number) => [...CPU_SIZES, ...Array.from({ length: 62 }, (
 // A name starts with a letter: a host that starts with a digit is a sandbox's.
 const NAME_RE = /^[a-z]([a-z0-9-]{0,38}[a-z0-9])?$/
 const MAX_NAME = 40
-// The platform's machines pull the image from the host it names: a DNS name, never an address or localhost.
-const imageHostOk = (image: string) => {
-  const host = registryHost(image).replace(/:\d+$/, "")
-  return host !== "localhost" && !/^\d+(\.\d+){3}$/.test(host) && !host.includes("[") && !host.includes(":")
-}
 
 const sizeOf = (f: { cpuMillis: number; memoryMi: number }) => `${f.cpuMillis / 1000} vCPU · ${f.memoryMi} MiB`
 

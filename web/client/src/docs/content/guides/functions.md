@@ -2,7 +2,7 @@
 
 **Platform → Functions** runs a container image of yours behind a stable HTTPS URL. A function stops when no request has arrived for a while and starts again on the next request, so it costs nothing while it is idle. It is meant for small HTTP services: webhooks, internal APIs, model front ends.
 
-Functions are offered only where your operator has enabled them. If the menu has no **Functions** entry, the project has no location that runs functions: ask your operator.
+Functions are offered only on a platform release that has them, and there only where your operator has enabled them. If the menu has no **Functions** entry, the project has no location that runs functions: ask your operator.
 
 A function runs an image that you name. The platform does not build images, and it has no registry of its own. A function's URL is **internal**: it answers on the platform's network, not on the public internet. Public URLs, hostnames of your own and GPUs are not offered.
 
