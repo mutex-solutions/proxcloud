@@ -65,6 +65,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Nothing of it ran on a lab**: Proxmox, ArgoCD, Cluster API, CAPMOX, Kamaji and the clusters are fakes in
     these tests, and the charts are rendered, not installed. The release candidate's drill is the first run
     ([Not verified on a lab yet](docs/managed-services.md#not-verified-on-a-lab-yet)).
+- **`sandbox-proxy` can serve function hosts (off, and nothing sets it yet).** With `FUNCTION_DOMAIN` set the proxy
+  also routes `https://<name>-<6 hex>.<domain>` to a ready instance of a serverless function, picked at random, and
+  holds a request for a function that has no instance while it asks the portal to start one
+  (`POST {PROXCLOUD_FUNCTION_WAKE_URL}/{id}/wake`), for up to 50 s, then 503 with `Retry-After: 2`. Every 5 s, and
+  at once for the first request after a quiet spell, it tells the portal which functions have traffic and how much
+  (`POST {PROXCLOUD_FUNCTION_WAKE_URL}/activity`, under the pod's name). Both calls carry
+  `PROXCLOUD_FUNCTION_WAKE_TOKEN`, a token of its own: the sandbox wake token (`PROXCLOUD_WAKE_TOKEN`) is not taken
+  for it. This is the proxy's half of serverless functions; the portal's routes, the function objects, the chart
+  values and the consoles come in later pull requests, the sandbox chart sets none of the three variables, and the
+  managed platform keeps the proxy image it pins. What holds once it is on:
+  - **The sandbox path does not change.** Only a host whose first label is `<name>-<6 hex>` (the name starts with a
+    letter) under the function domain goes to a function; `<port>-<sandbox id>.<domain>`, `sandbox.<domain>` and
+    `localhost` with the routing headers, and every other host, are answered as before, and without
+    `FUNCTION_DOMAIN` the binary serves as it did. With the domain set but no wake URL or token the proxy logs the
+    mistake and serves sandboxes only, instead of exiting.
+  - **A made-up name costs the cluster nothing.** Hosts are answered from one list of the function Deployments
+    (`app.kubernetes.io/managed-by=proxcloud` with a `proxcloud.io/function-host` label) read at most every 2 s;
+    nothing of the `Host` header reaches a label selector, and nothing is kept per name. A function is taken only
+    from a Deployment `fn-<16 hex>` in an `fn-*` namespace. The proxy needs `list` on `apps/deployments`, which the
+    chart does not grant yet.
+  - **Held requests are bounded:** 100 per function and 1000 per replica; one over the bound is answered 503 with
+    `Retry-After: 2` at once. At most 32 wake calls run at a time, as for sandboxes.
+  - **An instance is told the truth about the client.** TLS ends in the proxy, so `X-Forwarded-For` is the peer's
+    address alone, `X-Forwarded-Proto` what the listener served and `X-Forwarded-Host` the host asked for; whatever
+    the client sent as `X-Forwarded-*`, `Forwarded`, `X-Real-IP`, `True-Client-IP` or `CF-*` is dropped, and so are
+    the same names written with an underscore (`X_Forwarded_For`).
+  - **Not run on a cluster.** Every test of this change uses a fake cluster and a fake portal. A request is sent
+    to a second instance once, when no connection was made and its body is unread; `concurrency` is not enforced
+    per instance (the pick is random); custom hostnames, public endpoints with their rate limit, and the wait of a
+    GPU function for its GPU are not in this proxy.
 
 ### Changed
 
