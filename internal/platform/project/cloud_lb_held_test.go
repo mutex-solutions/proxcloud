@@ -2,7 +2,9 @@ package project
 
 import (
 	"context"
+	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -74,7 +76,7 @@ func TestLBPairTakesAChangeWhileAptRuns(t *testing.T) {
 	}
 	if lb.Status != lbStatusActive || !lb.waiting || lb.HeldSince == "" ||
 		!strings.Contains(lb.StatusMessage, "A change waits (appliance 302: a change is not loaded on it yet: its package manager is at work") ||
-		!strings.Contains(lb.StatusMessage, "the platform tries again within half a minute") {
+		!strings.HasSuffix(lb.StatusMessage, "; "+lbRetrySays()+".") || strings.Contains(lb.StatusMessage, "half a minute") {
 		t.Fatalf("the row while the holder waits: %s %q, waiting %v since %q", lb.Status, lb.StatusMessage, lb.waiting, lb.HeldSince)
 	}
 	f.set("302", func(g *lbGuest) { g.upgrading = false })
@@ -164,7 +166,8 @@ func TestLBSingleTakesAChangeWhileAptRuns(t *testing.T) {
 	lb.Listeners = append(lb.Listeners, pve.LBListener{Port: 82, Pool: "web"})
 	apply()
 	if lb.Status != lbStatusActive || lb.AppliedHash != served || !lb.waiting ||
-		!strings.Contains(lb.StatusMessage, "A change waits for the load balancer's VM: its package manager is at work on a package the load balancer runs") {
+		!strings.Contains(lb.StatusMessage, "A change waits for the load balancer's VM: its package manager is at work on a package the load balancer runs") ||
+		!strings.HasSuffix(lb.StatusMessage, "; "+lbRetrySays()+".") || strings.Contains(lb.StatusMessage, "half a minute") {
 		t.Fatalf("a change during an upgrade of HAProxy: %s %q, waiting %v", lb.Status, lb.StatusMessage, lb.waiting)
 	}
 	f.set("301", func(g *lbGuest) { g.upgrading = false })
@@ -174,12 +177,70 @@ func TestLBSingleTakesAChangeWhileAptRuns(t *testing.T) {
 	}
 }
 
+// What a row with a waiting change says of the retries is true at any time, and made of the loop's own figures: with
+// the ones a build ships (20 s, six tries) it reads "every 20 s for 2 minutes", and it moves with them. Until
+// v0.12.0-rc.1 it said "within half a minute", also after the last retry, when nothing tried again before the next
+// sync or change.
+func TestLBRetrySaysWhatTheLoopDoes(t *testing.T) {
+	every, tries := lbRetryEvery, lbRetryTries
+	defer func() { lbRetryEvery, lbRetryTries = every, tries }()
+	for _, c := range []struct {
+		every time.Duration
+		tries int
+		want  string
+	}{
+		{20 * time.Second, 6, "the platform tries again by itself every 20 s for 2 minutes, and after that at the next services sync or at the next change"},
+		{30 * time.Second, 3, "the platform tries again by itself every 30 s for 90 s, and after that at the next services sync or at the next change"},
+		{2 * time.Minute, 5, "the platform tries again by itself every 2 minutes for 10 minutes, and after that at the next services sync or at the next change"},
+	} {
+		lbRetryEvery, lbRetryTries = c.every, c.tries
+		if got := lbRetrySays(); got != c.want {
+			t.Errorf("with %d tries %s apart the row says %q, want %q", c.tries, c.every, got, c.want)
+		}
+	}
+}
+
+// retryEnds collects the log lines of a retry loop that ended with its change still waiting.
+type retryEnds struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (c *retryEnds) Enabled(context.Context, slog.Level) bool { return true }
+func (c *retryEnds) WithAttrs([]slog.Attr) slog.Handler       { return c }
+func (c *retryEnds) WithGroup(string) slog.Handler            { return c }
+func (c *retryEnds) Handle(_ context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, "the platform's own retries ended") {
+		c.mu.Lock()
+		c.recs = append(c.recs, r)
+		c.mu.Unlock()
+	}
+	return nil
+}
+
+// lines answers the lines so far, each as its level and its attributes in order.
+func (c *retryEnds) lines() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for _, r := range c.recs {
+		line := r.Level.String()
+		r.Attrs(func(a slog.Attr) bool { line += " " + a.String(); return true })
+		out = append(out, line)
+	}
+	return out
+}
+
 // The platform's own retries: one loop per balancer, the first lbRetryEvery after the pass that was held, ended by
-// the first pass that leaves nothing waiting and after lbRetryTries of them at the latest.
+// the first pass that leaves nothing waiting and after lbRetryTries of them at the latest. A loop that ends with the
+// change still waiting says so in the log, once; one that a pass ended says nothing.
 func TestLBRetryIsBoundedAndSingle(t *testing.T) {
 	every, tries := lbRetryEvery, lbRetryTries
 	lbRetryEvery, lbRetryTries = 5*time.Millisecond, 3
 	defer func() { lbRetryEvery, lbRetryTries = every, tries }()
+	logger, ends := slog.Default(), &retryEnds{}
+	slog.SetDefault(slog.New(ends))
+	defer slog.SetDefault(logger)
 	h := &Handler{}
 	idle := func(key string) {
 		t.Helper()
@@ -206,6 +267,10 @@ func TestLBRetryIsBoundedAndSingle(t *testing.T) {
 	if got := passes.Load(); got != 3 {
 		t.Fatalf("a change that keeps waiting was tried %d times, want %d", got, 3)
 	}
+	// The end with the change still waiting: one WARN line with the key and the number of tries, and nothing else.
+	if got := ends.lines(); len(got) != 1 || got[0] != "WARN key=lb-a tries=3" {
+		t.Fatalf("retries that ended with the change still waiting logged %q, want one line WARN key=lb-a tries=3", got)
+	}
 	// A cluster's pass may build an appliance, which takes longer than any bound a retry would set, and a build that
 	// is cut off cannot remove its VM: the retry's pass has no deadline, as the sync's and the controller's have none.
 	if bound.Load() {
@@ -216,6 +281,16 @@ func TestLBRetryIsBoundedAndSingle(t *testing.T) {
 	idle("lb-a")
 	if got := passes.Load(); got != 2 {
 		t.Fatalf("the retries went on after the change was taken: %d passes", got)
+	}
+	// The control: a pass that ends the wait ends the loop without that line, also when it is the last try.
+	passes.Store(0)
+	h.lbRetry("lb-b", func(context.Context) bool { return passes.Add(1) < 3 })
+	idle("lb-b")
+	if got := passes.Load(); got != 3 {
+		t.Fatalf("a change taken at the last try was tried %d times, want 3", got)
+	}
+	if got := ends.lines(); len(got) != 1 {
+		t.Fatalf("retries that a pass ended logged that they ended waiting: %q", got)
 	}
 	if lbHoldWindow() != 10*time.Millisecond {
 		t.Fatalf("the hold window is %s, want the time up to the last retry", lbHoldWindow())
