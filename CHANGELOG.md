@@ -53,6 +53,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
   pull request).
 
+### Fixed
+
+- **A sync no longer archives the `FLOATING_IP` row a balancer's pass wrote while the sync was listing.** The
+  services sync and the state sample read the public allocations first and the rows after. An address a pass took
+  in between had its row and no line in that list, so the row was archived, and the address was missing from the
+  tenant's list and from billing until the next pass or sync wrote it again (Known issues of `v0.11.1`).
+  `floatingIPProvider` now has the vanish grace the server and image providers have (`providers.VanishGrace`, two
+  minutes): a row younger than that is not archived for being absent from the list. The row's age is the
+  allocation's, which in this race is seconds. The other half of the grace comes with it: a row archived less
+  than two minutes ago is not written again for being still listed. A sync already refused that for a row archived
+  after it read its clock, which it does before it lists, so this half only adds the case of a release stamped by
+  a replica whose clock is behind the sync's. `TestFloatingIPRowVanishGrace` (`test/integration`) runs a state
+  sample over four addresses: a row 10 s old that the list lacks stays, one 3 min old is archived, a row archived
+  10 s ago and still listed is not written again, one archived 3 min ago is. Without the method the first and the
+  third fail and the two controls hold.
+  **For an upgrade:** nothing to do, and no stored row changes. What changes is the row of an address that is
+  given back less than two minutes after it was taken, on the paths that leave the archive to the sync: a server
+  that is deleted, a server's public network that is detached, and the two rollbacks that release an address
+  without its row (a public network attach that fails before the NIC is plugged, a single-VM balancer whose build
+  fails). That row was archived by the next state sample, a minute later at most; it is now archived by the first
+  sample or sync after the address is two minutes old, so such an address is listed and billed up to two minutes
+  longer. The paths that archive the row themselves are not affected: a balancer's delete, a cluster's release, a
+  Service's address given back, the delete of the address's own row, and a project's teardown.
+
 ## [0.11.1] - 2026-11-26
 
 The release after `v0.11.0`. It completes layer 4 of the load balancer: UDP listeners, TLS termination with
