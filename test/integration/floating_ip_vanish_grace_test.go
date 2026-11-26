@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,7 +22,8 @@ import (
 // list and from billing until the next pass or sync wrote it again (v0.11.1, Known issues). The grace has another
 // half: a row archived a moment ago and still listed is not written again. A sync already refused one archived after
 // it read its clock, so the row here is archived before that, as by a replica whose clock is behind. Each case has
-// its control: past the two minutes the list is believed.
+// its control: past the two minutes the list is believed. A fifth address is taken from inside the sample's own read
+// of the allocations, which is the race as it happens.
 func TestFloatingIPRowVanishGrace(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
@@ -57,10 +59,16 @@ func TestFloatingIPRowVanishGrace(t *testing.T) {
 		listed = append(listed, a)
 	}
 
+	var during sync.Once
 	es := externalservice.NewService(externalservice.NewRepo(db), textcrypt.New("k"))
 	j := syncjob.New(project.NewRepo(db), es, repo, nil).
 		WithProxmoxFactory(func(*externalservice.ExternalService) (*pve.Service, error) { return s, nil }).
-		WithPublicIPs(func(context.Context, string, string) ([]project.PublicIP, error) { return listed, nil }, func(context.Context, string, string, string) error { return nil })
+		WithPublicIPs(func(context.Context, string, string) ([]project.PublicIP, error) {
+			// The race itself: the pass takes .14 while the sample reads the allocations, so its row is younger than
+			// the clock the sample read before it listed, and no list the sample reads has the address.
+			during.Do(func() { alloc("198.51.100.14", -time.Since(now)) })
+			return listed, nil
+		}, func(context.Context, string, string, string) error { return nil })
 	if _, err := j.RunPVEState(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -83,12 +91,13 @@ func TestFloatingIPRowVanishGrace(t *testing.T) {
 		{"198.51.100.11", false, "control: a row 3 min old that the list lacks is archived"},
 		{"198.51.100.12", false, "a row archived 10 s ago and still listed is not written again"},
 		{"198.51.100.13", true, "control: a row archived 3 min ago and still listed is written again"},
+		{"198.51.100.14", true, "a row written while the sample was listing stays"},
 	} {
 		if has[c.ip] != c.want {
 			t.Errorf("%s has a row = %v, want %v: %s", c.ip, has[c.ip], c.want, c.why)
 		}
 	}
-	if len(fips) != 2 {
-		t.Errorf("FLOATING_IP rows = %d, want 2", len(fips))
+	if len(fips) != 3 {
+		t.Errorf("FLOATING_IP rows = %d, want 3", len(fips))
 	}
 }

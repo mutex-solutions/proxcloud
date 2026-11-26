@@ -111,9 +111,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than two minutes ago is not written again for being still listed. A sync already refused that for a row archived
   after it read its clock, which it does before it lists, so this half only adds the case of a release stamped by
   a replica whose clock is behind the sync's. `TestFloatingIPRowVanishGrace` (`test/integration`) runs a state
-  sample over four addresses: a row 10 s old that the list lacks stays, one 3 min old is archived, a row archived
-  10 s ago and still listed is not written again, one archived 3 min ago is. Without the method the first and the
-  third fail and the two controls hold.
+  sample over five addresses: a row 10 s old that the list lacks stays, one 3 min old is archived, a row archived
+  10 s ago and still listed is not written again, one archived 3 min ago is, and a row written from inside the
+  sample's own read of the allocations (the race as it happens, the row younger than the sample's clock) stays.
+  Without the method the first, the third and the fifth fail and the two controls hold.
   **For an upgrade:** nothing to do, and no stored row changes. What changes is the row of an address that is
   given back less than two minutes after it was taken, on the paths that leave the archive to the sync: a server
   that is deleted, a server's public network that is detached, and the two rollbacks that release an address
