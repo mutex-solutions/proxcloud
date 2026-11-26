@@ -730,8 +730,8 @@ func (s *Service) SetChartVersion(ctx context.Context, clusterID, version string
 			return err
 		}
 		src["targetRevision"] = version
-		if lb, _ := dig(app, "spec", "source", "helm", "valuesObject", "loadBalancer").(map[string]any); digStr(lb, "secretName") != "" && s.cfg.LBControllerImage != "" {
-			lb["image"] = s.cfg.LBControllerImage
+		if values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any); s.cfg.LBControllerBehind(values) {
+			values["loadBalancer"].(map[string]any)["image"] = s.cfg.LBControllerImage
 		}
 		return nil
 	})
@@ -785,7 +785,14 @@ type ClusterPin struct {
 	ChartVersion string `json:"chartVersion"`
 	// LoadBalancer is the cluster's load balancer mode (LBMode): "default", "class-only" or empty (MetalLB alone).
 	LoadBalancer string `json:"loadBalancer,omitempty"`
+	// LBControllerBehind: the cluster's controller runs another image than the portal pins now
+	// (Config.LBControllerBehind). A bump moves it, also on a cluster that is on the provider's chart.
+	LBControllerBehind bool `json:"lbControllerBehind,omitempty"`
 }
+
+// Behind says whether a bump onto the provider's chart pin would change the cluster: its chart, or its load balancer
+// controller's image alone.
+func (p ClusterPin) Behind(pin string) bool { return p.ChartVersion != pin || p.LBControllerBehind }
 
 // ListClusterPins lists every proxcloud-managed cluster on this provider with its chart pin
 // (ownership-labelled Applications only — pre-proxcloud clusters stay invisible).
@@ -805,11 +812,12 @@ func (s *Service) ListClusterPins(ctx context.Context) ([]ClusterPin, error) {
 		}
 		values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
 		out = append(out, ClusterPin{
-			ID:           id,
-			Name:         digStr(app, "metadata", "annotations", AnnotationDisplayName),
-			ProjectID:    digStr(app, "metadata", "labels", LabelProject),
-			ChartVersion: digStr(app, "spec", "source", "targetRevision"),
-			LoadBalancer: LBMode(values),
+			ID:                 id,
+			Name:               digStr(app, "metadata", "annotations", AnnotationDisplayName),
+			ProjectID:          digStr(app, "metadata", "labels", LabelProject),
+			ChartVersion:       digStr(app, "spec", "source", "targetRevision"),
+			LoadBalancer:       LBMode(values),
+			LBControllerBehind: s.cfg.LBControllerBehind(values),
 		})
 	}
 	return out, nil

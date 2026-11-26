@@ -381,7 +381,9 @@ function KamajiClustersCard({ id }: { id: string }) {
   }>(`/admin/service/${id}/k8s-clusters`)
   const pin = q.data?.providerChartVersion ?? ""
   const clusters = q.data?.clusters ?? []
-  const behind = clusters.filter((c) => pin && c.chartVersion !== pin)
+  // Behind the pin: by its chart, or by its load balancer controller's image alone (a release that changed only the
+  // controller). "Bump all" moves both kinds.
+  const behind = clusters.filter((c) => pin && (c.chartVersion !== pin || c.lbControllerBehind))
   const [machinesOf, setMachinesOf] = useState<{ id: string; name?: string } | null>(null)
   const [firewallOf, setFirewallOf] = useState<{ id: string; name?: string } | null>(null)
   const [lbOf, setLbOf] = useState<KamajiCluster | null>(null)
@@ -433,6 +435,9 @@ function KamajiClustersCard({ id }: { id: string }) {
           Customers can also apply this themselves from the cluster page. The provider's worker repair setting
           (startup timeout, guard, or off) is written into a cluster's values at every change of that cluster;
           Apply settings writes it now for a cluster that is already on the pin.
+          A cluster on the pin whose load balancer controller is the one of an earlier portal release counts as behind:
+          Update controller, or Bump all, sets its image to the portal's, which restarts the controller's pod and
+          replaces no machine.
         </p>
         <Table>
           <TableHeader>
@@ -461,7 +466,10 @@ function KamajiClustersCard({ id }: { id: string }) {
                     {c.chartVersion || "—"}
                     {pin && c.chartVersion === pin ? <span className="ml-2 text-xs text-muted-foreground">current</span> : null}
                   </TableCell>
-                  <TableCell className="text-sm">{LB_MODES[c.loadBalancer ?? ""] ?? c.loadBalancer}</TableCell>
+                  <TableCell className="text-sm">
+                    {LB_MODES[c.loadBalancer ?? ""] ?? c.loadBalancer}
+                    {c.lbControllerBehind ? <span className="ml-2 text-xs text-amber-600" data-testid="lb-controller-behind">controller image behind</span> : null}
+                  </TableCell>
                   <TableCell className="space-x-2 text-right">
                     <Button size="sm" variant="ghost" onClick={() => setMachinesOf(c)}>Machines</Button>
                     <Button size="sm" variant="ghost" onClick={() => setFirewallOf(c)}>Firewall</Button>
@@ -469,6 +477,10 @@ function KamajiClustersCard({ id }: { id: string }) {
                     {pin && c.chartVersion !== pin ? (
                       <Button size="sm" variant="outline" onClick={() => bumpOne.mutate(c.id)} disabled={bumpOne.isPending}>
                         Bump to {pin}
+                      </Button>
+                    ) : pin && c.lbControllerBehind ? (
+                      <Button size="sm" variant="outline" aria-label={`Update the load balancer controller of ${c.name || c.id}`} onClick={() => bumpOne.mutate(c.id)} disabled={bumpOne.isPending}>
+                        Update controller
                       </Button>
                     ) : pin ? (
                       <Button size="sm" variant="ghost" aria-label={`Apply the provider's settings to ${c.name || c.id}`} onClick={() => bumpOne.mutate(c.id)} disabled={bumpOne.isPending}>
@@ -489,7 +501,7 @@ function KamajiClustersCard({ id }: { id: string }) {
   )
 }
 
-type KamajiCluster = { id: string; name?: string; projectId?: string; chartVersion?: string; loadBalancer?: string }
+type KamajiCluster = { id: string; name?: string; projectId?: string; chartVersion?: string; loadBalancer?: string; lbControllerBehind?: boolean }
 // A cluster's load balancer mode, read off its values: which Services of type LoadBalancer get the product balancer.
 const LB_MODES: Record<string, string> = { "": "MetalLB only", default: "Default", "class-only": "Class only" }
 
