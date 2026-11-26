@@ -2,6 +2,7 @@ package lbgw
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"reflect"
 	"slices"
@@ -475,5 +476,60 @@ func TestKeepAddressAndLoadBalancerIP(t *testing.T) {
 	w, _ := r.put(t, v2, Request{Services: []Service{asked("203.0.113.7")}})
 	if w.Code != http.StatusOK || r.portal.got[0].LoadBalancerIP != "" || strings.Contains(w.Body.String(), "events") {
 		t.Fatalf("protocol 1: %d %s, the portal got %+v", w.Code, w.Body, r.portal.got)
+	}
+}
+
+// What the controller sends of a Service that is being deleted is its wish to keep its address, as its reader takes
+// it and as short as a boolean is. Fifty Services with a value of the full length, sent as written, are over the
+// gateway's part for them: it refuses the field, the controller's next request leaves it out, and the Services whose
+// value is a boolean lose their word with the others.
+func TestGoneAnnotationsAreShort(t *testing.T) {
+	key := OwnPrefix + KnobKeepAddress
+	if GoneAnnotations(nil) != nil || GoneAnnotations(map[string]string{OwnPrefix + KnobMethod: "source", "example.org/lb-keep-address": "true"}) != nil {
+		t.Error("an annotation that is not the wish to keep the address is sent of a Service being deleted")
+	}
+	for value, want := range map[string]string{"true": "true", "false": "false", " true ": "true", " False\n": "False", "1": "1", "": "", "yes": "yes"} {
+		if got := GoneAnnotations(map[string]string{key: value, OwnPrefix + KnobMethod: "source"}); len(got) != 1 || got[key] != want {
+			t.Errorf("keep-address %q: sent %q, want %q alone", value, got, want)
+		}
+	}
+	// A boolean keeps its meaning, and a value that is none stays none: the cut must not end where a boolean does.
+	long := strings.Repeat("<", MaxAnnotationValue+1) // as the controller cuts it, and six bytes a character in JSON
+	for value, keeps := range map[string]bool{"true": true, " true ": true, "T": true, "false": false, " false ": false, "yes": false,
+		"true    and more": false, "true\u2003 and more": false, "1       1": false, "truetruetrue": false, "tr\u00fc\u00fc\u00fc\u00fc\u00fc": false,
+		long: false, strings.Repeat("t", MaxAnnotationValue+1): false} {
+		sent := GoneAnnotations(map[string]string{key: value})
+		// As the portal reads it (project.lbClusterKeepGone), after the request's JSON.
+		var read map[string]string
+		if err := json.Unmarshal(mustJSON(sent), &read); err != nil {
+			t.Fatal(err)
+		}
+		if got := KeepsAddress(&Service{Annotations: read}); len(sent[key]) > maxGoneValue || got != keeps {
+			t.Errorf("keep-address %q: sent %d characters (at most %d), which read as keep %v, want %v", value, len(sent[key]), maxGoneValue, got, keeps)
+		}
+	}
+
+	r := newRig()
+	r.protocol = "2"
+	var written, sent []Gone
+	for i := range MaxGone {
+		ann := map[string]string{key: long}
+		if i == 0 {
+			ann = map[string]string{key: " true "}
+		}
+		uid := fmt.Sprintf("%08d-0000-4000-8000-%012d", i, i)
+		written, sent = append(written, Gone{UID: uid, Annotations: ann}), append(sent, Gone{UID: uid, Annotations: GoneAnnotations(ann)})
+	}
+	// Control: sent as written, these are refused, the Service that said "true" with them.
+	if w, _ := r.put(t, v2, Request{Services: []Service{web("u-1")}, Gone: written}); len(mustJSON(written)) <= maxGoneBody || w.Code != http.StatusBadRequest || r.portal.calls != 0 {
+		t.Fatalf("%d Services being deleted with their values as written, %d bytes: %d %s", MaxGone, len(mustJSON(written)), w.Code, w.Body)
+	}
+	if n := len(mustJSON(sent)); n > maxGoneBody/2 {
+		t.Fatalf("%d Services being deleted are %d bytes of the gateway's %d", MaxGone, n, maxGoneBody)
+	}
+	w, _ := r.put(t, v2, Request{Services: []Service{web("u-1")}, Gone: sent})
+	if w.Code != http.StatusOK || len(r.portal.gone) != MaxGone || !KeepsAddress(&Service{Annotations: r.portal.gone[0].Annotations}) ||
+		KeepsAddress(&Service{Annotations: r.portal.gone[1].Annotations}) {
+		t.Fatalf("%d Services being deleted as the controller sends them: %d %s, the portal heard %d", MaxGone, w.Code, w.Body, len(r.portal.gone))
 	}
 }
