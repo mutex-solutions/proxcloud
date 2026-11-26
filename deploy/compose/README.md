@@ -183,10 +183,11 @@ feature off. The last lines of `install` (also with `--dry-run`) say what is on.
 - **`--scheduler`** starts the timed jobs ([jobs and scheduling](../../docs/jobs-scheduling.md)).
   Without it nothing runs on a timer: resources are synchronised only when an operator starts a
   sync, and no new charge is started. **No project can be deleted without it**: the job that
-  tears a project's cloud resources down is one of the timed jobs, so "Delete now" (customer and
-  operator console) is refused with a `409` that names the scheduler, and nothing is changed. A
-  delete with the five-minute grace period is accepted and stays scheduled, cancellable, until the
-  scheduler runs; an organization cannot be deleted while it has a project. With it, among others:
+  tears a project's cloud resources down is one of the timed jobs, so a delete (customer and
+  operator console, with the five-minute grace period or "Delete now") is refused with a `409` that
+  names the scheduler, and nothing is changed. A project scheduled for deletion under a release up
+  to 0.11.1 stays scheduled, cancellable, until the scheduler runs; an organization cannot be
+  deleted while it has a project. With it, among others:
   - resources and Proxmox state are synchronised every minute to every 15 minutes;
   - usage is charged every minute and every hour, at the rates of the enabled price plans;
   - the bills of the previous month are issued, cards are collected, unpaid profiles are

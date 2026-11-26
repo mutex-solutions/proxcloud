@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **A project's delete is refused while the job scheduler is off, with the grace period too.** Up to 0.11.1
+  `DELETE /project/{id}` answered `200` and `SCHEDULED_FOR_DELETION` on such an install; it now answers the `409`
+  of "Delete now" and changes nothing. A project that was scheduled under an earlier release stays scheduled and
+  can be cancelled; it is deleted once the scheduler runs (`--scheduler` on a Compose install). An install with
+  the scheduler on, or with the debug triggers on, sees no change.
+
+### Fixed
+
+- **A project's delete with the grace period is refused when no job will carry it out.** With the job scheduler
+  and the debug triggers off, `DELETE /project/{id}` answered `200 SCHEDULED_FOR_DELETION` although the sweep that
+  deletes a scheduled project is one of the timed jobs, while `DELETE /project/{id}/now` answered `409` and said
+  why (lab drill of v0.11.1, finding R4-o2). Both routes of the customer API and both of the operator API
+  (`DELETE /admin/project/{id}` and `.../now`) now give the same `409` with the same text, which names the
+  scheduler and how to turn it on, and nothing is written (`project.Service.ScheduleDeletion`,
+  `project.Service.CanScheduleDeletion`, which is the operator route's pre-check). Both consoles show that text as
+  they show the one of "Delete now". Not changed: the operator's `DELETE /admin/project/{id}` on a project that is
+  already scheduled still answers `200` with the project as it is, and writes nothing. Tests:
+  `TestScheduleDeletionRefusedWithoutDeletionJob` and the new leg of `TestAdminProjectDeletionLegs` (a real
+  PostgreSQL); both fail with the two new checks taken out. Not run on a lab.
+
 ### Changed
 
 - **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1`**

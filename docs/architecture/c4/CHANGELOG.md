@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-26: a project's scheduled delete is refused when no job will carry it out (lab drill of v0.11.1, R4-o2)
+
+**What changed:** no component, container, route or relation. One refusal more inside one code element.
+
+- `internal/platform/project/service.go`: `Service.ScheduleDeletion` refuses with `errNoDeletionJob`, the `409` of
+  `Service.DeleteNow`, when nothing in the installation runs the deletion job (`SetNoDeletionJob`: the job scheduler
+  and the debug triggers are off). `Service.CanScheduleDeletion` is the same check plus "the project resolves", and
+  `cmd/api` wires it as the operator API's pre-check (`admin.ProjectCloudOps.CanDelete`), where a closure that only
+  resolved the project stood.
+
+**Why:** with the scheduler off, `DELETE /project/{id}` answered `200 SCHEDULED_FOR_DELETION` for a delete that no
+job would ever carry out, while the delete-now route answered `409` and said why.
+
+**Diagrams updated:** none (no element of C1 to C4 moves).
+
 ## 2026-11-25: a pair's push-order test asks for the order across appliances only (CI on the release PR of v0.11.1-rc.5)
 
 **What changed:** no component, container, wire field or behaviour of the product. One assertion of one unit test.

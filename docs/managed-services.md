@@ -95,8 +95,9 @@ The page also warns when the job scheduler is off, in three places with one text
 start**, the Check (row `scheduler`, a warning, absent while the scheduler runs) and the ready card.
 With it off:
 
-- no project is deleted: "Delete now" is refused with a `409` that says so, and a delete with the
-  grace period is accepted but stays scheduled until the scheduler runs;
+- no project is deleted: a delete, with the grace period or "Delete now", is refused with a `409` that
+  says so, and nothing is changed (up to 0.11.1 a delete with the grace period was accepted and stayed
+  scheduled; such a project stays scheduled, and can be cancelled, until the scheduler runs);
 - the state of tenant clusters, databases and servers is refreshed only when an operator runs a
   provider sync;
 - no usage is charged and no bill is made.
