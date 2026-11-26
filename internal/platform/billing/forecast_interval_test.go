@@ -36,6 +36,11 @@ func TestUnitsLeftFromTheStartOfTheRunningInterval(t *testing.T) {
 			t.Errorf("%s: %d units, want %d", tc.name, got, tc.want)
 		}
 	}
+	// The cut to the unit shows when the end is inside a unit (a resource that ends at 17:05): the
+	// charge counts the clock hours 12 to 17, six of them; from 12:10:40 uncut it would be five.
+	if got := unitsLeft(pricing.TimeUnitHour, item, &created, &woke, monthStart, now, time.Date(2026, 11, 15, 17, 5, 0, 0, time.UTC)); got != 6 {
+		t.Errorf("an end inside the hour: %d units, want 6", got)
+	}
 }
 
 // ProjectMonthEnd hands both fields on: the idle time since the watermark is not projected, and a

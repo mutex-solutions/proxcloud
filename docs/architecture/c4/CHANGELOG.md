@@ -38,6 +38,7 @@ test show that no existing item moves.
 
 **Diagrams updated:** none (no element of C1 to C4 moves). `c4-code.md`: the two rows that name
 `getTimeUnitsDiff` say what it counts from, and their line hints are refreshed.
+
 ## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
 
 **What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23
