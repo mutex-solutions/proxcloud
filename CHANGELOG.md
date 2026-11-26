@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can be cancelled; it is deleted once the scheduler runs (`--scheduler` on a Compose install). An install with
   the scheduler on, or with the debug triggers on, sees no change.
 
+- **Billing: the address of a tenant's own load balancer without a `FLOATING_IP` row gets one, billed from its
+  allocation time.** Up to 0.11.1 that row was written by the services sync alone (see Fixed). After the upgrade a
+  balancer that is live and has no row yet, which is one made since the last sync, or any on a site that runs no
+  sync, gets it at its next pass (the next change of the balancer, or the services sync, whichever comes first).
+  The row starts at the allocation's time, and its bill item is counted from that time or from the start of the
+  open bill's cycle, whichever is later (`getLastRateTime`), as the rows of a cluster's addresses are since
+  0.11.1. It is the row a services sync writes: to see the effect before the upgrade, run a services sync and read
+  each project's floating IPs and its open bill. A balancer deleted before the upgrade gets no row. A balancer that
+  has its row is not touched, and no appliance is pushed or reloaded for this. Not run on a lab.
 - **A Docker Compose install: this upgrade restarts the database once.** The PostgreSQL line of
   `deploy/compose/compose.yaml` now names one build (`postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73`, see
   Changed). `./proxcloud-up.sh upgrade` takes its backup, pulls, and then runs `docker compose up -d` for the
@@ -42,6 +51,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The address of a tenant's own load balancer was listed and billed only after a services sync.** The
+  `FLOATING_IP` row of a public address is what lists it for the tenant and bills it. Since 0.11.1 a cluster's
+  balancer writes the rows of its Services' addresses in the pass that allocates them; a tenant's own balancer, on
+  two appliances or on one VM, still got its row from the sync alone. On the lab a pair's address was allocated at
+  11:47:50 and its row written at 14:31:36, by the sync, while the project's list showed five addresses and its
+  quota six (drill of v0.11.1-rc.3, step C), and a pair made and deleted between two syncs never had a row, so it
+  was never listed or billed (lab of v0.11.1, "Seen, not new"). Now the row is written with the allocation: for a
+  pair when the create takes the address, for a single VM when its public NIC is plugged before the first boot
+  (`lbOwnAddressRows`, by `lbAddressRows`, the helper of the cluster's pass). It is archived with the release, as
+  before, and now also when a create gives the address back because the build failed (`lbGiveBack`). The row is the
+  one the sync makes of the allocation (`FloatingIPRow`), written only where there is none (`InsertIfAbsent`), so a
+  sync after it changes nothing and an address never has two; it starts at the allocation's time. Every pass of a
+  tenant's balancer writes a row that is missing, which is what an existing site sees (Upgrade notes). A row that
+  cannot be written is logged and left to the next pass or sync: the allocation is the truth, and the create goes
+  on. `TestLBTenantAddressRows` (a real PostgreSQL; Proxmox is a fake, and no appliance is built): a pair's create
+  whose build fails leaves one archived row from the allocation to the release; the single VM's row is there once
+  its address is taken; a pair without a row gets it at its first pass, billed from the allocation and not from the
+  pass, a second pass and a sync after it change nothing. Each of the three fails with its call taken out. Not run
+  on a lab: a create that succeeds, on real appliances, and the bill of such a row.
 - **A project's delete with the grace period is refused when no job will carry it out.** With the job scheduler
   and the debug triggers off, `DELETE /project/{id}` answered `200 SCHEDULED_FOR_DELETION` although the sweep that
   deletes a scheduled project is one of the timed jobs, while `DELETE /project/{id}/now` answered `409` and said

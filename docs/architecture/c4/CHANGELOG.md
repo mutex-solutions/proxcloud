@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-26: a tenant balancer's floating address row is written with the allocation (lab drills of v0.11.1)
+
+**What changed:** no component, container, route or row field. Who writes one existing row, and when.
+
+- `internal/platform/project/cloud_lb_pve.go`: `lbOwnAddressRows` (new) writes the `FLOATING_IP` row of each public
+  address a tenant's balancer holds that has none, through `lbAddressRows` of the cluster's pass. It is called by
+  `lbPlugPublic` (a single VM's address, taken before the first boot), by `pveCreateLBPair`
+  (`cloud_lb_pair_pve.go`, the pair's VIP) and by `lbApplyOnce` (every pass, for a balancer older than this).
+  `lbGiveBack` (new) is the release of an owner's addresses with the archive of their rows: `lbDestroy` used the two
+  calls for a pair, and a single VM's failed build now archives the row too.
+- `internal/platform/project/cloud_lb_address_rows_integration_test.go`: `TestLBTenantAddressRows`.
+
+**Why:** the provider sync alone wrote that row, so a tenant's list missed a live address for up to a sync interval
+and a balancer made and deleted between two syncs was never listed or billed. The cluster's balancer has written
+its rows with the allocation since #452.
+
+**Diagrams updated:** `c4-code.md`, the rows of `pveCreateLoadBalancer` / `lbPlugPublic` and of `pveCreateLBPair`.
+C1 to C3 are unchanged.
+
 ## 2026-11-26: the Compose install's PostgreSQL image is pinned by digest (the site's upgrades to v0.11.0 and v0.11.1)
 
 **What changed:** no component, container or relation: the PostgreSQL container of the one-host install is the
