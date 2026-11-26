@@ -36,7 +36,7 @@ and rules: [README.md](README.md#maintenance-rule).
   keeps the two kinds apart is the namespace prefix and the role: sandbox lists read `sb-*` only, function lists
   `fn-*` only, and in a shared cluster the identity holds the sandbox role (exec, Sandbox kinds) in the first and the
   function role (Deployments, scale, write-only Secrets) in the second.
-- Three departures from the code this was carried from, each because of where the pods run here. The image is pulled
+- Three rules that follow from where the pods run here: on machines shared by tenants. The image is pulled
   on every start also when it is named by digest: on a machine shared by tenants a cached private image would start
   for anyone who names its digest. No platform registry credential is copied into a function namespace, and the
   cluster interface cannot read a Secret. An image's registry must be a DNS name with two labels or more, because the
@@ -45,6 +45,7 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated:** c3-components.md (C3e, one table row). No diagram node and no arrow: nothing calls the
 component yet, so the flow diagrams and c4-code.md are unchanged until the API and the proxy mode land.
+
 ## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
 
 **What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23
