@@ -96,7 +96,7 @@ func TestBillingEquality(t *testing.T) {
 		"snapshots":  map[string]any{"diskGb": 20, "items": []any{map[string]any{"name": "snap1", "createdAt": stamp(at(9, 5, 42))}}},
 	}))
 	put("vm-build", cloud.TypeServer, tp(at(9, 2, 11)), server("vm-build", "BUILD", nil)) // not eligible, back-billed later
-	put("vm-nomark", cloud.TypeServer, nil, server("vm-nomark", "ACTIVE", nil))            // no createdAt: a nil watermark
+	put("vm-nomark", cloud.TypeServer, nil, server("vm-nomark", "ACTIVE", nil))           // no createdAt: a nil watermark
 	// Created before the cycle and first rated on the 31st: the units stop at the limit, the net at the cap.
 	put("vol-old", cloud.TypeVolume, tp(time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)), map[string]any{"volume": map[string]any{"name": "vol-old", "size": 100, "volume_type": "std", "status": "in-use"}})
 	volArchived := put("vol-archived", cloud.TypeVolume, tp(at(9, 10, 5)), map[string]any{"volume": map[string]any{"name": "vol-archived", "size": 10, "volume_type": "std", "status": "available"}})
