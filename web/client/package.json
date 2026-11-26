@@ -24,7 +24,7 @@
     "@novnc/novnc": "^1.7.0",
     "@number-flow/react": "^0.6.2",
     "@stripe/stripe-js": "^10.3.0",
-    "@tanstack/react-query": "^5.108.2",
+    "@tanstack/react-query": "^5.108.4",
     "@tanstack/react-table": "^8.21.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
