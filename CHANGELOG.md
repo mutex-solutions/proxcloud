@@ -124,6 +124,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgrade keeps the old sentence until its next pass writes the row, and a tool that matches the old sentence in
   `statusMessage` must match the new one, or the unchanged start "A change waits". Not verified on a lab: only
   the text and one log line change.
+- **A cluster Service whose health check is off no longer reads "0 of N up".** The Workers column of a cluster's
+  Services (on the cluster's page and on its load balancer's page of the customer console) counted a worker as up
+  only when one of its members read `UP`. A Service with `proxcloud.io/lb-enable-health-monitor: "false"` has pools
+  without a check: HAProxy reports each worker as `no check` and sends to every one, so the row read "0 of 3 up" for
+  a Service that served on all three. Such a row now reads "3, not checked". A worker with at least one checked
+  member counts by those, as before, and a row with both kinds of worker reads "2 of 2 up, 1 not checked". For an
+  upgrade: only the console changes; no load balancer is touched and the API answers as before. A UDP port whose
+  check is off is not affected: its members are read from the kernel's table and read `UP` while they are in it.
+  `web/client/e2e/kubernetes-lb-unchecked.spec.ts` fails on the page as it was, with "0 of 3 up".
 
 ## [0.11.1] - 2026-11-26
 
