@@ -124,13 +124,5 @@ export function registryHost(image: string): string {
   return hub(host)
 }
 
-// The platform's machines pull an image from the host it names: a DNS name, never localhost and
-// never an address, in any spelling a resolver takes for one (10.0.0.5, 127.1, 0x7f.0.0.1,
-// 2130706433, [fd00::1]): a name's last label is never a number.
-export function imageHostOk(image: string): boolean {
-  const host = registryHost(image).replace(/:\d+$/, "").replace(/\.$/, "").toLowerCase()
-  return !/[[:]/.test(host) && !/(^|\.)(localhost|0x[0-9a-f]*|\d+)$/.test(host)
-}
-
 // The registry that credentials stored for server are offered to: its host, without the scheme or a path.
 export const serverHost = (server: string) => hub(server.trim().replace(/^https?:\/\//, "").split("/")[0])

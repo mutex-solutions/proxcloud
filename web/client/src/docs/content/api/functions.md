@@ -2,7 +2,7 @@
 
 This reference covers the project routes behind **Platform → Functions**, under the configured ProxCloud API prefix (normally `/api/v1`). The [Functions guide](/docs/guides/functions) describes the controls.
 
-Functions are offered only on a platform release that has them, and there only where the operator has enabled them. On a release without them these routes do not exist and answer **404**. A function runs a container image that you name, behind an internal HTTPS URL. Builds from source, public URLs, hostnames of your own and GPUs are not offered: a request that names one is refused with **400**, not ignored.
+Functions are offered only where the operator has enabled them. A function runs a container image that you name, behind an internal HTTPS URL. Builds from source, public URLs, hostnames of your own and GPUs are not offered: a request that names one is refused with **400**, not ignored.
 
 ## Basics
 
