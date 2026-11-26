@@ -187,6 +187,23 @@ func CheckLBCertificate(chainPEM, keyPEM string, now time.Time) (info LBCertific
 	default:
 		return info, "", nil, kinds
 	}
+	// A signature over an MD2, MD5 or SHA-1 digest. The HAProxy of an Ubuntu 26.04 appliance refuses the certificate
+	// file (OpenSSL: "ca md too weak", for the server's certificate as for an intermediate), so the config that names
+	// it was refused at the push; the one of a Debian 13 appliance loads it. The upload refuses on every site what
+	// one of the two refuses (TestLBApplianceTLS, step 1b, asks both). OpenSSL does not look at the signature of a
+	// certificate that signed itself, and neither does this: an old root at the end of a chain is taken.
+	// ponytail: "signed itself" is read from the two names alone, so a certificate issued under its own name by
+	// another key passes here and is refused by that appliance, as before; compare the key identifiers too if one
+	// turns up. This stands before the chain's order: Go refuses a SHA-1 signature there too, and the answer would be
+	// that the next certificate did not sign this one.
+	for i, c := range chain {
+		switch c.SignatureAlgorithm {
+		case x509.MD2WithRSA, x509.MD5WithRSA, x509.SHA1WithRSA, x509.DSAWithSHA1, x509.ECDSAWithSHA1:
+			if !bytes.Equal(c.RawSubject, c.RawIssuer) {
+				return info, "", nil, fmt.Sprintf("Certificate %d of the chain is signed with %s, which the load balancer does not accept: have it issued again with SHA-256 or stronger", i+1, c.SignatureAlgorithm)
+			}
+		}
+	}
 	for i := 0; i+1 < len(chain); i++ {
 		if chain[i].CheckSignatureFrom(chain[i+1]) != nil {
 			return info, "", nil, fmt.Sprintf("Certificate %d of the chain did not sign certificate %d: put the server's certificate first, then each intermediate that signed the one before it", i+2, i+1)

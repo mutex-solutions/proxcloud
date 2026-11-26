@@ -187,6 +187,43 @@ func TestCheckLBCertificate(t *testing.T) {
 	}
 }
 
+// A signature an appliance's HAProxy refuses is refused at the upload, with the certificate's place in the chain and
+// the algorithm: SHA-1 (and MD5, MD2) on a certificate that did not sign itself. A certificate that signed itself is
+// taken whatever its digest, the old SHA-1 root at the end of a chain among them: OpenSSL does not look at that
+// signature. What HAProxy itself says of these certificates, and of an MD5 and a DSA one: TestLBApplianceTLS.
+func TestCheckLBCertificateSignature(t *testing.T) {
+	now, soon := time.Now(), time.Now().Add(72*time.Hour)
+	key := lbcerttest.RSA(t, 2048)
+	first := func(chain string) string {
+		return chain[:strings.Index(chain, "-----END CERTIFICATE-----")+len("-----END CERTIFICATE-----\n")]
+	}
+	sha1Leaf := lbcerttest.NewSigned(t, key, soon, lbcerttest.Sign{Leaf: x509.ECDSAWithSHA1}, "sha1.example.org")
+	sha1RSA := lbcerttest.NewSigned(t, key, soon, lbcerttest.Sign{Leaf: x509.SHA1WithRSA, RSA: true}, "sha1.example.org")
+	sha1Mid := lbcerttest.NewSigned(t, key, soon, lbcerttest.Sign{Intermediate: x509.ECDSAWithSHA1}, "sha1.example.org")
+	sha1Root := lbcerttest.NewSigned(t, key, soon, lbcerttest.Sign{Root: x509.ECDSAWithSHA1}, "sha1.example.org")
+	sha256RSA := lbcerttest.NewSigned(t, key, soon, lbcerttest.Sign{RSA: true}, "sha256.example.org")
+	sha256 := lbcerttest.New(t, key, soon, "sha256.example.org")
+	self := lbcerttest.SelfSigned(t, key, soon, x509.SHA1WithRSA, "self.example.org")
+	for _, c := range []struct{ name, chain, want string }{
+		{"a SHA-1 server certificate alone", first(sha1Leaf.Chain), "Certificate 1 of the chain is signed with ECDSA-SHA1"},
+		{"a SHA-1 server certificate with its intermediate", sha1Leaf.Chain, "Certificate 1 of the chain is signed with ECDSA-SHA1"},
+		{"a SHA-1 server certificate of an RSA authority", sha1RSA.Chain, "Certificate 1 of the chain is signed with SHA1-RSA"},
+		{"a SHA-1 intermediate", sha1Mid.Chain, "Certificate 2 of the chain is signed with ECDSA-SHA1"},
+		{"a SHA-1 certificate that signed itself", self.Chain, ""},
+		{"a chain that ends in its SHA-1 root", sha1Root.Chain + sha1Root.Root, ""},
+		{"SHA-256 (the control)", sha256.Chain, ""},
+		{"SHA-256 of an RSA authority (the control)", sha256RSA.Chain, ""},
+	} {
+		info, bundle, _, refused := CheckLBCertificate(c.chain, sha256.Key, now)
+		switch {
+		case c.want == "" && (refused != "" || bundle == "" || info.ChainLength != strings.Count(c.chain, "BEGIN CERTIFICATE")):
+			t.Errorf("%s: refused with %q, want it taken whole", c.name, refused)
+		case c.want != "" && (!strings.Contains(refused, c.want) || !strings.Contains(refused, "SHA-256") || bundle != ""):
+			t.Errorf("%s: %q, want %q", c.name, refused, c.want)
+		}
+	}
+}
+
 // certGuest is the guest agent of an appliance for the delivery's order: it logs each command by what it is and each
 // file written, and answers a command with the exit code set for it.
 type certGuest struct {

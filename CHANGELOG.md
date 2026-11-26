@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Load balancer certificates: a certificate signed over SHA-1, MD5 or MD2 is refused when it arrives, on every
+  site.** This is what the fix "a certificate whose signature an appliance's HAProxy refuses is refused at the
+  upload" (see Fixed) does to what exists.
+  - *Nothing stored is checked again.* A project's certificate and a cluster's certificate row stay as they are,
+    and no balancer is pushed by the upgrade. A balancer that serves such a certificate today (appliances on the
+    default Debian 13 image load it) keeps serving it. A balancer on Ubuntu 26.04 appliances whose config names one
+    stays in `ERROR` with the config of before, as under 0.11.1, until the certificate is replaced.
+  - *A new upload* of such a certificate (`POST /project/{id}/certificates`, the Certificates page) answers `400`
+    with the certificate's place in the chain and the algorithm. Up to 0.11.1 it answered `200`. **On a site whose
+    appliances run Debian 13 that certificate was served; it can no longer be uploaded there.** A certificate that
+    signed itself and a chain that ends in an old root are taken as before.
+  - *Managed Kubernetes: a TLS Secret with such a certificate that is new or changes* is unusable, as a Secret with
+    a key that does not fit: its Service stays exactly as it was served (a Service that was never served gets no
+    address), with a Warning Event `InvalidCertificate` that carries the same words, and the other Services of the
+    cluster are served as usual. Up to 0.11.1 the certificate was taken and, on Ubuntu 26.04 appliances, every
+    push of the cluster's balancer was refused while a Service named it; on Debian 13 appliances it was served. A
+    Secret the portal already holds a row for is not looked at again until its content changes.
+  - Not run on a lab. Shown in real guests of both images and in unit tests (see Fixed).
+
 ### Changed
 
 - **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1`**
@@ -52,6 +73,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     loaded from such a host on that. The console stays on 1.36.0 until the owner has decided.
   Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
   pull request).
+
+### Fixed
+
+- **A certificate whose signature an appliance's HAProxy refuses is refused at the upload.** The upload's check
+  (`pve.CheckLBCertificate`: the key, the key's match, the chain's order) did not look at the signature algorithm.
+  A certificate signed over SHA-1 or MD5 was taken, and on an Ubuntu 26.04 appliance HAProxy refused its file ("ca
+  md too weak"), so the push was refused, the config of before stayed and the balancer read `ERROR` (0.11.1, Known
+  issues, TLS). With its intermediate in the chain the upload did refuse a SHA-1 certificate, with the wrong
+  reason: "Certificate 2 of the chain did not sign certificate 1".
+  - *Now:* every certificate of the chain that is signed over SHA-1, MD5 or MD2 and did not sign itself is refused
+    with its place and the algorithm: "Certificate 1 of the chain is signed with SHA1-RSA, which the load balancer
+    does not accept: have it issued again with SHA-256 or stronger". A tenant's upload answers `400` with it; a
+    Service's Secret reads unusable with it and its Service is held as it was served, where the whole balancer's
+    push was refused before (upgrade note above). A certificate that signed itself is taken whatever its digest,
+    an old root at the end of a chain among them: OpenSSL does not look at that signature.
+  - *The two appliance images do not agree, and the upload follows the stricter one.* The HAProxy of Ubuntu 26.04
+    (3.2.25, OpenSSL 3.5.5) refuses a SHA-1, an MD5 and a DSA with SHA-1 server certificate and a SHA-1
+    intermediate; the HAProxy of Debian 13 (3.0.11, OpenSSL 3.5.9) loads all of them. The upload cannot know which
+    image a balancer will run on, so it refuses on every site what one of the two refuses.
+  - *Tests.* `TestLBApplianceTLS` (step 1b), in a real guest of each image: eleven certificates (SHA-256 of ECDSA
+    and of RSA authorities as controls; SHA-1 alone, with its intermediate, of an RSA authority, on the
+    intermediate; MD5 and DSA with SHA-1, made by the guest's openssl; SHA-1 and MD5 that signed themselves; a
+    chain that ends in its SHA-1 root) go to the check and to `haproxy -c` under the product's own config. Held on
+    each image: what its HAProxy refuses the upload refused, and the controls are taken by both. Held over the two
+    together: what the upload refuses, one image's HAProxy at least refuses. `TestCheckLBCertificateSignature`
+    holds the texts. Without the change the first fails on Ubuntu 26.04 for four certificates ("taken by the upload
+    and refused by this HAProxy") and the second for four; with Debian 13 as the only image the assertion over the
+    images fails for all six refused certificates.
+  - *Not changed, not shown.* A chain certificate with an RSA key of 1024 bits is refused by the HAProxy of both
+    images ("ca key too small", seen by hand in a container of each) and taken by the upload: still open. A
+    certificate issued under its own name by another key passes the upload's check. No guest was given an MD2
+    signature. Not run on a lab.
 
 ## [0.11.1] - 2026-11-26
 
