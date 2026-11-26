@@ -216,13 +216,14 @@ export function seedCloudResources(): CloudResource[] {
       },
     }),
 
-    // The balancer of prod's Services (a cluster in default mode): three Services with an address each (one ends TLS
-    // with a Secret's certificate, one is UDP with a worker down), one refused.
+    // The balancer of prod's Services (a cluster in default mode): five Services with an address each (one ends TLS
+    // with a Secret's certificate, one is UDP with a worker down, one has its health check turned off, one has a
+    // port without a check that a third worker serves alone), one refused.
     // Made and changed by the cluster, so its page shows the Services and offers no edit or delete.
     res("LOAD_BALANCER", "k8s-5e1f0a2b3c4d", {
       loadbalancer: {
         id: "5e1f0a2b3c4d", name: "k8s-5e1f0a2b3c4d", status: "ACTIVE", ha: true, networkId: "v1", publicNetworkId: "vmbr1",
-        publicIp: "203.0.113.21", vips: ["203.0.113.21", "203.0.113.22", "203.0.113.23"],
+        publicIp: "203.0.113.21", vips: ["203.0.113.21", "203.0.113.22", "203.0.113.23", "203.0.113.24", "203.0.113.25"],
         appliances: [
           { serverId: "311", node: "pve2", privateIp: "10.20.0.41", role: "MASTER", holdsVip: true, state: "up" },
           { serverId: "312", node: "pve3", privateIp: "10.20.0.42", role: "BACKUP", state: "up" },
@@ -233,6 +234,8 @@ export function seedCloudResources(): CloudResource[] {
             { uid: "u-web", namespace: "shop", name: "web", vip: "203.0.113.21", state: "ready" },
             { uid: "u-gw", namespace: "nginx-gateway", name: "public-gateway-nginx", vip: "203.0.113.22", state: "ready" },
             { uid: "u-dns", namespace: "infra", name: "dns", vip: "203.0.113.23", state: "ready" },
+            { uid: "u-log", namespace: "infra", name: "syslog", vip: "203.0.113.24", state: "ready" },
+            { uid: "u-mail", namespace: "infra", name: "relay", vip: "203.0.113.25", state: "ready" },
             { uid: "u-sig", namespace: "infra", name: "sigtran", state: "refused", reason: "ProtocolNotSupported", message: "The load balancer serves TCP and UDP, and port 2905 is SCTP: no port of this Service is served" },
           ],
           kept: ["203.0.113.30", "203.0.113.31"],
@@ -242,6 +245,9 @@ export function seedCloudResources(): CloudResource[] {
           { port: 80, pool: "s1-0", vip: "203.0.113.22" },
           { port: 443, protocol: "udp", pool: "s1-1", vip: "203.0.113.22" },
           { port: 53, protocol: "udp", pool: "s2-0", vip: "203.0.113.23" },
+          { port: 6514, pool: "s3-0", vip: "203.0.113.24" },
+          { port: 25, pool: "s4-0", vip: "203.0.113.25" },
+          { port: 587, pool: "s4-1", vip: "203.0.113.25" },
         ],
         pools: [
           { name: "s0-0", protocol: "http", algorithm: "roundrobin", members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 31443, weight: 1 })) },
@@ -252,6 +258,15 @@ export function seedCloudResources(): CloudResource[] {
             members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 30443, weight: 1 })) },
           { name: "s2-0", protocol: "udp", algorithm: "roundrobin", healthCheck: { type: "udp-connect" },
             members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 30053, weight: 1 })) },
+          // proxcloud.io/lb-enable-health-monitor: "false": HAProxy checks no worker and sends to every one.
+          { name: "s3-0", protocol: "tcp", algorithm: "roundrobin", healthCheck: { type: "none" },
+            members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 30514, weight: 1 })) },
+          // A checked port on two workers and an unchecked one on three. The controller gives every port of a Service
+          // the same workers: this one is here for the count over both kinds.
+          { name: "s4-0", protocol: "tcp", algorithm: "roundrobin",
+            members: ["10.20.0.11", "10.20.0.12"].map((a) => ({ serverId: "", node: true, address: a, port: 30025, weight: 1 })) },
+          { name: "s4-1", protocol: "tcp", algorithm: "roundrobin", healthCheck: { type: "none" },
+            members: ["10.20.0.11", "10.20.0.12", "10.20.0.13"].map((a) => ({ serverId: "", node: true, address: a, port: 30587, weight: 1 })) },
         ],
       },
     }),
