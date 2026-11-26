@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Serverless functions, the cluster side (not reachable yet).** The first part of functions on the managed
+- **Serverless functions, the cluster side (not reachable yet)** (#496). The first part of functions on the managed
   platform (v0.13.0): package `internal/cloud/function`, which renders and drives one function as a gVisor
   Deployment `fn-<16 hex>` in the project's `fn-<project>` namespace on the sandbox provider's cluster. No route,
   page, job, chart object or BOM pin uses it: a portal built from this commit behaves as before. What the package
