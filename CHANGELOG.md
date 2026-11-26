@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `FUNCTION`. A provider gains `secret.functionWakeToken` as a field of its own, apart from `proxyWakeToken`,
     which stays empty.
   Tested against a fake cluster only: no function has run on a cluster from this code.
-- **Serverless functions, the chart objects (off by default, pinned by nothing)** (#PRNUM,
+- **Serverless functions, the chart objects (off by default, pinned by nothing)** (#510,
   `deploy/charts/proxcloud-sandbox`). Chart `proxcloud-sandbox` is 0.2.0 in the source and gains the value
   `functions {enabled, wakeURL, portalCA, wakeTokenVersion}`. The platform BOM still pins the published 0.1.0, no tag
   `proxcloud-sandbox-v0.2.0` exists, and nothing sets the value: no platform renders any of it.

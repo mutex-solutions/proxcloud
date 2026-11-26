@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-27: PR #PRNUM, the sandbox chart carries the function objects (off: `functions.enabled` is false and nothing pins 0.2.0)
+## 2026-11-27: PR #510, the sandbox chart carries the function objects (off: `functions.enabled` is false and nothing pins 0.2.0)
 
 **What changed**
 
