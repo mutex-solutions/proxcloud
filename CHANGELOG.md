@@ -124,6 +124,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `FUNCTION`. A provider gains `secret.functionWakeToken` as a field of its own, apart from `proxyWakeToken`,
     which stays empty.
   Tested against a fake cluster only: no function has run on a cluster from this code.
+- **Functions in the operator console (nothing of them is shown yet).** The third console part of functions on the
+  managed platform (v0.13.0), in `web/admin` only. Every piece is on a page only where functions can exist; under
+  every BOM of this release (sandbox chart 0.1.0) the console looks and saves as before.
+  - **Managed services, Settings, Sandboxes: the box "Functions"**, with the portal URL the sandbox proxy calls and
+    its CA. Offered only when the platform's BOM pins sandbox chart 0.2.0 or newer, or when the stored settings
+    already name functions. Above the box, in full and for the placement chosen, is what functions add to what
+    sandboxes give up: on a shared node group an escape reads the secrets of other tenants' functions (on a
+    separate cluster it stays away from the platform cluster, not from those secrets), the cluster's copy of
+    function secrets is a Secret in an etcd this release does not encrypt, and anyone who reaches a function's
+    address keeps it running at its tenant's cost. The box is cleared when the placement of an installation that is
+    not built changes, since each placement has its own text. No tick and nothing stored sends no `functions` key;
+    a stored block is switched off as `{enabled: false}`.
+  - **The sandbox provider's page: a group "Functions"**: the switch, the two instance floors (`minInstances`,
+    `maxMinInstances`), the idle bounds, the per-instance caps, the highest instance count, functions per project
+    and the default function quota of a project. Shown only when the installation that built the provider has the
+    box ticked or the provider already stores a `functions` block. The form refuses, in the API's own terms, a
+    block the API would store and then not serve. A provider without functions is saved without the key.
+  - **Function gates.** The rows of the release check whose names start with `function` are listed apart from the
+    release gates, on the provider's page and on the Ready card, under the sentence that they decide the Functions
+    switch and never whether the provider goes live; the count of gates that do not hold leaves them out. The price
+    row is a warning. On a shared node group the Ready card's reduced isolation mark names functions.
+  - **A project's Quota tab: "Function quota"** (functions, vCPUs, RAM), saved as the project's own `functionQuota`
+    and never as a key of the resource quota. Shown when a sandbox provider of the project offers functions or the
+    project already holds one.
+  - Operator docs: the page "Functions on the sandbox provider", and the settings and resource type pages.
+  Shown on the mock API only (`web/admin/e2e/platform-functions.spec.ts`): the rows of the release check, the
+  settings block `spec.sandbox.functions` and the route `PUT /admin/project/{id}/function-quota` are the mock's,
+  written from the plan's names, until the API parts are merged.
 - **Sandboxes on the managed platform are offered** (#483, `deploy/platform/platform-bom.yaml`,
   [managed-services.md](docs/managed-services.md#sandboxes-on-the-platform)). The platform BOM names the sandbox
   chart, `proxcloud-sandbox` 0.1.0 at its published digest, as the component `sandbox` (`feature: sandbox`), and

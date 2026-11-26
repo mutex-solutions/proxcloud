@@ -29,6 +29,11 @@ export type SandboxSpec = Partial<SandboxMachines> & {
   placement: "shared" | "separate" | "off"
   nodeRange?: string; dns?: string[]; proxyAddress?: string; domain?: string; tls?: { mode: string }
   system?: SandboxMachines // separate only: sandbox-proxy and the sandbox controller
+  // Optional: serverless functions on the sandbox machines. A block without it keeps what is stored; enabled false
+  // switches them off (refused while a function exists). portalURL is where sandbox-proxy reaches this ProxCloud's API,
+  // portalCA the certificate it trusts for that (empty: a publicly trusted one). Offered only by a release whose BOM
+  // pins a sandbox chart that has the function objects (bomOffersFunctions).
+  functions?: { enabled: boolean; portalURL?: string; portalCA?: string }
 }
 export type Attach = "all" | "new" | "none"
 export const ATTACH_LABEL: Record<Attach, string> = {
@@ -96,8 +101,32 @@ export type BOM = {
 }
 // Whether the release an install runs with can build sandboxes: its BOM has the sandbox chart.
 export const bomOffersSandboxes = (bom?: BOM) => !!bom?.components.some((c) => c.feature === "sandbox")
+// Whether chart version v (1.2.3, v1.2.3, 1.2.3-rc.1) is at least want; false for anything that is not three numbers.
+function chartAtLeast(v: string, want: number[]): boolean {
+  const p = v.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number)
+  if (p.length !== 3 || p.some(Number.isNaN)) return false
+  for (let i = 0; i < 3; i++) if (p[i] !== want[i]) return p[i] > want[i]
+  return true
+}
+// The first sandbox chart with the function objects. Whether the release an install runs with can build functions:
+// its BOM pins that chart or a newer one. Under an older pin the API refuses spec.sandbox.functions, so the settings
+// do not offer the tick.
+const FUNCTIONS_CHART = [0, 2, 0]
+export const bomOffersFunctions = (bom?: BOM) => chartAtLeast(bom?.components.find((c) => c.feature === "sandbox")?.chart.version ?? "", FUNCTIONS_CHART)
 // One gate of POST /admin/service/{id}/sandbox/release-check.
 export type SandboxGate = { name: string; ok: boolean; detail: string }
+// The rows the release check adds for functions (their names start with "function"): they decide whether
+// config.sandbox.functions.enabled is accepted, never whether the provider goes live for sandboxes.
+export const isFunctionGate = (name: string) => name.startsWith("function")
+// A function row that warns and refuses nothing: with no price rule a function runs and bills nothing.
+export const isFunctionWarning = (name: string) => name === "function-price"
+export const FUNCTION_GATE_LABEL: Record<string, string> = {
+  "function-scheduler": "Job scheduler",
+  "function-sealing-key": "Sealing key for function secrets",
+  "function-proxy": "A sandbox-proxy replica reported in the last 90 seconds",
+  "function-billing": "Billing is not the external provider",
+  "function-price": "Price rule for functions",
+}
 export type Plan = {
   installed?: { release: string; sha256: string } | null
   target: { release: string; sha256: string } // what an apply runs with
@@ -170,7 +199,11 @@ export type SandboxForm = {
   placement: "" | "off" | "shared" | "separate"
   machines: GroupForm; system: GroupForm
   nodeRange: string; proxyAddress: string; domain: string; dns: string; accept: boolean
+  functions: FunctionsForm
 }
+// The Functions tick under Sandboxes. stored: the settings read from the API hold a functions block, so the form
+// sends one back also when the tick is off (a block without it would keep the stored one).
+export type FunctionsForm = { enabled: boolean; portalURL: string; portalCA: string; stored: boolean }
 
 const group = (cores: string, mem: string): GroupForm => ({ nodes: [], count: "1", cores, memoryGiB: mem, diskGiB: "40" })
 export const emptyForm: Form = {
@@ -184,6 +217,7 @@ export const emptyForm: Form = {
   sandbox: {
     placement: "", machines: { ...group("4", "8"), diskGiB: "40" }, system: { ...group("2", "4"), diskGiB: "30" },
     nodeRange: "", proxyAddress: "", domain: "", dns: "", accept: false,
+    functions: { enabled: false, portalURL: "", portalCA: "", stored: false },
   },
 }
 
@@ -193,11 +227,7 @@ export const emptyForm: Form = {
 const REPLICAS_CHART = [0, 1, 14]
 // Whether the release an install runs with can build three control plane machines: its cluster chart is new enough.
 export function bomBuildsThree(bom?: BOM): boolean {
-  const v = bom?.components.find((c) => c.cluster === "seed" && c.name === "pc-platform")?.chart.version ?? ""
-  const p = v.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number)
-  if (p.length !== 3 || p.some(Number.isNaN)) return false
-  for (let i = 0; i < 3; i++) if (p[i] !== REPLICAS_CHART[i]) return p[i] > REPLICAS_CHART[i]
-  return true
+  return chartAtLeast(bom?.components.find((c) => c.cluster === "seed" && c.name === "pc-platform")?.chart.version ?? "", REPLICAS_CHART)
 }
 
 export type Preset = "homelab" | "standard" | "custom"
@@ -249,7 +279,8 @@ export function applyPreset(preset: Preset, f: Form, site: Site): { form: Form; 
   const sb = f.sandbox
   if (sb.placement === "shared" || sb.placement === "separate") {
     form = { ...form, sandbox: {
-      ...sb, placement: home ? "shared" : "separate", accept: false,
+      // The functions tick is made under the text of one placement: a preset that may change the placement clears it.
+      ...sb, placement: home ? "shared" : "separate", accept: false, functions: { ...sb.functions, enabled: false },
       machines: { ...sb.machines, nodes: [seedNode].filter(Boolean), count: home ? "1" : "2", cores: home ? "2" : "4", memoryGiB: home ? "4" : "8", diskGiB: "40" },
       system: { ...sb.system, nodes: [seedNode].filter(Boolean), count: "1", cores: "2", memoryGiB: "4", diskGiB: "30" },
     } }
@@ -334,7 +365,15 @@ function sandboxSpec(sb: SandboxForm): SandboxSpec | undefined {
     nodeRange: sb.nodeRange.trim(), proxyAddress: sb.proxyAddress.trim(), domain: sb.domain.trim().toLowerCase(), tls: { mode: "selfsigned" },
     ...(dns.length ? { dns } : {}),
     ...(sb.placement === "separate" ? { system: machines(sb.system) } : {}),
+    ...functionsSpec(sb.functions),
   }
+}
+
+// No tick and nothing stored sends no functions key at all: the body is the one of a release without functions.
+function functionsSpec(fn: FunctionsForm): Pick<SandboxSpec, "functions"> {
+  if (!fn.enabled) return fn.stored ? { functions: { enabled: false } } : {}
+  const ca = fn.portalCA.trim()
+  return { functions: { enabled: true, portalURL: fn.portalURL.trim(), ...(ca ? { portalCA: ca } : {}) } }
 }
 
 export function specToForm(name: string, s: Spec): Form {
@@ -367,6 +406,7 @@ function sandboxForm(sb?: SandboxSpec): SandboxForm {
   return {
     placement: sb.placement, machines: g(sb, e.machines), system: g(sb.system, e.system),
     nodeRange: sb.nodeRange ?? "", proxyAddress: sb.proxyAddress ?? "", domain: sb.domain ?? "", dns: (sb.dns ?? []).join(", "), accept: true,
+    functions: { enabled: sb.functions?.enabled === true, portalURL: sb.functions?.portalURL ?? "", portalCA: sb.functions?.portalCA ?? "", stored: !!sb.functions },
   }
 }
 
@@ -554,6 +594,11 @@ export function validate(f: Form): Problem[] {
     const sdns = words(sb.dns)
     if (sdns.length > 3 || sdns.some((d) => Number.isNaN(ip4(d)))) bad("sbxDns", "Sandbox DNS servers: at most three IPv4 addresses, or empty for the platform network's.")
     if (sb.placement === "shared" && !sb.accept) bad("sbxAccept", "Tick the box under the text on what a shared node group gives up, or choose a separate cluster.")
+    if (sb.functions.enabled) {
+      if (!portalURL(sb.functions.portalURL)) bad("sbxFnUrl", "Portal URL: the https:// address sandbox-proxy reaches this ProxCloud at, such as https://cloud.example.org, with no path, query or credentials.")
+      const ca = sb.functions.portalCA.trim()
+      if (ca && !/^-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----$/.test(ca)) bad("sbxFnCa", "Portal CA: one or more PEM certificates (-----BEGIN CERTIFICATE-----), or empty when the portal's certificate is publicly trusted.")
+    }
   }
   return out
 }
@@ -571,6 +616,33 @@ export const SHARED_GIVES_UP: string[] = [
   "What still holds: the machine's VM firewall keeps the Proxmox API, the seed, the management networks, tenant networks and every address of the platform network that is not a machine of the cluster closed to it. Of the cluster's own machines it reaches the pod tunnel, the health port, ICMP and the Kubernetes API port, nothing else, and it cannot take another machine's address.",
   "A separate cluster limits the same escape to the sandbox cluster: other tenants' sandboxes on it, its own control plane's API and the internet. It costs a control plane (about 0.6 GiB on the kamaji group) and a system machine.",
 ]
+// An https origin: a host, an optional port, nothing else. The wake token travels to it as a bearer.
+function portalURL(raw: string): boolean {
+  try {
+    const u = new URL(raw.trim())
+    return u.protocol === "https:" && !!u.hostname && !u.username && !u.password && !u.search && !u.hash && (u.pathname === "" || u.pathname === "/")
+  } catch {
+    return false
+  }
+}
+
+// What functions add to what sandboxes already give up, for the placement chosen: shown in full before the Functions
+// tick, never shortened to a tooltip (docs/managed-services.md, "Sandboxes"; docs/managed-functions.md).
+export function functionsGiveUp(placement: SandboxForm["placement"]): string[] {
+  const shared = placement === "shared"
+  return [
+    shared
+      ? "On a shared node group, code that escapes a sandbox or a function (a gVisor escape) also reads the secrets of other tenants' functions: a kubelet reads the Secrets of the pods on its machine, so the escaped machine holds the environment secrets and the registry passwords of every function that runs there. Sandboxes put no tenant Secret on those machines; functions do."
+      : "A separate cluster keeps an escape away from the platform cluster, but not from other tenants' functions: a kubelet reads the Secrets of the pods on its machine, so code that escapes gVisor on a sandbox machine holds the environment secrets and the registry passwords of every function that runs there.",
+    shared
+      ? "The cluster's copy of those secrets is not encrypted: each function's environment secrets and registry login are a plain Kubernetes Secret in the platform cluster's etcd, and this release sets up no encryption for it. The portal's own copy is sealed."
+      : "The cluster's copy of those secrets is not encrypted: each function's environment secrets and registry login are a plain Kubernetes Secret in the sandbox cluster's etcd, which is the Kamaji datastore on the platform cluster, and this release sets up no encryption for it. The portal's own copy is sealed.",
+    "Callers cost the tenant money: a function's address has no caller authentication, so anyone who reaches the proxy address keeps a function awake and, when it scales on load, at its highest instance count, and the tenant is billed for every minute. A new function starts with at most 1 instance; the provider allows up to 5 unless you change it.",
+    "Images are pulled by the sandbox machines themselves: containerd contacts the registry host a tenant names, outside the network rules that hold the pods.",
+    "Every tenant's function answers under the one sandbox domain: do not serve anything under it that sets a session cookie for the whole domain.",
+  ]
+}
+
 // By CPU a sandbox machine of n cores holds n-1 sandboxes of one vCPU: the node's own pods ask for about one core.
 export const sandboxRoom = (cores: string) => {
   const c = num(cores)
@@ -579,6 +651,7 @@ export const sandboxRoom = (cores: string) => {
 }
 export const GATE_LABEL: Record<string, string> = {
   noderestriction: "NodeRestriction", isolation: "Isolation rules", fence: "VM firewall of the sandbox machines", "network-guard": "Network guard", checker: "Gate checker", config: "Provider settings",
+  ...FUNCTION_GATE_LABEL,
 }
 
 // ── What the operator does ────────────────────────────────────────────────────

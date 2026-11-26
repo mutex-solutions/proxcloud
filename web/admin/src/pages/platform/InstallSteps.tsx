@@ -18,7 +18,7 @@ import { useAdminList } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 import { CheckRows, CopyBlock, ErrorNote, LINK, StepCard, errMsg, fetchText, useClusterInfo } from "@/pages/setup/common"
 import {
-  CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, PRESETS, SHARED_GIVES_UP, TOKEN_SECRET, applyPreset, attachDefault, bomBuildsThree, bomOffersSandboxes, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, gib, isConflict, plannedMemory, sandboxRoom, specToForm, validate,
+  CAPI_TOKEN, CSI_TOKEN, ENROLL_PREFIX, GROUPS, PLATFORM_KEY, GROUP_USE, PRESETS, SHARED_GIVES_UP, TOKEN_SECRET, applyPreset, attachDefault, bomBuildsThree, bomOffersFunctions, bomOffersSandboxes, checkAction, enrollProblem, emptyForm, errCode, errProblems, formToSpec, functionsGiveUp, gib, isConflict, plannedMemory, sandboxRoom, specToForm, validate,
   type BOM, type Check, type Form, type Installation, type MachineForm, type Plan, type Preset, type Problem, type SandboxForm, type SiteNode, type TenantProbe, type Upgrade, type UpgradePart,
 } from "./model"
 import { AttachChoice } from "./Tenants"
@@ -113,9 +113,11 @@ const H3 = ({ children }: { children: React.ReactNode }) => <h3 className="borde
 // The Sandboxes block of the settings: off, a node group of the platform cluster, or a cluster of its own. built is
 // what a run made (status.sandbox): from then on the placement only goes to Off, and the range and the proxy address
 // stay. Shown only for a release whose BOM has the sandbox chart, or when the stored settings already hold a block.
-function SandboxSettings({ value, onChange, nodes, problems, canManage, built, schedulerOff }: {
+// functionsOffered: the BOM pins a sandbox chart with the function objects, or the stored block already names
+// functions; without it nothing of functions is on the page and nothing of them is sent.
+function SandboxSettings({ value, onChange, nodes, problems, canManage, built, schedulerOff, functionsOffered }: {
   value: SandboxForm; onChange: (v: SandboxForm) => void; nodes: string[]; problems: Problem[]; canManage: boolean
-  built?: NonNullable<Installation["status"]["sandbox"]>; schedulerOff: boolean
+  built?: NonNullable<Installation["status"]["sandbox"]>; schedulerOff: boolean; functionsOffered: boolean
 }) {
   const on = value.placement === "shared" || value.placement === "separate"
   const set = (next: Partial<SandboxForm>) => onChange({ ...value, ...next })
@@ -123,7 +125,10 @@ function SandboxSettings({ value, onChange, nodes, problems, canManage, built, s
   const choice = (placement: SandboxForm["placement"], title: string, body: string) => (
     <label className="flex items-start gap-2 text-sm">
       <input type="radio" name="pf-sandbox-placement" className="mt-1" disabled={!canManage || (!!built && placement !== "off" && placement !== built.placement)}
-        checked={value.placement === placement || (placement === "off" && value.placement === "")} onChange={() => set({ placement, accept: false })} />
+        checked={value.placement === placement || (placement === "off" && value.placement === "")}
+        // The Functions tick was made under the text of one placement: another placement clears it. A built placement
+        // only goes to Off and back, where the text is the same, so there the tick stays (a cleared one would be saved as off).
+        onChange={() => set({ placement, accept: false, functions: { ...value.functions, enabled: !!built && value.functions.enabled } })} />
       <span><span className="font-medium">{title}.</span> {body}</span>
     </label>
   )
@@ -146,6 +151,9 @@ function SandboxSettings({ value, onChange, nodes, problems, canManage, built, s
     )
   }
   const acceptProblem = problems.find((p) => p.field === "sbxAccept")
+  const fn = value.functions
+  const setFn = (next: Partial<SandboxForm["functions"]>) => set({ functions: { ...fn, ...next } })
+  const caProblem = problems.find((p) => p.field === "sbxFnCa")
   return (
     <>
       <H3>Sandboxes</H3>
@@ -198,6 +206,42 @@ function SandboxSettings({ value, onChange, nodes, problems, canManage, built, s
             {acceptProblem ? <p id="sbxAccept-error" className="mt-1 text-xs text-destructive">{acceptProblem.message}</p> : null}
           </AlertDescription>
         </Alert>
+      ) : null}
+      {on && functionsOffered ? (
+        <>
+          {/* The text comes first and the tick after it, in the page and in the reading order: nothing of functions is saved unread. */}
+          <Alert role="note" aria-label="What functions add">
+            <AlertTitle>Functions (optional)</AlertTitle>
+            <AlertDescription>
+              <p>
+                Serverless functions on the sandbox machines: a tenant deploys a container image and calls it at https://&lt;name&gt;-&lt;6 hex&gt;.{value.domain.trim() || "<domain>"}.
+                Traffic starts it, it stops when idle, and it is billed per minute while an instance runs. The install builds the function side; tenants see nothing
+                until you switch Functions on on the sandbox provider&apos;s page. What it adds{value.placement === "shared" ? " to what a shared node group gives up" : ""}:
+              </p>
+              <ul className="list-disc pl-5">{functionsGiveUp(value.placement).map((line) => <li key={line}>{line}</li>)}</ul>
+              <span className="mt-3 flex items-start gap-2">
+                <Checkbox id="sbxFunctions" className="mt-0.5" checked={fn.enabled} disabled={!canManage} aria-describedby="sbxFunctions-hint" onCheckedChange={(v) => setFn({ enabled: v === true })} />
+                <Label htmlFor="sbxFunctions" className="font-normal">Functions: I have read this, and tenants of this site may run functions on the sandbox machines.</Label>
+              </span>
+              <p id="sbxFunctions-hint" className="mt-1 text-xs text-muted-foreground">
+                Taking the tick away again is refused while a function exists, and sandboxes cannot be switched off while it is set.
+              </p>
+            </AlertDescription>
+          </Alert>
+          {fn.enabled ? (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field id="sbxFnUrl" label="Portal URL" value={fn.portalURL} onChange={(e) => setFn({ portalURL: e.target.value })} disabled={!canManage} problems={problems} placeholder="https://cloud.example.org"
+                hint={`Where sandbox-proxy reaches this ProxCloud over HTTPS, to start a stopped function and to report traffic.${value.placement === "separate" ? " The sandbox machines' firewall is opened to this address." : ""} A portal on a private address is closed to function pods; one on a public address they reach as the internet does, and its two internal routes answer only to the proxy's token.`} />
+              <div className="grid content-start gap-1.5">
+                <Label htmlFor="sbxFnCa">Portal CA (PEM, optional)</Label>
+                <Textarea id="sbxFnCa" className="min-h-16 font-mono text-xs" value={fn.portalCA} onChange={(e) => setFn({ portalCA: e.target.value })} disabled={!canManage} autoComplete="off"
+                  placeholder="-----BEGIN CERTIFICATE-----" aria-invalid={caProblem ? true : undefined} aria-describedby={caProblem ? "sbxFnCa-hint sbxFnCa-error" : "sbxFnCa-hint"} />
+                <p id="sbxFnCa-hint" className="text-xs text-muted-foreground">The certificate sandbox-proxy trusts for the portal URL. Empty: the portal&apos;s certificate is publicly trusted.</p>
+                {caProblem ? <p id="sbxFnCa-error" className="text-xs text-destructive">{caProblem.message}</p> : null}
+              </div>
+            </div>
+          ) : null}
+        </>
       ) : null}
     </>
   )
@@ -436,7 +480,7 @@ export function SettingsStep({ installation, serviceId, canManage, locked, confl
 
       {bomOffersSandboxes(bom.data) || form.sandbox.placement !== "" ? (
         <SandboxSettings value={form.sandbox} onChange={(sandbox) => setForm({ ...form, sandbox })} nodes={nodes} problems={problems} canManage={canManage}
-          built={installation?.status.sandbox} schedulerOff={!!installation?.schedulerNote} />
+          built={installation?.status.sandbox} schedulerOff={!!installation?.schedulerNote} functionsOffered={bomOffersFunctions(bom.data) || form.sandbox.functions.stored} />
       ) : null}
 
       <H3>Storage</H3>

@@ -23,7 +23,7 @@ import { hasPermission } from "@/lib/permissions"
 import { cn } from "@/lib/utils"
 import { CopyBlock, ErrorNote, LINK, errMsg, setupStatusQuery } from "@/pages/setup/common"
 import { CheckStep, IdentitiesStep, ReviewStep, SettingsStep } from "./InstallSteps"
-import { ATTACH_LABEL, GATE_LABEL, PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, rolling, runActive, stageNumbers, type Installation, type Run, type SandboxGate, type Stage } from "./model"
+import { ATTACH_LABEL, GATE_LABEL, PLATFORM_KEY, STAGE_TITLE, codeAction, errCode, isConflict, isFunctionGate, isFunctionWarning, rolling, runActive, stageNumbers, type Installation, type Run, type SandboxGate, type Stage } from "./model"
 import { KubernetesVersion } from "./Tenants"
 
 const POLL_MS = 3000
@@ -340,7 +340,22 @@ function SandboxProviderItem({ id, label, row, installation, canManage }: { id: 
   const gates = useMutation({ mutationFn: () => apiFetch<SandboxGate[]>(`/admin/service/${id}/sandbox/release-check`, { method: "POST" }) })
   const sb = installation.status.sandbox
   const live = !!row?.status && row.status !== "DISABLED"
-  const failed = (gates.data ?? []).filter((g) => !g.ok)
+  // The function rows of the answer decide whether functions can be switched on, not whether the provider goes live.
+  const liveGates = (gates.data ?? []).filter((g) => !isFunctionGate(g.name))
+  const fnGates = (gates.data ?? []).filter((g) => isFunctionGate(g.name))
+  const failed = liveGates.filter((g) => !g.ok)
+  const fnFailed = fnGates.filter((g) => !g.ok && !isFunctionWarning(g.name))
+  const functions = installation.spec.sandbox?.functions?.enabled === true
+  const gateRows = (rows: SandboxGate[], label: string) => (
+    <ul aria-label={label} className="grid gap-1">
+      {rows.map((g) => (
+        <li key={g.name} className="flex flex-col sm:flex-row sm:gap-3">
+          <span className="sm:w-64"><State state={g.ok ? "ok" : isFunctionWarning(g.name) ? "warn" : "fail"} className="mr-2" />{GATE_LABEL[g.name] ?? g.name}</span>
+          <span className="min-w-0 flex-1 text-muted-foreground">{g.detail}</span>
+        </li>
+      ))}
+    </ul>
+  )
   const saveCert = () => {
     const url = URL.createObjectURL(new Blob([sb?.certificate ?? ""], { type: "application/x-pem-file" }))
     const a = document.createElement("a")
@@ -356,7 +371,11 @@ function SandboxProviderItem({ id, label, row, installation, canManage }: { id: 
         <span>
           <State state={live ? "ok" : "warn"} className="mr-2" />
           {live ? `Live (${row.status}): tenants with this provider can start sandboxes.` : "Disabled: no tenant can start a sandbox yet. A run never sets it live."}
-          {sb?.placement === "shared" ? " Reduced isolation: sandboxes run on a shared node group of the platform cluster." : ""}
+          {sb?.placement === "shared"
+            ? functions
+              ? " Reduced isolation: sandboxes and functions run on a shared node group of the platform cluster, and an escape there reads the secrets of other tenants' functions."
+              : " Reduced isolation: sandboxes run on a shared node group of the platform cluster."
+            : ""}
         </span>
       ) : null}
       {installation.schedulerNote ? <span><State state="warn" className="mr-2" />The job scheduler is off, so this provider cannot be set live: no sync would fence a new sandbox machine or watch its firewall.</span> : null}
@@ -365,22 +384,23 @@ function SandboxProviderItem({ id, label, row, installation, canManage }: { id: 
         {sb?.certificate ? <Button variant="outline" size="sm" onClick={saveCert}>Download the certificate</Button> : null}
       </span>
       <ErrorNote title="The gates could not be checked" error={gates.error} />
-      {gates.data ? (
-        <ul aria-label="Release gates" className="grid gap-1">
-          {gates.data.map((g) => (
-            <li key={g.name} className="flex flex-col sm:flex-row sm:gap-3">
-              <span className="sm:w-64"><State state={g.ok ? "ok" : "fail"} className="mr-2" />{GATE_LABEL[g.name] ?? g.name}</span>
-              <span className="min-w-0 flex-1 text-muted-foreground">{g.detail}</span>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {gates.data ? gateRows(liveGates, "Release gates") : null}
       {gates.data ? (
         <span role="status">
           {failed.length
-            ? `${failed.length} of ${gates.data.length} gates do not hold. A new sandbox machine passes the VM firewall gate about 20 minutes after it joined, once a provider sync has fenced it.`
+            ? `${failed.length} of ${liveGates.length} gates do not hold. A new sandbox machine passes the VM firewall gate about 20 minutes after it joined, once a provider sync has fenced it.`
             : <>Every gate holds. Set the provider live on <Link to={to} className="underline underline-offset-4">its page</Link>: choose a status other than Disabled and save.</>}
         </span>
+      ) : null}
+      {fnGates.length ? (
+        <>
+          {gateRows(fnGates, "Function gates")}
+          <span role="status" aria-label="Functions">
+            {fnFailed.length
+              ? `Functions: ${fnFailed.length} of ${fnGates.length} do not hold, so functions cannot be switched on yet. This does not keep the provider from going live.`
+              : <>Functions: every gate holds. Switch them on on <Link to={to} className="underline underline-offset-4">the provider&apos;s page</Link>, in the Functions group.</>}
+          </span>
+        </>
       ) : null}
       {sb?.certificate ? <span className="text-muted-foreground">The certificate is self-signed for the sandbox domain: a client that calls a sandbox adds it to its trust store (SSL_CERT_FILE, or NODE_EXTRA_CA_CERTS for the JavaScript SDK).</span> : null}
     </li>

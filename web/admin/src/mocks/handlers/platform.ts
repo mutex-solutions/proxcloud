@@ -14,6 +14,9 @@
 // sandboxes (nothing saved; the settings offer sandboxes, as this release's BOM has the sandbox chart: the same as none) |
 // nosandboxes (nothing saved, and this release's BOM has no sandbox chart, as every release before 0.12.0: the settings offer none) |
 // sandboxready (ready, with a shared sandbox group a run built and its sandbox provider, disabled: the first check of its release gates finds the VM firewall gate open, the second finds every gate holding) |
+// functions (nothing saved, and this release's BOM pins sandbox chart 0.2.0, the first with the function objects: the settings offer the Functions tick under Sandboxes; under every other preset the pin is 0.1.0 and nothing of functions is offered or accepted) |
+// functionsready (sandboxready on that BOM, with Functions ticked and built and one function in a project: the provider's page shows the Functions group, switched off; the first check finds no sandbox-proxy report, the second finds every function gate holding and warns that no price rule exists; taking the tick away, or sandboxes off, is refused) |
+// functionson (the same, with functions switched on on the provider and project prj-0001 attached to it: its Quota tab shows the function quota) |
 // onechart (nothing saved, and this release's cluster chart builds one control plane machine) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
 // (none: enabled, nothing saved).
 import { ApiError } from "@/lib/api"
@@ -71,7 +74,8 @@ const INSTALLATION: Shape = {
   name: true, preset: true, serviceId: true, provisionedBy: true, layout: true, rev: true,
   spec: {
     sandbox: { placement: true, nodes: true, count: true, cores: true, memoryMiB: true, diskGiB: true, nodeRange: true, dns: true, proxyAddress: true, domain: true,
-      tls: { mode: true }, system: { nodes: true, count: true, cores: true, memoryMiB: true, diskGiB: true } },
+      tls: { mode: true }, system: { nodes: true, count: true, cores: true, memoryMiB: true, diskGiB: true },
+      functions: { enabled: true, portalURL: true, portalCA: true } },
     pveApiUrl: true, storage: { boot: true, iso: true, import: true },
     network: { mode: true, bridge: true, vlan: true, prefix: true, gateway: true, dns: true, mtu: true },
     seed: { mode: true, pool: true, node: true, address: true, cores: true, memoryMiB: true, diskGiB: true, sshKeys: true, apiSources: true },
@@ -122,8 +126,11 @@ if (preset === "onechart") bom.components = [...previous.components]
 // (platformlife.FeatureSandbox). The BOM of the release before it (previous) does not, and "nosandboxes" is a build
 // of before the offer.
 const sandboxesOffered = preset !== "nosandboxes"
+// Functions need sandbox chart 0.2.0 (platformlife.SandboxProblems): only the function presets pin it.
+const functionsOffered = ["functions", "functionsready", "functionson"].includes(preset)
+const functionsBuilt = preset === "functionsready" || preset === "functionson"
 if (sandboxesOffered) {
-  bom.components.splice(bom.components.length - 1, 0, { name: "sandbox", cluster: "workload", wave: 3, group: "", feature: "sandbox", chart: { version: "0.1.0", digest: "sha256:8899aabbccddeeff0011223344556677889900aabb1122cc33dd44ee55ff6677" } } as any)
+  bom.components.splice(bom.components.length - 1, 0, { name: "sandbox", cluster: "workload", wave: 3, group: "", feature: "sandbox", chart: { version: functionsOffered ? "0.2.0" : "0.1.0", digest: "sha256:8899aabbccddeeff0011223344556677889900aabb1122cc33dd44ee55ff6677" } } as any)
 }
 const SANDBOX_PROVIDER = "svc-sandbox-01"
 const SANDBOX_SPEC = { placement: "shared", nodes: ["pve1"], count: 1, cores: 2, memoryMiB: 4096, diskGiB: 40, nodeRange: "10.90.0.64/28", proxyAddress: "10.90.0.140", domain: "sbx.example.org", tls: { mode: "selfsigned" } }
@@ -140,7 +147,8 @@ const find = (id: string) => {
 const view = (in_: Doc) => {
   const sec = mockPlatform.secrets[in_.id] ?? {}
   // The mock API runs without the job scheduler, like a plain Compose install.
-  return { ...in_, schedulerNote: SCHEDULER_NOTE, credentials: { ...(sec.capi ? { capi: { tokenId: "capmox@pve!capi" } } : {}), ...(sec.csi ? { csi: { tokenId: "csi@pve!csi" } } : {}) } }
+  // The function presets are a site with the job scheduler on: functions cannot be switched on without it.
+  return { ...in_, ...(functionsBuilt ? {} : { schedulerNote: SCHEDULER_NOTE }), credentials: { ...(sec.capi ? { capi: { tokenId: "capmox@pve!capi" } } : {}), ...(sec.csi ? { csi: { tokenId: "csi@pve!csi" } } : {}) } }
 }
 const activeRun = (id: string) => mockPlatform.runs.find((r) => r.installationId === id && !TERMINAL.includes(tick(r).state))
 
@@ -352,6 +360,8 @@ function refuse(name: string, spec: Doc, serviceId: string, installedBy?: Doc) {
   // installed is on such a BOM until its upgrade.
   const asks = spec?.sandbox && spec.sandbox.placement !== "off"
   if (asks && sandboxesOffered && installedBy?.sha256 === previous.sha256) problems.push(`spec.sandbox: the platform's BOM (release ${previous.release}) has no sandbox chart. Upgrade the platform to release ${bom.release} first, then save spec.sandbox; until then leave it out, or set placement off`)
+  if (spec?.sandbox?.functions?.enabled && !functionsOffered) problems.push(`spec.sandbox.functions: the platform's BOM pins sandbox chart 0.1.0, which has no functions`)
+  if (spec?.sandbox?.functions?.enabled && !/^https:\/\/[^/?#@]+\/?$/.test(spec.sandbox.functions.portalURL ?? "")) problems.push("spec.sandbox.functions.portalURL: an https:// address with no path, query or credentials")
   if (asks && !sandboxesOffered) problems.push(`spec.sandbox: the platform's BOM (release ${bom.release}) has no sandbox chart, so this release builds no sandboxes on the platform: leave spec.sandbox out, or set placement off`)
   if (String(spec?.network?.prefix ?? "").startsWith("10.100.")) problems.push(`the platform network ${spec.network.prefix} overlaps cidrPool 10.100.0.0/16`)
   if (problems.length) throw fail(400, "invalid_installation", "The installation is not valid", { problems })
@@ -365,7 +375,7 @@ function create(name: string, spec: Doc): Doc {
   return in_
 }
 
-if (preset && !["disabled", "onenode", "onechart", "sandboxes", "nosandboxes"].includes(preset)) {
+if (preset && !["disabled", "onenode", "onechart", "sandboxes", "nosandboxes", "functions"].includes(preset)) {
   const in_ = create("lab", mockSpec)
   if (preset !== "draft") mockPlatform.secrets[in_.id] = { capi: true, csi: true }
   if (preset === "running") { mockPlatform.applies = 1; newRun(in_, "apply", Date.now() - 7.5 * STAGE_MS) }
@@ -383,16 +393,20 @@ if (preset && !["disabled", "onenode", "onechart", "sandboxes", "nosandboxes"].i
     if (preset === "replace") in_.status.targetBom = { release: "0.6.5", sha256: "5".repeat(64) }
     if (preset === "removing") newRun(in_, "remove", Date.now() - 0.5 * STAGE_MS)
   }
-  if (preset === "sandboxready") {
+  if (preset === "sandboxready" || functionsBuilt) {
     mockPlatform.applies = 1
     in_.spec.sandbox = structuredClone(SANDBOX_SPEC)
+    if (functionsBuilt) in_.spec.sandbox.functions = { enabled: true, portalURL: "https://cloud.example.org" }
     tick(newRun(in_, "apply", Date.now() - 3_600_000))
     // What the run built and registered: the group, the self-signed certificate, the provider, disabled.
     in_.status.sandbox = { placement: "shared", nodeRange: SANDBOX_SPEC.nodeRange, proxyAddress: SANDBOX_SPEC.proxyAddress, count: 1, nodes: ["pve1"], builtAt: now(),
       certificate: "-----BEGIN CERTIFICATE-----\nMIIBmockSandboxProxyCertificate\n-----END CERTIFICATE-----\n" }
     in_.status.providers.sandbox = SANDBOX_PROVIDER
     db.services.push({ id: SANDBOX_PROVIDER, name: "lab Sandboxes", type: "CLOUD", status: "DISABLED",
-      config: { provider: "sandbox", platformInstallationId: in_.id, attachToNewProjects: false, sandbox: { mode: "shared", domain: SANDBOX_SPEC.domain, envd: true } } } as any)
+      config: { provider: "sandbox", region: "az1", platformInstallationId: in_.id, attachToNewProjects: false, sandbox: { mode: "shared", domain: SANDBOX_SPEC.domain, envd: true,
+        proxmoxServiceId: SERVICE, templates: { base: { image: "ghcr.io/example/sandbox-base@sha256:" + "ab".repeat(32), cpu: 1, memoryGiB: 1 } }, limits: {}, egressMbps: 100,
+        ...(preset === "functionson" ? { functions: { enabled: true, projectQuota: { functions: 10 } } } : {}) } } } as any)
+    if (preset === "functionson") db.projects.find((p) => p.id === "prj-0001")?.services.push({ serviceId: SANDBOX_PROVIDER, provider: "sandbox", region: "az1" })
   }
 }
 
@@ -408,6 +422,16 @@ on("POST /admin/service/:id/sandbox/release-check", ({ params }) => {
     fenced ? { name: "fence", ok: true, detail: "1 worker(s) open to sandboxes, each with the VM firewall of pool proxcloud-sbx pinned to its address" }
       : { name: "fence", ok: false, detail: "pve sandbox: no worker is open to sandboxes yet (every Node still has the unsecured taint)" },
     { name: "network-guard", ok: true, detail: "host CNI guard installed on every schedulable node" },
+    // The function rows (admin/sandboxprovider.go), only where the function side was built: they decide whether
+    // config.sandbox.functions.enabled is accepted. function-price warns and refuses nothing.
+    ...(functionsBuilt ? [
+      { name: "function-scheduler", ok: true, detail: "the job scheduler is on: the reaper stops idle functions every 15 seconds" },
+      { name: "function-sealing-key", ok: true, detail: "a sealing key is configured: function secrets are stored sealed" },
+      fenced ? { name: "function-proxy", ok: true, detail: "2 sandbox-proxy replica(s) reported in the last 90 seconds" }
+        : { name: "function-proxy", ok: false, detail: "no sandbox-proxy replica of this provider has reported in the last 90 seconds: apply the installation with Functions ticked and wait for the proxy to roll" },
+      { name: "function-billing", ok: true, detail: "usage is rated by this ProxCloud, not by an external billing provider" },
+      { name: "function-price", ok: false, detail: "no enabled price rule for resource type function: functions run and bill nothing. A rule added later bills a running function back to the start of the billing cycle or to its start, whichever is later." },
+    ] : []),
   ] }
 })
 
@@ -489,6 +513,16 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
     if (fixed.length) throw fail(409, "fixed_fields", `These fields cannot change once the platform was installed (serviceId never): ${fixed.join(", ")}`, { problems: fixed })
     // KeepSandbox: a spec without the block keeps the stored one. Off is refused while the sandbox provider is live.
     if (!sb && in_.spec.sandbox) b.spec.sandbox = in_.spec.sandbox
+    // The same for functions inside the block. With a function on record (the function presets hold one) the tick
+    // does not come off, and sandboxes do not go off while it is set.
+    const fn = in_.spec.sandbox?.functions
+    if (sb && sb.placement !== "off" && !sb.functions && fn) sb.functions = fn
+    if (functionsBuilt && fn?.enabled && sb && sb.placement !== "off" && sb.functions?.enabled === false) {
+      throw fail(409, "functions_exist", "1 function of this installation's sandbox provider exists: spec.sandbox.functions.enabled stays true until every function is deleted. Switch functions off on the provider to stop them; their owners or a project deletion remove them.", { problems: ["spec.sandbox.functions.enabled"] })
+    }
+    if (functionsBuilt && fn?.enabled && sb?.placement === "off") {
+      throw fail(409, "functions_enabled", "Functions are on for this installation: take the Functions tick away and apply first, then set spec.sandbox.placement off.", { problems: ["spec.sandbox.placement"] })
+    }
     const provider = db.services.find((s) => s.id === in_.status.providers?.sandbox)
     if (built && sb?.placement === "off" && provider && provider.status !== "DISABLED") {
       throw fail(409, "sandbox_provider_live", `The sandbox provider "${provider.name}" is ${provider.status}: switching sandboxes off deletes every sandbox machine and with it every running sandbox. Set the provider DISABLED under Cloud providers and let its sandboxes end, then set spec.sandbox.placement off.`, { problems: ["spec.sandbox.placement"] })

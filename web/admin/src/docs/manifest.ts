@@ -23,6 +23,7 @@ export const sections: DocSection[] = [
       { slug: "platform-admin/cloud/service-availability", title: "Service availability" },
       { slug: "platform-admin/cloud/template-updates", title: "Template updates" },
       { slug: "platform-admin/cloud/kubernetes-clusters", title: "Managed Kubernetes clusters" },
+      { slug: "platform-admin/cloud/sandboxes", title: "Functions on the sandbox provider" },
     ],
   },
   {

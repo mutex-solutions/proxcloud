@@ -31,6 +31,7 @@ Which types produce charges depends on the services enabled on your cloud provid
 | `server_snapshot` | Disk snapshots of Proxmox VE servers, one line per snapshot | `size_gb` (the server's provisioned disks) |
 | `server_protection` | The Protection add-on of a server: the replica of its local disks | `size_gb`, `state` |
 | `sandbox` | Sandboxes, per minute while running (price it with `minute` rules) | `vcpus`, `ram_gb`, `gpu_count` (filter on `gpu_model`, `template`) |
+| `function` | Serverless functions on a sandbox provider, per minute while at least one instance runs (price it with `minute` rules; never filter on `status`). See [Functions on the sandbox provider](/docs/platform-admin/cloud/sandboxes) | `vcpus`, `ram_gb` (per instance, times the instances that run), `instances` |
 | `sandbox_snapshot` | Offered named filesystem snapshots and retained historical pause storage; managed pause/resume/fork are currently held | `size_gb`, `kind` |
 
 A Proxmox provider meters the traffic of public NICs out of the box; see [Connecting a Proxmox VE Cluster](/docs/platform-admin/cloud/connect-a-cloud). Networks, subnets, security groups, key pairs and catalog templates have no billing type: they are free plumbing.
