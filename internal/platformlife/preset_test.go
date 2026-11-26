@@ -447,7 +447,7 @@ func TestControlPlaneGrowth(t *testing.T) {
 	// A new installation lists its components, not a count, and no token means no read.
 	in := validInstallation(t)
 	in.Spec.Clusters[0].ControlPlane.Replicas = 3
-	if plan, err := PlanFor(in, ""); err != nil || len(plan.Changes) != len(cur.Components) {
+	if plan, err := PlanFor(in, ""); err != nil || len(plan.Changes) != len(cur.For(in.Spec).Components) {
 		t.Fatalf("a new installation with three: %+v %v", plan, err)
 	}
 	if b := (Preflight{Installation: in}).GrowthBlocking(context.Background()); b != nil {

@@ -26,7 +26,7 @@ func TestPlanFor(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh, err := PlanFor(installed(nil), "")
-	if err != nil || len(fresh.Blocking) != 0 || len(fresh.Changes) != len(cur.Components) || fresh.Target.SHA256 != cur.SHA256 || fresh.Upgrade != nil {
+	if err != nil || len(fresh.Blocking) != 0 || len(fresh.Changes) != len(cur.For(Spec{}).Components) || fresh.Target.SHA256 != cur.SHA256 || fresh.Upgrade != nil {
 		t.Fatalf("a new installation installs every component: %+v %v", fresh, err)
 	}
 	for _, c := range fresh.Changes {
@@ -116,33 +116,27 @@ func TestPreviousBOMsMoveAsTheirPinsDiffer(t *testing.T) {
 // cert-manager as class chart on both clusters (none from 0.10.2-rc.1, 0.10.2, 0.11.0-rc.1, 0.11.0-rc.2, 0.11.0,
 // 0.11.1-rc.1, 0.11.1-rc.2, 0.11.1-rc.3, 0.11.1-rc.4, 0.11.1-rc.5 or 0.11.1, which pin v1.21.3 already), and the
 // tenant chart to 0.1.19 record only from every one of them but 0.11.1-rc.1, 0.11.1-rc.2, 0.11.1-rc.3, 0.11.1-rc.4,
-// 0.11.1-rc.5 and 0.11.1, which pin 0.1.19 already and plan the release alone (from 0.1.17 for 0.11.0-rc.1,
-// 0.11.0-rc.2 and 0.11.0, from 0.1.16 for the four before them, from 0.1.15 for 0.10.1-rc.1): the run writes it on the
-// Kubernetes provider and touches no cluster. pc-platform's own chart stays where 0.11.0 has it, so only 0.10.1-rc.1,
-// which pins 0.1.15 for it, has a seed/pc-platform row. Every BOM on Kubernetes 1.35.10 is refused by the pair gate on
-// both cert-manager rows, because that pair also moves k3s, Kubernetes and the node image. A newly kept BOM needs its
-// line.
+// 0.11.1-rc.5 and 0.11.1, which pin 0.1.19 already (from 0.1.17 for 0.11.0-rc.1, 0.11.0-rc.2 and 0.11.0, from 0.1.16
+// for the four before them, from 0.1.15 for 0.10.1-rc.1): the run writes it on the Kubernetes provider and touches no
+// cluster. From 0.12.0 every one of them also has the two rows that switch sandboxes on: seed/pc-platform, the
+// platform's own cluster chart to 0.1.19 as class chart (from 0.1.16, and from 0.1.15 for 0.10.1-rc.1; no machine is
+// replaced, TestUpgradeRollsNoMachine), and workload/sandbox, the sandbox chart as class added, which no run renders
+// until the settings ask for sandboxes. Neither is a machines row. Every BOM on Kubernetes 1.35.10 is refused by the
+// pair gate on both cert-manager rows, because that pair also moves k3s, Kubernetes and the node image. A newly kept
+// BOM needs its line.
 func TestPreviousBOMsMoveCertManager(t *testing.T) {
 	cur := embedded(t)
 	prev, err := Previous()
 	if err != nil {
 		t.Fatal(err)
 	}
+	charts, tenant := []string{"/release", "/tenantCharts.kubernetes", "seed/cert-manager", "seed/pc-platform", "workload/cert-manager", "workload/sandbox"},
+		[]string{"/release", "/tenantCharts.kubernetes", "seed/pc-platform", "workload/sandbox"}
+	own := []string{"/release", "seed/pc-platform", "workload/sandbox"}
 	allowed := map[string][]string{
-		"0.10.1-rc.1": {"/release", "/tenantCharts.kubernetes", "seed/cert-manager", "seed/pc-platform", "workload/cert-manager"},
-		"0.10.1-rc.2": {"/release", "/tenantCharts.kubernetes", "seed/cert-manager", "workload/cert-manager"},
-		"0.10.1":      {"/release", "/tenantCharts.kubernetes", "seed/cert-manager", "workload/cert-manager"},
-		"0.10.2-rc.1": {"/release", "/tenantCharts.kubernetes"},
-		"0.10.2":      {"/release", "/tenantCharts.kubernetes"},
-		"0.11.0-rc.1": {"/release", "/tenantCharts.kubernetes"},
-		"0.11.0-rc.2": {"/release", "/tenantCharts.kubernetes"},
-		"0.11.0":      {"/release", "/tenantCharts.kubernetes"},
-		"0.11.1-rc.1": {"/release"},
-		"0.11.1-rc.2": {"/release"},
-		"0.11.1-rc.3": {"/release"},
-		"0.11.1-rc.4": {"/release"},
-		"0.11.1-rc.5": {"/release"},
-		"0.11.1":      {"/release"},
+		"0.10.1-rc.1": charts, "0.10.1-rc.2": charts, "0.10.1": charts,
+		"0.10.2-rc.1": tenant, "0.10.2": tenant, "0.11.0-rc.1": tenant, "0.11.0-rc.2": tenant, "0.11.0": tenant,
+		"0.11.1-rc.1": own, "0.11.1-rc.2": own, "0.11.1-rc.3": own, "0.11.1-rc.4": own, "0.11.1-rc.5": own, "0.11.1": own,
 	}
 	gate := "not supported by this release: a third-party chart moves only in an upgrade that changes no k3s, Kubernetes " +
 		"version or node image, and this one also changes kubernetes.version, kubernetes.nodeImage, seed.k3s. First finish an " +
@@ -165,6 +159,12 @@ func TestPreviousBOMsMoveCertManager(t *testing.T) {
 			}
 			if c.Name == "cert-manager" && c.Blocking == "" && c.Class != ClassChart {
 				t.Errorf("%s: %s is class %s, want chart", b.Release, row, c.Class)
+			}
+			if from := comp(t, b.BOM, ClusterSeed, ClusterName).Chart.Version; row == "seed/pc-platform" && (c.Class != ClassChart || c.From != from || c.To != "0.1.19" || c.Blocking != "") {
+				t.Errorf("%s: %s is class %s and moves %s to %s (%q), want chart from %s to 0.1.19", b.Release, row, c.Class, c.From, c.To, c.Blocking, from)
+			}
+			if row == "workload/sandbox" && (c.Class != ClassAdded || c.From != "" || c.To != "0.1.0" || c.Blocking != "" || !strings.Contains(c.Impact, "only when the settings ask for it")) {
+				t.Errorf("%s: %s is class %s, %s to %s (%q, %q), want added and not refused", b.Release, row, c.Class, c.From, c.To, c.Blocking, c.Impact)
 			}
 			if from := b.TenantCharts.Kubernetes.Version; c.Name == "tenantCharts.kubernetes" && (c.Class != ClassRecordOnly ||
 				!strings.Contains(c.From, "/proxmox-kamaji-cluster:"+from+"@") || !strings.Contains(c.To, "/proxmox-kamaji-cluster:0.1.19@")) {
