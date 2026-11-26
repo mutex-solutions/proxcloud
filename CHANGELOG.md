@@ -117,6 +117,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (class added); no seed part, no machine replaced. `TestPreviousBOMsMoveCertManager` states that answer, and
   `TestUpgradeRollsNoMachine` compares fourteen of the twenty-three previous BOMs with the BOM on `main`, none of
   them rolling. No move to that BOM and no apply on such a platform was run on a lab.
+- **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.12.0-rc.1`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.12.0-rc.1.yaml`, sha256
+  `19671c44e78f4888cb06a277bfd1a655b7d3622bb7f8e640f9c6b256f47479a1`, the file of the tag byte for byte). The
+  candidate's commit left the BOM at `0.12.0-rc.1`, and the release gate refuses only `-dev`. A platform moved to
+  that BOM (the candidate's drill) is not refused (`bom_unsupported`) under a later build while the file is carried.
+  Its pins are those of `main`, the sandbox chart and the platform's cluster chart 0.1.19 among them, so the plan
+  from it has one change, the release, record only. `TestPreviousBOMsMoveCertManager` states that answer, and
+  `TestUpgradeRollsNoMachine` compares fifteen of the twenty-four previous BOMs with the BOM on `main`, none of
+  them rolling. It is the first kept BOM that names the sandbox chart: `TestRenderGoldenOfPreviousBOMs` renders
+  every previous BOM as an installation without sandboxes does, and `TestSandboxIsOffered` holds that a platform on
+  it is taken `spec.sandbox` while one on a BOM from before 0.12.0 is refused it. No apply on such a platform was
+  run on a lab by this change.
+
 - **Fourteen dependency updates (November)**, the open Dependabot pull requests taken together. Go modules:
   `aws-sdk-go-v2/service/s3` 1.116.0, `aws-sdk-go-v2/service/ecr` 1.69.0, `aws-sdk-go-v2/credentials` 1.21.3,
   `golang.org/x/crypto` 0.59.0 (with `x/sys` 0.50.0 and `x/text` 0.44.0) and `golang.org/x/sync` 0.25.0; the module
