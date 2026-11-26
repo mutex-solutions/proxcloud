@@ -53,6 +53,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
   pull request).
 
+### Fixed
+
+- **The load balancer gateway bounds a cluster's calls** (`internal/cloud/lbgw`, `Handler.ServeHTTP`; Known issues
+  of `v0.11.1`: "The gateway has no rate limit per cluster"). The gateway took every `PUT /lb/v1/state` a cluster
+  sent, and since the controller watches (chart 0.1.19) a tenant whose Service flaps sends about one a second, each
+  one a credential lookup, a body of up to 64 KiB and a write of the state. Each cluster now has 30 calls at once
+  and one more every 2 s (30 a minute sustained; fixed, no setting). A call over that is answered `429`
+  `TooManyRequests` with `Retry-After`, after the credential is accepted and before the body is read: nothing is
+  stored, no converge starts, and the last call is not written as seen. A refused credential takes none of a
+  cluster's calls, so nobody who names a cluster can use up its limit. The API says a cluster over the limit in
+  one log line (`lb gateway: rate limit`) and one audit event of its project, at most once per cluster a minute.
+  The count is kept per API process: two API replicas take twice as many, and a restart starts every cluster at
+  30. `TestClusterRateLimit` runs it on the tests' clock (30 calls taken, the 31st refused with the portal not
+  called, one more 2 s later, the whole 30 after a quiet minute, a wrong secret before each call, one log line and
+  one event in a minute of refusals); its control is another cluster's call in the same instant, which is taken.
+  With the check taken out the 31st call is answered `200`; counted at a refused credential the 16th good call is
+  refused; with one count for all clusters the other cluster is refused.
+  **For an upgrade:** nothing to do, and no controller changes. A turn of the controller is one call, two when a
+  certificate is asked for, and a quiet cluster sends one per 30 s, so a cluster in normal use never meets the
+  limit. A cluster that does (Services, Nodes or TLS Secrets changing about once a second for a minute) keeps its
+  balancer and its addresses as they are: the controller of `v0.11.1` (chart 0.1.19) reports the refusal as a
+  Warning Event `TooManyRequests` on each of its Services, takes no address from that turn and sends its whole
+  state again at the next change or after its interval, so a change arrives up to a few seconds late and none is
+  lost. While the changes go on, a Service's Events go between that Warning and `EnsuredLoadBalancer`. A
+  controller of `v0.11.0` (a turn every 10 s) cannot reach the limit. Not run on a lab.
+
 ## [0.11.1] - 2026-11-26
 
 The release after `v0.11.0`. It completes layer 4 of the load balancer: UDP listeners, TLS termination with

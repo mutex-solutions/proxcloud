@@ -371,6 +371,112 @@ func TestRequestRefusals(t *testing.T) {
 	}
 }
 
+// Known issue of v0.11.1 ("The gateway has no rate limit per cluster"; open finding 2 of the watch review): since the
+// controller watches, a Service that flaps makes about one PUT a second, each one database work. A cluster has a
+// bucket of rateBurst calls that gets one back every rateEvery. A call over it is answered 429 TooManyRequests with
+// Retry-After before the body is read: nothing reaches the portal and nothing is written. The limit is the
+// cluster's own: another cluster's call in the same instant passes (the control), and a refused credential that
+// names the cluster takes none of its calls. A cluster that stays over it is logged and audited once a minute.
+func TestClusterRateLimit(t *testing.T) {
+	r := newRig()
+	var logged bytes.Buffer
+	r.h.Log = slog.New(slog.NewJSONHandler(&logged, nil))
+	at := time.Now()
+	r.h.now = func() time.Time { return at }
+	const c1, c2 = "PVEAPIToken=lb@proxcloud!c1=s1", "PVEAPIToken=lb@proxcloud!c2=s2"
+	body := Request{Services: []Service{web("u1")}}
+	said := func() (logs, events int) {
+		for _, ev := range r.events {
+			if ev.ResourceMetadata["reason"] == ReasonTooManyRequests {
+				if ev.RequestInterface != audit.InterfaceLBGateway || ev.Action != audit.ActionDeny || ev.ProjectID != "p1" ||
+					ev.ResourceID != "c1" || ev.ResourceMetadata["status"] != http.StatusTooManyRequests {
+					t.Errorf("audit event: %+v", ev)
+				}
+				events++
+			}
+		}
+		return strings.Count(logged.String(), `"msg":"lb gateway: rate limit"`), events
+	}
+	limited := func(w *httptest.ResponseRecorder, retryAfter string) {
+		t.Helper()
+		var got map[string]string
+		_ = json.Unmarshal(w.Body.Bytes(), &got)
+		if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != retryAfter || got["reason"] != ReasonTooManyRequests ||
+			!strings.Contains(got["message"], "Nothing changed; the next ones are taken in "+retryAfter+" s") {
+			t.Fatalf("over the limit: %d, Retry-After %q, %s; want 429 and Retry-After %s", w.Code, w.Header().Get("Retry-After"), w.Body, retryAfter)
+		}
+	}
+
+	// The whole bucket in one instant, and before each call one with a wrong secret for the same cluster.
+	for i := range rateBurst {
+		if w, _ := r.put(t, "PVEAPIToken=lb@proxcloud!c1=nope", body); w.Code != http.StatusUnauthorized {
+			t.Fatalf("wrong secret %d: %d %s", i, w.Code, w.Body)
+		}
+		if w, _ := r.put(t, c1, body); w.Code != http.StatusOK {
+			t.Fatalf("call %d of %d: %d %s", i+1, rateBurst, w.Code, w.Body)
+		}
+	}
+	calls, seen := r.portal.calls, r.reg.seen
+	w, _ := r.put(t, c1, body)
+	limited(w, "2")
+	if w.Header().Get(ProtocolHeader) != strconv.Itoa(Protocol) {
+		t.Errorf("the refusal names no protocol: %v", w.Header())
+	}
+	r.protocol = "2" // a protocol that changed is written at once, but not by a call over the limit
+	w, _ = r.put(t, c1, body)
+	limited(w, "2")
+	r.protocol = ""
+	if calls != rateBurst || r.portal.calls != calls || r.reg.seen != seen {
+		t.Fatalf("the portal was called %d times for %d calls taken, and %d more for the ones over the limit; last seen written %d times more",
+			calls, rateBurst, r.portal.calls-calls, r.reg.seen-seen)
+	}
+	if logs, events := said(); logs != 1 || events != 1 {
+		t.Fatalf("two calls over the limit: %d log lines and %d audit events, want one of each", logs, events)
+	}
+	// The control: the other cluster, in the same instant.
+	if w, _ := r.put(t, c2, body); w.Code != http.StatusOK || r.portal.calls != calls+1 {
+		t.Fatalf("another cluster in the same instant: %d %s", w.Code, w.Body)
+	}
+
+	// One call comes back every rateEvery, not sooner.
+	at = at.Add(rateEvery / 2)
+	w, _ = r.put(t, c1, body)
+	limited(w, "1")
+	at = at.Add(rateEvery / 2)
+	if w, _ := r.put(t, c1, body); w.Code != http.StatusOK || r.portal.calls != calls+2 {
+		t.Fatalf("%s later: %d %s", rateEvery, w.Code, w.Body)
+	}
+	w, _ = r.put(t, c1, body)
+	limited(w, "2")
+
+	// The cluster keeps sending two calls a second: one in four is taken, the others are said once a minute.
+	for range 57 {
+		at = at.Add(time.Second)
+		r.put(t, c1, body)
+		r.put(t, c1, body)
+	}
+	if logs, events := said(); logs != 1 || events != 1 {
+		t.Fatalf("59 s over the limit: %d log lines and %d audit events, want one of each", logs, events)
+	}
+	at = at.Add(time.Second)
+	r.put(t, c1, body)
+	w, _ = r.put(t, c1, body)
+	limited(w, "2")
+	if logs, events := said(); logs != 2 || events != 2 {
+		t.Fatalf("a minute after the first: %d log lines and %d audit events, want two of each", logs, events)
+	}
+
+	// A cluster that was quiet for a minute has its whole bucket again, and no more than that.
+	at = at.Add(rateBurst * rateEvery)
+	for i := range rateBurst {
+		if w, _ := r.put(t, c1, body); w.Code != http.StatusOK {
+			t.Fatalf("after a quiet minute, call %d of %d: %d %s", i+1, rateBurst, w.Code, w.Body)
+		}
+	}
+	w, _ = r.put(t, c1, body)
+	limited(w, "2")
+}
+
 // The listener sends /lb/v1/ to the load balancer gateway and everything else, untouched, to the CSI gateway.
 func TestSplit(t *testing.T) {
 	var lb, csi []string
