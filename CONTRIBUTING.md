@@ -99,6 +99,42 @@ so `go test ./...` skips them by default. Run them explicitly with `make
 test-integration` (or `go test -tags=integration ./test/integration/...`). They
 require Docker to be running; each run gets a fresh, disposable PostgreSQL.
 
+#### The guest images of the load balancer tests
+
+The real-guest load balancer tests (`test/integration/lb_*_test.go`) run privileged
+systemd containers of `debian:trixie` and `ubuntu:26.04`, with the distribution's own
+HAProxy, keepalived and nftables. Without any setup each of them installs its packages
+from the distribution's mirror while it runs, which works and is slow, and fails when
+the mirror does. CI builds two images that already hold the packages
+(`test/integration/images`) and names them to the tests. To do the same locally:
+
+```sh
+docker buildx build --load -t proxcloud-lb-test:debian-trixie \
+  -f test/integration/images/debian-trixie.Dockerfile test/integration/images
+docker buildx build --load -t proxcloud-lb-test:ubuntu-26.04 \
+  -f test/integration/images/ubuntu-26.04.Dockerfile test/integration/images
+export LB_TEST_IMAGE_DEBIAN=proxcloud-lb-test:debian-trixie
+export LB_TEST_IMAGE_UBUNTU=proxcloud-lb-test:ubuntu-26.04
+make test-integration
+```
+
+- The packages are the ones the distribution ships on the day of the build; nothing is
+  pinned to a version. To take the current ones, build again with
+  `--build-arg REFRESH=$(date -u +%G-W%V)` (or `--no-cache`). CI passes the ISO week as
+  `REFRESH`, which is part of the package layer's cache key: the first run of a week
+  installs from the mirror, every other run takes the layer from the Actions cache.
+  The base image is pinned by digest and moved by Dependabot.
+- A build that cannot install says `mirror` in its last line: that is the
+  distribution's mirror, not a test.
+- A test that needs a package the images lack fails and says so: add the package to
+  both Dockerfiles (and to the test's own `lbInstall`/`lbInit` call, which is what a
+  run without the images installs).
+- `TestLBApplianceServesWhatIsRecorded` never uses these images: the product's own
+  install on a plain distribution image is what it shows (the pair's install line and
+  the UDP service's), so it always needs the mirror.
+- The UDP tests need the kernel's IPVS (`sudo modprobe ip_vs`); without it they skip,
+  unless `LB_UDP_REQUIRE_IPVS` is set, as CI sets it.
+
 ## Project layout
 
 See the [repository layout table](README.md#-repository-layout) in the README.

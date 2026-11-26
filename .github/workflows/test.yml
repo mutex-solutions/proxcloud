@@ -89,9 +89,66 @@ jobs:
           else
             echo "::warning title=UDP load balancer test skipped::this runner's kernel has no IPVS (ip_vs): TestLBApplianceUDP does not run, the lab drill is the gate for UDP listeners"
           fi
+      # The guests of the real-guest load balancer tests (test/integration/lb_guest_test.go): the two distribution
+      # images with the tests' packages in them, built once per run and named to the tests below, so that no test
+      # installs from a distribution mirror while it runs. One test stays on the plain image, because the product's
+      # own install is what it shows: TestLBApplianceServesWhatIsRecorded.
+      # Nothing is pushed: the images are loaded into this runner's Docker and the layers are kept in the Actions
+      # cache. REFRESH is the ISO week and part of the package layer's cache key, so the first run of a week
+      # installs the distribution's current packages again and every other run takes the layer from the cache.
+      # The package step tries three times; its failure says "mirror".
+      - uses: docker/setup-buildx-action@v4
+      - name: Week of the appliance test images
+        id: lb-images
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      - name: Appliance test image (Debian 13)
+        id: lb-image-debian
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_SUMMARY: "false"
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: test/integration/images
+          file: test/integration/images/debian-trixie.Dockerfile
+          build-args: REFRESH=${{ steps.lb-images.outputs.week }}
+          tags: proxcloud-lb-test:debian-trixie
+          load: true
+          push: false
+          provenance: false
+          cache-from: type=gha,scope=lb-test-debian-trixie
+          cache-to: type=gha,mode=max,scope=lb-test-debian-trixie
+      - name: Appliance test image (Ubuntu 26.04)
+        id: lb-image-ubuntu
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_SUMMARY: "false"
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: test/integration/images
+          file: test/integration/images/ubuntu-26.04.Dockerfile
+          build-args: REFRESH=${{ steps.lb-images.outputs.week }}
+          tags: proxcloud-lb-test:ubuntu-26.04
+          load: true
+          push: false
+          provenance: false
+          cache-from: type=gha,scope=lb-test-ubuntu-26.04
+          cache-to: type=gha,mode=max,scope=lb-test-ubuntu-26.04
+      - name: Appliance test images not built
+        if: ${{ failure() && (steps.lb-image-debian.outcome == 'failure' || steps.lb-image-ubuntu.outcome == 'failure') }}
+        run: echo "::error title=Appliance test images not built::The guest images of the load balancer tests did not build, and no integration test has run. A build log that says 'mirror' means the distribution's package mirror did not answer in three tries, which is the mirror and not a test. Run the job again."
+      # The versions the tests run against, in every run (a build from the cache prints nothing).
+      - name: What the appliance test images hold
+        run: |
+          for image in proxcloud-lb-test:debian-trixie proxcloud-lb-test:ubuntu-26.04; do
+            echo "== $image"
+            docker run --rm "$image" cat /etc/proxcloud-lb-test-image
+          done
       # 60 minutes: the real-guest load balancer tests are most of it, and TestLBApplianceUDPStopStart alone loops
       # 120 stops and starts of the UDP service in each of two guests (about 10 minutes, the guests side by side).
       - name: Integration tests (testcontainers PostgreSQL)
+        env:
+          LB_TEST_IMAGE_DEBIAN: proxcloud-lb-test:debian-trixie
+          LB_TEST_IMAGE_UBUNTU: proxcloud-lb-test:ubuntu-26.04
         run: |
           go test -tags=integration -timeout 60m ./test/integration/... ./cmd/api/...
           go test -tags=integration ./internal/platform/project -run '^(TestBuildArchiveSurvivesCleanupAndRestart|TestPVESubnetRefreshFollowsTheLiveZone|TestPVEServerRefreshKeepsTheRowIdentity|TestLBPairApplyOrderAndStatus|TestLBCertificatesReachThePair|TestLBClusterStateConverges|TestLBControllerEnable)$'

@@ -18,13 +18,13 @@ import (
 )
 
 // lbUDPGuest is a real guest of image with the networks of lbUDPNet around it and the pair's own packages and
-// keepalived on it, through the product's install: the appliance holds vip. The kernel is the host's; where it has no IPVS the test is skipped as TestLBApplianceUDP is.
+// keepalived on it (the baked image's, or through the product's install on the plain one): the appliance holds vip. The kernel is the host's; where it has no IPVS the test is skipped as TestLBApplianceUDP is.
 func lbUDPGuest(t *testing.T, ctx context.Context, image, vip string) (*guestAgent, *pve.Service) {
 	t.Helper()
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:      image,
-			Cmd:        []string{"sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd-sysv procps iproute2 socat >/dev/null 2>&1 && rm -f /usr/sbin/policy-rc.d && exec /sbin/init"},
+			Image:      lbImage(image),
+			Cmd:        lbInit("systemd-sysv", "procps", "iproute2", "socat"),
 			Privileged: true,
 			Tmpfs:      map[string]string{"/run": "", "/run/lock": ""},
 		},
@@ -35,14 +35,7 @@ func lbUDPGuest(t *testing.T, ctx context.Context, image, vip string) (*guestAge
 	}
 	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 	g := &guestAgent{t: t, c: c, runs: map[int]*guestRun{}}
-	for deadline := time.Now().Add(5 * time.Minute); ; time.Sleep(2 * time.Second) {
-		if code, out, _ := g.sh(ctx, "boot", "systemctl", "is-system-running"); code == 0 || strings.TrimSpace(out) == "degraded" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("systemd did not come up in the container")
-		}
-	}
+	g.booted(ctx)
 	srv := httptest.NewServer(g)
 	t.Cleanup(srv.Close)
 	ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
@@ -82,7 +75,7 @@ func lbUDPGuest(t *testing.T, ctx context.Context, image, vip string) (*guestAge
 
 // lbUDPRoute makes the guest route as a VM does: its default route is the tenant gateway, and only the rule of the
 // address sends anything out of the public NIC. A VM has spoken to its gateway and knows its MAC; this guest never
-// did. It runs after the first UDP push, which may install nftables from the distribution's mirror.
+// did. It runs after the first UDP push, which on the plain image installs nftables from the distribution's mirror.
 const lbUDPRoute = "ip route replace default via 10.77.0.1 dev ten0 && ip neigh replace 10.77.0.1 lladdr $(ip netns exec gw cat /sys/class/net/eth0/address) dev ten0"
 
 // A change of a UDP listener that stays, in a real guest of each image: the kernel's own table is read after every

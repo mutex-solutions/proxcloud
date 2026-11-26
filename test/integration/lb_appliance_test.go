@@ -189,16 +189,20 @@ command -v ss >/dev/null && systemctl cat haproxy.service keepalived.service >/d
 // is at work on HAProxy's own package, until dpkg is done with it (R3-F1, R2b-1); and sshd, which the image runs,
 // is masked by the product's install and stays off over a reboot, where a unit that is only disabled is started
 // again by whatever asks for it (R4-o1).
+//
+// This is the test of the product's own install, and the one real-guest test that runs on the distribution's plain
+// image whatever LB_TEST_IMAGE_* names (lb_guest_test.go): the pair's install line at its start, the UDP service's
+// at its end. It needs the distribution's mirror, and nothing lets it skip.
 func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 	for _, image := range []string{"debian:trixie", "ubuntu:26.04"} {
 		t.Run(image, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
 			defer cancel()
-			// systemd as PID 1, and no policy-rc.d: on a VM a package's postinst starts its service.
+			// The plain image, with systemd as PID 1 and nothing else: the product installs the rest.
 			c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 				ContainerRequest: testcontainers.ContainerRequest{
 					Image:      image,
-					Cmd:        []string{"sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd-sysv procps >/dev/null 2>&1 && rm -f /usr/sbin/policy-rc.d && exec /sbin/init"},
+					Cmd:        lbInit("systemd-sysv", "procps"),
 					Privileged: true,
 					Tmpfs:      map[string]string{"/run": "", "/run/lock": ""},
 				},
@@ -209,14 +213,7 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 			g := &guestAgent{t: t, c: c, runs: map[int]*guestRun{}}
-			for deadline := time.Now().Add(5 * time.Minute); ; time.Sleep(2 * time.Second) {
-				if code, out, _ := g.sh(ctx, "boot", "systemctl", "is-system-running"); code == 0 || strings.TrimSpace(out) == "degraded" {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("systemd did not come up in the container")
-				}
-			}
+			g.booted(ctx)
 			srv := httptest.NewServer(g)
 			defer srv.Close()
 			ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
@@ -284,7 +281,7 @@ func TestLBApplianceServesWhatIsRecorded(t *testing.T) {
 					early++
 				}
 				if time.Now().After(deadline) {
-					t.Fatalf("the appliance did not become ready: %v", err)
+					t.Fatalf("the appliance did not become ready: %v%s", err, g.mirror(ctx))
 				}
 			}
 			t.Logf("%s; %s; refused %d times while the binaries were already there",
@@ -720,6 +717,38 @@ sed -i '/^Package: haproxy$/,/^$/ s/^Status: install ok installed$/Status: insta
 					t.Fatalf("HAProxy and keepalived after a reboot: %s", g.run(ctx, "systemctl is-active haproxy keepalived | tr '\\n' ' '"))
 				}
 			}
+
+			// 10. The install line of the first UDP listener, on the plain image: nftables, which the image lacks
+			// (every other UDP test runs on the baked image, where it is in). The appliance serves when the line
+			// runs, so it names nftables alone and upgrades nothing: HAProxy and keepalived keep their processes,
+			// and sshd stays off. What the push does once the package is in is TestLBApplianceUDP's subject and
+			// needs that test's networks and the kernel's IPVS: here its answer is only waited for.
+			pids := func() string {
+				return g.run(ctx, "systemctl show -p MainPID haproxy keepalived | tr '\\n' ' '")
+			}
+			had, pidsBefore := g.run(ctx, "dpkg-query -W -f='${Status}' nftables 2>/dev/null || true"), pids()
+			lvs := pve.RenderLVS(pve.LBSpec{
+				Listeners: []pve.LBListener{{Port: 5000, Protocol: "udp", Pool: "udp"}},
+				Pools: []pve.LBPool{{Name: "udp", Protocol: "udp", Algorithm: "roundrobin",
+					Members: []pve.LBMember{{ServerID: "101", Port: 5000, Weight: 1, Address: "10.0.0.11"}}}},
+			}, []string{vip})
+			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(time.Second) {
+				err := ps.PushLVS(ctx, "n1", 100, lvs, "eth0")
+				if !errors.Is(err, pve.ErrLBNotReady) {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the UDP service's install did not end: %v%s", err, g.mirror(ctx))
+				}
+			}
+			if got := g.run(ctx, "dpkg-query -W -f='${Status}' nftables"); got != "install ok installed" {
+				t.Fatalf("after the UDP service's install dpkg says %q of nftables", got)
+			}
+			if got := pids(); got != pidsBefore {
+				t.Fatalf("the UDP service's install restarted HAProxy or keepalived: %s, before %s", got, pidsBefore)
+			}
+			sshOff("after the UDP service's install")
+			t.Logf("the UDP service's install: nftables was %q before it; %s", had, g.run(ctx, "nft --version"))
 		})
 	}
 }

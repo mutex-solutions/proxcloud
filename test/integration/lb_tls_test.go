@@ -65,8 +65,8 @@ func TestLBApplianceTLS(t *testing.T) {
 			// openssl is the test's own client for the suites Go's TLS has none of.
 			c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 				ContainerRequest: testcontainers.ContainerRequest{
-					Image:        image,
-					Cmd:          []string{"sh", "-c", "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd-sysv procps openssl >/dev/null 2>&1 && rm -f /usr/sbin/policy-rc.d && exec /sbin/init"},
+					Image:        lbImage(image),
+					Cmd:          lbInit("systemd-sysv", "procps", "openssl"),
 					Privileged:   true,
 					Tmpfs:        map[string]string{"/run": "", "/run/lock": ""},
 					ExposedPorts: []string{"443/tcp", "8443/tcp"},
@@ -78,14 +78,7 @@ func TestLBApplianceTLS(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 			g := &guestAgent{t: t, c: c, runs: map[int]*guestRun{}}
-			for deadline := time.Now().Add(5 * time.Minute); ; time.Sleep(2 * time.Second) {
-				if code, out, _ := g.sh(ctx, "boot", "systemctl", "is-system-running"); code == 0 || strings.TrimSpace(out) == "degraded" {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("systemd did not come up in the container")
-				}
-			}
+			g.booted(ctx)
 			srv := httptest.NewServer(g)
 			defer srv.Close()
 			ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
@@ -151,7 +144,8 @@ func TestLBApplianceTLS(t *testing.T) {
 			g.run(ctx, `printf '%s\n' 'while :; do stat -c "%a %n" /etc/haproxy/certs/*.new 2>/dev/null | grep -v "^600 " >> /root/cert-modes; done' > /root/cert-watch.sh
 : > /root/cert-modes; systemd-run --quiet --unit=cert-watch sh /root/cert-watch.sh`)
 
-			// 1. The first push, through the product's own install: the directory and the files before the config.
+			// 1. The first push (on the plain image through the product's own install): the directory and the files
+			// before the config.
 			config := pve.RenderHAProxy(spec(fileA))
 			for deadline := time.Now().Add(8 * time.Minute); ; time.Sleep(time.Second) {
 				_, err := ps.PushHAProxy(ctx, "n1", 100, config, fileA, fileB)
@@ -174,7 +168,7 @@ func TestLBApplianceTLS(t *testing.T) {
 				t.Fatalf("the watcher after the first push and the control saw %q, want the control's file alone, with mode 666", got)
 			}
 			t.Log(g.run(ctx, "haproxy -v | head -n1; openssl version"))
-			// The members come up after HAProxy (socat came with the product's install): wait for their checks.
+			// The members come up after HAProxy (socat is the image's, or came with the product's install): wait for their checks.
 			g.run(ctx, lbTLSMembers)
 			for deadline := time.Now().Add(time.Minute); ; time.Sleep(time.Second) {
 				health, _, err := ps.LBHealth(ctx, "n1", 100, spec(fileA))
