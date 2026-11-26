@@ -28,6 +28,13 @@ func embedded(t *testing.T) *BOM {
 	return b
 }
 
+// plain is this build's BOM as an installation without sandboxes renders it (BOM.For): every component but the sandbox
+// chart's, which the fixtures of the render tests do not ask for.
+func plain(t *testing.T) *BOM {
+	t.Helper()
+	return embedded(t).For(Spec{})
+}
+
 func comp(t *testing.T, b *BOM, cluster, name string) *Component {
 	t.Helper()
 	for i := range b.Components {

@@ -152,17 +152,98 @@ func TestApplyBuildsTheSharedSandbox(t *testing.T) {
 	}
 }
 
-// A record that holds the block under a BOM without the sandbox chart (every released one: the save refuses it, so only
-// a record written past the save can): the run builds nothing and asks nothing of Proxmox.
-func TestSandboxRunIsDark(t *testing.T) {
+// A platform that a release before the offer installed, whose record holds the block all the same (the save refuses it
+// until the upgrade, so only a record written past the save can): an apply runs with the installed BOM, which has no
+// sandbox chart, builds nothing and asks nothing of Proxmox.
+func TestSandboxRunRefusedOnABOMWithoutTheChart(t *testing.T) {
+	old, ok := Lookup(previousSHA256["0.11.1"])
+	if !ok || old.Feature(FeatureSandbox) != nil {
+		t.Fatal("this build embeds the 0.11.1 BOM, which names no sandbox chart")
+	}
+	from := refOf(old)
 	p := newPlatform(t, RunApply)
-	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Spec.Sandbox = sharedSandbox() })
+	p.mutate(func(run *Run, in *Installation, _ *Secrets) {
+		run.BOM, in.Status.BOM = from, &from
+		in.Spec.Sandbox = sharedSandbox()
+	})
 	p.upTo(stageCluster)
 	if end := p.until(5); end != "fail:"+CodeSandboxRefused || len(p.pve.pools)+len(p.pve.acl)+len(p.pve.tokens) != 0 || p.seed.obj(appsPath+"pc-platform") != nil {
 		t.Fatalf("end %s: %+v; pools %v, acl %v", end, p.stage(stageCluster), p.pve.pools, p.pve.acl)
 	}
-	if s := p.stage(stageCluster); !strings.Contains(s.Message, "has no sandbox chart") {
+	if s := p.stage(stageCluster); !strings.Contains(s.Message, "release 0.11.1 has no sandbox chart") {
 		t.Errorf("stage %+v", s)
+	}
+}
+
+// The upgrade the offer arrives with, on the real pair: a platform that release 0.11.1 installed moves to this build's
+// BOM with no sandbox block. The plan has the cluster chart's row and the sandbox chart as added, and no machines row;
+// the run passes the rollout check, moves the cluster's Application to the new chart and writes nothing of sandboxes:
+// no pool, no ACL row, no token, no Application, no record, no third provider. The record lists every component but
+// the sandbox chart. Only then is the block taken at the save, and its plan names the machines an apply would build.
+func TestUpgradeFromTheLastReleaseBuildsNoSandbox(t *testing.T) {
+	old, ok := Lookup(previousSHA256["0.11.1"])
+	if !ok {
+		t.Fatal("this build does not embed the 0.11.1 BOM")
+	}
+	cur := sandboxBOM(t)
+	cur.Release = "0.12.0" // main's "-dev" BOM is no target of an upgrade; the pins are the ones under test
+	from, to := refOf(old), refOf(cur)
+	p := newPlatform(t, RunApply)
+	p.mutate(func(run *Run, in *Installation, _ *Secrets) { run.BOM, in.Status.BOM = from, &from })
+	p.upTo(stageSeedPlatform)
+	if end := p.until(30); end != "complete" {
+		t.Fatalf("the installing run: %s", end)
+	}
+	_, in, _ := p.state.snapshot()
+	in.Spec.Sandbox = sharedSandbox()
+	if probs := in.SandboxProblems(); len(probs) != 1 || !strings.Contains(probs[0], "Upgrade the platform to release "+cur.Release+" first") {
+		t.Fatalf("the block before the upgrade: %v", probs)
+	}
+	in.Spec.Sandbox = nil
+	plan, err := PlanFor(in, to.SHA256)
+	if err != nil || plan.Upgrade == nil || len(plan.Upgrade.Blocking) != 0 || hasMachines(plan.Upgrade.Changes) {
+		t.Fatalf("the plan of the move: %+v %v", plan.Upgrade, err)
+	}
+	classes := map[string]string{}
+	for _, c := range plan.Upgrade.Changes {
+		classes[c.Cluster+"/"+c.Name] = c.Class
+	}
+	if classes["seed/"+ClusterName] != ClassChart || classes["workload/sandbox"] != ClassAdded || len(classes) != 3 {
+		t.Fatalf("the rows of the move: %v", classes)
+	}
+
+	p.start(t, to.SHA256, "upgrade lab to "+cur.Release)
+	if end := p.until(30); end != "complete" {
+		t.Fatalf("the upgrade: %s: %+v\n%+v", end, p.stage(stageCluster), p.stage(stageWorkloadPlatform))
+	}
+	_, in, _ = p.state.snapshot()
+	if *in.Status.BOM != to || !p.receipt(stageCluster).RolloutChecked || str(p.seed.obj(appsPath+ClusterName), "spec", "source", "targetRevision") != ClusterChartVersion(cur.BOM) {
+		t.Fatalf("status %+v, cluster stage %+v", in.Status.BOM, p.stage(stageCluster))
+	}
+	if len(p.pve.pools)+len(p.pve.acl)+len(p.pve.tokens) != 0 || p.seed.obj(sandboxApp) != nil || in.Status.Sandbox != nil || len(p.sites) != 0 ||
+		in.Status.Providers == nil || in.Status.Providers.Sandbox != "" || len(in.Status.Components) != len(cur.Components)-1 {
+		t.Fatalf("pools %v, acl %v, sandbox %+v, providers %+v, %d components", p.pve.pools, p.pve.acl, in.Status.Sandbox, in.Status.Providers, len(in.Status.Components))
+	}
+	for _, c := range in.Status.Components {
+		if c.Name == "sandbox" {
+			t.Errorf("the record names the sandbox chart: %+v", c)
+		}
+	}
+	// Asking: the save takes the block now, and the plan of the apply names the group's machines.
+	in.Spec.Sandbox = sharedSandbox()
+	if probs := in.SandboxProblems(); probs != nil {
+		t.Fatalf("the block after the upgrade: %v", probs)
+	}
+	plan, err = PlanFor(in, "")
+	if err != nil || len(plan.Blocking) != 0 {
+		t.Fatalf("the plan with the block: %+v %v", plan, err)
+	}
+	rows := map[string]PlanChange{}
+	for _, c := range plan.Changes {
+		rows[c.Name] = c
+	}
+	if c := rows["sandbox"]; !strings.HasPrefix(c.To, SandboxShared+" (sandbox: 1 x 2 cores") || c.Class != ClassMachines || rows["sandbox-pool"].To == "" || rows["sandbox-access"].To == "" || len(rows) != 3 {
+		t.Errorf("the rows of the apply: %+v", plan.Changes)
 	}
 }
 
