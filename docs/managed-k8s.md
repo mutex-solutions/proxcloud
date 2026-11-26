@@ -872,9 +872,12 @@ call for its own cluster, and minting it again rotates it.
   Secrets change about once a second for a minute (a Service that flaps), which costs a call a second since the
   controller watches (chart 0.1.19). The controller is the one of v0.11.1, unchanged: it says the refusal in a
   Warning Event `TooManyRequests` on each of its Services, with the seconds until the next call is taken, takes no
-  address from that turn and sends again at the next change, or after its interval (10 s) with none. While the
-  changes go on, about every second turn is refused, and a Service's Events go between that Warning and
-  `EnsuredLoadBalancer`. The API logs `lb gateway: rate limit` with the cluster and writes one audit event of the
+  address from that turn and sends again at the next change, or after its interval (10 s) with none: the newest
+  state is the one that arrives, at most about 10 s after the last change. A certificate the portal asks for is the
+  second call of a turn, which a cluster at the limit has refused, and the controller sends one Secret at most once
+  a minute: a new or renewed certificate of such a cluster is served up to a minute after its changes stop, and the
+  old one until then. While the changes go on, about every second turn is refused, and a Service's Events go
+  between that Warning and `EnsuredLoadBalancer`. The API logs `lb gateway: rate limit` with the cluster and writes one audit event of the
   cluster's project, each at most once per cluster a minute. The figures are fixed, with no setting. A refused
   credential takes none of a cluster's calls. The count is kept per API process: two API replicas take twice as
   many, and a restart starts every cluster at 30.

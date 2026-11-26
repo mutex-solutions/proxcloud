@@ -120,14 +120,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one event in a minute of refusals); its control is another cluster's call in the same instant, which is taken.
   With the check taken out the 31st call is answered `200`; counted at a refused credential the 16th good call is
   refused; with one count for all clusters the other cluster is refused.
+  `TestStateRefusedAtTheGatewaysLimitStillLands` (`cmd/lb-controller`) runs the controller with its watch against
+  the gateway itself: a Service that flaps until one of its states is answered `429`, then nothing more; the state
+  that was refused, the newest, is at the portal once a call has come back, with no further change in the cluster,
+  and the Service keeps its address. Without the limit no state is refused (200 in a row are taken); with a controller
+  that takes the `429` for an answer the portal stays one state behind and the test fails.
   **For an upgrade:** nothing to do, and no controller changes. A turn of the controller is one call, two when a
   certificate is asked for, and a quiet cluster sends one per 30 s, so a cluster in normal use never meets the
   limit. A cluster that does (Services, Nodes or TLS Secrets changing about once a second for a minute) keeps its
   balancer and its addresses as they are: the controller of `v0.11.1` (chart 0.1.19) reports the refusal as a
   Warning Event `TooManyRequests` on each of its Services, takes no address from that turn and sends its whole
-  state again at the next change or after its interval, so a change arrives up to a few seconds late and none is
-  lost. While the changes go on, a Service's Events go between that Warning and `EnsuredLoadBalancer`. A
-  controller of `v0.11.0` (a turn every 10 s) cannot reach the limit. Not run on a lab.
+  state again at the next change or, with none, after its interval (10 s), so the newest state arrives up to about
+  10 s late and none is lost. A certificate the portal asks for is the second call of a turn, which a cluster at
+  the limit has refused, and the controller sends one Secret at most once a minute: a new or renewed certificate
+  of such a cluster is served up to a minute after its changes stop, and the old one until then. While the
+  changes go on, a Service's Events go between that Warning and `EnsuredLoadBalancer`. A controller of `v0.11.0`
+  (a turn every 10 s) cannot reach the limit. Not run on a lab.
 
 ## [0.11.1] - 2026-11-26
 

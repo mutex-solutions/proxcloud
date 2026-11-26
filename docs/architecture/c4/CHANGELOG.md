@@ -16,6 +16,9 @@ handler refuses one case more.
   audit event per cluster a minute (`rateSaidEvery`). A refused credential never reaches it.
 - `internal/cloud/lbgw/gateway_test.go`: `TestClusterRateLimit`, on the tests' clock, with another cluster's call
   in the same instant as its control.
+- `cmd/lb-controller/watch_test.go`: `TestStateRefusedAtTheGatewaysLimitStillLands`, the controller with its
+  watch against `lbgw.Handler`: the state the gateway refused is at the portal with no further change in the
+  cluster. No controller code changes.
 
 **Why:** the gateway took every `PUT /lb/v1/state`, and since the controller watches (chart 0.1.19) a Service that
 flaps makes about one a second, each one a credential lookup, a body of up to 64 KiB and a write of the state. One
@@ -25,6 +28,7 @@ whole state again later. The count is per API process, so two replicas take twic
 database is the step after, if that shows.
 
 **Diagrams updated:** none (no element of C1 to C3 moves). [c4-code.md](c4-code.md): the `lbgw.Handler` row.
+
 ## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
 
 **What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23
