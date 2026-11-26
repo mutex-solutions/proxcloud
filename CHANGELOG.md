@@ -53,6 +53,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
   pull request).
 
+### Fixed
+
+- **A balancer with a change that waits says truthfully when the platform tries again, and the log says when its
+  own retries ended.** The row of a pair and of a balancer on one VM said "the platform tries again within half a
+  minute, by itself". The platform's own retries are six, 20 s apart (`lbRetry`); after the last one the row kept
+  saying it while nothing tried again before the next services sync or the next change, which on a site without a
+  scheduler is the next change, and the log had no line for it (review of `v0.11.1-rc.3`, finding 4; a known issue
+  of `v0.11.1`). The sentence is now true at any time: "the platform tries again by itself every 20 s for 2
+  minutes, and after that at the next services sync or at the next change". It is made of the loop's own figures
+  (`lbRetrySays`, from `lbRetryEvery` and `lbRetryTries`), so it cannot drift from them; the rest of both messages
+  is as before. A loop that ends after its six passes with the change still waiting writes one WARN line, "load
+  balancer: the platform's own retries ended and the change still waits; the next services sync or the next change
+  tries again", with the balancer's key and the number of tries and nothing else (no config, no secret); a loop
+  that a pass ended writes none. No state was added, and nothing tries more often or longer than before. Tests:
+  `TestLBRetrySaysWhatTheLoopDoes`, `TestLBPairTakesAChangeWhileAptRuns`, `TestLBSingleTakesAChangeWhileAptRuns`
+  and `TestLBRetryIsBoundedAndSingle` (the line once when every pass still waits; the control: none when a pass
+  ends the wait, also at the last try); all three message and log assertions fail on the code of before. For an
+  upgrade: nothing is pushed to any appliance and no balancer changes what it serves. A row that waits at the
+  upgrade keeps the old sentence until its next pass writes the row, and a tool that matches the old sentence in
+  `statusMessage` must match the new one, or the unchanged start "A change waits". Not verified on a lab: only
+  the text and one log line change.
+
 ## [0.11.1] - 2026-11-26
 
 The release after `v0.11.0`. It completes layer 4 of the load balancer: UDP listeners, TLS termination with
