@@ -29,6 +29,7 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated:** c3-components.md (C3e: the `sandbox-proxy` node and the `Sandbox proxy` row), c2-containers.md
 (trust boundaries: the row for the function routes, Planned).
+
 ## 2026-11-26: a node selector term with an empty key matches no node
 
 **What changed:** no component, container, wire field or relation. One function of the cluster's load balancer
