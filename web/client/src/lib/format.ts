@@ -112,3 +112,17 @@ export function statusKind(status?: string): "ok" | "warn" | "error" | "muted" {
   if (s.endsWith("_IN_PROGRESS") || s.startsWith("PENDING") || s === "DEGRADED") return "warn"
   return "muted"
 }
+
+// Docker Hub under its two names is one registry.
+const hub = (host: string) => (host === "index.docker.io" ? "docker.io" : host)
+
+// The registry an image reference is pulled from, by Docker's rule: the first component is a host
+// when it has a "." or a ":" or is localhost; anything else is on Docker Hub, "docker.io".
+export function registryHost(image: string): string {
+  const [host, ...rest] = image.trim().split("/")
+  if (!rest.length || (!/[.:]/.test(host) && host !== "localhost")) return "docker.io"
+  return hub(host)
+}
+
+// The registry that credentials stored for server are offered to: its host, without the scheme or a path.
+export const serverHost = (server: string) => hub(server.trim().replace(/^https?:\/\//, "").split("/")[0])
