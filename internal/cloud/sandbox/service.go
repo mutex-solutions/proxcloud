@@ -96,22 +96,37 @@ func (s *Service) ownerSelector(projectID string) string {
 }
 
 // ensureTenantNamespace creates/labels sb-<projectId> and leaves its quota alone. On a shared cluster it then binds
-// SharedRole to the portal's identity there: until that RoleBinding exists the identity can do nothing in the
-// namespace, and the cluster's admission policies let it bind nothing else and nowhere else.
+// SharedRole to the portal's identity there (EnsureTenantNamespace).
 func (s *Service) ensureTenantNamespace(ctx context.Context, projectID string) error {
-	ns := NamespaceFor(projectID)
-	if err := s.api.EnsureNamespace(ctx, ns, map[string]string{
-		LabelProject:   projectID,
-		LabelService:   s.serviceID,
-		LabelManagedBy: ManagedByValue,
-		LabelTenant:    "true",
-	}, nil); err != nil || !s.cfg.Shared {
+	return EnsureTenantNamespace(ctx, s.api, s.cfg.Shared, s.serviceID, projectID, NamespaceFor(projectID), SharedRole, nil)
+}
+
+// TenantNamespaceAPI is what EnsureTenantNamespace writes with.
+type TenantNamespaceAPI interface {
+	EnsureNamespace(ctx context.Context, name string, labels, annotations map[string]string) error
+	ApplyCR(ctx context.Context, group, version, plural string, obj map[string]any) error
+}
+
+// EnsureTenantNamespace creates/labels a project's namespace ns for one kind of tenant workload: sb-<projectId> with
+// SharedRole for sandboxes, fn-<projectId> with FunctionRole for functions. The namespace always carries the owner
+// labels and LabelTenant, which is what puts it under the pod policy and the egress guardrail; extra adds labels and
+// cannot change those. On a shared cluster it then binds role to the portal's identity in ns: until that RoleBinding
+// exists the identity can do nothing in the namespace, and the cluster's admission policies let it bind only the role
+// that fits the namespace's prefix, and nowhere else. The first call that rests on the binding goes through
+// AfterBinding.
+func EnsureTenantNamespace(ctx context.Context, api TenantNamespaceAPI, shared bool, serviceID, projectID, ns, role string, extra map[string]string) error {
+	labels := map[string]string{}
+	for k, v := range extra {
+		labels[k] = v
+	}
+	labels[LabelProject], labels[LabelService], labels[LabelManagedBy], labels[LabelTenant] = projectID, serviceID, ManagedByValue, "true"
+	if err := api.EnsureNamespace(ctx, ns, labels, nil); err != nil || !shared {
 		return err
 	}
-	return s.api.ApplyCR(ctx, "rbac.authorization.k8s.io", "v1", "rolebindings", map[string]any{
+	return api.ApplyCR(ctx, "rbac.authorization.k8s.io", "v1", "rolebindings", map[string]any{
 		"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
-		"metadata": map[string]any{"name": SharedAccount, "namespace": ns, "labels": map[string]any{LabelManagedBy: ManagedByValue, LabelService: s.serviceID}},
-		"roleRef":  map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": SharedRole},
+		"metadata": map[string]any{"name": SharedAccount, "namespace": ns, "labels": map[string]any{LabelManagedBy: ManagedByValue, LabelService: serviceID}},
+		"roleRef":  map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": role},
 		"subjects": []any{map[string]any{"kind": "ServiceAccount", "name": SharedAccount, "namespace": SharedAccountNS}},
 	})
 }
@@ -119,19 +134,29 @@ func (s *Service) ensureTenantNamespace(ctx context.Context, projectID string) e
 // tenantNamespaces are the sb-* namespaces of this service on a shared cluster, where the identity may list
 // namespaces cluster-wide and everything else only inside the ones it bound.
 func (s *Service) tenantNamespaces(ctx context.Context) ([]string, error) {
-	api, ok := s.api.(interface {
-		ListNamespaces(ctx context.Context, labelSelector string) ([]map[string]any, error)
-	})
+	api, ok := s.api.(NamespaceLister)
 	if !ok {
 		return nil, fmt.Errorf("sandbox: namespace lister unavailable")
 	}
-	items, err := api.ListNamespaces(ctx, LabelTenant+"=true,"+LabelService+"="+s.serviceID)
+	return TenantNamespaces(ctx, api, s.serviceID, "sb-")
+}
+
+// NamespaceLister lists namespaces by label.
+type NamespaceLister interface {
+	ListNamespaces(ctx context.Context, labelSelector string) ([]map[string]any, error)
+}
+
+// TenantNamespaces are the tenant namespaces of one service whose name starts with prefix ("sb-" for sandboxes, "fn-"
+// for functions) and that are not being deleted. Both kinds carry LabelTenant, so the prefix is what keeps a list of
+// one kind out of the namespaces of the other, where the identity holds another role or none.
+func TenantNamespaces(ctx context.Context, api NamespaceLister, serviceID, prefix string) ([]string, error) {
+	items, err := api.ListNamespaces(ctx, LabelTenant+"=true,"+LabelService+"="+serviceID)
 	if err != nil {
 		return nil, err
 	}
 	var out []string
 	for _, it := range items {
-		if name := digStr(it, "metadata", "name"); strings.HasPrefix(name, "sb-") && dig(it, "metadata", "deletionTimestamp") == nil {
+		if name := digStr(it, "metadata", "name"); strings.HasPrefix(name, prefix) && dig(it, "metadata", "deletionTimestamp") == nil {
 			out = append(out, name)
 		}
 	}
@@ -198,13 +223,18 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string, 
 // sharedBindingWait is how long the first call into a namespace waits for its RoleBinding to count.
 var sharedBindingWait = 3 * time.Second
 
-// afterBinding runs the first namespaced call after ensureTenantNamespace. On a shared cluster that call rests on a
+// afterBinding runs the first namespaced call after ensureTenantNamespace (AfterBinding).
+func (s *Service) afterBinding(ctx context.Context, call func() error) error {
+	return AfterBinding(ctx, s.cfg.Shared, call)
+}
+
+// AfterBinding runs the first namespaced call after EnsureTenantNamespace. On a shared cluster that call rests on a
 // RoleBinding written a moment ago, and the API server authorizes from a cache that follows its writes: a 403 right
 // after the write is the cache, so the call is tried again for a few seconds. A 403 that stays is returned.
 // ponytail: a fixed wait; watch the RoleBinding's resourceVersion in a SubjectAccessReview if a busy API server needs longer.
-func (s *Service) afterBinding(ctx context.Context, call func() error) error {
+func AfterBinding(ctx context.Context, shared bool, call func() error) error {
 	err := call()
-	if !s.cfg.Shared {
+	if !shared {
 		return err
 	}
 	for deadline := time.Now().Add(sharedBindingWait); err != nil && time.Now().Before(deadline); err = call() {

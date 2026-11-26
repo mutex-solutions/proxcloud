@@ -94,6 +94,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Serverless functions, the cluster side (not reachable yet)** (#496). The first part of functions on the managed
+  platform (v0.13.0): package `internal/cloud/function`, which renders and drives one function as a gVisor
+  Deployment `fn-<16 hex>` in the project's `fn-<project>` namespace on the sandbox provider's cluster. No route,
+  page, job, chart object or BOM pin uses it: a portal built from this commit behaves as before. What the package
+  settles for the parts that follow:
+  - **The pod.** The provider's gVisor runtime class, no service account token, no service links, no volume of any
+    kind, requests equal to limits, 1 GiB of `ephemeral-storage`, the provider's egress cap
+    (`kubernetes.io/egress-bandwidth`). Secrets reach it only as environment from Secret `<id>`, registry
+    credentials only through pull Secret `<id>-registry`; both are applied with `data` and their type and are owned
+    by the Deployment, so a removed secret is gone from the Secret with the next deploy.
+  - **Every start asks the registry**, for a tag and for a digest (`imagePullPolicy: Always`): an image in a
+    machine's cache is not started for a project that only knows its digest.
+  - **An image's registry must have a DNS name.** An IP address in any spelling, `localhost` and a single-label
+    host are refused when the function is created or changed, because the pull is made by the machine itself.
+  - **Not offered: a GPU, a build from a repository, a public endpoint.** A request that names one is refused, not
+    answered with a plain function.
+  - **A failed start is explained by one of nine fixed sentences.** The cluster's own message (the kubelet's, the
+    scheduler's, the quota's) is kept for the operator's log and is in no answer.
+  - **Limits.** The provider's `functions` block (`enabled`, idle bounds, per-instance `maxCpuMillis` and
+    `maxMemoryMi`, `maxFunctions`, `maxInstances`, `projectQuota`) with defaults: 20 functions, 8 vCPUs and
+    16384 MiB per project, 5 instances per function at most, 1 for a function that names none. The namespace's
+    ResourceQuota `proxcloud-function` carries the project's numbers. Nothing reads the block from a provider
+    document yet.
+  - **A shared cluster.** The portal's identity is bound to `proxcloud-function-namespace` in each `fn-*`
+    namespace, never to the sandbox role, and reads across projects go namespace by namespace. The chart does not
+    carry that role yet.
+  - New calls of the cluster client: `SetScale` (the scale subresource) and `MergePatchCore`. New row type
+    `FUNCTION`. A provider gains `secret.functionWakeToken` as a field of its own, apart from `proxyWakeToken`,
+    which stays empty.
+  Tested against a fake cluster only: no function has run on a cluster from this code.
 - **Sandboxes on the managed platform are offered** (#483, `deploy/platform/platform-bom.yaml`,
   [managed-services.md](docs/managed-services.md#sandboxes-on-the-platform)). The platform BOM names the sandbox
   chart, `proxcloud-sandbox` 0.1.0 at its published digest, as the component `sandbox` (`feature: sandbox`), and
