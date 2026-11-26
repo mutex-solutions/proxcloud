@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 )
@@ -84,6 +85,11 @@ func TestFloatingIPProvider(t *testing.T) {
 	}
 	if rows, err := (&floatingIPProvider{}).List(context.Background()); err != nil || rows != nil {
 		t.Fatal("no lister means no rows")
+	}
+	// Reconcile asks for the grace through this interface, so a method of another name would be no grace at all
+	// (what the grace does to the rows: TestFloatingIPRowVanishGrace, test/integration).
+	if g, ok := providers.Provider(&floatingIPProvider{}).(providers.VanishGrace); !ok || g.VanishGrace() != 2*time.Minute {
+		t.Fatal("the FLOATING_IP reconcile must have the two-minute vanish grace")
 	}
 }
 
