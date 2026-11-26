@@ -17,7 +17,7 @@ the stack, creates the first operator and prints the URLs.
 | Customer console | `ghcr.io/mutex-solutions/proxcloud-web` | |
 | Operator console | `ghcr.io/mutex-solutions/proxcloud-admin` | |
 | Keycloak | `quay.io/keycloak/keycloak:26.8.2` | Production mode, behind Traefik. Realm `clients` for customers, `master` for operators |
-| PostgreSQL | `postgres:17.12-alpine` | Databases `proxcloud` and `keycloak` |
+| PostgreSQL | `postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73` | Databases `proxcloud` and `keycloak` |
 | keycloak-config, seed | one-shot | Realm settings (the same the Helm chart derives) and the first-run documents |
 
 The three ProxCloud images run at one release tag: the pinned release of this checkout, unless
@@ -365,10 +365,15 @@ To go back to the previous release, restore the backup the upgrade took, with it
 3. Follow [Restore](#restore) with `backups/proxcloud-<UTC time>.sql.gz` of the same backup. Its
    last step, `install`, starts the previous release.
 
-Traefik, Keycloak and PostgreSQL are pinned to a version in `compose.yaml` (PostgreSQL to its minor
-release, `17.12-alpine`); they move with the checkout, so an upgrade restarts the database only when
-the release changes that line. A new PostgreSQL major version needs a dump and restore, not just a
-new image.
+Traefik, Keycloak and PostgreSQL are pinned to a version in `compose.yaml`; they move with the
+checkout. PostgreSQL is pinned to its minor release and to one build of it, by digest
+(`postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73`): the
+publisher rebuilds a version's tag, and by the tag alone a container made later would be another
+build than the one that ran. An upgrade restarts the database only when the release changes that
+line, and then it does: `upgrade` recreates the PostgreSQL container (a few seconds without a
+database for the API and Keycloak, which connect again by themselves; the volume and its data
+stay), after the backup it always takes first. A new PostgreSQL major version needs a dump and
+restore, not just a new image.
 
 ### Uninstall
 

@@ -15,6 +15,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can be cancelled; it is deleted once the scheduler runs (`--scheduler` on a Compose install). An install with
   the scheduler on, or with the debug triggers on, sees no change.
 
+- **A Docker Compose install: this upgrade restarts the database once.** The PostgreSQL line of
+  `deploy/compose/compose.yaml` now names one build (`postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73`, see
+  Changed). `./proxcloud-up.sh upgrade` takes its backup, pulls, and then runs `docker compose up -d` for the
+  realm import and for the rest; neither is given `--no-deps`, so the first of the two already brings PostgreSQL
+  to the file's state. Compose recreates a container whose image line changed, **on every install, whether or not
+  the build it runs is the pinned one**: the container is stopped, removed and started from the pinned image on the
+  same volume. That is a restart of the portal's database and of Keycloak's: for a few seconds the API and Keycloak
+  have no database, and they connect again by themselves. Both builds are PostgreSQL 17.12, so the data directory
+  is read as it is; nothing is dumped and restored.
+  - *What the script's backup covers:* before anything is pulled, `upgrade` writes `pg_dumpall` of the running
+    container (both databases, roles included) and a copy of `.env` to `backups/`, and stops if the dump fails. The
+    recreate does not touch the volume `<project>_postgres-data`; the dump is for the case that the new container
+    does not come up on it (`README.md`, "Restore").
+  - *Later upgrades* leave the container alone until a release changes that line again, and a rebuild of the tag by
+    its publisher no longer reaches a site by itself.
+  - *Going back* to the previous release recreates it once more: that release's file names the tag alone, and the
+    container starts from the image the host's tag names then.
+  - Measured in a throwaway two-service Compose project on a workstation (Docker 29.10.0, Compose 5.8.0), not
+    with the product's stack and not on a lab: the line given the digest of the image that was already running,
+    container recreated; given the digest of another build of 17.12, recreated, 3.6 s until healthy again on an
+    empty database; a row written before was read back after both; a second `up` on the same line, "Running"; a
+    service that waits for the database (`depends_on`, `service_healthy`) kept its container and its start time
+    both times. Whether Keycloak's container is recreated with PostgreSQL's depends on the Compose version: a
+    production site saw it at the upgrade to 0.9.0.
+
 ### Fixed
 
 - **A project's delete with the grace period is refused when no job will carry it out.** With the job scheduler
@@ -30,6 +55,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PostgreSQL); both fail with the two new checks taken out. Not run on a lab.
 
 ### Changed
+
+- **The Docker Compose install pins PostgreSQL to one build, by digest**
+  (`postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73` in
+  `deploy/compose/compose.yaml`, before `postgres:17.12-alpine`). The publisher rebuilt the tag `17.12-alpine`
+  after 0.9.1 pinned it. `upgrade` pulls every image of the file, so the tag on a site's host moved to the new
+  build while Compose left the running container on the old one (seen on a production site at the upgrades to
+  0.11.0 and to 0.11.1: the container ran image `526f86d9...` while the host's tag named `f9cf3e1f...`). Whatever
+  recreated that container next, a changed line, a `down` and `up`, a restore on a new host, would have started
+  another build of the database without anyone having asked for it. The digest is the one the tag names on
+  2026-11-26 (the image index, so every architecture the tag has). The version stays in the line: it is what a
+  reader and Dependabot go by, and Dependabot now proposes a rebuild of the tag as a pull request
+  (`.github/dependabot.yml`). `test_the_database_image_is_pinned_by_digest` (`deploy/tests`) asks for the version
+  and a digest in that line and for the same line in the two places of `deploy/compose/README.md` that name it; it
+  fails on the line as it was. Left as they are: Traefik, Keycloak and its config CLI, pinned to a version
+  without a digest as before (a restart of those loses no state; they move by hand, with the chart), the
+  development `docker-compose.yml` at the repository root, and the app chart's CloudNativePG image.
 
 - **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.11.1`**
   (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.11.1.yaml`, sha256

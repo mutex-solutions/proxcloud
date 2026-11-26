@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-26: the Compose install's PostgreSQL image is pinned by digest (the site's upgrades to v0.11.0 and v0.11.1)
+
+**What changed:** no component, container or relation: the PostgreSQL container of the one-host install is the
+same container, named by one build.
+
+- `deploy/compose/compose.yaml`: `postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73`
+  where the version alone stood.
+- `deploy/tests/test_compose_production.py`: `test_the_database_image_is_pinned_by_digest`.
+- `deploy/compose/README.md`, `.github/dependabot.yml`: the line, and what a change of it does at an upgrade.
+
+**Why:** the publisher rebuilt the tag, and a site's running container was a build the tag no longer named: the
+next recreate would have started another build unasked.
+
+**Diagrams updated:** none (no element of C1 to C4 moves).
+
 ## 2026-11-26: a project's scheduled delete is refused when no job will carry it out (lab drill of v0.11.1, R4-o2)
 
 **What changed:** no component, container, route or relation. One refusal more inside one code element.
