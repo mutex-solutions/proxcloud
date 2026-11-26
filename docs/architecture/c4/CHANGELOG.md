@@ -22,6 +22,7 @@ of v0.11.1). The guard is for a refusal only, which comes from an appliance that
 and the new appliance goes ahead after the window, so it can still take over from it.
 
 **Diagrams updated:** none (no element of C1 to C4 moves). `c4-code.md`: the row of `Handler.lbApplyPair`.
+
 ## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
 
 **What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23
