@@ -15,8 +15,8 @@ package platformlife
 // Both put their machines on the platform network, in a range of their own (nodeRange, one CIDR) and in the Proxmox
 // pool pve.SandboxPool. This file holds the rules and the renders; sandbox_run.go what a run does on the site.
 //
-// No release pins the sandbox chart yet: SandboxProblems refuses the block while the installation's BOM has no
-// component marked FeatureSandbox, so nothing here runs against a real site until a BOM names one.
+// The BOM of 0.12.0 is the first that pins the sandbox chart. SandboxProblems refuses the block while the installation's
+// BOM has no component marked FeatureSandbox: a platform that an earlier release installed, until its upgrade.
 
 import (
 	"context"
@@ -345,6 +345,10 @@ func (in *Installation) SandboxProblems() []string {
 		bom = cur.BOM
 	}
 	if bom.Feature(FeatureSandbox) == nil {
+		// A platform that an earlier release installed, under a build that offers sandboxes: the upgrade comes first.
+		if cur, err := Current(); err == nil && cur.Feature(FeatureSandbox) != nil {
+			return []string{fmt.Sprintf("spec.sandbox: the platform's BOM (release %s) has no sandbox chart. Upgrade the platform to release %s first, then save spec.sandbox; until then leave it out, or set placement off", bom.Release, cur.Release)}
+		}
 		return []string{fmt.Sprintf("spec.sandbox: the platform's BOM (release %s) has no sandbox chart, so this release builds no sandboxes on the platform: leave spec.sandbox out, or set placement off", bom.Release)}
 	}
 	chart := ClusterChartVersion(bom)

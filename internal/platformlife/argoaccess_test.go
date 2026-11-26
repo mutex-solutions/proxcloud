@@ -16,7 +16,7 @@ var testArgo = &ArgoCDAccess{Address: "10.200.200.210", Sources: []string{"192.1
 
 func workloadArgoValues(t *testing.T, in RenderInput) map[string]any {
 	t.Helper()
-	apps, err := Applications(embedded(t), in)
+	apps, err := Applications(plain(t), in)
 	if err != nil {
 		t.Fatal(err)
 	}
