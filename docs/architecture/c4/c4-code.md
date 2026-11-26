@@ -134,7 +134,7 @@ separate; fixture tests never power off a real node or call external mail.
 | `ClaimKinds`, `Renew`, `Retry`, `Complete` | DB-clock due/expiry, SKIP LOCKED; UUID owner + increasing epoch + unexpired CAS; post-row-lock fresh time check. Unsupported provider-mode jobs remain untouched. |
 | `Worker.Run` | Bounded concurrency/poll, SQL-only handler deadline and cancellation; final expiry rolls back all effects, retry jitter/attempt bounds/dead letters. |
 | `Cycle`, `WithChargeReceipt`, `ChargeBillingResources` | Frozen original cadence/cutoff, one existing profile money lock and joined whole-profile transaction across all services. Retained receipt prevents business-commit-before-ACK duplicate money/units; issued cycles never reopen. |
-| `Engine.At`, `advanceWatermark`, `getTimeUnitsDiff` | Per-call original clock (no shared engine mutation), no accrual past cutoff/deletion or watermark rewind. Current cache/pricing are not historical snapshots. |
+| `Engine.At`, `advanceWatermark`, `getTimeUnitsDiff` | Per-call original clock (no shared engine mutation), no accrual past cutoff/deletion or watermark rewind. Current cache/pricing are not historical snapshots. A resource that reports the start of its running interval (`ChargeFrom`) is counted from the later of the watermark and that start, so idle time between two intervals is not accrued. |
 | `BillSendService.SetChargeBacklog` | Under primary profile money lock defer on original-cycle pending/running/dead jobs; a post-issuance late publish requires reconciliation instead of invoice mutation. |
 | Admin durable status/replay | Existing primary RBAC first; history only may use read pool, always marked lag-tolerant. Replay validates fixed original payload and atomically writes operator audit; no arbitrary code/payload editing. |
 
@@ -720,7 +720,7 @@ flowchart TB
 | `SelectPricePlansForService`, `ApplicableRules` | `internal/platform/pricing/planselect.go:46`, `:60` | Profile plans plus public plans for the provider, filtered by time unit |
 | `ChargeBillingResources` | `internal/platform/pricing/charge.go:26` | Under the profile lock: current bill, created on demand, rate each resource, adjustments, save |
 | `Engine.ApplyPricePlanRules` | `internal/platform/pricing/engine.go:30` | Filters, tiers, modifiers per rule |
-| `SaveChargingToBill`, `getTimeUnitsDiff` | `internal/platform/pricing/bill_build.go:28`, `:155` | Bill item upsert; units elapsed since the last rating |
+| `SaveChargingToBill`, `getTimeUnitsDiff` | `internal/platform/pricing/bill_build.go:35`, `:213` | Bill item upsert; units elapsed since the last rating, or since the start of the resource's running interval when it reports one |
 | `Service.billAdjuster` | `billingjob.go:165` | Savings-contract discounts and price-adjustment rules after rating |
 
 ```mermaid

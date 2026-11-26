@@ -211,7 +211,9 @@ scheduled here; the billing service owns them. See `docs/configuration.md`.
 Requests still carry the wall-clock month, because a service without the native
 closing pass would open a second bill for a month that has ended and re-bill it.
 So the last hour of each month stays unbilled under `external` until that service
-has the same charge code and `remote.go` sends the closing cycle.
+has the same charge code and `remote.go` sends the closing cycle. A resource charged by
+its running intervals is not posted either (see *Resources charged by their running
+intervals*).
 
 ### Native durable dispatch (no RabbitMQ)
 
@@ -278,6 +280,66 @@ Each cadence tick **accumulates** onto a per-resource `BillItem`:
 
 The result is a bill whose items track a running, capped, cadence-accurate cost.
 
+### Resources charged by their running intervals
+
+A server exists from its creation to its deletion and is charged for all of it. A resource that
+stops and starts while its row lives (one that scales to zero) must be charged for the time it ran
+only, on one bill item. The watermark alone cannot do that: it moves only when a pass charges or
+skips, never with the clock, so after an idle hour the next pass would count the hour. Three optional
+fields on the billing resource (`pkg/billingapi/resource.go`, copied by `pricing.FromAPIResource`)
+say what such a resource needs. **No provider sets them yet**; a resource that sets none of them is
+charged exactly as before, and serializes as before (all three are `omitempty`).
+
+| Field | What it says | What the engine does with it |
+|---|---|---|
+| `chargeFrom` | The start of the running interval the resource is charged for | A `minute` or `hour` pass counts from the later of the watermark and `chargeFrom` cut to the unit (`getTimeUnitsDiff`). Never earlier than the watermark, so a unit two intervals share is charged once, at the first one's size. After the pass: nothing is counted, and the watermark still moves to the pass |
+| `variableRate` | The rate changes while the resource lives | A `minute` or `hour` pass has no money cap (`updateBillItems`): the cap is one month at the pass's rate, and would freeze an item, and its watermark, whose rate fell. The unit limit still holds. A `month` pass keeps the cap for every resource: it counts one unit each time and runs every hour, so the cap is what makes a month rule charge once |
+| `earlierInterval` | A closed interval (`chargeFrom` to `deletedAt`) that ended before the one the same resource reports after it | Rated on `minute` passes only, and only with both ends set (`SaveChargingToBill`). Its end is on a minute boundary, not an hour boundary: on an hour pass it would leave the hour watermark inside the hour and the running interval would count that hour again |
+
+What stays as it is for every resource: the watermark moves only forward, never past the pass and
+never past a deletion (`advanceWatermark` is unchanged); started units are counted up; the two
+rounding functions; the unit limit per item per month.
+
+What a provider of such a resource hands the engine:
+
+- `chargeFrom` stamped once per interval, when it starts. If it moved forward while the interval
+  runs and a pass was missed, the minutes before the new value would be lost.
+- The end of an interval on a minute boundary: the start's minute plus the runtime rounded up to
+  whole minutes, at least one (the rule of a sandbox, `billedEnd`). A stopped resource is returned
+  with that `deletedAt` so its last part-minute is charged; fed again later it counts nothing.
+- Earlier intervals before the resource's own, oldest first. The wrong order charges less, never
+  more: the earlier interval is then behind the watermark.
+- While a start has not served yet: `notEligibleForBilling` WITHOUT `skipInterval`. The watermark
+  stays, and the first eligible pass bills back from `chargeFrom`, not from the end of the interval
+  before it and not from the row's creation.
+- `variableRate` on every such resource.
+
+For whoever prices such a resource:
+
+- **Per minute only.** An `hour` rule charges each clock hour in which an hour pass saw the resource
+  running or just ended, and misses an interval that starts and ends between two hour passes. A
+  `month` rule charges once a month, at the rate of the first month pass that saw it.
+- Never price an attribute that is zero while the resource is stopped, and never filter on its
+  status: a stopped interval that rates to nothing is skipped at the cap gate, and its last
+  part-minute is then never charged.
+
+Known limits. A pass that runs out of order charges the same minutes, all at the later pass's rate.
+An earlier interval that no minute pass saw while the provider still reported it is not charged. A
+stale pass (see *Metering staleness*) writes its time off for a running interval as for any
+resource. Under `PROXCLOUD_BILLING_PROVIDER=external` such a resource is not posted at all
+(`ResolveByProfileID`): a rating service that does not know the fields would bill every idle gap as
+running, so it bills nothing there instead.
+
+**The guard of this path.** `test/integration/billing_equality_test.go` charges one profile with a
+row of every billable type through 23 passes on PostgreSQL (a repeated pass, passes out of order, a
+stale meter, an archived row, the month-closing passes, the first passes of the next month) and
+compares every bill after every pass with `testdata/billing_equality.golden.txt`: each applied
+amount as an exact decimal, each counter, each watermark. The golden was written by the engine
+before these fields existed. It is rewritten (`-update`) only when a bill is meant to change, and
+its diff is then the change to review; a new billable type adds a row to the fixture.
+`pricing/bill_legacy_test.go` keeps that engine's accrual as a test-only copy and compares it with
+the engine over random pass sequences.
+
 ### Month-end forecast
 
 The cost-info reads (`GET /project/{id}/cost-info`, `GET /bill/{bp}/cost-info`,
@@ -295,6 +357,9 @@ at the time-unit limit and the item cap.
   per-profile time zone). The units left are `ceil((month end − watermark) / unit)`: right after the
   hourly pass, the whole hours left; between passes it includes the hour in progress. A `month` rule
   adds its amount once if it has not been charged this month (normally it has, up front).
+- A resource charged by its running intervals is projected from `chargeFrom` cut to the unit when
+  that is after the watermark, and without the item cap on `minute` and `hour` rules when it is
+  `variableRate` (`ForecastResource.ChargeFrom`, `.VariableRate`), like the charge.
 - **Only what keeps accruing** is projected: an ineligible resource (a server in `BUILD`/`ERROR`) and a
   deleted one add nothing more; an ended or timed sandbox stops at its end. A suspended profile or a
   disabled project projects nothing: forecast = current.
