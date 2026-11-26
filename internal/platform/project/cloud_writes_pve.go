@@ -651,7 +651,11 @@ func (h *Handler) pveCreateKeypair(w http.ResponseWriter, r *http.Request, u *us
 		}
 		privPEM = string(pem.EncodeToMemory(block))
 	} else if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubKey)); err != nil {
-		h.fail(w, httpx.BadRequest("publicKey is not a valid SSH public key"))
+		msg := "publicKey is not a valid SSH public key"
+		if strings.HasPrefix(pubKey, "ssh-dss ") {
+			msg = "ssh-dss (DSA) keys are no longer accepted: use an ed25519, ecdsa or rsa key"
+		}
+		h.fail(w, httpx.BadRequest(msg))
 		return
 	}
 	now := time.Now().UTC()

@@ -12,7 +12,8 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
   [supported Go build baseline](docs/supported-go-build-baseline.md).
 - **Node.js 24** and npm — matches hosted frontend CI for both React consoles.
   The locked Vite toolchain requires at least Node 20.19 or 22.12 on those older
-  release lines; arbitrary Node 20.x is not enough.
+  release lines; arbitrary Node 20.x is not enough. The accessibility specs of the
+  customer console (`@axe-core/playwright` 4.14) declare Node 22.12 or newer.
 - **Docker** — required for the integration tests (they spin up a throwaway
   PostgreSQL via testcontainers) and for building images / running the local stack.
 - Optional for a full run: an **OpenID Connect** issuer (Keycloak or other) and

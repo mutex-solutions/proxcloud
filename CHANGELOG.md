@@ -18,6 +18,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only: no seed part, no machine replaced. `TestPreviousBOMsMoveCertManager` states that answer, and
   `TestUpgradeRollsNoMachine` compares fourteen of the twenty-three previous BOMs with the BOM on `main`, none of
   them rolling. No move to that BOM and no apply on such a platform was run on a lab.
+- **Fourteen dependency updates (November)**, the open Dependabot pull requests taken together. Go modules:
+  `aws-sdk-go-v2/service/s3` 1.116.0, `aws-sdk-go-v2/service/ecr` 1.69.0, `aws-sdk-go-v2/credentials` 1.21.3,
+  `golang.org/x/crypto` 0.59.0 (with `x/sys` 0.50.0 and `x/text` 0.44.0) and `golang.org/x/sync` 0.25.0; the module
+  minimum stays `go 1.26.0`. Customer console (`web/client`): `recharts` 3.11.0, `@tanstack/react-query` 5.108.2,
+  `@vitejs/plugin-react` 6.3.0 and `@axe-core/playwright` 4.14.0. Operator console (`web/admin`): `recharts` 3.11.0,
+  `@tanstack/react-query` 5.108.2, `react-router-dom` 7.18.6 and `lucide-react` 1.77.0. Workflows:
+  `oras-project/setup-oras` v2.0.4. What changes with them:
+  - **An `ssh-dss` public key is refused.** `x/crypto` 0.59.0 removed DSA from its `ssh` package, so a key pair
+    import and the SSH keys of a platform installation refuse such a key, where they accepted it before. The key
+    pair import answers 400 "ssh-dss (DSA) keys are no longer accepted: use an ed25519, ecdsa or rsa key"
+    (`TestKeypairImportRefusesDSA`, which generates a DSA key; the same test passes the key on `x/crypto` 0.58.0);
+    a platform installation answers that the entry "is not an SSH public key". OpenSSH itself no longer accepts
+    these keys.
+  - **`setup-oras` downloads the ORAS CLI without a token.** Since v2.0.4 the action sends the job token with the
+    download by default; the two workflows that publish and verify a VM artifact pass `token: ''`, and their tests
+    assert the whole step (`images/tests/test_vm_export_workflow.py`, `images/tests/test_vm_publish_workflow.py`).
+    The action runs on node24, which the hosted runners already forced on the node20 build of v1.2.4.
+  - **`@axe-core/playwright` 4.14.0 declares Node 22.12 or newer** (a development dependency of the customer
+    console: its accessibility specs). Builds and CI use Node 24.22.2.
+  - **`@vitejs/plugin-react` 6.3.0 in `web/client` needed `npm install --force`**: npm refuses it alone over an
+    optional peer that is not installed (`@rolldown/plugin-babel` 0.3 wants `@babel/core` 8, `shadcn` keeps 7). The
+    lockfile is the one Dependabot produced, and `web/admin` already had the same pair.
+  - **Not taken: `tailwind-merge` 3.7.1 in `web/admin`.** It keeps an earlier `leading-*` class when a font size
+    follows, so every card title that passes a text size renders at line-height 1 and the content under it moves up
+    8 px: 75 of the 202 screenshots of the operator console differed by more than 20000 pixels, and none of the
+    twenty sampled ones once this package was put back. The customer console would have stayed on 3.7.0.
+  - **Not taken: `@airwallex/components-sdk` 1.37.1 in `web/client`.** Since 1.37.0 the SDK loads its script from
+    `checkout.openpay.com` and `static.openpay.com` when the Airwallex host does not answer. That `openpay.com` is
+    Airwallex's own could not be established from public sources: its registrant is hidden behind a privacy
+    service, no Airwallex or OpenPay page names the domain (OpenPay, which Airwallex bought in 2025, publishes
+    under `getopenpay.com`), and the only source is the SDK's own changelog. A script that takes card data is not
+    loaded from such a host on that. The console stays on 1.36.0 until the owner has decided.
+  Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
+  pull request).
 
 ## [0.11.1] - 2026-11-26
 
