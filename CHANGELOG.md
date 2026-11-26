@@ -53,6 +53,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
   pull request).
 
+### Fixed
+
+- **An appliance that joins a pair no longer takes the addresses beside the first one when that one refused to be
+  told of it.** At a join the appliance that served alone is given its keepalived config first, so that it learns
+  of its peer and sends it adverts, and the new one starts as a standby that hears a master (`lbPushOrder`). When
+  the first appliance refused that push, the pass gave the new one keepalived all the same: it heard no advert,
+  became a second master and held the addresses beside the first until the next pass (known issue of `v0.11.1`,
+  "A second appliance that joins can hold the addresses beside the first for one pass"; open finding of the review
+  of #446). Now an appliance keepalived never ran on gets no keepalived in a pass in which an appliance keepalived
+  runs on refused its keepalived push. It reads `building` with the reason "it waits for appliance N, which did not
+  take the change that tells it of this one", the row reads `ERROR` with the first appliance's words as before, and
+  the next pass tries both again, in the order. Unchanged: a first appliance that is down, gone or not running is
+  not waited for, nor is one whose keepalived is stopped (it holds no address), and the new one is pushed and takes
+  over; one that holds its push (its guest agent does not answer, or its package manager is at work) is waited for
+  one retry window and no longer, as before; a pair built at once whose first push of all is refused still gets
+  keepalived on the other appliance. For an upgrade: no appliance is pushed because of this and no config changes.
+  A pair that has both appliances on keepalived never meets the rule. A join that met a refusing first appliance
+  showed the second one as serving after one pass and now shows it `building` until the first takes the change:
+  the first appliance keeps the addresses and the traffic meanwhile, and the pair has no standby for that long.
+  `TestLBJoinWaitsForAPeerThatRefused`, on the package's fake Proxmox, whose guests elect as keepalived does; the
+  control (the same join with no refusal) pushes both in one pass, and without the fix the test finds keepalived on
+  the new appliance and the addresses on both. Not verified on a lab.
+
 ## [0.11.1] - 2026-11-26
 
 The release after `v0.11.0`. It completes layer 4 of the load balancer: UDP listeners, TLS termination with
