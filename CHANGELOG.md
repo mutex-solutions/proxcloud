@@ -121,7 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`DELETE /admin/project/{id}` and `.../now`) now give the same `409` with the same text, which names the
   scheduler and how to turn it on, and nothing is written (`project.Service.ScheduleDeletion`,
   `project.Service.CanScheduleDeletion`, which is the operator route's pre-check). Both consoles show that text as
-  they show the one of "Delete now". Not changed: the operator's `DELETE /admin/project/{id}` on a project that is
+  they show the one of "Delete now", with no change to them (`project-delete-refused.spec.ts` in each, on its mock). Not changed: the operator's `DELETE /admin/project/{id}` on a project that is
   already scheduled still answers `200` with the project as it is, and writes nothing. Tests:
   `TestScheduleDeletionRefusedWithoutDeletionJob` and the new leg of `TestAdminProjectDeletionLegs` (a real
   PostgreSQL); both fail with the two new checks taken out. Not run on a lab.
