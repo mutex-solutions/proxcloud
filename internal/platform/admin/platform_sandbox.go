@@ -77,8 +77,11 @@ func applySandboxSite(doc pgdoc.M, installationID string, site *platformlife.San
 		}
 		return changed, nil
 	}
-	if pool, _ := have["pool"].(string); pool != "" && owner != installationID {
-		return false, fmt.Errorf("%w: the provider's config.sandbox fences pool %s, which is not installation %s's. One provider fences one sandbox pool: remove that sandbox cluster and its config.sandbox first",
+	// Any block that is not this installation's, also one without a pool (inert for the sync, and still someone's
+	// settings: a registry, an entry appliance): never overwritten.
+	if len(have) > 0 && owner != installationID {
+		pool, _ := have["pool"].(string)
+		return false, fmt.Errorf("%w: the provider's config.sandbox (pool %q) is not installation %s's. One provider fences one sandbox pool: remove that sandbox cluster and its config.sandbox first",
 			platformlife.ErrProviderConflict, pool, installationID)
 	}
 	if others := slices.DeleteFunc(slices.Clone(cidrs), func(c string) bool { return c == site.Range }); len(others) > 0 {
