@@ -122,7 +122,8 @@ make test-integration
   pinned to a version. To take the current ones, build again with
   `--build-arg REFRESH=$(date -u +%G-W%V)` (or `--no-cache`). CI passes the ISO week as
   `REFRESH`, which is part of the package layer's cache key: the first run of a week
-  installs from the mirror, every other run takes the layer from the Actions cache.
+  installs from the mirror, a later run takes the layer from the Actions cache, which
+  only a push to `main` writes.
   The base image is pinned by digest and moved by Dependabot.
 - A build that cannot install says `mirror` in its last line: that is the
   distribution's mirror, not a test.

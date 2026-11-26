@@ -95,8 +95,12 @@ jobs:
       # own install is what it shows: TestLBApplianceServesWhatIsRecorded.
       # Nothing is pushed: the images are loaded into this runner's Docker and the layers are kept in the Actions
       # cache. REFRESH is the ISO week and part of the package layer's cache key, so the first run of a week
-      # installs the distribution's current packages again and every other run takes the layer from the cache.
-      # The package step tries three times; its failure says "mirror".
+      # installs the distribution's current packages again and a later run takes the layer from the cache.
+      # Only a push to main writes the cache: every run reads that one entry, which keeps it in use, and a pull
+      # request adds nothing of its own to the repository's 10 GB, of which GitHub evicts the least recently used
+      # first. A run that finds no layer (the cache evicted, the first days of a week before main moved, a pull
+      # request that changes the Dockerfiles) installs from the mirror, about 70 seconds for both images. The
+      # package step tries three times; its failure says "mirror", and then no test has run.
       - uses: docker/setup-buildx-action@v4
       - name: Week of the appliance test images
         id: lb-images
@@ -116,7 +120,7 @@ jobs:
           push: false
           provenance: false
           cache-from: type=gha,scope=lb-test-debian-trixie
-          cache-to: type=gha,mode=max,scope=lb-test-debian-trixie
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=lb-test-debian-trixie' || '' }}
       - name: Appliance test image (Ubuntu 26.04)
         id: lb-image-ubuntu
         uses: docker/build-push-action@v7
@@ -132,7 +136,7 @@ jobs:
           push: false
           provenance: false
           cache-from: type=gha,scope=lb-test-ubuntu-26.04
-          cache-to: type=gha,mode=max,scope=lb-test-ubuntu-26.04
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=lb-test-ubuntu-26.04' || '' }}
       - name: Appliance test images not built
         if: ${{ failure() && (steps.lb-image-debian.outcome == 'failure' || steps.lb-image-ubuntu.outcome == 'failure') }}
         run: echo "::error title=Appliance test images not built::The guest images of the load balancer tests did not build, and no integration test has run. A build log that says 'mirror' means the distribution's package mirror did not answer in three tries, which is the mirror and not a test. Run the job again."

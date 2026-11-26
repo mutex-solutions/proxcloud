@@ -8,8 +8,8 @@
 # the plain image because the product's own install is its subject. Baked in, sshd would run in every other guest.
 #
 # The base is pinned by digest (Dependabot moves it, .github/dependabot.yml). REFRESH is part of the cache key of the
-# layer below: CI passes the ISO week (test.yml), so the first run of a week installs from the mirror again and every
-# other run takes the layer from the cache.
+# layer below: CI passes the ISO week (test.yml), so the first run of a week installs from the mirror again and a
+# later run takes the layer from the cache, for as long as the cache keeps it.
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db
 ARG REFRESH=local
 RUN set -eu; export DEBIAN_FRONTEND=noninteractive; \

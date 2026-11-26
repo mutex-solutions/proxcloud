@@ -151,9 +151,19 @@ that no test installs from a distribution mirror while it runs.
 - **Current packages, from a cache.** The base is pinned by digest (Dependabot moves
   it). The package layer installs what the mirror serves, with no version pinned, and
   its cache key holds the build argument `REFRESH`, which the job sets to the ISO week:
-  the first run of a week installs again, every other run takes the layer from the
+  the first run of a week installs again, a later run takes the layer from the
   Actions cache (scopes `lb-test-debian-trixie` and `lb-test-ubuntu-26.04`). The step
   "What the appliance test images hold" prints the versions in every run.
+- **The cache is not a promise.** GitHub keeps 10 GB of cache per repository and
+  evicts the least recently used entries first. Only a push to `main` writes these
+  two entries, and every run of every pull request reads them, which keeps them in
+  use. A run that finds no layer installs from the mirror (about 70 seconds for both
+  images, 12 from the cache): after an eviction, in the first days of a week until
+  `main` moves, and in a pull request that changes the Dockerfiles. On 2026-11-26, a
+  day of many pull requests with the repository at 10.8 GB, an entry that only its
+  own pull request read was gone within the hour. So the mirror can still fail this
+  job, at the build step and under its own name; it can no longer fail a test, apart
+  from the one below.
 - **A mirror failure reads as one.** The package step tries three times and then fails
   with a line that starts with `mirror`; the job adds the annotation "Appliance test
   images not built" and runs no integration test. That is the mirror: run the job
