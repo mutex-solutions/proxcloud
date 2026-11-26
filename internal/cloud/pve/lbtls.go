@@ -22,6 +22,8 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -111,6 +113,36 @@ type LBCertificate struct {
 	File string `json:"file"`
 }
 
+// lbWeakSignature names the signature algorithm of c when it signs over MD2, MD5 or SHA-1, and answers "" for every
+// other. Go names RSA-PSS with SHA-256, SHA-384 and SHA-512 (salt as long as the digest) and reads every other
+// signature it has no name for as unknown: SHA-224, which the HAProxy of both appliance images loads, and RSA-PSS
+// with SHA-1, which the one of Ubuntu 26.04 refuses like any SHA-1 signature. So for an unknown one the digest is
+// read from the RSA-PSS parameters: SHA-1 is the digest when they name none (RFC 4055).
+func lbWeakSignature(c *x509.Certificate) string {
+	switch c.SignatureAlgorithm {
+	case x509.MD2WithRSA, x509.MD5WithRSA, x509.SHA1WithRSA, x509.DSAWithSHA1, x509.ECDSAWithSHA1:
+		return c.SignatureAlgorithm.String()
+	case x509.UnknownSignatureAlgorithm:
+		var cert struct {
+			TBS asn1.RawValue
+			Alg pkix.AlgorithmIdentifier
+		}
+		var pss struct {
+			Hash pkix.AlgorithmIdentifier `asn1:"optional,explicit,tag:0"`
+		}
+		if _, err := asn1.Unmarshal(c.Raw, &cert); err != nil || !cert.Alg.Algorithm.Equal(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 10}) {
+			return ""
+		}
+		if _, err := asn1.Unmarshal(cert.Alg.Parameters.FullBytes, &pss); err != nil {
+			return ""
+		}
+		if len(pss.Hash.Algorithm) == 0 || pss.Hash.Algorithm.Equal(asn1.ObjectIdentifier{1, 3, 14, 3, 2, 26}) {
+			return "SHA1-RSAPSS"
+		}
+	}
+	return ""
+}
+
 // CheckLBCertificate checks an uploaded certificate: chainPEM holds the server's certificate first and then its
 // intermediates, keyPEM the private key. It answers what the certificate says, the file an appliance gets (the chain
 // and the key, written afresh so that the same upload gives the same bytes), warnings that do not refuse it, and a
@@ -197,11 +229,8 @@ func CheckLBCertificate(chainPEM, keyPEM string, now time.Time) (info LBCertific
 	// turns up. This stands before the chain's order: Go refuses a SHA-1 signature there too, and the answer would be
 	// that the next certificate did not sign this one.
 	for i, c := range chain {
-		switch c.SignatureAlgorithm {
-		case x509.MD2WithRSA, x509.MD5WithRSA, x509.SHA1WithRSA, x509.DSAWithSHA1, x509.ECDSAWithSHA1:
-			if !bytes.Equal(c.RawSubject, c.RawIssuer) {
-				return info, "", nil, fmt.Sprintf("Certificate %d of the chain is signed with %s, which the load balancer does not accept: have it issued again with SHA-256 or stronger", i+1, c.SignatureAlgorithm)
-			}
+		if alg := lbWeakSignature(c); alg != "" && !bytes.Equal(c.RawSubject, c.RawIssuer) {
+			return info, "", nil, fmt.Sprintf("Certificate %d of the chain is signed with %s, which the load balancer does not accept: have it issued again with SHA-256 or stronger", i+1, alg)
 		}
 	}
 	for i := 0; i+1 < len(chain); i++ {

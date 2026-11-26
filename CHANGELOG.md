@@ -138,20 +138,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     does not accept: have it issued again with SHA-256 or stronger". A tenant's upload answers `400` with it; a
     Service's Secret reads unusable with it and its Service is held as it was served, where the whole balancer's
     push was refused before (upgrade note above). A certificate that signed itself is taken whatever its digest,
-    an old root at the end of a chain among them: OpenSSL does not look at that signature.
+    an old root at the end of a chain among them: OpenSSL does not look at that signature. RSA-PSS with SHA-1 is
+    among the refused ("signed with SHA1-RSAPSS"): Go has no name for that signature, so its digest is read from
+    the certificate's RSA-PSS parameters (`lbWeakSignature`). The other signatures Go has no name for, SHA-224 and
+    RSA-PSS with a salt shorter than its digest, are taken, as the HAProxy of both images takes them.
   - *The two appliance images do not agree, and the upload follows the stricter one.* The HAProxy of Ubuntu 26.04
-    (3.2.25, OpenSSL 3.5.5) refuses a SHA-1, an MD5 and a DSA with SHA-1 server certificate and a SHA-1
-    intermediate; the HAProxy of Debian 13 (3.0.11, OpenSSL 3.5.9) loads all of them. The upload cannot know which
+    (3.2.25, OpenSSL 3.5.5) refuses a SHA-1, an MD5, a DSA with SHA-1 and an RSA-PSS with SHA-1 server certificate
+    and a SHA-1 intermediate; the HAProxy of Debian 13 (3.0.11, OpenSSL 3.5.9) loads all of them. The upload cannot know which
     image a balancer will run on, so it refuses on every site what one of the two refuses.
-  - *Tests.* `TestLBApplianceTLS` (step 1b), in a real guest of each image: eleven certificates (SHA-256 of ECDSA
-    and of RSA authorities as controls; SHA-1 alone, with its intermediate, of an RSA authority, on the
-    intermediate; MD5 and DSA with SHA-1, made by the guest's openssl; SHA-1 and MD5 that signed themselves; a
-    chain that ends in its SHA-1 root) go to the check and to `haproxy -c` under the product's own config. Held on
-    each image: what its HAProxy refuses the upload refused, and the controls are taken by both. Held over the two
-    together: what the upload refuses, one image's HAProxy at least refuses. `TestCheckLBCertificateSignature`
-    holds the texts. Without the change the first fails on Ubuntu 26.04 for four certificates ("taken by the upload
-    and refused by this HAProxy") and the second for four; with Debian 13 as the only image the assertion over the
-    images fails for all six refused certificates.
+  - *Tests.* `TestLBApplianceTLS` (step 1b), in a real guest of each image: fourteen certificates (SHA-256 of
+    ECDSA and of RSA authorities as controls; SHA-1 alone, with its intermediate, of an RSA authority, on the
+    intermediate; MD5, DSA with SHA-1 and RSA-PSS with SHA-1, made by the guest's openssl; SHA-224 and RSA-PSS
+    with SHA-256 and a salt of 20 bytes, made by it too, as the controls of the signatures Go has no name for;
+    SHA-1 and MD5 that signed themselves; a chain that ends in its SHA-1 root) go to the check and to `haproxy -c`
+    under the product's own config. Held on each image: what its HAProxy refuses the upload refused, and the
+    controls are taken by both. Held over the two together: what the upload refuses, one image's HAProxy at least
+    refuses. `TestCheckLBCertificateSignature` holds the texts, and `TestLBWeakSignatureUnnamed` the three
+    signatures without a name on certificates openssl made (`testdata/sig-*.pem`, no key). Without the change the
+    first fails on Ubuntu 26.04 for five certificates ("taken by the upload and refused by this HAProxy") and the
+    second for four; without the reading of the RSA-PSS parameters alone, the first fails there for the RSA-PSS
+    with SHA-1 certificate and the third fails; with Debian 13 as the only image the assertion over the images
+    fails for all seven refused certificates.
   - *Not changed, not shown.* A chain certificate with an RSA key of 1024 bits is refused by the HAProxy of both
     images ("ca key too small", seen by hand in a container of each) and taken by the upload: still open. A
     certificate issued under its own name by another key passes the upload's check. No guest was given an MD2

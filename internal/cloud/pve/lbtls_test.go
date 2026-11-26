@@ -14,6 +14,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -220,6 +221,29 @@ func TestCheckLBCertificateSignature(t *testing.T) {
 			t.Errorf("%s: refused with %q, want it taken whole", c.name, refused)
 		case c.want != "" && (!strings.Contains(refused, c.want) || !strings.Contains(refused, "SHA-256") || bundle != ""):
 			t.Errorf("%s: %q, want %q", c.name, refused, c.want)
+		}
+	}
+}
+
+// The signatures Go has no name for (x509.UnknownSignatureAlgorithm), on certificates openssl made (testdata/sig-*.pem,
+// certificates only): RSA-PSS with SHA-1 is named, as the SHA-1 signature it is; SHA-224, and RSA-PSS with SHA-256
+// and a salt of 20 bytes, are not. What the HAProxy of each appliance image says of the three: TestLBApplianceTLS.
+func TestLBWeakSignatureUnnamed(t *testing.T) {
+	for file, want := range map[string]string{"sig-rsapss-sha1.pem": "SHA1-RSAPSS", "sig-sha224.pem": "", "sig-rsapss-sha256-salt20.pem": ""} {
+		text, err := os.ReadFile("testdata/" + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(text)
+		c, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.SignatureAlgorithm != x509.UnknownSignatureAlgorithm {
+			t.Fatalf("%s: Go names its signature %v, so it shows nothing here", file, c.SignatureAlgorithm)
+		}
+		if got := lbWeakSignature(c); got != want {
+			t.Errorf("%s: %q, want %q", file, got, want)
 		}
 	}
 }

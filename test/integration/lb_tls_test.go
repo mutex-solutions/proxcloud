@@ -246,10 +246,12 @@ func TestLBApplianceTLS(t *testing.T) {
 			// 1b. The signature of a certificate: the upload's check and this image's HAProxy, asked about the same
 			// bytes. The config is the product's own with the first certificate's file exchanged, so its TLS policy
 			// lines are in force; `haproxy -c` loads the file as a push's check does. The certificates signed with
-			// SHA-1 and SHA-256 are made here; the MD5 and the DSA ones by the guest's openssl, which Go has no
-			// signer for. Held for every case on every image: what this HAProxy refuses, the upload refused (a
-			// certificate taken by the upload and refused at the push was the fault), and the SHA-256 controls are
-			// taken by both. The images do not agree on the weak ones (Ubuntu 26.04's OpenSSL refuses them, "ca md
+			// SHA-1 and SHA-256 are made here; the MD5, the DSA, the RSA-PSS and the SHA-224 ones by the guest's
+			// openssl, which Go has no signer for. Go has no name either for the last three (RSA-PSS with SHA-1,
+			// SHA-224, RSA-PSS with SHA-256 and a salt of 20 bytes): the upload reads the digest of the first from
+			// its parameters and refuses it, and takes the other two, as both HAProxy do. Held for every case on
+			// every image: what this HAProxy refuses, the upload refused (a certificate taken by the upload and
+			// refused at the push was the fault), and the controls are taken by both. The images do not agree on the weak ones (Ubuntu 26.04's OpenSSL refuses them, "ca md
 			// too weak"; Debian 13's loads them), so the other direction is held over the images together, at the
 			// end of the test: what the upload refuses, the HAProxy of one image at least refuses.
 			sigKey := lbcerttest.RSA(t, 2048)
@@ -263,7 +265,7 @@ func TestLBApplianceTLS(t *testing.T) {
 			sha1Mid, sha1Root := sigged(lbcerttest.Sign{Intermediate: x509.ECDSAWithSHA1}), sigged(lbcerttest.Sign{Root: x509.ECDSAWithSHA1})
 			sha256EC, sha256RSA := sigged(lbcerttest.Sign{}), sigged(lbcerttest.Sign{RSA: true})
 			selfSHA1 := lbcerttest.SelfSigned(t, sigKey, until, x509.SHA1WithRSA, "sig.example.org")
-			var ossl []string // by the guest's openssl: an MD5 one, a DSA with SHA-1 one, one that signed itself with MD5, their key
+			var ossl []string // by the guest's openssl: MD5, DSA with SHA-1, one that signed itself with MD5, RSA-PSS with SHA-1, SHA-224, RSA-PSS with SHA-256, their key
 			for rest := []byte(g.run(ctx, `set -e; mkdir /root/sig; cd /root/sig; q() { "$@" >/dev/null 2>&1; }
 q openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -subj /CN=sig-ca -days 2
 q openssl dsaparam -genkey -out dsa.key 2048
@@ -272,17 +274,20 @@ q openssl req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj /CN=s
 q openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -md5 -days 2 -out md5.pem
 q openssl x509 -req -in leaf.csr -CA dsa.pem -CAkey dsa.key -CAcreateserial -sha1 -days 2 -out dsasha1.pem
 q openssl req -x509 -new -key leaf.key -md5 -out self.pem -subj /CN=sig.example.org -days 2
-cat md5.pem dsasha1.pem self.pem leaf.key`)); ; {
+q openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -sha1 -sigopt rsa_padding_mode:pss -days 2 -out pss1.pem
+q openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -sha224 -days 2 -out sha224.pem
+q openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -sha256 -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:20 -days 2 -out pss256.pem
+cat md5.pem dsasha1.pem self.pem pss1.pem sha224.pem pss256.pem leaf.key`)); ; {
 				var block *pem.Block
 				if block, rest = pem.Decode(rest); block == nil {
 					break
 				}
 				ossl = append(ossl, lbcerttest.PEM(block.Type, block.Bytes))
 			}
-			if len(ossl) != 4 {
-				t.Fatalf("the guest's openssl made %d PEM blocks, want three certificates and a key", len(ossl))
+			if len(ossl) != 7 {
+				t.Fatalf("the guest's openssl made %d PEM blocks, want six certificates and a key", len(ossl))
 			}
-			for i, want := range []x509.SignatureAlgorithm{x509.MD5WithRSA, x509.DSAWithSHA1, x509.MD5WithRSA} {
+			for i, want := range []x509.SignatureAlgorithm{x509.MD5WithRSA, x509.DSAWithSHA1, x509.MD5WithRSA, x509.UnknownSignatureAlgorithm, x509.UnknownSignatureAlgorithm, x509.UnknownSignatureAlgorithm} {
 				block, _ := pem.Decode([]byte(ossl[i]))
 				if got, err := x509.ParseCertificate(block.Bytes); err != nil {
 					t.Fatalf("certificate %d of the guest's openssl: %v", i+1, err)
@@ -303,10 +308,13 @@ cat md5.pem dsasha1.pem self.pem leaf.key`)); ; {
 				{"a SHA-1 server certificate with its intermediate", sha1Leaf.Chain, sha1Leaf.Key, true},
 				{"a SHA-1 server certificate of an RSA authority", sha1RSA.Chain, sha1RSA.Key, true},
 				{"a SHA-1 intermediate", sha1Mid.Chain, sha1Mid.Key, true},
-				{"an MD5 server certificate", ossl[0], ossl[3], true},
-				{"a DSA with SHA-1 server certificate", ossl[1], ossl[3], true},
+				{"an MD5 server certificate", ossl[0], ossl[6], true},
+				{"a DSA with SHA-1 server certificate", ossl[1], ossl[6], true},
+				{"an RSA-PSS with SHA-1 server certificate", ossl[3], ossl[6], true},
+				{"a SHA-224 server certificate (Go has no name for it; the control)", ossl[4], ossl[6], false},
+				{"an RSA-PSS with SHA-256 and a salt of 20 bytes server certificate (Go has no name for it; the control)", ossl[5], ossl[6], false},
 				{"a SHA-1 certificate that signed itself", selfSHA1.Chain, selfSHA1.Key, false},
-				{"an MD5 certificate that signed itself", ossl[2], ossl[3], false},
+				{"an MD5 certificate that signed itself", ossl[2], ossl[6], false},
 				{"a chain that ends in its SHA-1 root", sha1Root.Chain + sha1Root.Root, sha1Root.Key, false},
 			} {
 				_, _, _, refused := pve.CheckLBCertificate(sc.chain, sc.key, time.Now())
