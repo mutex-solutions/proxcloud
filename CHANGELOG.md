@@ -131,6 +131,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A sync no longer archives the `FLOATING_IP` row a balancer's pass wrote while the sync was listing.** The
+  services sync and the state sample read the public allocations first and the rows after. An address a pass took
+  in between had its row and no line in that list, so the row was archived, and the address was missing from the
+  tenant's list and from billing until the next pass or sync wrote it again (Known issues of `v0.11.1`).
+  `floatingIPProvider` now has the vanish grace the server and image providers have (`providers.VanishGrace`, two
+  minutes): a row younger than that is not archived for being absent from the list. The row's age is the
+  allocation's, which in this race is seconds. The other half of the grace comes with it: a row archived less
+  than two minutes ago is not written again for being still listed. A sync already refused that for a row archived
+  after it read its clock, which it does before it lists, so this half only adds the case of a release stamped by
+  a replica whose clock is behind the sync's. `TestFloatingIPRowVanishGrace` (`test/integration`) runs a state
+  sample over five addresses: a row 10 s old that the list lacks stays, one 3 min old is archived, a row archived
+  10 s ago and still listed is not written again, one archived 3 min ago is, and a row written from inside the
+  sample's own read of the allocations (the race as it happens, the row younger than the sample's clock) stays.
+  Without the method the first, the third and the fifth fail and the two controls hold.
+  **For an upgrade:** nothing to do, and no stored row changes. What changes is the row of an address that is
+  given back less than two minutes after it was taken, on the paths that leave the archive to the sync: a server
+  that is deleted, a server's public network that is detached, and the two rollbacks that release an address
+  without its row (a public network attach that fails before the NIC is plugged, a single-VM balancer whose build
+  fails). That row was archived by the next state sample, a minute later at most; it is now archived by the first
+  sample or sync after the address is two minutes old, so such an address is listed and billed up to two minutes
+  longer. The paths that archive the row themselves are not affected: a balancer's delete, a cluster's release, a
+  Service's address given back, the delete of the address's own row, and a project's teardown.
+
 - **A cluster's load balancer controller lets a deleted Service go under a rolled-back portal whose state is near
   64 KiB, and 50 deleted Services with long keep-address values keep their wishes** (`cmd/lb-controller`,
   `internal/cloud/lbgw/annotations.go`; the portal's code is not changed). Two cases of a request that names
