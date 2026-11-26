@@ -875,7 +875,14 @@ call for its own cluster, and minting it again rotates it.
   stays as the last state that fitted made it, every address stays, and no change to a Service or a node reaches
   the balancer until the state fits again. The controller says so in a Warning Event `TooLarge` on each of its
   Services. What makes a state large is long `loadBalancerSourceRanges` and many load balancer annotations; no other
-  annotation of a Service is in the body, and a value over 256 characters is sent cut (below).
+  annotation of a Service is in the body, and a value over 256 characters is sent cut (below). The Services that
+  are being deleted are named beside the state and not counted in its 64 KiB: at most 50 a request and 16 KiB
+  together, each with its uid and its `proxcloud.io/lb-keep-address` value, of which a controller later than
+  v0.11.1's sends 8 characters at most (a boolean has 5; a longer value is no boolean and stays none). With the
+  values as written, 50 Services with long ones were over the 16 KiB, and the wish of every one of them was
+  dropped, the valid ones too: their addresses then went by the state the portal last stored. While a Service is
+  being deleted, a state over the limit costs that controller a second request a turn: it cannot tell this `413`
+  from that of an older portal (the controller's part, below), so it asks once more without those Services.
 - The answer is the state as it is: per Service `ready` with its address, `building`, or `refused`. Nothing is built in
   the request: the state is stored (`lbGatewayState`) and a converge starts when there is something to converge. The
   controller sends its state when it changes and, unchanged, every 30 s (a controller of v0.11.0 every 10 s, whether
@@ -1090,7 +1097,15 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
   remembers nothing: every turn starts with the whole request, so the first request a portal that came back gets
   carries the annotations, the affinity and the selected nodes, and no Service is served a turn without them. The
   price is paid only while the portal is rolled back: a turn of a cluster whose Services use protocol 2 is two
-  requests, and the old portal logs and audits the refused one each turn. A Service that asks for an internal
+  requests, and the old portal logs and audits the refused one each turn. Such a portal (v0.11.0, and the
+  candidates before v0.11.1-rc.3) measures the whole body against the state's 64 KiB before it reads a field, so
+  a state near that limit is answered `413` and not `400` once what that portal does not know comes on top: the
+  Services that are being deleted, or the annotations of protocol 2. A controller later than v0.11.1's steps
+  down on that `413` as on the `400`: first without the Services being deleted, then, for a portal that names an
+  older protocol, with the request of protocol 1. The controller of v0.11.1 does not, and under such a portal
+  with such a state every Service gets `TooLarge`, no change reaches the balancer and a Service that is being
+  deleted stays `Terminating` until the portal is back. A `413` to a request with nothing to leave out is one
+  request and is said as it is. A Service that asks for an internal
   balancer (below) is left out of that request and gets the Event `InternalNotSupported` from the controller: a
   portal of protocol 1 reads no annotation and would give it a public address. `-interval` is unchanged and the
   watch is off unless the chart asks for it, so this release's image runs under charts 0.1.17 and 0.1.18.
