@@ -24,6 +24,7 @@ gateway's 16 KiB for them: it answered `400`, and the request without `gone` dro
 valid ones too. The portal is not changed.
 
 **Diagrams updated:** none (no element of C1 to C4 moves); one table row of c4-code.md.
+
 ## 2026-11-26: a node selector term with an empty key matches no node
 
 **What changed:** no component, container, wire field or relation. One function of the cluster's load balancer
