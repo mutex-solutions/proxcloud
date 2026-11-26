@@ -24,6 +24,10 @@ const (
 
 var (
 	sandboxIDRe = regexp.MustCompile(`^sbx-[0-9a-f]{8}([0-9a-f]{8})?$`)
+	// The first label of a function host: <function name>-<6 hex>. A sandbox host label starts
+	// with its port, a digit, and the header-routing hosts (sandbox.<domain>, localhost) have no
+	// such suffix: none of them matches.
+	functionHostRe = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,38}[a-z0-9])?-[0-9a-f]{6}$`)
 
 	errInvalidHost      = errors.New("invalid host")
 	errInvalidSandboxID = errors.New("invalid sandbox id")
@@ -82,4 +86,12 @@ func parseTarget(r *http.Request, domain string) (string, int, error) {
 		return "", 0, errInvalidSandboxID
 	}
 	return id, port, nil
+}
+
+// functionHost returns the first label of a function host, <name>-<6 hex>.<domain>, whatever
+// its case or port: false for every other host, which takes the sandbox path. It is the only
+// thing of a Host header function mode ever looks anything up by.
+func functionHost(host, domain string) (string, bool) {
+	label, rest, _ := strings.Cut(strings.ToLower((&url.URL{Host: host}).Hostname()), ".")
+	return label, rest == domain && functionHostRe.MatchString(label)
 }
