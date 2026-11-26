@@ -525,6 +525,13 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		slog.Info("load balancer: push taken", "lb", lb.ID, "vm", a.ServerID, "push", what, "role", a.Role, "holdsAddress", a.HoldsVIP,
 			"position", position[a], "of", len(order))
 	}
+	// untoldBy: an appliance keepalived runs on refused the keepalived config of this pass, which is the one that
+	// tells it of a peer that joins. It answers and may hold the addresses, and it sends that peer no advert: an
+	// appliance keepalived never ran on is not given keepalived beside it in this pass, where it would hear no master
+	// and take the addresses too (review of #446). The next pass tries both again. A refusal only: an appliance
+	// that holds its push is waited for one window and no longer (hold), and one that is down, gone, or whose
+	// keepalived is stopped holds no address, so the new one is pushed and takes over.
+	var untoldBy *lbAppliance
 	for _, a := range order {
 		vmid, _ := strconv.Atoi(a.ServerID)
 		st, known := seen[a]
@@ -578,7 +585,8 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 			if editedKeepalived {
 				slog.Warn("load balancer: an appliance's keepalived config is not the one its row records; pushing it again", "lb", lb.ID, "vm", a.ServerID)
 			}
-			if (khash != a.KeepalivedHash && !behind) || restartKeepalived || editedKeepalived {
+			untold := untoldBy != nil && a.KeepalivedHash == ""
+			if (khash != a.KeepalivedHash && !behind && !untold) || restartKeepalived || editedKeepalived {
 				pushed[a] = true
 				if err := ps.PushKeepalived(ctx, a.Node, vmid, conf, a.PublicIface); err != nil {
 					if errors.Is(err, pve.ErrLBNotReady) {
@@ -586,6 +594,9 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 						continue
 					}
 					refuse(a, "keepalived", err)
+					if a.KeepalivedHash != "" && !restartKeepalived {
+						untoldBy = a
+					}
 					continue
 				}
 				a.KeepalivedHash, a.KeepalivedConfHash = khash, lbHash(conf)
@@ -598,11 +609,15 @@ func (h *Handler) lbApplyPair(ctx context.Context, es *externalservice.ExternalS
 		}
 		// HAProxy binds the addresses, and without keepalived's files it cannot bind one the appliance does not hold:
 		// it would refuse its config (drill Q0b-1). keepalived is there on every pass but one whose public network
-		// this project may no longer use, and one that waits behind the other appliance.
+		// this project may no longer use, one that waits behind the other appliance, and one whose peer refused to be
+		// told of it (untoldBy).
 		if a.KeepalivedHash == "" {
 			a.State, a.Reason = lbAppBuilding, "its public network is not available to this project"
-			if behind {
+			switch {
+			case behind:
 				a.Reason = "it waits for appliance " + waitFor.ServerID + ", which takes every change first"
+			case untoldBy != nil:
+				a.Reason = "it waits for appliance " + untoldBy.ServerID + ", which did not take the change that tells it of this one"
 			}
 			continue
 		}
