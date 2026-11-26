@@ -25,7 +25,17 @@ func min64(a, b int64) int64 {
 // bill's base/product currency (NO tax, NO FX — those act on the bill aggregate,
 // see billagg.go). Mutates bill in place. `clockNow` supplies the current time
 // for the new-item + updatedAt stamps (deterministic; those fields are masked).
+//
+// An earlier interval (BillingResource.EarlierInterval) is rated on minute charges only, and only
+// when it is closed. Its end is on a minute boundary, not an hour boundary: on an hour charge it
+// would leave the hour watermark inside the hour, and the running interval fed after it would count
+// that hour a second time. A month charge counts one unit per item, which the resource's own
+// interval already is. This is the one place every charge passes, so the rule holds for the crons,
+// the debug triggers and the queue workers alike.
 func SaveChargingToBill(rc RatingContext, bc BillingContext, bill *Bill, res *BillingResource, results []PricePlanRuleResult, clockNow time.Time) {
+	if res.EarlierInterval && (rc.TimeUnit != TimeUnitMinute || res.ChargeFrom == nil || res.DeletedAt == nil) {
+		return
+	}
 	if bill.Items == nil {
 		bill.Items = []BillItem{}
 	}
@@ -95,6 +105,14 @@ func getBillItemName(res *BillingResource) string {
 // updateBillItems: skip ineligible resources; gate
 // on the cap (frozen once net ≥ cap); advance the cadence counter; create/update the
 // applied price-plan-rule amounts; re-derive item.NetAmount = round16(min(Σ, cap)).
+//
+// The cap is one month at THIS charge's rate, which is right while the rate is fixed. A resource
+// whose rate changes while it lives (BillingResource.VariableRate) can be above a month of today's
+// rate with a month of running still unbilled: after it scaled down the gate would freeze the item
+// and its watermark with it. So for such a resource a minute or hour charge has no money cap; the
+// unit limit in getTimeUnitsDiff still bounds it. A charge that rates to nothing is skipped as for
+// any resource. A month charge keeps the cap whatever the resource: it counts one unit every time it
+// runs, and it runs every hour, so the cap gate is the only thing that makes a month rule charge once.
 func updateBillItems(rc RatingContext, bc BillingContext, res *BillingResource, results []PricePlanRuleResult, item *BillItem) {
 	if res.NotEligibleForBilling {
 		// A blind interval (stale cloud state) is written off instead of back-billed on recovery;
@@ -105,7 +123,8 @@ func updateBillItems(rc RatingContext, bc BillingContext, res *BillingResource, 
 		return
 	}
 	totalCap := getTotalCap(bc, rc.TimeUnit, results)
-	if !(totalCap.Cmp(item.NetAmount) > 0) { // strict >
+	uncapped := res.VariableRate && rc.TimeUnit != TimeUnitMonth
+	if !(totalCap.Cmp(item.NetAmount) > 0) && !(uncapped && totalCap.IsPositive()) { // strict >
 		return
 	}
 	diff := getTimeUnitsDiff(bc, rc, item, res)
@@ -128,7 +147,7 @@ func updateBillItems(rc RatingContext, bc BillingContext, res *BillingResource, 
 	}
 	calc := calculateBillItemAppliedAmounts(item)
 	net := calc
-	if calc.Cmp(totalCap) > 0 {
+	if !uncapped && calc.Cmp(totalCap) > 0 {
 		net = totalCap
 	}
 	item.NetAmount = round16(net)
@@ -184,6 +203,13 @@ func getTotalCap(bc BillingContext, timeUnit string, results []PricePlanRuleResu
 // boundary after the first charge, so this only changes the first partial interval and the last
 // one. The floor makes re-rating an archived row (deletedAt behind the watermark) a no-op instead
 // of a refund, which is what lets the charge job feed archived rows on every pass.
+//
+// A resource charged by its running intervals (BillingResource.ChargeFrom) counts from the later of
+// the watermark and ChargeFrom cut to the unit. The watermark does not follow the clock while such a
+// resource is stopped (it moves only on a charge), so without this every start would be billed back
+// to the end of the interval before it. Cut to the unit, because a started unit is a billed unit at
+// this end too; never earlier than the watermark, so a unit two intervals share is charged once.
+// ChargeFrom after the charge counts nothing (the floor). A nil watermark counts 1 whatever it says.
 func getTimeUnitsDiff(bc BillingContext, rc RatingContext, item *BillItem, res *BillingResource) int64 {
 	chargeTime := rc.CycleTimestamp
 	if res.DeletedAt != nil && res.DeletedAt.Before(chargeTime) {
@@ -206,7 +232,13 @@ func getTimeUnitsDiff(bc BillingContext, rc RatingContext, item *BillItem, res *
 	if last == nil {
 		return 1
 	}
-	elapsed := chargeTime.Sub(*last)
+	start := *last
+	if res.ChargeFrom != nil {
+		if cf := res.ChargeFrom.Truncate(unit); cf.After(start) {
+			start = cf
+		}
+	}
+	elapsed := chargeTime.Sub(start)
 	units := int64(elapsed / unit)
 	if elapsed%unit > 0 {
 		units++
@@ -279,13 +311,14 @@ func updateAppliedPricePlanRule(result PricePlanRuleResult, applied *BillItemApp
 //     updateAppliedPricePlanRule multiply by the units;
 //   - the units stop at the time-unit limit (limit − units already charged this month), so a month
 //     rule charged once is never projected again;
-//   - the item stops at its cap (getTotalCap): nothing is added once its net reaches it.
+//   - the item stops at its cap (getTotalCap): nothing is added once its net reaches it. Not for a
+//     variableRate resource on a minute or hour rule, which updateBillItems does not cap either.
 //
 // An OVERWRITE_TOTAL result on a minute or hour rule adds nothing: its amount is a month-to-date
 // usage total that replaces the previous one, and how the usage grows is unknown. usageHeld reports
 // that such a total was held at its current value, so the caller can call the forecast approximate.
 // On a month rule the single charge stores the amount as is, so it counts like any other.
-func ProjectedAccrual(bc BillingContext, timeUnit string, results []PricePlanRuleResult, item *BillItem, net decimal.Decimal, units int64) (add decimal.Decimal, usageHeld bool) {
+func ProjectedAccrual(bc BillingContext, timeUnit string, results []PricePlanRuleResult, item *BillItem, net decimal.Decimal, units int64, variableRate bool) (add decimal.Decimal, usageHeld bool) {
 	if units <= 0 {
 		return decimal.Zero, false
 	}
@@ -323,11 +356,12 @@ func ProjectedAccrual(bc BillingContext, timeUnit string, results []PricePlanRul
 		return decimal.Zero, usageHeld
 	}
 	totalCap := getTotalCap(bc, timeUnit, results)
-	if !(totalCap.Cmp(net) > 0) {
+	uncapped := variableRate && timeUnit != TimeUnitMonth
+	if !(totalCap.Cmp(net) > 0) && !(uncapped && totalCap.IsPositive()) {
 		return decimal.Zero, usageHeld
 	}
 	add = perUnit.Mul(decimal.NewFromInt(units))
-	if room := totalCap.Sub(net); add.Cmp(room) > 0 {
+	if room := totalCap.Sub(net); !uncapped && add.Cmp(room) > 0 {
 		add = room
 	}
 	return add, usageHeld

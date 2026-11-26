@@ -40,6 +40,21 @@ type BillingResource struct {
 	NotEligibleForBilling bool                 `json:"notEligibleForBilling"`
 	SkipInterval          bool                 `json:"skipInterval,omitempty"`
 	BillingResourceType   *BillingResourceType `json:"billingResourceType,omitempty"`
+	// The three fields below describe a resource that is charged by its running intervals (one that
+	// stops and starts while its row lives). A resource that sets none of them is charged as before,
+	// and serializes as before: all three are omitted when unset.
+	//
+	// ChargeFrom is the start of the running interval this resource is charged for: a minute or hour
+	// charge counts from it (cut to the unit) when it is later than the bill item's watermark, so the
+	// idle time between two intervals is never counted.
+	ChargeFrom *time.Time `json:"chargeFrom,omitempty"`
+	// VariableRate says the rate changes while the resource lives (a size that scales): its bill item
+	// has no money cap on minute and hour charges. The unit limit still holds, and a month rule is
+	// capped as for any resource.
+	VariableRate bool `json:"variableRate,omitempty"`
+	// EarlierInterval marks a closed interval [ChargeFrom, DeletedAt] that ended before the one the
+	// same resource reports after it. It is rated on minute charges only.
+	EarlierInterval bool `json:"earlierInterval,omitempty"`
 }
 
 // BillingResourceType declares the attributes (name→type) of a resource type. The rating engine
