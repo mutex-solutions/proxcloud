@@ -91,6 +91,48 @@ valid ones too. The portal is not changed.
 
 **Diagrams updated:** none (no element of C1 to C4 moves); one table row of c4-code.md.
 
+## 2026-11-26: PR #496 function manifests and the cluster calls they need (v0.13.0, first of the functions PRs)
+
+**What changed**
+
+- New component, C3e, **Functions, cluster side** (`internal/cloud/function`): Implemented, not wired. It renders
+  and drives a serverless function on the sandbox provider's cluster: one `apps/v1` Deployment `fn-<16 hex>` in
+  `fn-<project>`, Secret `<id>` (environment secrets), Secret `<id>-registry` (pull credentials) and ResourceQuota
+  `proxcloud-function`. No route, job, chart object or BOM pin uses it: nothing in a running portal reaches this code.
+- `internal/cloud/kamajik8s`: two calls, `SetScale` (a merge patch of a resource's scale subresource) and
+  `MergePatchCore` (a merge patch of a namespaced core object).
+- `internal/cloud/sandbox`: the provider's `functions` block (`FunctionsConfig`, `FunctionQuota`) and
+  `FunctionWakeToken` on `Config` (no reader of the provider document fills them yet); the names functions share with
+  the proxy and the chart (`LabelFunctionID`, `LabelFunctionTenant`, `FunctionRole`, `FunctionNamespace`); and the
+  sandbox namespace code exported as `EnsureTenantNamespace`, `AfterBinding` and `TenantNamespaces`, which the
+  sandbox service calls with `sb-` and its role exactly as before.
+- `internal/cloud`: row type `FUNCTION`.
+- Trust boundary, stated for the first time and not yet in force (the chart objects are a later PR): in a function
+  namespace the portal's identity needs Deployments (get, list, create, patch, delete), the scale subresource
+  (patch), Secrets (create, patch), pods (list), pod logs (get) and ResourceQuotas (create, patch). It reads no
+  Secret, deletes none, watches nothing and reads no scale: the package's cluster interface has no such call, and a
+  test fails when one is added.
+
+**Why**
+
+- v0.13.0 brings serverless functions from container images to the managed platform. This is the part every other
+  functions PR builds against (the API, the proxy's function mode, the chart objects, the meter), so it lands first
+  and alone.
+- A function namespace carries the tenant label of a sandbox namespace on purpose: the pod policy (gVisor forced, no
+  host access) and the egress guardrail select by that label, so they hold for function pods with no change. What
+  keeps the two kinds apart is the namespace prefix and the role: sandbox lists read `sb-*` only, function lists
+  `fn-*` only, and in a shared cluster the identity holds the sandbox role (exec, Sandbox kinds) in the first and the
+  function role (Deployments, scale, write-only Secrets) in the second.
+- Three rules that follow from where the pods run here: on machines shared by tenants. The image is pulled
+  on every start also when it is named by digest: on a machine shared by tenants a cached private image would start
+  for anyone who names its digest. No platform registry credential is copied into a function namespace, and the
+  cluster interface cannot read a Secret. An image's registry must be a DNS name with two labels or more, because the
+  pull is made by containerd on the machine, outside the pod's network policies, towards whatever host the customer
+  writes.
+
+**Diagrams updated:** c3-components.md (C3e, one table row). No diagram node and no arrow: nothing calls the
+component yet, so the flow diagrams and c4-code.md are unchanged until the API and the proxy mode land.
+
 ## 2026-11-26: a node selector term with an empty key matches no node
 
 **What changed:** no component, container, wire field or relation. One function of the cluster's load balancer

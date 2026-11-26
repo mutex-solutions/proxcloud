@@ -654,6 +654,15 @@ func (c *Client) MergePatchCR(ctx context.Context, group, version, plural, ns, n
 	return c.do(ctx, http.MethodPatch, crPath(group, version, plural, ns)+"/"+name, nil, patch, "application/merge-patch+json")
 }
 
+// SetScale sets spec.replicas of a namespaced, scalable resource (apps/v1 deployments) through its scale subresource:
+// one merge patch, no read before it. The caller needs patch on <plural>/scale and nothing on the resource itself, and
+// the write does not meet a server-side apply of the resource that names no replicas.
+func (c *Client) SetScale(ctx context.Context, group, version, plural, ns, name string, replicas int) error {
+	patch := map[string]any{"spec": map[string]any{"replicas": replicas}}
+	_, err := c.do(ctx, http.MethodPatch, crPath(group, version, plural, ns)+"/"+url.PathEscape(name)+"/scale", nil, patch, "application/merge-patch+json")
+	return err
+}
+
 // ListCRsAllNamespaces lists a custom resource across every namespace, filtered by labelSelector.
 func (c *Client) ListCRsAllNamespaces(ctx context.Context, group, version, plural, labelSelector string) ([]map[string]any, error) {
 	return c.list(ctx, fmt.Sprintf("/apis/%s/%s/%s", group, version, plural), labelSelector)
@@ -679,6 +688,13 @@ func (c *Client) ApplyCore(ctx context.Context, plural string, obj map[string]an
 		return fmt.Errorf("%s: metadata.name/namespace required", plural)
 	}
 	_, err := c.apply(ctx, corePath(plural, ns), name, obj)
+	return err
+}
+
+// MergePatchCore applies a JSON merge patch to a namespaced core/v1 object. It needs patch alone: neither a read nor a
+// delete of the object, which is how a caller that may not read Secrets empties one.
+func (c *Client) MergePatchCore(ctx context.Context, plural, ns, name string, patch map[string]any) error {
+	_, err := c.do(ctx, http.MethodPatch, corePath(plural, ns)+"/"+url.PathEscape(name), nil, patch, "application/merge-patch+json")
 	return err
 }
 

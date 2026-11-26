@@ -44,6 +44,31 @@ const (
 	ResourceGPU = "nvidia.com/gpu"
 )
 
+// Names of serverless functions (internal/cloud/function) on the sandbox cluster. They are here, and not in that
+// package, so that this package and the proxy can tell a function's objects from a sandbox's without importing it.
+const (
+	// LabelFunctionID is on a function's Deployment and on its pods (it is the Deployment's selector). A function's
+	// pods never carry LabelSandboxID, so no sandbox selector, network policy or guard takes one for a sandbox.
+	LabelFunctionID = "proxcloud.io/function-id"
+	// LabelFunctionTenant marks a project's function namespace, beside LabelTenant: LabelTenant puts the namespace
+	// under the pod policy and the egress guardrail every tenant namespace is under, this one under the policy that
+	// opens the internet for function pods.
+	LabelFunctionTenant = "proxcloud.io/function-tenant"
+	// FunctionRole is the ClusterRole of the chart that holds the portal identity's rights in a function namespace
+	// of a shared cluster. It is bound in fn-* only, as SharedRole is in sb-* only.
+	FunctionRole = "proxcloud-function-namespace"
+	// MaxFunctionInstances is the ceiling of functions.maxInstances: the most instances any function may ever be
+	// scaled to.
+	MaxFunctionInstances = 100
+	// MinFunctionIdleSeconds is the lowest idle window an operator may configure: the proxy reports activity every
+	// few seconds, and a window near that would scale down a function that is serving.
+	MinFunctionIdleSeconds = 60
+)
+
+// FunctionNamespace is the project's function namespace on the sandbox cluster. Not the sandbox namespace (sb-):
+// functions have their own quota, their own role and their own network policy, and every sandbox list keeps to sb-*.
+func FunctionNamespace(projectID string) string { return "fn-" + projectID }
+
 // NamespaceFor is the project's namespace on the sandbox cluster. Distinct from kamaji's pc-
 // and dbaas's pc-db- so no prefix glob of one provider can ever match another's namespace.
 func NamespaceFor(projectID string) string { return "sb-" + projectID }
@@ -182,6 +207,116 @@ type Config struct {
 	// BuildStorage is the bucket custom template builds keep their COPY contexts in (config.sandbox.buildStorage,
 	// keys secret.buildStorageAccessKey / buildStorageSecretKey). Empty Bucket: custom template builds are off.
 	BuildStorage BuildStorage
+	// Functions is the serverless-functions block of this provider (config.sandbox.functions,
+	// internal/cloud/function). Off unless Functions.Enabled.
+	Functions FunctionsConfig
+	// FunctionWakeToken is the bearer sandbox-proxy sends to wake a function and to report activity (secret
+	// functionWakeToken). It is a token of its own and never ProxyWakeToken: that one staying empty is what keeps
+	// autoResume refused, and the sandbox wake route accepts it as its bearer.
+	FunctionWakeToken string
+}
+
+// FunctionsConfig is the `functions` block of config.sandbox: serverless functions (gVisor Deployments behind
+// sandbox-proxy that scale from zero to maxInstances on traffic) on the same cluster as the sandboxes. A function is
+// reached at <name>-<6 hex>.<Config.Domain>: the block has no domain of its own.
+type FunctionsConfig struct {
+	Enabled bool `json:"enabled"`
+	// MinInstances is the platform floor applied to every function: 0 = scale to zero allowed, 1 = every function
+	// always keeps one instance (and is billed continuously).
+	MinInstances int `json:"minInstances"`
+	// MaxMinInstances is the highest minInstances a customer may set on a function (0 or 1).
+	MaxMinInstances int `json:"maxMinInstances"`
+	// IdleSeconds is the default idle time before a function scales down; a function may pick its own within
+	// [MinIdleSeconds, MaxIdleSeconds].
+	IdleSeconds    int `json:"idleSeconds"`
+	MinIdleSeconds int `json:"minIdleSeconds"`
+	MaxIdleSeconds int `json:"maxIdleSeconds"`
+	MaxCPUMillis   int `json:"maxCpuMillis"` // per instance
+	MaxMemoryMi    int `json:"maxMemoryMi"`  // per instance
+	MaxFunctions   int `json:"maxFunctions"` // per project, whatever its quota says
+	// MaxInstances is the highest maxInstances a function may have (default 5, at most MaxFunctionInstances). A
+	// function that names none gets 1.
+	MaxInstances int `json:"maxInstances"`
+	// ProjectQuota is what a project may hold when it has no function quota of its own. Never unlimited: an unset
+	// value is the built-in default (WithDefaults).
+	ProjectQuota FunctionQuota `json:"projectQuota"`
+}
+
+// FunctionQuota is what one project may hold in functions: how many, and the vCPUs and memory of all their instances
+// together. The namespace's ResourceQuota carries the same three numbers.
+type FunctionQuota struct {
+	Functions int `json:"functions"`
+	VCPUs     int `json:"vcpus"`
+	RAMMb     int `json:"ramMb"`
+}
+
+// WithDefaults fills unset (0) limits.
+func (f FunctionsConfig) WithDefaults() FunctionsConfig {
+	for _, d := range []struct {
+		p   *int
+		def int
+	}{
+		{&f.IdleSeconds, 300}, {&f.MinIdleSeconds, MinFunctionIdleSeconds}, {&f.MaxIdleSeconds, 3600},
+		{&f.MaxCPUMillis, 2000}, {&f.MaxMemoryMi, 4096}, {&f.MaxFunctions, 20}, {&f.MaxInstances, 5},
+		{&f.ProjectQuota.Functions, 20}, {&f.ProjectQuota.VCPUs, 8}, {&f.ProjectQuota.RAMMb, 16384},
+	} {
+		if *d.p <= 0 {
+			*d.p = d.def
+		}
+	}
+	return f
+}
+
+// Validate checks the block (after defaults). Deliberately NOT part of Config.Validate: a bad functions block must
+// make functions unavailable, not the provider's sandboxes. A disabled block is not checked.
+func (f FunctionsConfig) Validate() error {
+	if !f.Enabled {
+		return nil
+	}
+	f = f.WithDefaults()
+	var errs []string
+	if f.MinInstances < 0 || f.MinInstances > 1 {
+		errs = append(errs, "minInstances must be 0 or 1")
+	}
+	if f.MaxMinInstances < 0 || f.MaxMinInstances > 1 {
+		errs = append(errs, "maxMinInstances must be 0 or 1")
+	}
+	if f.MinIdleSeconds < MinFunctionIdleSeconds {
+		errs = append(errs, fmt.Sprintf("minIdleSeconds must be at least %d", MinFunctionIdleSeconds))
+	}
+	if f.IdleSeconds < f.MinIdleSeconds || f.IdleSeconds > f.MaxIdleSeconds {
+		errs = append(errs, "idleSeconds must be between minIdleSeconds and maxIdleSeconds")
+	}
+	if f.MaxCPUMillis < 250 {
+		errs = append(errs, "maxCpuMillis must be at least 250")
+	}
+	if f.MaxMemoryMi < 256 {
+		errs = append(errs, "maxMemoryMi must be at least 256")
+	}
+	if f.MaxInstances > MaxFunctionInstances {
+		errs = append(errs, fmt.Sprintf("maxInstances must be between 1 and %d", MaxFunctionInstances))
+	}
+	if len(errs) > 0 {
+		return errors.New("sandbox provider: functions: " + strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// ValidateFunctions is FunctionsConfig.Validate with what the block needs of the provider around it: the domain
+// functions are served under is the provider's, and without one no function has a host.
+func (c Config) ValidateFunctions() error {
+	if !c.Functions.Enabled {
+		return nil
+	}
+	if err := c.Functions.Validate(); err != nil {
+		return err
+	}
+	for _, l := range strings.Split(c.Domain, ".") {
+		if !validName(l) { // also an empty domain
+			return fmt.Errorf("sandbox provider: functions: sandbox.domain %q is not a DNS name", c.Domain)
+		}
+	}
+	return nil
 }
 
 // BuildStorage is an S3 bucket the portal writes build contexts to and build pods read them from (presigned GETs).
@@ -230,6 +365,7 @@ func (c Config) WithDefaults() Config {
 	c.Startup = c.Startup.withDefaults()
 	c.Build = c.Build.withDefaults()
 	c.Warming = c.Warming.withDefaults()
+	c.Functions = c.Functions.WithDefaults()
 	if c.EgressMbps == 0 {
 		c.EgressMbps = 100
 	}
