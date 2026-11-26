@@ -22,6 +22,7 @@ of v0.11.1). The guard is for a refusal only, which comes from an appliance that
 and the new appliance goes ahead after the window, so it can still take over from it.
 
 **Diagrams updated:** none (no element of C1 to C4 moves). `c4-code.md`: the row of `Handler.lbApplyPair`.
+
 ## 2026-11-26: the load balancer controller steps down on `413` as on `400`, and sends a short keep-address value of a Service being deleted (#487)
 
 **What changed:** no component, container, listener, route or wire field. Two behaviours of `cmd/lb-controller`,
