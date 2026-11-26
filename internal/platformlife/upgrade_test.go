@@ -146,7 +146,7 @@ func TestUpgradeMovesThePlatform(t *testing.T) {
 		t.Fatalf("end %s: %+v", end, p.stage(stageWorkloadPlatform))
 	}
 	run, in, _ := p.state.snapshot()
-	if run.State != RunSucceeded || in.Status.Phase != PhaseReady || *in.Status.BOM != to || in.Status.TargetBOM != nil || len(in.Status.Components) != len(cur.Components) {
+	if run.State != RunSucceeded || in.Status.Phase != PhaseReady || *in.Status.BOM != to || in.Status.TargetBOM != nil || len(in.Status.Components) != len(cur.For(in.Spec).Components) {
 		t.Fatalf("run %s, status %+v", run.State, in.Status)
 	}
 	for i, c := range cur.Components {

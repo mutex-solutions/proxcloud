@@ -705,13 +705,17 @@ func TestPlatformRunOnAPreviousBOM(t *testing.T) {
 	// the k3s and the Kubernetes of 0.8.0. 0.8.0 and it differ in the release line, the product's own charts and
 	// cert-manager (v1.20.2 to v1.21.3), each of which lists the installed version in upgradeFrom, so the move is
 	// allowed: the release, both tenantCharts, the charts of capi, pc-platform, capi-tenant and platform, and both
-	// cert-manager entries. It wants the typed confirmation, records the target on the installation and where it comes
-	// from on the run.
+	// cert-manager entries, and the sandbox chart, the one component a move adds (class added: nothing of it is synced
+	// until the settings ask for sandboxes). It wants the typed confirmation, records the target on the installation
+	// and where it comes from on the run.
 	old := bom080(t)
 	cur.Kubernetes, cur.Seed.K3s = old.Kubernetes, old.Seed.K3s
 	upgrade, _ = call(http.MethodGet, up+"/plan?target="+cur.SHA256, "", http.StatusOK)["data"].(map[string]any)["upgrade"].(map[string]any)
-	if upgrade["allowed"] != true || upgrade["confirm"] != "upgrade lab to 0.9.0" || len(upgrade["changes"].([]any)) != 9 || len(upgrade["blocking"].([]any)) != 0 {
+	if upgrade["allowed"] != true || upgrade["confirm"] != "upgrade lab to 0.9.0" || len(upgrade["changes"].([]any)) != 10 || len(upgrade["blocking"].([]any)) != 0 {
 		t.Fatalf("the plan of the move: %v", upgrade)
+	}
+	if last, _ := upgrade["changes"].([]any)[9].(map[string]any); last["name"] != "sandbox" || last["class"] != platformlife.ClassAdded || last["blocking"] != nil && last["blocking"] != "" {
+		t.Fatalf("the sandbox chart in the plan of the move: %v", last)
 	}
 	call(http.MethodPost, up+"/runs", fmt.Sprintf(`{"kind":"apply","targetBom":%q}`, cur.SHA256), http.StatusBadRequest)
 	from, to := platformlife.BOMRef{Release: "0.8.0", SHA256: sha080}, platformlife.BOMRef{Release: "0.9.0", SHA256: cur.SHA256}
