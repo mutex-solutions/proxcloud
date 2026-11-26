@@ -19,7 +19,8 @@ controller reads one kind of term differently.
 Service with such a selector loses its members at the controller's update (CHANGELOG, upgrade note).
 
 **Diagrams updated:** none (no element of C1 to C4 moves).
- asks for the order across appliances only (CI on the release PR of v0.11.1-rc.5)
+
+## 2026-11-25: a pair's push-order test asks for the order across appliances only (CI on the release PR of v0.11.1-rc.5)
 
 **What changed:** no component, container, wire field or behaviour of the product. One assertion of one unit test.
 
