@@ -901,11 +901,17 @@ func addressesOf(nodes []lbgw.Node) []string {
 // Spaces around "=" are dropped too, which StringToMap does not do: it reads "pool = edge" as the key "pool " and
 // the value " edge", which no node has, and the Service is left without a member. A label's key and value hold no
 // space, so the term can only mean pool=edge, and a selector OCCM matches nodes with matches the same nodes here.
+//
+// A term with "=" and no key ("=edge", "=") is kept under the key "", which no node label has: such a selector
+// selects no node, as StringToMap's does, and the Service gets no member. Dropped, a selector made only of such
+// terms would be no selector at all, and a typo in the one annotation that narrows a Service's nodes would put every
+// node behind it. A term that is empty or only spaces (a trailing comma, "a=b,,c") is skipped, and an annotation
+// with nothing else is no selector.
 func parseSelector(v string) map[string]string {
 	out := map[string]string{}
 	for _, term := range strings.Split(v, ",") {
-		k, val, _ := strings.Cut(term, "=")
-		if k = strings.TrimSpace(k); k != "" {
+		k, val, eq := strings.Cut(term, "=")
+		if k = strings.TrimSpace(k); k != "" || eq {
 			out[k] = strings.TrimSpace(val)
 		}
 	}
