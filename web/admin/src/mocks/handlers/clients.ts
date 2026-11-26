@@ -202,6 +202,21 @@ on("PUT /admin/project/:id/quota", ({ params, opts }) => {
   return { data: project }
 })
 
+// The project's functionQuota, whole: a field of its own, never a key of quota. Stands in for the API's route until
+// the functions API is on main.
+on("PUT /admin/project/:id/function-quota", ({ params, opts }) => {
+  const project = db.projects.find((p) => p.id === params.id) ?? notFound("Project")
+  const body = (opts.body ?? {}) as Doc
+  for (const [key, limit] of Object.entries(body)) {
+    if (!["functions", "vcpus", "ramMb"].includes(key) || !Number.isSafeInteger(limit) || Number(limit) < 0) {
+      throw new ApiError(400, 400, `functionQuota.${key}: the keys are functions, vcpus and ramMb, each a non-negative whole number.`)
+    }
+  }
+  if (Object.keys(body).length) project.functionQuota = body
+  else delete project.functionQuota
+  return { data: project }
+})
+
 on("PUT /admin/project/:id/gpu-capacity-visible", ({ params, opts }) => {
   const project = db.projects.find((p) => p.id === params.id) ?? notFound("Project")
   project.gpuCapacityVisible = !!(opts.body as Doc)?.gpuCapacityVisible

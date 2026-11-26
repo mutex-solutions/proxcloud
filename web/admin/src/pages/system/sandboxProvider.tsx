@@ -4,7 +4,7 @@
 // The workers belong to a Proxmox provider's sandbox pool (config.sandbox.proxmoxServiceId), whose sync fences them.
 // The provider goes live (any status but DISABLED) only while its three release gates hold (docs/managed-sandbox.md §3).
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { CheckCircle2, ShieldCheck, XCircle } from "lucide-react"
+import { AlertTriangle, CheckCircle2, ShieldCheck, XCircle } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -13,6 +13,7 @@ import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch, apiFetchEnvelope } from "@/lib/api"
+import { FUNCTION_GATE_LABEL, isFunctionGate, isFunctionWarning } from "@/pages/platform/model"
 
 export type SandboxFormState = {
   name: string
@@ -56,6 +57,25 @@ export type SandboxFormState = {
   abuseJSON: string
   rotationJSON: string
   rotationKubeconfig: string
+  // config.sandbox.functions: serverless functions on this cluster (internal/cloud/sandbox FunctionsConfig). A number
+  // field left empty takes the API's default. The floors are "0" or "1".
+  fnEnabled: boolean
+  fnMinInstances: string
+  fnMaxMinInstances: string
+  fnIdleSeconds: string
+  fnMinIdleSeconds: string
+  fnMaxIdleSeconds: string
+  fnMaxCpuMillis: string
+  fnMaxMemoryMi: string
+  fnMaxInstances: string
+  fnMaxFunctions: string
+  // config.sandbox.functions.projectQuota: what a project may hold when it has no functionQuota of its own.
+  fnQuotaFunctions: string
+  fnQuotaVcpus: string
+  fnQuotaRamMb: string
+  // config.platformInstallationId: the managed-services installation that built this provider ("" for one added by
+  // hand). Functions exist only on a provider whose installation built the function side.
+  installationId: string
 }
 
 export const emptySandboxForm: SandboxFormState = {
@@ -93,6 +113,20 @@ export const emptySandboxForm: SandboxFormState = {
   abuseJSON: '{"action":"alert","cpuPercent":90,"windowSeconds":900,"trafficBytes":65536,"notifyEmails":[]}',
   rotationJSON: '{"enabled":false,"intervalHours":168,"namespace":"pc-sandbox","cluster":"pc-sandbox","machineDeployments":[]}',
   rotationKubeconfig: "",
+  fnEnabled: false,
+  fnMinInstances: "0",
+  fnMaxMinInstances: "0",
+  fnIdleSeconds: "",
+  fnMinIdleSeconds: "",
+  fnMaxIdleSeconds: "",
+  fnMaxCpuMillis: "",
+  fnMaxMemoryMi: "",
+  fnMaxInstances: "",
+  fnMaxFunctions: "",
+  fnQuotaFunctions: "",
+  fnQuotaVcpus: "",
+  fnQuotaRamMb: "",
+  installationId: "",
 }
 
 type TemplateOffer = { image: string; cpu: number; memoryGiB: number; description?: string }
@@ -120,8 +154,64 @@ export function automaticActionError(f: SandboxFormState): string | null {
   return null
 }
 
+type FnKey = "fnIdleSeconds" | "fnMinIdleSeconds" | "fnMaxIdleSeconds" | "fnMaxCpuMillis" | "fnMaxMemoryMi" | "fnMaxInstances" | "fnMaxFunctions"
+// The number fields of the functions block: form key, key in the block, label, the API's default (WithDefaults, also
+// what 0 means), the lowest and the highest value FunctionsConfig.Validate takes.
+const FN_NUMBERS: Array<[FnKey, string, string, number, number, number?]> = [
+  ["fnIdleSeconds", "idleSeconds", "Default idle time (s)", 300, 1],
+  ["fnMinIdleSeconds", "minIdleSeconds", "Shortest idle time a function may set (s)", 60, 60],
+  ["fnMaxIdleSeconds", "maxIdleSeconds", "Longest idle time a function may set (s)", 3600, 1],
+  ["fnMaxCpuMillis", "maxCpuMillis", "Max CPU per instance (millicores)", 2000, 250],
+  ["fnMaxMemoryMi", "maxMemoryMi", "Max memory per instance (Mi)", 4096, 256],
+  ["fnMaxInstances", "maxInstances", "Most instances a function may scale to", 5, 1, 100],
+  ["fnMaxFunctions", "maxFunctions", "Functions per project, whatever its quota", 20, 1],
+]
+type FnQuotaKey = "fnQuotaFunctions" | "fnQuotaVcpus" | "fnQuotaRamMb"
+const FN_QUOTA: Array<[FnQuotaKey, string, string, number]> = [
+  ["fnQuotaFunctions", "functions", "Functions", 20],
+  ["fnQuotaVcpus", "vcpus", "vCPU", 8],
+  ["fnQuotaRamMb", "ramMb", "RAM (MB)", 16384],
+]
+// Each label of the domain as sandbox.validName takes it: functions are served at <name>-<6 hex>.<sandbox domain>.
+const DNS_NAME = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/
+
+// functionsFormError mirrors FunctionsConfig.Validate and Config.ValidateFunctions (internal/cloud/sandbox/config.go):
+// the first reason the block would make functions unavailable, or "". The API does not check a block that is off, so
+// neither does this, beyond every number being a number.
+export function functionsFormError(f: SandboxFormState): string {
+  for (const [k, , label] of [...FN_NUMBERS, ...FN_QUOTA]) if (!okNum(f[k])) return `${label}: a whole number, or empty for the default.`
+  if (!f.fnEnabled) return ""
+  if (!DNS_NAME.test(f.domain.trim())) return "Functions need the sandbox domain: every function is served at <name>-<6 hex>.<sandbox domain>."
+  const v = Object.fromEntries(FN_NUMBERS.map(([k, , , def]) => [k, num(f[k]) || def])) as Record<FnKey, number>
+  for (const [k, , label, , low, high] of FN_NUMBERS) {
+    if (v[k] < low) return `${label}: at least ${low}.`
+    if (high !== undefined && v[k] > high) return `${label}: at most ${high}.`
+  }
+  if (v.fnIdleSeconds < v.fnMinIdleSeconds || v.fnIdleSeconds > v.fnMaxIdleSeconds) return "The default idle time must be between the shortest and the longest idle time."
+  return ""
+}
+
+// functionsBlock is config.sandbox.functions as the form holds it, over what is stored (keys the form does not show
+// stay). undefined when nothing is stored and the form was not touched: the body is then the one of a release without
+// functions.
+function functionsBlock(f: SandboxFormState): Record<string, any> | undefined {
+  const stored = f.storedSandbox.functions as Record<string, any> | undefined
+  const fields = [...FN_NUMBERS, ...FN_QUOTA].map(([k]) => f[k])
+  if (!stored && !f.fnEnabled && f.fnMinInstances === "0" && f.fnMaxMinInstances === "0" && fields.every((x) => x.trim() === "")) return undefined
+  const block: Record<string, any> = { ...stored, enabled: f.fnEnabled, minInstances: Number(f.fnMinInstances), maxMinInstances: Number(f.fnMaxMinInstances) }
+  for (const [k, key] of FN_NUMBERS) {
+    if (num(f[k]) === undefined) delete block[key] // empty: the API's default
+    else block[key] = num(f[k])
+  }
+  const quota = compact(Object.fromEntries(FN_QUOTA.map(([k, key]) => [key, num(f[k])])))
+  if (Object.keys(quota).length) block.projectQuota = quota
+  else delete block.projectQuota
+  return block
+}
+
 export const sandboxFormValid = (f: SandboxFormState, requireKubeconfig = true) =>
   automaticActionError(f) === null &&
+  functionsFormError(f) === "" &&
   !!f.name.trim() && jsonBlock(f.abuseJSON) !== null && jsonBlock(f.rotationJSON) !== null && okNum(f.egressMbps) &&
   !!f.region.trim() &&
   !!f.proxmoxServiceId.trim() &&
@@ -181,6 +271,7 @@ export function sandboxConfigBlocks(f: SandboxFormState) {
         sandboxRamMb: num(f.quotaRamMb),
         sandboxGpus: num(f.quotaGpus),
       }),
+      ...(functionsBlock(f) ? { functions: functionsBlock(f) } : {}),
     },
   }
 }
@@ -214,6 +305,7 @@ export function sandboxFormFromService(svc: { name?: string; status?: string; co
   const sb = (c.sandbox ?? {}) as Record<string, any>
   const l = (sb.limits ?? {}) as Record<string, any>
   const q = (sb.projectQuota ?? {}) as Record<string, any>
+  const fn = (sb.functions ?? {}) as Record<string, any>
   const s = (v: unknown) => (v === undefined || v === null ? "" : String(v))
   const templates = Object.entries((sb.templates ?? {}) as Record<string, TemplateOffer>)
     .map(([name, t]) => `${name}=${t.image} ${t.cpu ?? 1} ${t.memoryGiB ?? 1}${t.description ? " " + t.description : ""}`)
@@ -248,6 +340,12 @@ export function sandboxFormFromService(svc: { name?: string; status?: string; co
     egressMbps: s(sb.egressMbps) || "100",
     abuseJSON: JSON.stringify(sb.abuse ?? JSON.parse(emptySandboxForm.abuseJSON), null, 2),
     rotationJSON: JSON.stringify(sb.rotation ?? JSON.parse(emptySandboxForm.rotationJSON), null, 2),
+    fnEnabled: fn.enabled === true,
+    fnMinInstances: fn.minInstances === 1 ? "1" : "0",
+    fnMaxMinInstances: fn.maxMinInstances === 1 ? "1" : "0",
+    ...(Object.fromEntries(FN_NUMBERS.map(([k, key]) => [k, s(fn[key])])) as Record<FnKey, string>),
+    ...(Object.fromEntries(FN_QUOTA.map(([k, key]) => [k, s(fn.projectQuota?.[key])])) as Record<FnQuotaKey, string>),
+    installationId: s(c.platformInstallationId),
   }
 }
 
@@ -275,6 +373,29 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
   })
   const proxmox = (providers.data?.data ?? []).filter((p) => p.config?.provider === "proxmox")
   const set = (k: keyof SandboxFormState) => (v: string) => setForm({ ...form, [k]: v })
+  // The Functions group is on the page only where functions can exist: the installation that built this provider has
+  // them ticked in its settings, or a functions block is already stored. Elsewhere the form is the one without them.
+  const installation = useQuery({
+    queryKey: ["platform", "installation", form.installationId],
+    queryFn: () => apiFetch<{ spec?: { sandbox?: { placement?: string; functions?: { enabled?: boolean } } } }>(`/admin/platform/installations/${form.installationId}`),
+    enabled: !!form.installationId,
+    retry: false,
+  })
+  const functionsOffered = form.storedSandbox.functions !== undefined || installation.data?.spec?.sandbox?.functions?.enabled === true
+  const fnError = functionsFormError(form)
+  const floor = (id: string, label: string, k: "fnMinInstances" | "fnMaxMinInstances", zero: string, one: string, hint: string) => (
+    <div className="grid gap-2">
+      <Label htmlFor={id}>{label}</Label>
+      <Select value={form[k]} onValueChange={set(k)}>
+        <SelectTrigger id={id}><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="0">{zero}</SelectItem>
+          <SelectItem value="1">{one}</SelectItem>
+        </SelectContent>
+      </Select>
+      <p className="text-xs text-muted-foreground">{hint}</p>
+    </div>
+  )
   return (
     <div className="grid gap-4">
       <div className="grid gap-4 sm:grid-cols-2">
@@ -441,6 +562,52 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
           0 GPU). A project's own quota (Projects → Quota) overrides it key by key.
         </p>
       </div>
+      {functionsOffered ? (
+        <fieldset className="grid gap-4 rounded-lg border p-4">
+          <legend className="px-1 text-sm font-medium">Functions</legend>
+          <div className="grid gap-2">
+            <div className="flex items-center gap-3">
+              <Switch id="sb-fn-enabled" checked={form.fnEnabled} onCheckedChange={(on) => setForm({ ...form, fnEnabled: on })} />
+              <Label htmlFor="sb-fn-enabled">Offer serverless functions on this cluster</Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              A function is a container image a tenant deploys and calls at https://&lt;name&gt;-&lt;6 hex&gt;.{form.domain.trim() || "<sandbox domain>"}: traffic starts it, load scales it,
+              and it stops when idle. Switching on is refused unless the function gates under Release gates hold. Switching off stops every function of this
+              provider within 15 seconds and nothing more is billed; the functions, their deployments and their addresses are kept, and tenants can still read and delete them.
+              {installation.data?.spec?.sandbox?.placement === "shared" ? " Reduced isolation: this provider runs on a shared node group, where an escape reads the secrets of other tenants' functions." : ""}
+            </p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {floor("sb-fn-min", "Minimum instances (every function)", "fnMinInstances", "0: functions stop when idle", "1: every function keeps one instance",
+              "With 1 every function always runs one instance and is billed all the time.")}
+            {floor("sb-fn-maxmin", "Highest minimum a tenant may set", "fnMaxMinInstances", "0: tenants cannot keep a function running", "1: a tenant may keep a function always on",
+              "With 1 a tenant may set a function to keep one instance; that function is billed all the time.")}
+          </div>
+          <div className="grid gap-4 sm:grid-cols-3">
+            {FN_NUMBERS.map(([k, key, label, def]) => (
+              <Field key={k} id={`sb-fn-${key}`} label={label} value={form[k]} onChange={set(k)} placeholder={String(def)} />
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Empty = the default shown. The shortest idle time cannot be under 60 seconds: sandbox-proxy reports traffic every few seconds. Most instances: 1 to 100, and 1 turns
+            scaling on load off. A new function starts with at most 1 instance until its owner raises it. Every running instance is billed, and anyone who reaches a function&apos;s
+            address can keep it running at its highest count: raise the limit only as far as your tenants should be able to pay for.
+          </p>
+          <div className="grid gap-2">
+            <div className="text-sm font-medium">Default function quota of a project</div>
+            <div className="grid gap-4 sm:grid-cols-3">
+              {FN_QUOTA.map(([k, key, label, def]) => (
+                <Field key={k} id={`sb-fn-q-${key}`} label={label} value={form[k]} onChange={set(k)} placeholder={String(def)} />
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              What one project&apos;s functions may hold together, counted as reserved: the CPU and memory of every function at its highest instance count. Empty = the default
+              shown; never unlimited. A project&apos;s own function quota (Projects → Quota) overrides it key by key.
+            </p>
+          </div>
+          {fnError ? <p role="alert" className="text-xs text-destructive">{fnError}</p> : null}
+        </fieldset>
+      ) : null}
     </div>
   )
 }
@@ -451,6 +618,25 @@ const GATE_LABEL: Record<string, string> = {
   noderestriction: "NodeRestriction on the sandbox cluster's API server",
   isolation: "Isolation rules for the sandbox network",
   fence: "VM firewall on every worker",
+  ...FUNCTION_GATE_LABEL,
+}
+
+function GateRows({ gates, label }: { gates: Gate[]; label: string }) {
+  return (
+    <ul className="grid gap-2" aria-label={label}>
+      {gates.map((g) => (
+        <li key={g.name} className="flex items-start gap-2 rounded-md border p-3 text-sm">
+          {g.ok ? <CheckCircle2 className="mt-0.5 size-4 text-emerald-600" aria-label="holds" />
+            : isFunctionWarning(g.name) ? <AlertTriangle className="mt-0.5 size-4 text-amber-600" aria-label="warning" />
+              : <XCircle className="mt-0.5 size-4 text-destructive" aria-label="does not hold" />}
+          <div className="grid gap-1">
+            <span className="font-medium">{GATE_LABEL[g.name] ?? g.name}</span>
+            <span className="break-all text-xs text-muted-foreground">{g.detail}</span>
+          </div>
+        </li>
+      ))}
+    </ul>
+  )
 }
 
 // SandboxReleaseGates runs the release check on the stored provider and shows each gate's answer.
@@ -470,17 +656,18 @@ export function SandboxReleaseGates({ id }: { id: string }) {
         </Button>
       </div>
       {check.data && (
-        <ul className="grid gap-2" aria-live="polite">
-          {check.data.map((g) => (
-            <li key={g.name} className="flex items-start gap-2 rounded-md border p-3 text-sm">
-              {g.ok ? <CheckCircle2 className="mt-0.5 size-4 text-emerald-600" aria-label="holds" /> : <XCircle className="mt-0.5 size-4 text-destructive" aria-label="does not hold" />}
-              <div className="grid gap-1">
-                <span className="font-medium">{GATE_LABEL[g.name] ?? g.name}</span>
-                <span className="break-all text-xs text-muted-foreground">{g.detail}</span>
-              </div>
-            </li>
-          ))}
-        </ul>
+        <div className="grid gap-3" aria-live="polite">
+          <GateRows gates={check.data.filter((g) => !isFunctionGate(g.name))} label="Release gates" />
+          {/* The function rows decide one switch of the form below, not whether the provider goes live. */}
+          {check.data.some((g) => isFunctionGate(g.name)) ? (
+            <>
+              <p className="text-sm text-muted-foreground">
+                Functions: the switch “Offer serverless functions on this cluster” is accepted only while these hold. They do not decide whether the provider goes live. A warning refuses nothing.
+              </p>
+              <GateRows gates={check.data.filter((g) => isFunctionGate(g.name))} label="Function gates" />
+            </>
+          ) : null}
+        </div>
       )}
     </div>
   )

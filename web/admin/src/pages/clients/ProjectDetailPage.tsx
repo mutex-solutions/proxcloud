@@ -64,6 +64,9 @@ type ProjectDoc = {
   // Admin-managed per-project quota; gpu = {model alias (or "*") → device limit}, plus the
   // Proxmox resource keys (RESOURCE_QUOTA_KEYS). Other stored keys are preserved on save.
   quota?: { gpu?: Record<string, number> } & Record<string, unknown>
+  // What the project's functions may hold (FUNCTION_QUOTA_KEYS). A field of its own, never a key of quota: any key
+  // there but the sandbox ones makes quota a Proxmox quota, where an absent key is unlimited.
+  functionQuota?: Record<string, number>
   createdAt?: string
 }
 
@@ -150,6 +153,15 @@ const RESOURCE_QUOTA_KEYS: Array<{ key: string; label: string; blank?: string }>
   { key: "sandboxGpus", label: "Sandbox GPUs", blank: "Provider default (0)" },
 ]
 
+// The keys of the project's functionQuota, with the built-in default a blank one falls back to when the sandbox
+// provider names none (sandbox.FunctionsConfig.WithDefaults). Usage is counted as reserved: every function at its
+// highest instance count.
+const FUNCTION_QUOTA_KEYS: Array<{ key: "functions" | "vcpus" | "ramMb"; label: string; def: number }> = [
+  { key: "functions", label: "Functions", def: 20 },
+  { key: "vcpus", label: "Function vCPUs", def: 8 },
+  { key: "ramMb", label: "Function RAM (MiB)", def: 16384 },
+]
+
 function parseGPUQuotaLimit(value: string): number | undefined {
   if (!/^\d+$/.test(value.trim())) return undefined
   const parsed = Number(value)
@@ -204,9 +216,12 @@ export default function ProjectDetailPage() {
   const bps = useAdminList<BillingProfile>("/admin/billing-profile", bpOpen)
   const orgsList = useAdminList<{ id: string; name?: string }>("/admin/organizations", orgOpen)
   const users = useAdminList<AdminUser>("/admin/user", addMemberOpen)
-  const providers = useAdminList<{ id: string; name?: string; status?: string; config?: { provider?: string } }>(
+  const providers = useAdminList<{
+    id: string; name?: string; status?: string
+    config?: { provider?: string; sandbox?: { functions?: { enabled?: boolean; projectQuota?: Record<string, number> } } }
+  }>(
     "/admin/service",
-    attachOpen,
+    attachOpen || tab === "quota",
   )
 
   const externalServiceId = project?.services?.find((s) => s.serviceId)?.serviceId ?? ""
@@ -243,6 +258,19 @@ export default function ProjectDetailPage() {
   }, [project?.quota])
   const resourceQuotaValid = RESOURCE_QUOTA_KEYS.every(
     ({ key }) => !(resourceQuota[key] ?? "").trim() || parseGPUQuotaLimit(resourceQuota[key]) !== undefined,
+  )
+  // The function quota is on the page only where it means something: a sandbox provider of this project offers
+  // functions, or the project already holds one.
+  const functionsProvider = (providers.data?.data ?? []).find(
+    (p) => p.config?.sandbox?.functions?.enabled === true && project?.services?.some((s) => s.serviceId === p.id),
+  )
+  const functionQuotaOffered = !!functionsProvider || !!project?.functionQuota
+  const [functionQuota, setFunctionQuota] = useState<Record<string, string>>({})
+  useEffect(() => {
+    setFunctionQuota(Object.fromEntries(FUNCTION_QUOTA_KEYS.map(({ key }) => [key, project?.functionQuota?.[key] != null ? String(project.functionQuota[key]) : ""])))
+  }, [project?.functionQuota])
+  const functionQuotaValid = FUNCTION_QUOTA_KEYS.every(
+    ({ key }) => !(functionQuota[key] ?? "").trim() || parseGPUQuotaLimit(functionQuota[key]) !== undefined,
   )
   const [quotaModel, setQuotaModel] = useState("")
   const [quotaLimit, setQuotaLimit] = useState("")
@@ -496,6 +524,27 @@ export default function ProjectDetailPage() {
     },
     onSuccess: () => {
       toast.success("Project quota saved")
+      invalidateProject()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  // PUT /admin/project/{id}/function-quota: the project's functionQuota, whole. A key left out falls back to the
+  // sandbox provider's default, then the built-in one; never unlimited. An empty object clears it.
+  const saveFunctionQuota = useMutation({
+    mutationFn: () => {
+      const body: Record<string, number> = {}
+      for (const { key, label } of FUNCTION_QUOTA_KEYS) {
+        const raw = (functionQuota[key] ?? "").trim()
+        if (!raw) continue
+        const limit = parseGPUQuotaLimit(raw)
+        if (limit === undefined) throw new Error(`${label} limit must be a non-negative whole number`)
+        body[key] = limit
+      }
+      return apiFetch(`${projectPath}/function-quota`, { method: "PUT", body })
+    },
+    onSuccess: () => {
+      toast.success("Function quota saved")
       invalidateProject()
     },
     onError: (e: Error) => toast.error(e.message),
@@ -1004,6 +1053,52 @@ export default function ProjectDetailPage() {
                 </Button>
               </CardContent>
             </Card>
+            {functionQuotaOffered ? (
+              <Card>
+                <CardHeader>
+                  <h2 className="text-base font-semibold">Function quota</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    What this project&apos;s functions may hold together, checked when a function is created, changed or
+                    resumed. Usage is counted as reserved: the CPU and memory of every function at its highest instance
+                    count, running or not. Blank = the sandbox provider&apos;s default; never unlimited.
+                  </p>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                    {FUNCTION_QUOTA_KEYS.map(({ key, label, def }) => {
+                      const raw = functionQuota[key] ?? ""
+                      const invalid = !!raw.trim() && parseGPUQuotaLimit(raw) === undefined
+                      return (
+                        <div key={key} className="grid gap-1">
+                          <Label className="text-xs" htmlFor={`fq-${key}`}>
+                            {label}
+                          </Label>
+                          <Input
+                            id={`fq-${key}`}
+                            type="number"
+                            min={0}
+                            step={1}
+                            placeholder={`Provider default (${functionsProvider?.config?.sandbox?.functions?.projectQuota?.[key] || def})`}
+                            aria-invalid={invalid}
+                            aria-describedby={invalid ? `fq-${key}-error` : undefined}
+                            value={raw}
+                            onChange={(e) => setFunctionQuota((q) => ({ ...q, [key]: e.target.value }))}
+                          />
+                          {invalid ? (
+                            <p id={`fq-${key}-error`} className="text-xs text-destructive">
+                              Whole number required.
+                            </p>
+                          ) : null}
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <Button onClick={() => saveFunctionQuota.mutate()} disabled={saveFunctionQuota.isPending || !functionQuotaValid}>
+                    {saveFunctionQuota.isPending ? "Saving…" : "Save function quota"}
+                  </Button>
+                </CardContent>
+              </Card>
+            ) : null}
             <Card>
               <CardHeader className="flex flex-row items-start justify-between gap-3">
                 <div>
