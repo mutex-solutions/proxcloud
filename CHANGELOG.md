@@ -65,10 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs on refused its keepalived push. It reads `building` with the reason "it waits for appliance N, which did not
   take the change that tells it of this one", the row reads `ERROR` with the first appliance's words as before, and
   the next pass tries both again, in the order. Unchanged: a first appliance that is down, gone or not running is
-  not waited for, nor is one whose keepalived is stopped (it holds no address), and the new one is pushed and takes
-  over; one that holds its push (its guest agent does not answer, or its package manager is at work) is waited for
-  one retry window and no longer, as before; a pair built at once whose first push of all is refused still gets
-  keepalived on the other appliance. For an upgrade: no appliance is pushed because of this and no config changes.
+  not waited for, and the new one is pushed and takes over; one whose keepalived is stopped and that refuses its
+  restart is not waited for either (it holds no address): the new one gets keepalived and takes the addresses, and
+  its HAProxy config still waits for a pass in which the first appliance refuses nothing, as before; one that holds
+  its push (its guest agent does not answer, or its package manager is at work) is waited for one retry window and
+  no longer, as before; a pair built at once whose first push of all is refused still gets keepalived on the other
+  appliance. For an upgrade: no appliance is pushed because of this and no config changes.
   A pair that has both appliances on keepalived never meets the rule. A join that met a refusing first appliance
   showed the second one as serving after one pass and now shows it `building` until the first takes the change:
   the first appliance keeps the addresses and the traffic meanwhile, and the pair has no standby for that long.
