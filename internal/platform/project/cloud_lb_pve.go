@@ -264,7 +264,7 @@ func (h *Handler) pveCreateLoadBalancer(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		if lb.ServerID != "" {
-			if err := h.publicIPs.ReleaseServer(ctx, es.ID, lb.ServerID); err != nil {
+			if err := h.lbGiveBack(ctx, es, proj, lb.ServerID); err != nil { // lbPlugPublic took it and wrote its row
 				slog.Error("load balancer: release address after a failed build", "project", proj.ID, "err", err)
 			}
 		}
@@ -301,6 +301,7 @@ func (h *Handler) lbPlugPublic(ctx context.Context, ps *pve.Service, es *externa
 	if err != nil {
 		return err
 	}
+	h.lbOwnAddressRows(ctx, es, proj, lb)
 	held, err := h.publicIPs.ForServer(ctx, es.ID, id)
 	if err != nil {
 		return err
@@ -525,6 +526,8 @@ func (h *Handler) lbApplyOnce(ctx context.Context, es *externalservice.ExternalS
 	if err != nil {
 		return lbStatusError, false, err
 	}
+	// A balancer made before the row was written with the allocation gets it here, not at the next provider sync.
+	h.lbOwnAddressRows(ctx, es, proj, lb)
 	before, _ := json.Marshal(lb)
 	err = h.lbApplyLocked(ctx, es, proj, cr, lb)
 	if after, _ := json.Marshal(lb); string(after) != string(before) {
@@ -899,11 +902,7 @@ func (h *Handler) lbDestroy(ctx context.Context, ps *pve.Service, es *externalse
 	}
 	if lb.HA {
 		// The VIPs are the balancer's, not a VM's: they go with it.
-		owner := LBAddressOwner(lb.ID)
-		if err := h.publicIPs.ReleaseServer(ctx, es.ID, owner); err != nil {
-			return err
-		}
-		return h.lbDropAddressRows(ctx, es, proj, owner)
+		return h.lbGiveBack(ctx, es, proj, LBAddressOwner(lb.ID))
 	}
 	// A VM someone else destroyed left its address behind, and the public address's row bills until the
 	// next sample unless it goes now. A vmid another VM has since taken is that VM's.
@@ -923,6 +922,33 @@ func (h *Handler) lbDestroy(ctx context.Context, ps *pve.Service, es *externalse
 		return h.lbDropAddressRows(ctx, es, proj, lb.ServerID)
 	}
 	return nil
+}
+
+// lbOwnAddressRows writes the FLOATING_IP row of each public address a tenant's balancer holds that has none
+// (lbAddressRows, the row the provider sync makes): with the allocation, and at every pass for a balancer that is
+// older than that. It was the sync's alone to write, so the tenant's list missed a live address for up to a sync
+// interval, and a balancer made and deleted between two syncs was never listed or billed (lab drill of v0.11.1). A
+// pair's addresses are the balancer's, a single VM's is its VM's. A failure is the next pass's or the sync's to
+// mend: the allocation is the truth.
+func (h *Handler) lbOwnAddressRows(ctx context.Context, es *externalservice.ExternalService, proj *Project, lb *loadBalancer) {
+	owner := lb.ServerID
+	if lb.HA {
+		owner = LBAddressOwner(lb.ID)
+	}
+	if owner == "" || h.publicIPs == nil {
+		return
+	}
+	if err := h.lbAddressRows(ctx, es, proj, owner); err != nil {
+		slog.Warn("load balancer: floating IP rows of a balancer's addresses; the next pass or sync writes them", "project", proj.ID, "lb", lb.ID, "err", err)
+	}
+}
+
+// lbGiveBack releases the addresses owner holds and archives their FLOATING_IP rows.
+func (h *Handler) lbGiveBack(ctx context.Context, es *externalservice.ExternalService, proj *Project, owner string) error {
+	if err := h.publicIPs.ReleaseServer(ctx, es.ID, owner); err != nil {
+		return err
+	}
+	return h.lbDropAddressRows(ctx, es, proj, owner)
 }
 
 // lbDropAddressRows archives the FLOATING_IP rows of the addresses owner held, which would bill until the next

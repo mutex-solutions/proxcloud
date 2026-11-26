@@ -23,12 +23,14 @@ type Service struct {
 	billing     *billing.Repo
 	users       *user.Repo
 	platformcfg *platformconfig.Repo // project-provisioning-quota (default config); nil-safe
-	// noDeletionJob: nothing in this installation runs the deletion job (SetNoDeletionJob), so DeleteNow refuses.
+	// noDeletionJob: nothing in this installation runs the deletion job (SetNoDeletionJob), so DeleteNow and
+	// ScheduleDeletion refuse.
 	noDeletionJob bool
 }
 
 // SetNoDeletionJob tells the service that the deletion job never runs here (cmd/api: the job scheduler is off and so
-// are the debug triggers). DeleteNow then refuses instead of leaving the project DELETE_IN_PROGRESS for good.
+// are the debug triggers). DeleteNow then refuses instead of leaving the project DELETE_IN_PROGRESS for good, and a
+// scheduled delete refuses instead of answering SCHEDULED_FOR_DELETION for a delete nothing will carry out.
 func (s *Service) SetNoDeletionJob(off bool) { s.noDeletionJob = off }
 
 var errNoDeletionJob = httpx.NewError(http.StatusConflict, http.StatusConflict, "This installation cannot delete a project yet: the job that "+
@@ -281,9 +283,24 @@ func (s *Service) BillingHold(ctx context.Context, p *Project) (reason, profileS
 	return ReasonBillingProfileInactive, bp.Status, nil
 }
 
+// CanScheduleDeletion is the operator route's check before it schedules a project's delete (admin.ProjectCloudOps
+// .CanDelete): the deletion job runs here, and the project resolves.
+func (s *Service) CanScheduleDeletion(ctx context.Context, id string) error {
+	if s.noDeletionJob {
+		return errNoDeletionJob
+	}
+	_, err := s.GetProjectByID(ctx, id)
+	return err
+}
+
 // ScheduleDeletion marks the project for deferred deletion. The cloud-side
 // deletability check is deferred.
 func (s *Service) ScheduleDeletion(ctx context.Context, p *Project, _ bool) (*Project, error) {
+	// The mark below is all a scheduled delete does; the deletion job's sweep does the rest once the grace is over.
+	// Without that job the project would read SCHEDULED_FOR_DELETION for good (drill R4-o2 of v0.11.1).
+	if s.noDeletionJob {
+		return nil, errNoDeletionJob
+	}
 	if err := CheckTransition(ActionSchedule, p.Status); err != nil {
 		return nil, err
 	}

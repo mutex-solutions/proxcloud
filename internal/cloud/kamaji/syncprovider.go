@@ -60,6 +60,12 @@ func (p *ClusterSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 		}
 		data := clusterData(app, tcp, mds)
 		c := data["cluster"].(map[string]any)
+		// What the tenant's page offers as an update beside a newer chart: the controller's image alone. Said only
+		// while it is true, so a cluster that needs nothing keeps the row it had, and only on a provider with a chart
+		// pin: without one the tenant's action refuses (APPLY_PLATFORM_UPDATE), so there is nothing to offer.
+		if values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any); s.cfg.ChartVersion != "" && s.cfg.LBControllerBehind(values) {
+			c["lb_controller_update"] = true
+		}
 		if needsProgress(c, mds) {
 			if objs == nil {
 				read, err := s.readProgress(ctx, ns)
