@@ -408,6 +408,29 @@ appliances have let go of it. A refusal such as `Quota exceeded for floatingIps:
 names the same five. `network.networks` is the networks figure. When the allocations cannot be read the answer
 carries no `network` and a line in `warnings`.
 
+On a sandbox service the answer also carries `functions: {limits: {functions, vcpus, ramMb}, usage: {functions,
+vcpus, ramMb}}`: the project's function quota in force there and what its functions hold of it. The usage is
+reserved, not measured: `cpuMillis` and `memoryMi` times `maxInstances` of every function, running or not
+([managed-functions.md](managed-functions.md#quota)). Absent where the service offers no functions and holds none
+of the project.
+
+Functions: `/api/v1/project/{id}/functions` (list, create), `/functions/{fn}` (get, `PATCH`, `DELETE`),
+`/functions/{fn}/deployments`, `/functions/{fn}/rollback` (`{deploymentId, registryAuth?}`),
+`/functions/{fn}/action` (`{action: suspend|resume}`) and `/functions/{fn}/logs?tail=`; reads need
+`project:cloud_resource:read`, everything else `project:cloud_resource:manage`. **No sandbox provider can have
+functions enabled in this release**, so a read answers an empty list and every other route but `DELETE` answers
+`403 functions are not offered here` (`503 functions are not configured` in a portal without a function
+service). The bodies, the statuses, what is refused as not offered (`gpu`, `source`, `exposure: public`,
+`publicRateLimit`, `domains`: `400`), the write-only `secrets` and `registryAuth` (`503` and nothing stored without
+the portal's encryption key), the quota (`429`) and the off states are in
+[managed-functions.md](managed-functions.md). The operator sets a project's function quota with
+`PUT /api/v1/admin/project/{id}/function-quota` (`{functions, vcpus, ramMb}`, each a non-negative integer and
+optional; an empty body removes it; `ADMIN_PROJECT_UPDATE`). It is a document of its own:
+`PUT /api/v1/admin/project/{id}/quota` refuses the keys `functions`, `functionVcpus`, `functionRamMb` and
+`functionQuota` (`400`), because a key there that is not a sandbox key turns the project's quota into a Proxmox
+quota in which every absent key is unlimited. A save of a sandbox provider with
+`config.sandbox.functions.enabled: true` is refused (`409`), whatever its status.
+
 Cloud service selection: the project cloud routes (`/project/{id}/cloud`, its
 actions and deletes, `quota-usage`, `gpu-capacity`, `public-networks`, the S3
 key routes) run against the service named by the `x-service-id` header (with

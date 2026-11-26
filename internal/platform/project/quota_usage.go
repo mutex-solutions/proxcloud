@@ -30,6 +30,9 @@ type projectQuotaUsage struct {
 	Compute   *computeQuota  `json:"compute,omitempty"`
 	Storage   *storageQuota  `json:"storage,omitempty"`
 	Network   *networkQuota  `json:"network,omitempty"`
+	// Functions is the project's function quota on a sandbox location and what its functions reserve of it
+	// (functionQuotaUsage); absent on any other service.
+	Functions map[string]any `json:"functions,omitempty"`
 	Warnings  []string       `json:"warnings"`
 }
 
@@ -159,12 +162,12 @@ func (h *Handler) pveNetworkQuota(ctx context.Context, projectID, svcID string, 
 func pveQuotaMetrics(limits map[string]any, u pveQuotaDemand) (*computeQuota, *storageQuota) {
 	metric := func(key string, used int) quotaMetric { return quotaMetricOf(limits, key, used) }
 	return &computeQuota{
-		Instances: metric("servers", u.Servers),
-		Cores:     metric("vcpus", u.VCPUs),
-		RAMMb:     metric("ramMb", u.RAMMb),
-	}, &storageQuota{
-		Gigabytes: metric("diskGb", u.DiskGb),
-	}
+			Instances: metric("servers", u.Servers),
+			Cores:     metric("vcpus", u.VCPUs),
+			RAMMb:     metric("ramMb", u.RAMMb),
+		}, &storageQuota{
+			Gigabytes: metric("diskGb", u.DiskGb),
+		}
 }
 
 // quotaUsage reports the ProxCloud-managed quota (GPU + resource keys) with usage
@@ -215,6 +218,7 @@ func (h *Handler) quotaUsage(w http.ResponseWriter, r *http.Request) {
 			out.Warnings = append(out.Warnings, "Quota usage is temporarily unavailable")
 		}
 	}
+	out.Functions = h.functionQuotaUsage(r.Context(), proj, svcID)
 	if usage, err := h.cloud.GPUUsageByProject(r.Context(), proj.ID); err == nil {
 		out.GPU.Usage = usage
 		out.GPU.UsageAvailable = true
