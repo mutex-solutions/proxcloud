@@ -1,0 +1,2226 @@
+== pass 01: minute at 2026-10-31T10:00:07Z (the first pass of every row)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=1501.251291111110118 items=17
+  bucket bkt name="bkt" net=6.177 minute=300 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T05:00:01Z|-
+    rule-bucket-minute existence=4.71 last="1"
+    rule-bucket-minute size_gb=1.467 last="3"
+  database_cluster db name="db" net=3.4086 minute=190 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T06:50:00Z|-
+    rule-database_cluster-minute existence=2.413 last="1"
+    rule-database_cluster-minute vcpus_total=0.9956 last="4"
+  floating_ip fip name="203.0.113.7" net=0.513111111110118 minute=90 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T08:30:00Z|-
+    rule-floating_ip-minute existence=0.477 last="1"
+    rule-floating_ip-minute-18dp existence=0.036111111110118 last="1"
+  image img name="img" net=1.32616 minute=121 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T07:59:59Z|-
+    rule-image-minute existence=0.8107 last="1"
+    rule-image-minute size_gb=0.51546 last="6"
+  instance vm-active name="vm-active" net=0.02782 minute=107 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T08:13:27Z|-
+    rule-instance-minute existence=0.0214 last="1"
+    rule-instance-minute vcpus=0.00642 last="2"
+  instance vm-build name="vm-build" net=0 minute=0 hour=0 month=0 marks=2026-10-31T09:02:11Z|2026-10-31T09:02:11Z|-
+  instance vm-nomark name="vm-nomark" net=0.00026 minute=1 hour=0 month=0 marks=2026-10-31T10:00:00Z|-|-
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=0.1819 minute=107 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T08:13:27Z|-
+    rule-instance_traffic-minute existence=0.1819 last="1"
+  kubernetes_cluster k8s name="k8s" net=2.48235 minute=195 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T06:45:30Z|-
+    rule-kubernetes_cluster-minute existence=1.8915 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.59085 last="3"
+  sandbox sbx-ended name="sbx-ended" net=0.15615 minute=5 hour=0 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:20:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+  sandbox sbx-run name="sbx-run" net=0.64904 minute=19 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T09:41:00Z|-
+    rule-sandbox-minute existence=0.5377 last="1"
+    rule-sandbox-minute vcpus=0.11134 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=1.3944 minute=35 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox_snapshot-minute existence=1.1585 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.2359 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=5.48 minute=80 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T08:40:10Z|-
+    rule-server_protection-minute existence=1.816 last="1"
+    rule-server_protection-minute size_gb=3.664 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=4.3065 minute=55 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T09:05:42Z|-
+    rule-server_snapshot-minute existence=1.4135 last="1"
+    rule-server_snapshot-minute size_gb=2.893 last="20"
+  share shr name="shr" net=10.368 minute=270 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T05:30:00Z|-
+    rule-share-minute existence=5.157 last="1"
+    rule-share-minute quota_gb=5.211 last="10"
+  volume vol-archived name="vol-archived" net=0.3 minute=50 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T09:10:05Z|-
+    rule-volume-minute existence=0.145 last="1"
+    rule-volume-minute size=0.155 last="10"
+  volume vol-old name="vol-old" net=1464.48 minute=43200 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-01T00:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+== pass 02: minute at 2026-10-31T10:00:31Z (the same minute again)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=1501.251291111110118 items=17
+  bucket bkt name="bkt" net=6.177 minute=300 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T05:00:01Z|-
+    rule-bucket-minute existence=4.71 last="1"
+    rule-bucket-minute size_gb=1.467 last="3"
+  database_cluster db name="db" net=3.4086 minute=190 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T06:50:00Z|-
+    rule-database_cluster-minute existence=2.413 last="1"
+    rule-database_cluster-minute vcpus_total=0.9956 last="4"
+  floating_ip fip name="203.0.113.7" net=0.513111111110118 minute=90 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T08:30:00Z|-
+    rule-floating_ip-minute existence=0.477 last="1"
+    rule-floating_ip-minute-18dp existence=0.036111111110118 last="1"
+  image img name="img" net=1.32616 minute=121 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T07:59:59Z|-
+    rule-image-minute existence=0.8107 last="1"
+    rule-image-minute size_gb=0.51546 last="6"
+  instance vm-active name="vm-active" net=0.02782 minute=107 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T08:13:27Z|-
+    rule-instance-minute existence=0.0214 last="1"
+    rule-instance-minute vcpus=0.00642 last="2"
+  instance vm-build name="vm-build" net=0 minute=0 hour=0 month=0 marks=2026-10-31T09:02:11Z|2026-10-31T09:02:11Z|-
+  instance vm-nomark name="vm-nomark" net=0.00026 minute=1 hour=0 month=0 marks=2026-10-31T10:00:00Z|-|-
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=0.1819 minute=107 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T08:13:27Z|-
+    rule-instance_traffic-minute existence=0.1819 last="1"
+  kubernetes_cluster k8s name="k8s" net=2.48235 minute=195 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T06:45:30Z|-
+    rule-kubernetes_cluster-minute existence=1.8915 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.59085 last="3"
+  sandbox sbx-ended name="sbx-ended" net=0.15615 minute=5 hour=0 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:20:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+  sandbox sbx-run name="sbx-run" net=0.64904 minute=19 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T09:41:00Z|-
+    rule-sandbox-minute existence=0.5377 last="1"
+    rule-sandbox-minute vcpus=0.11134 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=1.3944 minute=35 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox_snapshot-minute existence=1.1585 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.2359 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=5.48 minute=80 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T08:40:10Z|-
+    rule-server_protection-minute existence=1.816 last="1"
+    rule-server_protection-minute size_gb=3.664 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=4.3065 minute=55 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T09:05:42Z|-
+    rule-server_snapshot-minute existence=1.4135 last="1"
+    rule-server_snapshot-minute size_gb=2.893 last="20"
+  share shr name="shr" net=10.368 minute=270 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T05:30:00Z|-
+    rule-share-minute existence=5.157 last="1"
+    rule-share-minute quota_gb=5.211 last="10"
+  volume vol-archived name="vol-archived" net=0.3 minute=50 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T09:10:05Z|-
+    rule-volume-minute existence=0.145 last="1"
+    rule-volume-minute size=0.155 last="10"
+  volume vol-old name="vol-old" net=1464.48 minute=43200 hour=0 month=0 marks=2026-10-31T10:00:00Z|2026-10-01T00:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+== pass 03: hour at 2026-10-31T10:00:12Z (the first hour pass)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3389.230341111110118 items=17
+  bucket bkt name="bkt" net=17.122 minute=300 hour=5 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-bucket-minute existence=4.71 last="1"
+    rule-bucket-minute size_gb=1.467 last="3"
+    rule-bucket-hour existence=8.35 last="1"
+    rule-bucket-hour size_gb=2.595 last="3"
+  database_cluster db name="db" net=11.1126 minute=190 hour=4 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-database_cluster-minute existence=2.413 last="1"
+    rule-database_cluster-minute vcpus_total=0.9956 last="4"
+    rule-database_cluster-hour existence=5.48 last="1"
+    rule-database_cluster-hour vcpus_total=2.224 last="4"
+  floating_ip fip name="203.0.113.7" net=1.693111111110118 minute=90 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-floating_ip-minute existence=0.477 last="1"
+    rule-floating_ip-minute-18dp existence=0.036111111110118 last="1"
+    rule-floating_ip-hour existence=1.18 last="1"
+  image img name="img" net=4.93816 minute=121 hour=3 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-image-minute existence=0.8107 last="1"
+    rule-image-minute size_gb=0.51546 last="6"
+    rule-image-hour existence=2.19 last="1"
+    rule-image-hour size_gb=1.422 last="6"
+  instance vm-active name="vm-active" net=0.15582 minute=107 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-instance-minute existence=0.0214 last="1"
+    rule-instance-minute vcpus=0.00642 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-build name="vm-build" net=0 minute=0 hour=0 month=0 marks=2026-10-31T09:02:11Z|2026-10-31T09:02:11Z|-
+  instance vm-nomark name="vm-nomark" net=0.06426 minute=1 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=51.05295 minute=107 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-instance_traffic-minute existence=0.1819 last="1"
+    rule-instance_traffic-hour existence=0.38 last="1"
+    rule-instance_traffic-usage total_traffic_mb=50.49105 last="1234.5"
+  kubernetes_cluster k8s name="k8s" net=7.88635 minute=195 hour=4 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-kubernetes_cluster-minute existence=1.8915 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.59085 last="3"
+    rule-kubernetes_cluster-hour existence=4.12 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.284 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=4.34104 minute=19 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox-minute existence=0.5377 last="1"
+    rule-sandbox-minute vcpus=0.11134 last="2"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.622 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=5.5624 minute=35 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox_snapshot-minute existence=1.1585 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.2359 last="2"
+    rule-sandbox_snapshot-hour existence=3.47 last="1"
+    rule-sandbox_snapshot-hour size_gb=0.698 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=19.7 minute=80 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-server_protection-minute existence=1.816 last="1"
+    rule-server_protection-minute size_gb=3.664 last="20"
+    rule-server_protection-hour existence=4.66 last="1"
+    rule-server_protection-hour size_gb=9.56 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=12.4165 minute=55 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-server_snapshot-minute existence=1.4135 last="1"
+    rule-server_snapshot-minute size_gb=2.893 last="20"
+    rule-server_snapshot-hour existence=2.69 last="1"
+    rule-server_snapshot-hour size_gb=5.42 last="20"
+  share shr name="shr" net=30.168 minute=270 hour=5 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-share-minute existence=5.157 last="1"
+    rule-share-minute quota_gb=5.211 last="10"
+    rule-share-hour existence=9.85 last="1"
+    rule-share-hour quota_gb=9.95 last="10"
+  volume vol-archived name="vol-archived" net=1.08 minute=50 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=0.145 last="1"
+    rule-volume-minute size=0.155 last="10"
+    rule-volume-hour existence=0.37 last="1"
+    rule-volume-hour size=0.41 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 04: month at 2026-10-31T10:00:15Z (the first month pass)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3389.5865112186369997 items=17
+  bucket bkt name="bkt" net=17.122 minute=300 hour=5 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-bucket-minute existence=4.71 last="1"
+    rule-bucket-minute size_gb=1.467 last="3"
+    rule-bucket-hour existence=8.35 last="1"
+    rule-bucket-hour size_gb=2.595 last="3"
+  database_cluster db name="db" net=11.1126 minute=190 hour=4 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-database_cluster-minute existence=2.413 last="1"
+    rule-database_cluster-minute vcpus_total=0.9956 last="4"
+    rule-database_cluster-hour existence=5.48 last="1"
+    rule-database_cluster-hour vcpus_total=2.224 last="4"
+  floating_ip fip name="203.0.113.7" net=1.693111111110118 minute=90 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-floating_ip-minute existence=0.477 last="1"
+    rule-floating_ip-minute-18dp existence=0.036111111110118 last="1"
+    rule-floating_ip-hour existence=1.18 last="1"
+  image img name="img" net=4.93816 minute=121 hour=3 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-image-minute existence=0.8107 last="1"
+    rule-image-minute size_gb=0.51546 last="6"
+    rule-image-hour existence=2.19 last="1"
+    rule-image-hour size_gb=1.422 last="6"
+  instance vm-active name="vm-active" net=0.15582 minute=107 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-instance-minute existence=0.0214 last="1"
+    rule-instance-minute vcpus=0.00642 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-build name="vm-build" net=0 minute=0 hour=0 month=0 marks=2026-10-31T09:02:11Z|2026-10-31T09:02:11Z|-
+  instance vm-nomark name="vm-nomark" net=0.4204301075268817 minute=1 hour=1 month=1 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=0.3400537634408602 last="1"
+    rule-instance-month vcpus=0.0803763440860215 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=51.05295 minute=107 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-instance_traffic-minute existence=0.1819 last="1"
+    rule-instance_traffic-hour existence=0.38 last="1"
+    rule-instance_traffic-usage total_traffic_mb=50.49105 last="1234.5"
+  kubernetes_cluster k8s name="k8s" net=7.88635 minute=195 hour=4 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-kubernetes_cluster-minute existence=1.8915 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.59085 last="3"
+    rule-kubernetes_cluster-hour existence=4.12 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.284 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=4.34104 minute=19 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox-minute existence=0.5377 last="1"
+    rule-sandbox-minute vcpus=0.11134 last="2"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.622 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=5.5624 minute=35 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox_snapshot-minute existence=1.1585 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.2359 last="2"
+    rule-sandbox_snapshot-hour existence=3.47 last="1"
+    rule-sandbox_snapshot-hour size_gb=0.698 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=19.7 minute=80 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-server_protection-minute existence=1.816 last="1"
+    rule-server_protection-minute size_gb=3.664 last="20"
+    rule-server_protection-hour existence=4.66 last="1"
+    rule-server_protection-hour size_gb=9.56 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=12.4165 minute=55 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-server_snapshot-minute existence=1.4135 last="1"
+    rule-server_snapshot-minute size_gb=2.893 last="20"
+    rule-server_snapshot-hour existence=2.69 last="1"
+    rule-server_snapshot-hour size_gb=5.42 last="20"
+  share shr name="shr" net=30.168 minute=270 hour=5 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-share-minute existence=5.157 last="1"
+    rule-share-minute quota_gb=5.211 last="10"
+    rule-share-hour existence=9.85 last="1"
+    rule-share-hour quota_gb=9.95 last="10"
+  volume vol-archived name="vol-archived" net=1.08 minute=50 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=0.145 last="1"
+    rule-volume-minute size=0.155 last="10"
+    rule-volume-hour existence=0.37 last="1"
+    rule-volume-hour size=0.41 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 05: month at 2026-10-31T11:00:15Z (the month pass an hour later: the cap gate)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3389.5865112186369997 items=17
+  bucket bkt name="bkt" net=17.122 minute=300 hour=5 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-bucket-minute existence=4.71 last="1"
+    rule-bucket-minute size_gb=1.467 last="3"
+    rule-bucket-hour existence=8.35 last="1"
+    rule-bucket-hour size_gb=2.595 last="3"
+  database_cluster db name="db" net=11.1126 minute=190 hour=4 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-database_cluster-minute existence=2.413 last="1"
+    rule-database_cluster-minute vcpus_total=0.9956 last="4"
+    rule-database_cluster-hour existence=5.48 last="1"
+    rule-database_cluster-hour vcpus_total=2.224 last="4"
+  floating_ip fip name="203.0.113.7" net=1.693111111110118 minute=90 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-floating_ip-minute existence=0.477 last="1"
+    rule-floating_ip-minute-18dp existence=0.036111111110118 last="1"
+    rule-floating_ip-hour existence=1.18 last="1"
+  image img name="img" net=4.93816 minute=121 hour=3 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-image-minute existence=0.8107 last="1"
+    rule-image-minute size_gb=0.51546 last="6"
+    rule-image-hour existence=2.19 last="1"
+    rule-image-hour size_gb=1.422 last="6"
+  instance vm-active name="vm-active" net=0.15582 minute=107 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-instance-minute existence=0.0214 last="1"
+    rule-instance-minute vcpus=0.00642 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-build name="vm-build" net=0 minute=0 hour=0 month=0 marks=2026-10-31T09:02:11Z|2026-10-31T09:02:11Z|-
+  instance vm-nomark name="vm-nomark" net=0.4204301075268817 minute=1 hour=1 month=2 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=51.05295 minute=107 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-instance_traffic-minute existence=0.1819 last="1"
+    rule-instance_traffic-hour existence=0.38 last="1"
+    rule-instance_traffic-usage total_traffic_mb=50.49105 last="1234.5"
+  kubernetes_cluster k8s name="k8s" net=7.88635 minute=195 hour=4 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-kubernetes_cluster-minute existence=1.8915 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.59085 last="3"
+    rule-kubernetes_cluster-hour existence=4.12 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.284 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=4.34104 minute=19 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox-minute existence=0.5377 last="1"
+    rule-sandbox-minute vcpus=0.11134 last="2"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.622 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=5.5624 minute=35 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox_snapshot-minute existence=1.1585 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.2359 last="2"
+    rule-sandbox_snapshot-hour existence=3.47 last="1"
+    rule-sandbox_snapshot-hour size_gb=0.698 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=19.7 minute=80 hour=2 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-server_protection-minute existence=1.816 last="1"
+    rule-server_protection-minute size_gb=3.664 last="20"
+    rule-server_protection-hour existence=4.66 last="1"
+    rule-server_protection-hour size_gb=9.56 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=12.4165 minute=55 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-server_snapshot-minute existence=1.4135 last="1"
+    rule-server_snapshot-minute size_gb=2.893 last="20"
+    rule-server_snapshot-hour existence=2.69 last="1"
+    rule-server_snapshot-hour size_gb=5.42 last="20"
+  share shr name="shr" net=30.168 minute=270 hour=5 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-share-minute existence=5.157 last="1"
+    rule-share-minute quota_gb=5.211 last="10"
+    rule-share-hour existence=9.85 last="1"
+    rule-share-hour quota_gb=9.95 last="10"
+  volume vol-archived name="vol-archived" net=1.08 minute=50 hour=1 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=0.145 last="1"
+    rule-volume-minute size=0.155 last="10"
+    rule-volume-hour existence=0.37 last="1"
+    rule-volume-hour size=0.41 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 06: minute at 2026-10-31T10:07:03Z (a later minute)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3392.4185899681391128 items=17
+  bucket bkt name="bkt" net=17.26613 minute=307 hour=5 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-bucket-minute existence=4.8199 last="1"
+    rule-bucket-minute size_gb=1.50123 last="3"
+    rule-bucket-hour existence=8.35 last="1"
+    rule-bucket-hour size_gb=2.595 last="3"
+  database_cluster db name="db" net=11.23818 minute=197 hour=4 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-database_cluster-minute existence=2.5019 last="1"
+    rule-database_cluster-minute vcpus_total=1.03228 last="4"
+    rule-database_cluster-hour existence=5.48 last="1"
+    rule-database_cluster-hour vcpus_total=2.224 last="4"
+  floating_ip fip name="203.0.113.7" net=1.7330197530853494 minute=97 hour=2 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-floating_ip-minute existence=0.5141 last="1"
+    rule-floating_ip-minute-18dp existence=0.0389197530853494 last="1"
+    rule-floating_ip-hour existence=1.18 last="1"
+  image img name="img" net=5.01488 minute=128 hour=3 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-image-minute existence=0.8576 last="1"
+    rule-image-minute size_gb=0.54528 last="6"
+    rule-image-hour existence=2.19 last="1"
+    rule-image-hour size_gb=1.422 last="6"
+  instance vm-active name="vm-active" net=0.15764 minute=114 hour=2 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-instance-minute existence=0.0228 last="1"
+    rule-instance-minute vcpus=0.00684 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-build name="vm-build" net=0 minute=0 hour=0 month=0 marks=2026-10-31T09:02:11Z|2026-10-31T09:02:11Z|-
+  instance vm-nomark name="vm-nomark" net=0.9069402150537634 minute=8 hour=1 month=2 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.0016 last="1"
+    rule-instance-minute vcpus=0.00048 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=51.06485 minute=114 hour=2 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-instance_traffic-minute existence=0.1938 last="1"
+    rule-instance_traffic-hour existence=0.38 last="1"
+    rule-instance_traffic-usage total_traffic_mb=50.49105 last="1234.5"
+  kubernetes_cluster k8s name="k8s" net=7.97546 minute=202 hour=4 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-kubernetes_cluster-minute existence=1.9594 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.61206 last="3"
+    rule-kubernetes_cluster-hour existence=4.12 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.284 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=4.58016 minute=26 hour=1 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox-minute existence=0.7358 last="1"
+    rule-sandbox-minute vcpus=0.15236 last="2"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.622 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=5.84128 minute=42 hour=1 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox_snapshot-minute existence=1.3902 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.28308 last="2"
+    rule-sandbox_snapshot-hour existence=3.47 last="1"
+    rule-sandbox_snapshot-hour size_gb=0.698 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=20.1795 minute=87 hour=2 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-server_protection-minute existence=1.9749 last="1"
+    rule-server_protection-minute size_gb=3.9846 last="20"
+    rule-server_protection-hour existence=4.66 last="1"
+    rule-server_protection-hour size_gb=9.56 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=12.9646 minute=62 hour=1 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-server_snapshot-minute existence=1.5934 last="1"
+    rule-server_snapshot-minute size_gb=3.2612 last="20"
+    rule-server_snapshot-hour existence=2.69 last="1"
+    rule-server_snapshot-hour size_gb=5.42 last="20"
+  share shr name="shr" net=30.4368 minute=277 hour=5 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-share-minute existence=5.2907 last="1"
+    rule-share-minute quota_gb=5.3461 last="10"
+    rule-share-hour existence=9.85 last="1"
+    rule-share-hour quota_gb=9.95 last="10"
+  volume vol-archived name="vol-archived" net=1.122 minute=57 hour=1 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=0.1653 last="1"
+    rule-volume-minute size=0.1767 last="10"
+    rule-volume-hour existence=0.37 last="1"
+    rule-volume-hour size=0.41 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 07: minute at 2026-10-31T10:03:03Z (an earlier minute, out of order)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3392.4185899681391128 items=17
+  bucket bkt name="bkt" net=17.26613 minute=307 hour=5 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-bucket-minute existence=4.8199 last="1"
+    rule-bucket-minute size_gb=1.50123 last="3"
+    rule-bucket-hour existence=8.35 last="1"
+    rule-bucket-hour size_gb=2.595 last="3"
+  database_cluster db name="db" net=11.23818 minute=197 hour=4 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-database_cluster-minute existence=2.5019 last="1"
+    rule-database_cluster-minute vcpus_total=1.03228 last="4"
+    rule-database_cluster-hour existence=5.48 last="1"
+    rule-database_cluster-hour vcpus_total=2.224 last="4"
+  floating_ip fip name="203.0.113.7" net=1.7330197530853494 minute=97 hour=2 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-floating_ip-minute existence=0.5141 last="1"
+    rule-floating_ip-minute-18dp existence=0.0389197530853494 last="1"
+    rule-floating_ip-hour existence=1.18 last="1"
+  image img name="img" net=5.01488 minute=128 hour=3 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-image-minute existence=0.8576 last="1"
+    rule-image-minute size_gb=0.54528 last="6"
+    rule-image-hour existence=2.19 last="1"
+    rule-image-hour size_gb=1.422 last="6"
+  instance vm-active name="vm-active" net=0.15764 minute=114 hour=2 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-instance-minute existence=0.0228 last="1"
+    rule-instance-minute vcpus=0.00684 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-build name="vm-build" net=0 minute=0 hour=0 month=0 marks=2026-10-31T09:02:11Z|2026-10-31T09:02:11Z|-
+  instance vm-nomark name="vm-nomark" net=0.9069402150537634 minute=8 hour=1 month=2 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.0016 last="1"
+    rule-instance-minute vcpus=0.00048 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=51.06485 minute=114 hour=2 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-instance_traffic-minute existence=0.1938 last="1"
+    rule-instance_traffic-hour existence=0.38 last="1"
+    rule-instance_traffic-usage total_traffic_mb=50.49105 last="1234.5"
+  kubernetes_cluster k8s name="k8s" net=7.97546 minute=202 hour=4 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-kubernetes_cluster-minute existence=1.9594 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.61206 last="3"
+    rule-kubernetes_cluster-hour existence=4.12 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.284 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=4.58016 minute=26 hour=1 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox-minute existence=0.7358 last="1"
+    rule-sandbox-minute vcpus=0.15236 last="2"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.622 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=5.84128 minute=42 hour=1 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox_snapshot-minute existence=1.3902 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.28308 last="2"
+    rule-sandbox_snapshot-hour existence=3.47 last="1"
+    rule-sandbox_snapshot-hour size_gb=0.698 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=20.1795 minute=87 hour=2 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-server_protection-minute existence=1.9749 last="1"
+    rule-server_protection-minute size_gb=3.9846 last="20"
+    rule-server_protection-hour existence=4.66 last="1"
+    rule-server_protection-hour size_gb=9.56 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=12.9646 minute=62 hour=1 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-server_snapshot-minute existence=1.5934 last="1"
+    rule-server_snapshot-minute size_gb=3.2612 last="20"
+    rule-server_snapshot-hour existence=2.69 last="1"
+    rule-server_snapshot-hour size_gb=5.42 last="20"
+  share shr name="shr" net=30.4368 minute=277 hour=5 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-share-minute existence=5.2907 last="1"
+    rule-share-minute quota_gb=5.3461 last="10"
+    rule-share-hour existence=9.85 last="1"
+    rule-share-hour quota_gb=9.95 last="10"
+  volume vol-archived name="vol-archived" net=1.122 minute=57 hour=1 month=0 marks=2026-10-31T10:07:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=0.1653 last="1"
+    rule-volume-minute size=0.1767 last="10"
+    rule-volume-hour existence=0.37 last="1"
+    rule-volume-hour size=0.41 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 08: minute at 2026-10-31T10:12:05Z (the BUILD server came up; more traffic)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3394.1134961409785638 items=17
+  bucket bkt name="bkt" net=17.36908 minute=312 hour=5 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-bucket-minute existence=4.8984 last="1"
+    rule-bucket-minute size_gb=1.52568 last="3"
+    rule-bucket-hour existence=8.35 last="1"
+    rule-bucket-hour size_gb=2.595 last="3"
+  database_cluster db name="db" net=11.32788 minute=202 hour=4 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-database_cluster-minute existence=2.5654 last="1"
+    rule-database_cluster-minute vcpus_total=1.05848 last="4"
+    rule-database_cluster-hour existence=5.48 last="1"
+    rule-database_cluster-hour vcpus_total=2.224 last="4"
+  floating_ip fip name="203.0.113.7" net=1.7615259259248004 minute=102 hour=2 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-floating_ip-minute existence=0.5406 last="1"
+    rule-floating_ip-minute-18dp existence=0.0409259259248004 last="1"
+    rule-floating_ip-hour existence=1.18 last="1"
+  image img name="img" net=5.06968 minute=133 hour=3 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-image-minute existence=0.8911 last="1"
+    rule-image-minute size_gb=0.56658 last="6"
+    rule-image-hour existence=2.19 last="1"
+    rule-image-hour size_gb=1.422 last="6"
+  instance vm-active name="vm-active" net=0.15894 minute=119 hour=2 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-instance-minute existence=0.0238 last="1"
+    rule-instance-minute vcpus=0.00714 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-build name="vm-build" net=0.0182 minute=70 hour=0 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T09:02:11Z|-
+    rule-instance-minute existence=0.014 last="1"
+    rule-instance-minute vcpus=0.0042 last="2"
+  instance vm-nomark name="vm-nomark" net=0.9082402150537634 minute=13 hour=1 month=2 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.0026 last="1"
+    rule-instance-minute vcpus=0.00078 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=51.07335 minute=119 hour=2 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.38 last="1"
+    rule-instance_traffic-usage total_traffic_mb=50.49105 last="1234.5"
+  kubernetes_cluster k8s name="k8s" net=8.03911 minute=207 hour=4 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-kubernetes_cluster-minute existence=2.0079 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.62721 last="3"
+    rule-kubernetes_cluster-hour existence=4.12 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.284 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=4.75096 minute=31 hour=1 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox-minute existence=0.8773 last="1"
+    rule-sandbox-minute vcpus=0.18166 last="2"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.622 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=6.04048 minute=47 hour=1 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-sandbox_snapshot-minute existence=1.5557 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.31678 last="2"
+    rule-sandbox_snapshot-hour existence=3.47 last="1"
+    rule-sandbox_snapshot-hour size_gb=0.698 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=20.522 minute=92 hour=2 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-server_protection-minute existence=2.0884 last="1"
+    rule-server_protection-minute size_gb=4.2136 last="20"
+    rule-server_protection-hour existence=4.66 last="1"
+    rule-server_protection-hour size_gb=9.56 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=13.3561 minute=67 hour=1 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-server_snapshot-minute existence=1.7219 last="1"
+    rule-server_snapshot-minute size_gb=3.5242 last="20"
+    rule-server_snapshot-hour existence=2.69 last="1"
+    rule-server_snapshot-hour size_gb=5.42 last="20"
+  share shr name="shr" net=30.6288 minute=282 hour=5 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-share-minute existence=5.3862 last="1"
+    rule-share-minute quota_gb=5.4426 last="10"
+    rule-share-hour existence=9.85 last="1"
+    rule-share-hour quota_gb=9.95 last="10"
+  volume vol-archived name="vol-archived" net=1.152 minute=62 hour=1 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=0.1798 last="1"
+    rule-volume-minute size=0.1922 last="10"
+    rule-volume-hour existence=0.37 last="1"
+    rule-volume-hour size=0.41 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 09: hour at 2026-10-31T11:00:09Z (the usage total is replaced)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3460.9586711409785638 items=17
+  bucket bkt name="bkt" net=19.55808 minute=312 hour=6 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-bucket-minute existence=4.8984 last="1"
+    rule-bucket-minute size_gb=1.52568 last="3"
+    rule-bucket-hour existence=10.02 last="1"
+    rule-bucket-hour size_gb=3.114 last="3"
+  database_cluster db name="db" net=13.25388 minute=202 hour=5 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-database_cluster-minute existence=2.5654 last="1"
+    rule-database_cluster-minute vcpus_total=1.05848 last="4"
+    rule-database_cluster-hour existence=6.85 last="1"
+    rule-database_cluster-hour vcpus_total=2.78 last="4"
+  floating_ip fip name="203.0.113.7" net=2.3515259259248004 minute=102 hour=3 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-floating_ip-minute existence=0.5406 last="1"
+    rule-floating_ip-minute-18dp existence=0.0409259259248004 last="1"
+    rule-floating_ip-hour existence=1.77 last="1"
+  image img name="img" net=6.27368 minute=133 hour=4 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-image-minute existence=0.8911 last="1"
+    rule-image-minute size_gb=0.56658 last="6"
+    rule-image-hour existence=2.92 last="1"
+    rule-image-hour size_gb=1.896 last="6"
+  instance vm-active name="vm-active" net=0.22294 minute=119 hour=3 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-instance-minute existence=0.0238 last="1"
+    rule-instance-minute vcpus=0.00714 last="2"
+    rule-instance-hour existence=0.15 last="1"
+    rule-instance-hour vcpus=0.042 last="2"
+  instance vm-build name="vm-build" net=0.1462 minute=70 hour=2 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-instance-minute existence=0.014 last="1"
+    rule-instance-minute vcpus=0.0042 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-nomark name="vm-nomark" net=0.9722402150537634 minute=13 hour=2 month=2 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.0026 last="1"
+    rule-instance-minute vcpus=0.00078 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=82.582525 minute=119 hour=3 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.57 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=9.39011 minute=207 hour=5 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-kubernetes_cluster-minute existence=2.0079 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.62721 last="3"
+    rule-kubernetes_cluster-hour existence=5.15 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.605 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=8.44296 minute=31 hour=2 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-sandbox-minute existence=0.8773 last="1"
+    rule-sandbox-minute vcpus=0.18166 last="2"
+    rule-sandbox-hour existence=6.14 last="1"
+    rule-sandbox-hour vcpus=1.244 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=10.20848 minute=47 hour=2 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-sandbox_snapshot-minute existence=1.5557 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.31678 last="2"
+    rule-sandbox_snapshot-hour existence=6.94 last="1"
+    rule-sandbox_snapshot-hour size_gb=1.396 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=27.632 minute=92 hour=3 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-server_protection-minute existence=2.0884 last="1"
+    rule-server_protection-minute size_gb=4.2136 last="20"
+    rule-server_protection-hour existence=6.99 last="1"
+    rule-server_protection-hour size_gb=14.34 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=21.4661 minute=67 hour=2 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-server_snapshot-minute existence=1.7219 last="1"
+    rule-server_snapshot-minute size_gb=3.5242 last="20"
+    rule-server_snapshot-hour existence=5.38 last="1"
+    rule-server_snapshot-hour size_gb=10.84 last="20"
+  share shr name="shr" net=34.5888 minute=282 hour=6 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-share-minute existence=5.3862 last="1"
+    rule-share-minute quota_gb=5.4426 last="10"
+    rule-share-hour existence=11.82 last="1"
+    rule-share-hour quota_gb=11.94 last="10"
+  volume vol-archived name="vol-archived" net=1.932 minute=62 hour=2 month=0 marks=2026-10-31T10:12:00Z|2026-10-31T11:00:00Z|-
+    rule-volume-minute existence=0.1798 last="1"
+    rule-volume-minute size=0.1922 last="10"
+    rule-volume-hour existence=0.74 last="1"
+    rule-volume-hour size=0.82 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T10:00:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 10: minute at 2026-10-31T11:20:04Z (the heartbeat is 31 minutes old: written off)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3460.9586711409785638 items=17
+  bucket bkt name="bkt" net=19.55808 minute=312 hour=6 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-bucket-minute existence=4.8984 last="1"
+    rule-bucket-minute size_gb=1.52568 last="3"
+    rule-bucket-hour existence=10.02 last="1"
+    rule-bucket-hour size_gb=3.114 last="3"
+  database_cluster db name="db" net=13.25388 minute=202 hour=5 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-database_cluster-minute existence=2.5654 last="1"
+    rule-database_cluster-minute vcpus_total=1.05848 last="4"
+    rule-database_cluster-hour existence=6.85 last="1"
+    rule-database_cluster-hour vcpus_total=2.78 last="4"
+  floating_ip fip name="203.0.113.7" net=2.3515259259248004 minute=102 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-floating_ip-minute existence=0.5406 last="1"
+    rule-floating_ip-minute-18dp existence=0.0409259259248004 last="1"
+    rule-floating_ip-hour existence=1.77 last="1"
+  image img name="img" net=6.27368 minute=133 hour=4 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-image-minute existence=0.8911 last="1"
+    rule-image-minute size_gb=0.56658 last="6"
+    rule-image-hour existence=2.92 last="1"
+    rule-image-hour size_gb=1.896 last="6"
+  instance vm-active name="vm-active" net=0.22294 minute=119 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-instance-minute existence=0.0238 last="1"
+    rule-instance-minute vcpus=0.00714 last="2"
+    rule-instance-hour existence=0.15 last="1"
+    rule-instance-hour vcpus=0.042 last="2"
+  instance vm-build name="vm-build" net=0.1462 minute=70 hour=2 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-instance-minute existence=0.014 last="1"
+    rule-instance-minute vcpus=0.0042 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-nomark name="vm-nomark" net=0.9722402150537634 minute=13 hour=2 month=2 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.0026 last="1"
+    rule-instance-minute vcpus=0.00078 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=82.582525 minute=119 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.57 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=9.39011 minute=207 hour=5 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-kubernetes_cluster-minute existence=2.0079 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.62721 last="3"
+    rule-kubernetes_cluster-hour existence=5.15 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.605 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=8.44296 minute=31 hour=2 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-sandbox-minute existence=0.8773 last="1"
+    rule-sandbox-minute vcpus=0.18166 last="2"
+    rule-sandbox-hour existence=6.14 last="1"
+    rule-sandbox-hour vcpus=1.244 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=10.20848 minute=47 hour=2 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-sandbox_snapshot-minute existence=1.5557 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.31678 last="2"
+    rule-sandbox_snapshot-hour existence=6.94 last="1"
+    rule-sandbox_snapshot-hour size_gb=1.396 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=27.632 minute=92 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-server_protection-minute existence=2.0884 last="1"
+    rule-server_protection-minute size_gb=4.2136 last="20"
+    rule-server_protection-hour existence=6.99 last="1"
+    rule-server_protection-hour size_gb=14.34 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=21.4661 minute=67 hour=2 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-server_snapshot-minute existence=1.7219 last="1"
+    rule-server_snapshot-minute size_gb=3.5242 last="20"
+    rule-server_snapshot-hour existence=5.38 last="1"
+    rule-server_snapshot-hour size_gb=10.84 last="20"
+  share shr name="shr" net=34.5888 minute=282 hour=6 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-share-minute existence=5.3862 last="1"
+    rule-share-minute quota_gb=5.4426 last="10"
+    rule-share-hour existence=11.82 last="1"
+    rule-share-hour quota_gb=11.94 last="10"
+  volume vol-archived name="vol-archived" net=1.932 minute=62 hour=2 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T11:00:00Z|-
+    rule-volume-minute existence=0.1798 last="1"
+    rule-volume-minute size=0.1922 last="10"
+    rule-volume-hour existence=0.74 last="1"
+    rule-volume-hour size=0.82 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T10:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 11: hour at 2026-10-31T12:00:04Z (stale on an hour pass)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3460.9586711409785638 items=17
+  bucket bkt name="bkt" net=19.55808 minute=312 hour=6 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-bucket-minute existence=4.8984 last="1"
+    rule-bucket-minute size_gb=1.52568 last="3"
+    rule-bucket-hour existence=10.02 last="1"
+    rule-bucket-hour size_gb=3.114 last="3"
+  database_cluster db name="db" net=13.25388 minute=202 hour=5 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-database_cluster-minute existence=2.5654 last="1"
+    rule-database_cluster-minute vcpus_total=1.05848 last="4"
+    rule-database_cluster-hour existence=6.85 last="1"
+    rule-database_cluster-hour vcpus_total=2.78 last="4"
+  floating_ip fip name="203.0.113.7" net=2.3515259259248004 minute=102 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-floating_ip-minute existence=0.5406 last="1"
+    rule-floating_ip-minute-18dp existence=0.0409259259248004 last="1"
+    rule-floating_ip-hour existence=1.77 last="1"
+  image img name="img" net=6.27368 minute=133 hour=4 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-image-minute existence=0.8911 last="1"
+    rule-image-minute size_gb=0.56658 last="6"
+    rule-image-hour existence=2.92 last="1"
+    rule-image-hour size_gb=1.896 last="6"
+  instance vm-active name="vm-active" net=0.22294 minute=119 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-instance-minute existence=0.0238 last="1"
+    rule-instance-minute vcpus=0.00714 last="2"
+    rule-instance-hour existence=0.15 last="1"
+    rule-instance-hour vcpus=0.042 last="2"
+  instance vm-build name="vm-build" net=0.1462 minute=70 hour=2 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-instance-minute existence=0.014 last="1"
+    rule-instance-minute vcpus=0.0042 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-nomark name="vm-nomark" net=0.9722402150537634 minute=13 hour=2 month=2 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.0026 last="1"
+    rule-instance-minute vcpus=0.00078 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=82.582525 minute=119 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.57 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=9.39011 minute=207 hour=5 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-kubernetes_cluster-minute existence=2.0079 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.62721 last="3"
+    rule-kubernetes_cluster-hour existence=5.15 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.605 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=8.44296 minute=31 hour=2 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-sandbox-minute existence=0.8773 last="1"
+    rule-sandbox-minute vcpus=0.18166 last="2"
+    rule-sandbox-hour existence=6.14 last="1"
+    rule-sandbox-hour vcpus=1.244 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=10.20848 minute=47 hour=2 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-sandbox_snapshot-minute existence=1.5557 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.31678 last="2"
+    rule-sandbox_snapshot-hour existence=6.94 last="1"
+    rule-sandbox_snapshot-hour size_gb=1.396 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=27.632 minute=92 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-server_protection-minute existence=2.0884 last="1"
+    rule-server_protection-minute size_gb=4.2136 last="20"
+    rule-server_protection-hour existence=6.99 last="1"
+    rule-server_protection-hour size_gb=14.34 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=21.4661 minute=67 hour=2 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-server_snapshot-minute existence=1.7219 last="1"
+    rule-server_snapshot-minute size_gb=3.5242 last="20"
+    rule-server_snapshot-hour existence=5.38 last="1"
+    rule-server_snapshot-hour size_gb=10.84 last="20"
+  share shr name="shr" net=34.5888 minute=282 hour=6 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-share-minute existence=5.3862 last="1"
+    rule-share-minute quota_gb=5.4426 last="10"
+    rule-share-hour existence=11.82 last="1"
+    rule-share-hour quota_gb=11.94 last="10"
+  volume vol-archived name="vol-archived" net=1.932 minute=62 hour=2 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=0.1798 last="1"
+    rule-volume-minute size=0.1922 last="10"
+    rule-volume-hour existence=0.74 last="1"
+    rule-volume-hour size=0.82 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 12: minute at 2026-10-31T12:02:04Z (after recovery)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3474.9825229928299522 items=17
+  bucket bkt name="bkt" net=20.42286 minute=354 hour=6 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-bucket-minute existence=5.5578 last="1"
+    rule-bucket-minute size_gb=1.73106 last="3"
+    rule-bucket-hour existence=10.02 last="1"
+    rule-bucket-hour size_gb=3.114 last="3"
+  database_cluster db name="db" net=14.00736 minute=244 hour=5 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-database_cluster-minute existence=3.0988 last="1"
+    rule-database_cluster-minute vcpus_total=1.27856 last="4"
+    rule-database_cluster-hour existence=6.85 last="1"
+    rule-database_cluster-hour vcpus_total=2.78 last="4"
+  floating_ip fip name="203.0.113.7" net=2.5909777777761888 minute=144 hour=3 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-floating_ip-minute existence=0.7632 last="1"
+    rule-floating_ip-minute-18dp existence=0.0577777777761888 last="1"
+    rule-floating_ip-hour existence=1.77 last="1"
+  image img name="img" net=6.734 minute=175 hour=4 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-image-minute existence=1.1725 last="1"
+    rule-image-minute size_gb=0.7455 last="6"
+    rule-image-hour existence=2.92 last="1"
+    rule-image-hour size_gb=1.896 last="6"
+  instance vm-active name="vm-active" net=0.23386 minute=161 hour=3 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-instance-minute existence=0.0322 last="1"
+    rule-instance-minute vcpus=0.00966 last="2"
+    rule-instance-hour existence=0.15 last="1"
+    rule-instance-hour vcpus=0.042 last="2"
+  instance vm-build name="vm-build" net=0.15712 minute=112 hour=2 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-instance-minute existence=0.0224 last="1"
+    rule-instance-minute vcpus=0.00672 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-nomark name="vm-nomark" net=0.9831602150537634 minute=55 hour=2 month=2 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.011 last="1"
+    rule-instance-minute vcpus=0.0033 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=82.582525 minute=119 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.57 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=9.92477 minute=249 hour=5 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-kubernetes_cluster-minute existence=2.4153 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.75447 last="3"
+    rule-kubernetes_cluster-hour existence=5.15 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.605 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=9.87768 minute=73 hour=2 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-sandbox-minute existence=2.0659 last="1"
+    rule-sandbox-minute vcpus=0.42778 last="2"
+    rule-sandbox-hour existence=6.14 last="1"
+    rule-sandbox-hour vcpus=1.244 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=11.88176 minute=89 hour=2 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-sandbox_snapshot-minute existence=2.9459 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.59986 last="2"
+    rule-sandbox_snapshot-hour existence=6.94 last="1"
+    rule-sandbox_snapshot-hour size_gb=1.396 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=30.509 minute=134 hour=3 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-server_protection-minute existence=3.0418 last="1"
+    rule-server_protection-minute size_gb=6.1372 last="20"
+    rule-server_protection-hour existence=6.99 last="1"
+    rule-server_protection-hour size_gb=14.34 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=24.7547 minute=109 hour=2 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-server_snapshot-minute existence=2.8013 last="1"
+    rule-server_snapshot-minute size_gb=5.7334 last="20"
+    rule-server_snapshot-hour existence=5.38 last="1"
+    rule-server_snapshot-hour size_gb=10.84 last="20"
+  share shr name="shr" net=36.2016 minute=324 hour=6 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-share-minute existence=6.1884 last="1"
+    rule-share-minute quota_gb=6.2532 last="10"
+    rule-share-hour existence=11.82 last="1"
+    rule-share-hour quota_gb=11.94 last="10"
+  volume vol-archived name="vol-archived" net=2.184 minute=104 hour=2 month=0 marks=2026-10-31T12:02:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=0.3016 last="1"
+    rule-volume-minute size=0.3224 last="10"
+    rule-volume-hour existence=0.74 last="1"
+    rule-volume-hour size=0.82 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 13: minute at 2026-10-31T12:06:02Z (a volume was archived at 12:05:40)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3476.318127931101513 items=17
+  bucket bkt name="bkt" net=20.50522 minute=358 hour=6 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-bucket-minute existence=5.6206 last="1"
+    rule-bucket-minute size_gb=1.75062 last="3"
+    rule-bucket-hour existence=10.02 last="1"
+    rule-bucket-hour size_gb=3.114 last="3"
+  database_cluster db name="db" net=14.07912 minute=248 hour=5 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-database_cluster-minute existence=3.1496 last="1"
+    rule-database_cluster-minute vcpus_total=1.29952 last="4"
+    rule-database_cluster-hour existence=6.85 last="1"
+    rule-database_cluster-hour vcpus_total=2.78 last="4"
+  floating_ip fip name="203.0.113.7" net=2.6137827160477496 minute=148 hour=3 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-floating_ip-minute existence=0.7844 last="1"
+    rule-floating_ip-minute-18dp existence=0.0593827160477496 last="1"
+    rule-floating_ip-hour existence=1.77 last="1"
+  image img name="img" net=6.77784 minute=179 hour=4 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-image-minute existence=1.1993 last="1"
+    rule-image-minute size_gb=0.76254 last="6"
+    rule-image-hour existence=2.92 last="1"
+    rule-image-hour size_gb=1.896 last="6"
+  instance vm-active name="vm-active" net=0.2349 minute=165 hour=3 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-instance-minute existence=0.033 last="1"
+    rule-instance-minute vcpus=0.0099 last="2"
+    rule-instance-hour existence=0.15 last="1"
+    rule-instance-hour vcpus=0.042 last="2"
+  instance vm-build name="vm-build" net=0.15816 minute=116 hour=2 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-instance-minute existence=0.0232 last="1"
+    rule-instance-minute vcpus=0.00696 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-nomark name="vm-nomark" net=0.9842002150537634 minute=59 hour=2 month=2 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.0118 last="1"
+    rule-instance-minute vcpus=0.00354 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=82.582525 minute=119 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.57 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=9.97569 minute=253 hour=5 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-kubernetes_cluster-minute existence=2.4541 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.76659 last="3"
+    rule-kubernetes_cluster-hour existence=5.15 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.605 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=10.01432 minute=77 hour=2 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-sandbox-minute existence=2.1791 last="1"
+    rule-sandbox-minute vcpus=0.45122 last="2"
+    rule-sandbox-hour existence=6.14 last="1"
+    rule-sandbox-hour vcpus=1.244 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=12.04112 minute=93 hour=2 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-sandbox_snapshot-minute existence=3.0783 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.62682 last="2"
+    rule-sandbox_snapshot-hour existence=6.94 last="1"
+    rule-sandbox_snapshot-hour size_gb=1.396 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=30.783 minute=138 hour=3 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-server_protection-minute existence=3.1326 last="1"
+    rule-server_protection-minute size_gb=6.3204 last="20"
+    rule-server_protection-hour existence=6.99 last="1"
+    rule-server_protection-hour size_gb=14.34 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=25.0679 minute=113 hour=2 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-server_snapshot-minute existence=2.9041 last="1"
+    rule-server_snapshot-minute size_gb=5.9438 last="20"
+    rule-server_snapshot-hour existence=5.38 last="1"
+    rule-server_snapshot-hour size_gb=10.84 last="20"
+  share shr name="shr" net=36.3552 minute=328 hour=6 month=0 marks=2026-10-31T12:06:00Z|2026-10-31T12:00:00Z|-
+    rule-share-minute existence=6.2648 last="1"
+    rule-share-minute quota_gb=6.3304 last="10"
+    rule-share-hour existence=11.82 last="1"
+    rule-share-hour quota_gb=11.94 last="10"
+  volume vol-archived name="vol-archived" net=2.208 minute=108 hour=2 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=0.74 last="1"
+    rule-volume-hour size=0.82 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 14: minute at 2026-10-31T12:07:02Z (the archived row again)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3476.6460291656694032 items=17
+  bucket bkt name="bkt" net=20.52581 minute=359 hour=6 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-bucket-minute existence=5.6363 last="1"
+    rule-bucket-minute size_gb=1.75551 last="3"
+    rule-bucket-hour existence=10.02 last="1"
+    rule-bucket-hour size_gb=3.114 last="3"
+  database_cluster db name="db" net=14.09706 minute=249 hour=5 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-database_cluster-minute existence=3.1623 last="1"
+    rule-database_cluster-minute vcpus_total=1.30476 last="4"
+    rule-database_cluster-hour existence=6.85 last="1"
+    rule-database_cluster-hour vcpus_total=2.78 last="4"
+  floating_ip fip name="203.0.113.7" net=2.6194839506156398 minute=149 hour=3 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-floating_ip-minute existence=0.7897 last="1"
+    rule-floating_ip-minute-18dp existence=0.0597839506156398 last="1"
+    rule-floating_ip-hour existence=1.77 last="1"
+  image img name="img" net=6.7888 minute=180 hour=4 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-image-minute existence=1.206 last="1"
+    rule-image-minute size_gb=0.7668 last="6"
+    rule-image-hour existence=2.92 last="1"
+    rule-image-hour size_gb=1.896 last="6"
+  instance vm-active name="vm-active" net=0.23516 minute=166 hour=3 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-instance-minute existence=0.0332 last="1"
+    rule-instance-minute vcpus=0.00996 last="2"
+    rule-instance-hour existence=0.15 last="1"
+    rule-instance-hour vcpus=0.042 last="2"
+  instance vm-build name="vm-build" net=0.15842 minute=117 hour=2 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-instance-minute existence=0.0234 last="1"
+    rule-instance-minute vcpus=0.00702 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+  instance vm-nomark name="vm-nomark" net=0.9844602150537634 minute=60 hour=2 month=2 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.012 last="1"
+    rule-instance-minute vcpus=0.0036 last="2"
+    rule-instance-hour existence=0.1 last="1"
+    rule-instance-hour vcpus=0.028 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=82.582525 minute=119 hour=3 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.57 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=9.98842 minute=254 hour=5 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-kubernetes_cluster-minute existence=2.4638 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.76962 last="3"
+    rule-kubernetes_cluster-hour existence=5.15 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.605 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=10.04848 minute=78 hour=2 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-sandbox-minute existence=2.2074 last="1"
+    rule-sandbox-minute vcpus=0.45708 last="2"
+    rule-sandbox-hour existence=6.14 last="1"
+    rule-sandbox-hour vcpus=1.244 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=12.08096 minute=94 hour=2 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-sandbox_snapshot-minute existence=3.1114 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.63356 last="2"
+    rule-sandbox_snapshot-hour existence=6.94 last="1"
+    rule-sandbox_snapshot-hour size_gb=1.396 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=30.8515 minute=139 hour=3 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-server_protection-minute existence=3.1553 last="1"
+    rule-server_protection-minute size_gb=6.3662 last="20"
+    rule-server_protection-hour existence=6.99 last="1"
+    rule-server_protection-hour size_gb=14.34 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=25.1462 minute=114 hour=2 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-server_snapshot-minute existence=2.9298 last="1"
+    rule-server_snapshot-minute size_gb=5.9964 last="20"
+    rule-server_snapshot-hour existence=5.38 last="1"
+    rule-server_snapshot-hour size_gb=10.84 last="20"
+  share shr name="shr" net=36.3936 minute=329 hour=6 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T12:00:00Z|-
+    rule-share-minute existence=6.2839 last="1"
+    rule-share-minute quota_gb=6.3497 last="10"
+    rule-share-hour existence=11.82 last="1"
+    rule-share-hour quota_gb=11.94 last="10"
+  volume vol-archived name="vol-archived" net=2.208 minute=108 hour=2 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=0.74 last="1"
+    rule-volume-hour size=0.82 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 15: hour at 2026-10-31T13:00:02Z (the archived row on an hour pass)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3512.1080291656694032 items=17
+  bucket bkt name="bkt" net=22.71481 minute=359 hour=7 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-bucket-minute existence=5.6363 last="1"
+    rule-bucket-minute size_gb=1.75551 last="3"
+    rule-bucket-hour existence=11.69 last="1"
+    rule-bucket-hour size_gb=3.633 last="3"
+  database_cluster db name="db" net=16.02306 minute=249 hour=6 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-database_cluster-minute existence=3.1623 last="1"
+    rule-database_cluster-minute vcpus_total=1.30476 last="4"
+    rule-database_cluster-hour existence=8.22 last="1"
+    rule-database_cluster-hour vcpus_total=3.336 last="4"
+  floating_ip fip name="203.0.113.7" net=3.2094839506156398 minute=149 hour=4 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-floating_ip-minute existence=0.7897 last="1"
+    rule-floating_ip-minute-18dp existence=0.0597839506156398 last="1"
+    rule-floating_ip-hour existence=2.36 last="1"
+  image img name="img" net=7.9928 minute=180 hour=5 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-image-minute existence=1.206 last="1"
+    rule-image-minute size_gb=0.7668 last="6"
+    rule-image-hour existence=3.65 last="1"
+    rule-image-hour size_gb=2.37 last="6"
+  instance vm-active name="vm-active" net=0.29916 minute=166 hour=4 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-instance-minute existence=0.0332 last="1"
+    rule-instance-minute vcpus=0.00996 last="2"
+    rule-instance-hour existence=0.2 last="1"
+    rule-instance-hour vcpus=0.056 last="2"
+  instance vm-build name="vm-build" net=0.22242 minute=117 hour=3 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-instance-minute existence=0.0234 last="1"
+    rule-instance-minute vcpus=0.00702 last="2"
+    rule-instance-hour existence=0.15 last="1"
+    rule-instance-hour vcpus=0.042 last="2"
+  instance vm-nomark name="vm-nomark" net=1.0484602150537634 minute=60 hour=3 month=2 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.012 last="1"
+    rule-instance-minute vcpus=0.0036 last="2"
+    rule-instance-hour existence=0.15 last="1"
+    rule-instance-hour vcpus=0.042 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=82.772525 minute=119 hour=4 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T13:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.76 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=11.33942 minute=254 hour=6 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-kubernetes_cluster-minute existence=2.4638 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.76962 last="3"
+    rule-kubernetes_cluster-hour existence=6.18 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=1.926 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=13.74048 minute=78 hour=3 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-sandbox-minute existence=2.2074 last="1"
+    rule-sandbox-minute vcpus=0.45708 last="2"
+    rule-sandbox-hour existence=9.21 last="1"
+    rule-sandbox-hour vcpus=1.866 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=16.24896 minute=94 hour=3 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-sandbox_snapshot-minute existence=3.1114 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.63356 last="2"
+    rule-sandbox_snapshot-hour existence=10.41 last="1"
+    rule-sandbox_snapshot-hour size_gb=2.094 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=37.9615 minute=139 hour=4 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-server_protection-minute existence=3.1553 last="1"
+    rule-server_protection-minute size_gb=6.3662 last="20"
+    rule-server_protection-hour existence=9.32 last="1"
+    rule-server_protection-hour size_gb=19.12 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=33.2562 minute=114 hour=3 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-server_snapshot-minute existence=2.9298 last="1"
+    rule-server_snapshot-minute size_gb=5.9964 last="20"
+    rule-server_snapshot-hour existence=8.07 last="1"
+    rule-server_snapshot-hour size_gb=16.26 last="20"
+  share shr name="shr" net=40.3536 minute=329 hour=7 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T13:00:00Z|-
+    rule-share-minute existence=6.2839 last="1"
+    rule-share-minute quota_gb=6.3497 last="10"
+    rule-share-hour existence=13.79 last="1"
+    rule-share-hour quota_gb=13.93 last="10"
+  volume vol-archived name="vol-archived" net=2.988 minute=108 hour=3 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:05:40Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=1.11 last="1"
+    rule-volume-hour size=1.23 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 16: hour at 2026-10-31T14:00:02Z (and again)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3546.7900291656694032 items=17
+  bucket bkt name="bkt" net=24.90381 minute=359 hour=8 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-bucket-minute existence=5.6363 last="1"
+    rule-bucket-minute size_gb=1.75551 last="3"
+    rule-bucket-hour existence=13.36 last="1"
+    rule-bucket-hour size_gb=4.152 last="3"
+  database_cluster db name="db" net=17.94906 minute=249 hour=7 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-database_cluster-minute existence=3.1623 last="1"
+    rule-database_cluster-minute vcpus_total=1.30476 last="4"
+    rule-database_cluster-hour existence=9.59 last="1"
+    rule-database_cluster-hour vcpus_total=3.892 last="4"
+  floating_ip fip name="203.0.113.7" net=3.7994839506156398 minute=149 hour=5 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-floating_ip-minute existence=0.7897 last="1"
+    rule-floating_ip-minute-18dp existence=0.0597839506156398 last="1"
+    rule-floating_ip-hour existence=2.95 last="1"
+  image img name="img" net=9.1968 minute=180 hour=6 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-image-minute existence=1.206 last="1"
+    rule-image-minute size_gb=0.7668 last="6"
+    rule-image-hour existence=4.38 last="1"
+    rule-image-hour size_gb=2.844 last="6"
+  instance vm-active name="vm-active" net=0.36316 minute=166 hour=5 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-instance-minute existence=0.0332 last="1"
+    rule-instance-minute vcpus=0.00996 last="2"
+    rule-instance-hour existence=0.25 last="1"
+    rule-instance-hour vcpus=0.07 last="2"
+  instance vm-build name="vm-build" net=0.28642 minute=117 hour=4 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-instance-minute existence=0.0234 last="1"
+    rule-instance-minute vcpus=0.00702 last="2"
+    rule-instance-hour existence=0.2 last="1"
+    rule-instance-hour vcpus=0.056 last="2"
+  instance vm-nomark name="vm-nomark" net=1.1124602150537634 minute=60 hour=4 month=2 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.012 last="1"
+    rule-instance-minute vcpus=0.0036 last="2"
+    rule-instance-hour existence=0.2 last="1"
+    rule-instance-hour vcpus=0.056 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=82.962525 minute=119 hour=5 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T14:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.95 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=12.69042 minute=254 hour=7 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-kubernetes_cluster-minute existence=2.4638 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.76962 last="3"
+    rule-kubernetes_cluster-hour existence=7.21 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=2.247 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=17.43248 minute=78 hour=4 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-sandbox-minute existence=2.2074 last="1"
+    rule-sandbox-minute vcpus=0.45708 last="2"
+    rule-sandbox-hour existence=12.28 last="1"
+    rule-sandbox-hour vcpus=2.488 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=20.41696 minute=94 hour=4 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-sandbox_snapshot-minute existence=3.1114 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.63356 last="2"
+    rule-sandbox_snapshot-hour existence=13.88 last="1"
+    rule-sandbox_snapshot-hour size_gb=2.792 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=45.0715 minute=139 hour=5 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-server_protection-minute existence=3.1553 last="1"
+    rule-server_protection-minute size_gb=6.3662 last="20"
+    rule-server_protection-hour existence=11.65 last="1"
+    rule-server_protection-hour size_gb=23.9 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=41.3662 minute=114 hour=4 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-server_snapshot-minute existence=2.9298 last="1"
+    rule-server_snapshot-minute size_gb=5.9964 last="20"
+    rule-server_snapshot-hour existence=10.76 last="1"
+    rule-server_snapshot-hour size_gb=21.68 last="20"
+  share shr name="shr" net=44.3136 minute=329 hour=8 month=0 marks=2026-10-31T12:07:00Z|2026-10-31T14:00:00Z|-
+    rule-share-minute existence=6.2839 last="1"
+    rule-share-minute quota_gb=6.3497 last="10"
+    rule-share-hour existence=15.76 last="1"
+    rule-share-hour quota_gb=15.92 last="10"
+  volume vol-archived name="vol-archived" net=2.988 minute=108 hour=3 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:05:40Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=1.11 last="1"
+    rule-volume-hour size=1.23 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 17: minute at 2026-10-31T23:59:02Z (the last minute pass inside the month)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3780.2557081780072256 items=17
+  bucket bkt name="bkt" net=39.56389 minute=1071 hour=8 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-bucket-minute existence=16.8147 last="1"
+    rule-bucket-minute size_gb=5.23719 last="3"
+    rule-bucket-hour existence=13.36 last="1"
+    rule-bucket-hour size_gb=4.152 last="3"
+  database_cluster db name="db" net=30.72234 minute=961 hour=7 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-database_cluster-minute existence=12.2047 last="1"
+    rule-database_cluster-minute vcpus_total=5.03564 last="4"
+    rule-database_cluster-hour existence=9.59 last="1"
+    rule-database_cluster-hour vcpus_total=3.892 last="4"
+  floating_ip fip name="203.0.113.7" net=7.8587629629534622 minute=861 hour=5 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-floating_ip-minute existence=4.5633 last="1"
+    rule-floating_ip-minute-18dp existence=0.3454629629534622 last="1"
+    rule-floating_ip-hour existence=2.95 last="1"
+  image img name="img" net=17.00032 minute=892 hour=6 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-image-minute existence=5.9764 last="1"
+    rule-image-minute size_gb=3.79992 last="6"
+    rule-image-hour existence=4.38 last="1"
+    rule-image-hour size_gb=2.844 last="6"
+  instance vm-active name="vm-active" net=0.54828 minute=878 hour=5 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-instance-minute existence=0.1756 last="1"
+    rule-instance-minute vcpus=0.05268 last="2"
+    rule-instance-hour existence=0.25 last="1"
+    rule-instance-hour vcpus=0.07 last="2"
+  instance vm-build name="vm-build" net=0.47154 minute=829 hour=4 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-instance-minute existence=0.1658 last="1"
+    rule-instance-minute vcpus=0.04974 last="2"
+    rule-instance-hour existence=0.2 last="1"
+    rule-instance-hour vcpus=0.056 last="2"
+  instance vm-nomark name="vm-nomark" net=1.2975802150537634 minute=772 hour=4 month=2 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.1544 last="1"
+    rule-instance-minute vcpus=0.04632 last="2"
+    rule-instance-hour existence=0.2 last="1"
+    rule-instance-hour vcpus=0.056 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=82.962525 minute=119 hour=5 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T14:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.95 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=21.75418 minute=966 hour=7 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-kubernetes_cluster-minute existence=9.3702 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=2.92698 last="3"
+    rule-kubernetes_cluster-hour existence=7.21 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=2.247 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=41.7544 minute=790 hour=4 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-sandbox-minute existence=22.357 last="1"
+    rule-sandbox-minute vcpus=4.6294 last="2"
+    rule-sandbox-hour existence=12.28 last="1"
+    rule-sandbox-hour vcpus=2.488 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=48.78304 minute=806 hour=4 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-sandbox_snapshot-minute existence=26.6786 last="1"
+    rule-sandbox_snapshot-minute size_gb=5.43244 last="2"
+    rule-sandbox_snapshot-hour existence=13.88 last="1"
+    rule-sandbox_snapshot-hour size_gb=2.792 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=93.8435 minute=851 hour=5 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-server_protection-minute existence=19.3177 last="1"
+    rule-server_protection-minute size_gb=38.9758 last="20"
+    rule-server_protection-hour existence=11.65 last="1"
+    rule-server_protection-hour size_gb=23.9 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=97.1158 minute=826 hour=4 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-server_snapshot-minute existence=21.2282 last="1"
+    rule-server_snapshot-minute size_gb=43.4476 last="20"
+    rule-server_snapshot-hour existence=10.76 last="1"
+    rule-server_snapshot-hour size_gb=21.68 last="20"
+  share shr name="shr" net=71.6544 minute=1041 hour=8 month=0 marks=2026-10-31T23:59:00Z|2026-10-31T14:00:00Z|-
+    rule-share-minute existence=19.8831 last="1"
+    rule-share-minute quota_gb=20.0913 last="10"
+    rule-share-hour existence=15.76 last="1"
+    rule-share-hour quota_gb=15.92 last="10"
+  volume vol-archived name="vol-archived" net=2.988 minute=108 hour=3 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:05:40Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=1.11 last="1"
+    rule-volume-hour size=1.23 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 18: minute at 2026-11-01T00:00:03Z (the closing minute pass: 00:00 on the 1st bills October)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=3780.5836094125751158 items=17
+  bucket bkt name="bkt" net=39.58448 minute=1072 hour=8 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-bucket-minute existence=16.8304 last="1"
+    rule-bucket-minute size_gb=5.24208 last="3"
+    rule-bucket-hour existence=13.36 last="1"
+    rule-bucket-hour size_gb=4.152 last="3"
+  database_cluster db name="db" net=30.74028 minute=962 hour=7 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-database_cluster-minute existence=12.2174 last="1"
+    rule-database_cluster-minute vcpus_total=5.04088 last="4"
+    rule-database_cluster-hour existence=9.59 last="1"
+    rule-database_cluster-hour vcpus_total=3.892 last="4"
+  floating_ip fip name="203.0.113.7" net=7.8644641975213524 minute=862 hour=5 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-floating_ip-minute existence=4.5686 last="1"
+    rule-floating_ip-minute-18dp existence=0.3458641975213524 last="1"
+    rule-floating_ip-hour existence=2.95 last="1"
+  image img name="img" net=17.01128 minute=893 hour=6 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-image-minute existence=5.9831 last="1"
+    rule-image-minute size_gb=3.80418 last="6"
+    rule-image-hour existence=4.38 last="1"
+    rule-image-hour size_gb=2.844 last="6"
+  instance vm-active name="vm-active" net=0.54854 minute=879 hour=5 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-instance-minute existence=0.1758 last="1"
+    rule-instance-minute vcpus=0.05274 last="2"
+    rule-instance-hour existence=0.25 last="1"
+    rule-instance-hour vcpus=0.07 last="2"
+  instance vm-build name="vm-build" net=0.4718 minute=830 hour=4 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-instance-minute existence=0.166 last="1"
+    rule-instance-minute vcpus=0.0498 last="2"
+    rule-instance-hour existence=0.2 last="1"
+    rule-instance-hour vcpus=0.056 last="2"
+  instance vm-nomark name="vm-nomark" net=1.2978402150537634 minute=773 hour=4 month=2 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.1546 last="1"
+    rule-instance-minute vcpus=0.04638 last="2"
+    rule-instance-hour existence=0.2 last="1"
+    rule-instance-hour vcpus=0.056 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=82.962525 minute=119 hour=5 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T14:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=0.95 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=21.76691 minute=967 hour=7 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-kubernetes_cluster-minute existence=9.3799 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=2.93001 last="3"
+    rule-kubernetes_cluster-hour existence=7.21 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=2.247 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=41.78856 minute=791 hour=4 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-sandbox-minute existence=22.3853 last="1"
+    rule-sandbox-minute vcpus=4.63526 last="2"
+    rule-sandbox-hour existence=12.28 last="1"
+    rule-sandbox-hour vcpus=2.488 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=48.82288 minute=807 hour=4 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-sandbox_snapshot-minute existence=26.7117 last="1"
+    rule-sandbox_snapshot-minute size_gb=5.43918 last="2"
+    rule-sandbox_snapshot-hour existence=13.88 last="1"
+    rule-sandbox_snapshot-hour size_gb=2.792 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=93.912 minute=852 hour=5 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-server_protection-minute existence=19.3404 last="1"
+    rule-server_protection-minute size_gb=39.0216 last="20"
+    rule-server_protection-hour existence=11.65 last="1"
+    rule-server_protection-hour size_gb=23.9 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=97.1941 minute=827 hour=4 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-server_snapshot-minute existence=21.2539 last="1"
+    rule-server_snapshot-minute size_gb=43.5002 last="20"
+    rule-server_snapshot-hour existence=10.76 last="1"
+    rule-server_snapshot-hour size_gb=21.68 last="20"
+  share shr name="shr" net=71.6928 minute=1042 hour=8 month=0 marks=2026-11-01T00:00:00Z|2026-10-31T14:00:00Z|-
+    rule-share-minute existence=19.9022 last="1"
+    rule-share-minute quota_gb=20.1106 last="10"
+    rule-share-hour existence=15.76 last="1"
+    rule-share-hour quota_gb=15.92 last="10"
+  volume vol-archived name="vol-archived" net=2.988 minute=108 hour=3 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:05:40Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=1.11 last="1"
+    rule-volume-hour size=1.23 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 19: hour at 2026-11-01T00:00:06Z (the closing hour pass)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=4127.4036094125751158 items=17
+  bucket bkt name="bkt" net=61.47448 minute=1072 hour=18 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-bucket-minute existence=16.8304 last="1"
+    rule-bucket-minute size_gb=5.24208 last="3"
+    rule-bucket-hour existence=30.06 last="1"
+    rule-bucket-hour size_gb=9.342 last="3"
+  database_cluster db name="db" net=50.00028 minute=962 hour=17 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-database_cluster-minute existence=12.2174 last="1"
+    rule-database_cluster-minute vcpus_total=5.04088 last="4"
+    rule-database_cluster-hour existence=23.29 last="1"
+    rule-database_cluster-hour vcpus_total=9.452 last="4"
+  floating_ip fip name="203.0.113.7" net=13.7644641975213524 minute=862 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-floating_ip-minute existence=4.5686 last="1"
+    rule-floating_ip-minute-18dp existence=0.3458641975213524 last="1"
+    rule-floating_ip-hour existence=8.85 last="1"
+  image img name="img" net=29.05128 minute=893 hour=16 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-image-minute existence=5.9831 last="1"
+    rule-image-minute size_gb=3.80418 last="6"
+    rule-image-hour existence=11.68 last="1"
+    rule-image-hour size_gb=7.584 last="6"
+  instance vm-active name="vm-active" net=1.18854 minute=879 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.1758 last="1"
+    rule-instance-minute vcpus=0.05274 last="2"
+    rule-instance-hour existence=0.75 last="1"
+    rule-instance-hour vcpus=0.21 last="2"
+  instance vm-build name="vm-build" net=1.1118 minute=830 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.166 last="1"
+    rule-instance-minute vcpus=0.0498 last="2"
+    rule-instance-hour existence=0.7 last="1"
+    rule-instance-hour vcpus=0.196 last="2"
+  instance vm-nomark name="vm-nomark" net=1.9378402150537634 minute=773 hour=14 month=2 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.1546 last="1"
+    rule-instance-minute vcpus=0.04638 last="2"
+    rule-instance-hour existence=0.7 last="1"
+    rule-instance-hour vcpus=0.196 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=84.862525 minute=119 hour=15 month=0 marks=2026-10-31T11:20:00Z|2026-11-01T00:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=2.85 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=35.27691 minute=967 hour=17 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-kubernetes_cluster-minute existence=9.3799 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=2.93001 last="3"
+    rule-kubernetes_cluster-hour existence=17.51 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=5.457 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=78.70856 minute=791 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox-minute existence=22.3853 last="1"
+    rule-sandbox-minute vcpus=4.63526 last="2"
+    rule-sandbox-hour existence=42.98 last="1"
+    rule-sandbox-hour vcpus=8.708 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=90.50288 minute=807 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox_snapshot-minute existence=26.7117 last="1"
+    rule-sandbox_snapshot-minute size_gb=5.43918 last="2"
+    rule-sandbox_snapshot-hour existence=48.58 last="1"
+    rule-sandbox_snapshot-hour size_gb=9.772 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=165.012 minute=852 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-server_protection-minute existence=19.3404 last="1"
+    rule-server_protection-minute size_gb=39.0216 last="20"
+    rule-server_protection-hour existence=34.95 last="1"
+    rule-server_protection-hour size_gb=71.7 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=178.2941 minute=827 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-server_snapshot-minute existence=21.2539 last="1"
+    rule-server_snapshot-minute size_gb=43.5002 last="20"
+    rule-server_snapshot-hour existence=37.66 last="1"
+    rule-server_snapshot-hour size_gb=75.88 last="20"
+  share shr name="shr" net=111.2928 minute=1042 hour=18 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-share-minute existence=19.9022 last="1"
+    rule-share-minute quota_gb=20.1106 last="10"
+    rule-share-hour existence=35.46 last="1"
+    rule-share-hour quota_gb=35.82 last="10"
+  volume vol-archived name="vol-archived" net=2.988 minute=108 hour=3 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:05:40Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=1.11 last="1"
+    rule-volume-hour size=1.23 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+== pass 20: minute at 2026-11-01T00:01:03Z (the first minute pass of November)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=4127.4036094125751158 items=17
+  bucket bkt name="bkt" net=61.47448 minute=1072 hour=18 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-bucket-minute existence=16.8304 last="1"
+    rule-bucket-minute size_gb=5.24208 last="3"
+    rule-bucket-hour existence=30.06 last="1"
+    rule-bucket-hour size_gb=9.342 last="3"
+  database_cluster db name="db" net=50.00028 minute=962 hour=17 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-database_cluster-minute existence=12.2174 last="1"
+    rule-database_cluster-minute vcpus_total=5.04088 last="4"
+    rule-database_cluster-hour existence=23.29 last="1"
+    rule-database_cluster-hour vcpus_total=9.452 last="4"
+  floating_ip fip name="203.0.113.7" net=13.7644641975213524 minute=862 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-floating_ip-minute existence=4.5686 last="1"
+    rule-floating_ip-minute-18dp existence=0.3458641975213524 last="1"
+    rule-floating_ip-hour existence=8.85 last="1"
+  image img name="img" net=29.05128 minute=893 hour=16 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-image-minute existence=5.9831 last="1"
+    rule-image-minute size_gb=3.80418 last="6"
+    rule-image-hour existence=11.68 last="1"
+    rule-image-hour size_gb=7.584 last="6"
+  instance vm-active name="vm-active" net=1.18854 minute=879 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.1758 last="1"
+    rule-instance-minute vcpus=0.05274 last="2"
+    rule-instance-hour existence=0.75 last="1"
+    rule-instance-hour vcpus=0.21 last="2"
+  instance vm-build name="vm-build" net=1.1118 minute=830 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.166 last="1"
+    rule-instance-minute vcpus=0.0498 last="2"
+    rule-instance-hour existence=0.7 last="1"
+    rule-instance-hour vcpus=0.196 last="2"
+  instance vm-nomark name="vm-nomark" net=1.9378402150537634 minute=773 hour=14 month=2 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.1546 last="1"
+    rule-instance-minute vcpus=0.04638 last="2"
+    rule-instance-hour existence=0.7 last="1"
+    rule-instance-hour vcpus=0.196 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=84.862525 minute=119 hour=15 month=0 marks=2026-10-31T11:20:00Z|2026-11-01T00:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=2.85 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=35.27691 minute=967 hour=17 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-kubernetes_cluster-minute existence=9.3799 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=2.93001 last="3"
+    rule-kubernetes_cluster-hour existence=17.51 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=5.457 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=78.70856 minute=791 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox-minute existence=22.3853 last="1"
+    rule-sandbox-minute vcpus=4.63526 last="2"
+    rule-sandbox-hour existence=42.98 last="1"
+    rule-sandbox-hour vcpus=8.708 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=90.50288 minute=807 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox_snapshot-minute existence=26.7117 last="1"
+    rule-sandbox_snapshot-minute size_gb=5.43918 last="2"
+    rule-sandbox_snapshot-hour existence=48.58 last="1"
+    rule-sandbox_snapshot-hour size_gb=9.772 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=165.012 minute=852 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-server_protection-minute existence=19.3404 last="1"
+    rule-server_protection-minute size_gb=39.0216 last="20"
+    rule-server_protection-hour existence=34.95 last="1"
+    rule-server_protection-hour size_gb=71.7 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=178.2941 minute=827 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-server_snapshot-minute existence=21.2539 last="1"
+    rule-server_snapshot-minute size_gb=43.5002 last="20"
+    rule-server_snapshot-hour existence=37.66 last="1"
+    rule-server_snapshot-hour size_gb=75.88 last="20"
+  share shr name="shr" net=111.2928 minute=1042 hour=18 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-share-minute existence=19.9022 last="1"
+    rule-share-minute quota_gb=20.1106 last="10"
+    rule-share-hour existence=35.46 last="1"
+    rule-share-hour quota_gb=35.82 last="10"
+  volume vol-archived name="vol-archived" net=2.988 minute=108 hour=3 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:05:40Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=1.11 last="1"
+    rule-volume-hour size=1.23 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+bill 2026-11-01T00:00:00Z..2026-12-01T00:00:00Z OPEN total=0.3635012345678902 items=15
+  bucket bkt name="bkt" net=0.02059 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-bucket-minute existence=0.0157 last="1"
+    rule-bucket-minute size_gb=0.00489 last="3"
+  database_cluster db name="db" net=0.01794 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-database_cluster-minute existence=0.0127 last="1"
+    rule-database_cluster-minute vcpus_total=0.00524 last="4"
+  floating_ip fip name="203.0.113.7" net=0.0057012345678902 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-floating_ip-minute existence=0.0053 last="1"
+    rule-floating_ip-minute-18dp existence=0.0004012345678902 last="1"
+  image img name="img" net=0.01096 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-image-minute existence=0.0067 last="1"
+    rule-image-minute size_gb=0.00426 last="6"
+  instance vm-active name="vm-active" net=0.00026 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+  instance vm-build name="vm-build" net=0.00026 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+  instance vm-nomark name="vm-nomark" net=0.00026 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|-|-
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=0.0017 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-instance_traffic-minute existence=0.0017 last="1"
+  kubernetes_cluster k8s name="k8s" net=0.01273 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-kubernetes_cluster-minute existence=0.0097 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.00303 last="3"
+  sandbox sbx-run name="sbx-run" net=0.03416 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox-minute existence=0.0283 last="1"
+    rule-sandbox-minute vcpus=0.00586 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=0.03984 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox_snapshot-minute existence=0.0331 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.00674 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=0.0685 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-server_protection-minute existence=0.0227 last="1"
+    rule-server_protection-minute size_gb=0.0458 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=0.0783 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-server_snapshot-minute existence=0.0257 last="1"
+    rule-server_snapshot-minute size_gb=0.0526 last="20"
+  share shr name="shr" net=0.0384 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-share-minute existence=0.0191 last="1"
+    rule-share-minute quota_gb=0.0193 last="10"
+  volume vol-old name="vol-old" net=0.0339 minute=1 hour=0 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T00:00:00Z|-
+    rule-volume-minute existence=0.0029 last="1"
+    rule-volume-minute size=0.031 last="100"
+== pass 21: hour at 2026-11-01T01:00:06Z (the first hour pass of November)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=4127.4036094125751158 items=17
+  bucket bkt name="bkt" net=61.47448 minute=1072 hour=18 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-bucket-minute existence=16.8304 last="1"
+    rule-bucket-minute size_gb=5.24208 last="3"
+    rule-bucket-hour existence=30.06 last="1"
+    rule-bucket-hour size_gb=9.342 last="3"
+  database_cluster db name="db" net=50.00028 minute=962 hour=17 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-database_cluster-minute existence=12.2174 last="1"
+    rule-database_cluster-minute vcpus_total=5.04088 last="4"
+    rule-database_cluster-hour existence=23.29 last="1"
+    rule-database_cluster-hour vcpus_total=9.452 last="4"
+  floating_ip fip name="203.0.113.7" net=13.7644641975213524 minute=862 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-floating_ip-minute existence=4.5686 last="1"
+    rule-floating_ip-minute-18dp existence=0.3458641975213524 last="1"
+    rule-floating_ip-hour existence=8.85 last="1"
+  image img name="img" net=29.05128 minute=893 hour=16 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-image-minute existence=5.9831 last="1"
+    rule-image-minute size_gb=3.80418 last="6"
+    rule-image-hour existence=11.68 last="1"
+    rule-image-hour size_gb=7.584 last="6"
+  instance vm-active name="vm-active" net=1.18854 minute=879 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.1758 last="1"
+    rule-instance-minute vcpus=0.05274 last="2"
+    rule-instance-hour existence=0.75 last="1"
+    rule-instance-hour vcpus=0.21 last="2"
+  instance vm-build name="vm-build" net=1.1118 minute=830 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.166 last="1"
+    rule-instance-minute vcpus=0.0498 last="2"
+    rule-instance-hour existence=0.7 last="1"
+    rule-instance-hour vcpus=0.196 last="2"
+  instance vm-nomark name="vm-nomark" net=1.9378402150537634 minute=773 hour=14 month=2 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.1546 last="1"
+    rule-instance-minute vcpus=0.04638 last="2"
+    rule-instance-hour existence=0.7 last="1"
+    rule-instance-hour vcpus=0.196 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=84.862525 minute=119 hour=15 month=0 marks=2026-10-31T11:20:00Z|2026-11-01T00:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=2.85 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=35.27691 minute=967 hour=17 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-kubernetes_cluster-minute existence=9.3799 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=2.93001 last="3"
+    rule-kubernetes_cluster-hour existence=17.51 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=5.457 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=78.70856 minute=791 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox-minute existence=22.3853 last="1"
+    rule-sandbox-minute vcpus=4.63526 last="2"
+    rule-sandbox-hour existence=42.98 last="1"
+    rule-sandbox-hour vcpus=8.708 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=90.50288 minute=807 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox_snapshot-minute existence=26.7117 last="1"
+    rule-sandbox_snapshot-minute size_gb=5.43918 last="2"
+    rule-sandbox_snapshot-hour existence=48.58 last="1"
+    rule-sandbox_snapshot-hour size_gb=9.772 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=165.012 minute=852 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-server_protection-minute existence=19.3404 last="1"
+    rule-server_protection-minute size_gb=39.0216 last="20"
+    rule-server_protection-hour existence=34.95 last="1"
+    rule-server_protection-hour size_gb=71.7 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=178.2941 minute=827 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-server_snapshot-minute existence=21.2539 last="1"
+    rule-server_snapshot-minute size_gb=43.5002 last="20"
+    rule-server_snapshot-hour existence=37.66 last="1"
+    rule-server_snapshot-hour size_gb=75.88 last="20"
+  share shr name="shr" net=111.2928 minute=1042 hour=18 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-share-minute existence=19.9022 last="1"
+    rule-share-minute quota_gb=20.1106 last="10"
+    rule-share-hour existence=35.46 last="1"
+    rule-share-hour quota_gb=35.82 last="10"
+  volume vol-archived name="vol-archived" net=2.988 minute=108 hour=3 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:05:40Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=1.11 last="1"
+    rule-volume-hour size=1.23 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+bill 2026-11-01T00:00:00Z..2026-12-01T00:00:00Z OPEN total=39.8018012345678902 items=15
+  bucket bkt name="bkt" net=2.20959 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-bucket-minute existence=0.0157 last="1"
+    rule-bucket-minute size_gb=0.00489 last="3"
+    rule-bucket-hour existence=1.67 last="1"
+    rule-bucket-hour size_gb=0.519 last="3"
+  database_cluster db name="db" net=1.94394 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-database_cluster-minute existence=0.0127 last="1"
+    rule-database_cluster-minute vcpus_total=0.00524 last="4"
+    rule-database_cluster-hour existence=1.37 last="1"
+    rule-database_cluster-hour vcpus_total=0.556 last="4"
+  floating_ip fip name="203.0.113.7" net=0.5957012345678902 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-floating_ip-minute existence=0.0053 last="1"
+    rule-floating_ip-minute-18dp existence=0.0004012345678902 last="1"
+    rule-floating_ip-hour existence=0.59 last="1"
+  image img name="img" net=1.21496 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-image-minute existence=0.0067 last="1"
+    rule-image-minute size_gb=0.00426 last="6"
+    rule-image-hour existence=0.73 last="1"
+    rule-image-hour size_gb=0.474 last="6"
+  instance vm-active name="vm-active" net=0.06426 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+  instance vm-build name="vm-build" net=0.06426 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+  instance vm-nomark name="vm-nomark" net=0.06426 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=0.478 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-instance_traffic-minute existence=0.0017 last="1"
+    rule-instance_traffic-hour existence=0.19 last="1"
+    rule-instance_traffic-usage total_traffic_mb=0.2863 last="7"
+  kubernetes_cluster k8s name="k8s" net=1.36373 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-kubernetes_cluster-minute existence=0.0097 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.00303 last="3"
+    rule-kubernetes_cluster-hour existence=1.03 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=0.321 last="3"
+  sandbox sbx-run name="sbx-run" net=3.72616 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-sandbox-minute existence=0.0283 last="1"
+    rule-sandbox-minute vcpus=0.00586 last="2"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.622 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=4.20784 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-sandbox_snapshot-minute existence=0.0331 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.00674 last="2"
+    rule-sandbox_snapshot-hour existence=3.47 last="1"
+    rule-sandbox_snapshot-hour size_gb=0.698 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=7.1785 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-server_protection-minute existence=0.0227 last="1"
+    rule-server_protection-minute size_gb=0.0458 last="20"
+    rule-server_protection-hour existence=2.33 last="1"
+    rule-server_protection-hour size_gb=4.78 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=8.1883 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-server_snapshot-minute existence=0.0257 last="1"
+    rule-server_snapshot-minute size_gb=0.0526 last="20"
+    rule-server_snapshot-hour existence=2.69 last="1"
+    rule-server_snapshot-hour size_gb=5.42 last="20"
+  share shr name="shr" net=3.9984 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-share-minute existence=0.0191 last="1"
+    rule-share-minute quota_gb=0.0193 last="10"
+    rule-share-hour existence=1.97 last="1"
+    rule-share-hour quota_gb=1.99 last="10"
+  volume vol-old name="vol-old" net=4.5039 minute=1 hour=1 month=0 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|-
+    rule-volume-minute existence=0.0029 last="1"
+    rule-volume-minute size=0.031 last="100"
+    rule-volume-hour existence=0.37 last="1"
+    rule-volume-hour size=4.1 last="100"
+== pass 22: month at 2026-11-01T01:00:09Z (the month pass of November)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=4127.4036094125751158 items=17
+  bucket bkt name="bkt" net=61.47448 minute=1072 hour=18 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-bucket-minute existence=16.8304 last="1"
+    rule-bucket-minute size_gb=5.24208 last="3"
+    rule-bucket-hour existence=30.06 last="1"
+    rule-bucket-hour size_gb=9.342 last="3"
+  database_cluster db name="db" net=50.00028 minute=962 hour=17 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-database_cluster-minute existence=12.2174 last="1"
+    rule-database_cluster-minute vcpus_total=5.04088 last="4"
+    rule-database_cluster-hour existence=23.29 last="1"
+    rule-database_cluster-hour vcpus_total=9.452 last="4"
+  floating_ip fip name="203.0.113.7" net=13.7644641975213524 minute=862 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-floating_ip-minute existence=4.5686 last="1"
+    rule-floating_ip-minute-18dp existence=0.3458641975213524 last="1"
+    rule-floating_ip-hour existence=8.85 last="1"
+  image img name="img" net=29.05128 minute=893 hour=16 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-image-minute existence=5.9831 last="1"
+    rule-image-minute size_gb=3.80418 last="6"
+    rule-image-hour existence=11.68 last="1"
+    rule-image-hour size_gb=7.584 last="6"
+  instance vm-active name="vm-active" net=1.18854 minute=879 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.1758 last="1"
+    rule-instance-minute vcpus=0.05274 last="2"
+    rule-instance-hour existence=0.75 last="1"
+    rule-instance-hour vcpus=0.21 last="2"
+  instance vm-build name="vm-build" net=1.1118 minute=830 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.166 last="1"
+    rule-instance-minute vcpus=0.0498 last="2"
+    rule-instance-hour existence=0.7 last="1"
+    rule-instance-hour vcpus=0.196 last="2"
+  instance vm-nomark name="vm-nomark" net=1.9378402150537634 minute=773 hour=14 month=2 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.1546 last="1"
+    rule-instance-minute vcpus=0.04638 last="2"
+    rule-instance-hour existence=0.7 last="1"
+    rule-instance-hour vcpus=0.196 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=84.862525 minute=119 hour=15 month=0 marks=2026-10-31T11:20:00Z|2026-11-01T00:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=2.85 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=35.27691 minute=967 hour=17 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-kubernetes_cluster-minute existence=9.3799 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=2.93001 last="3"
+    rule-kubernetes_cluster-hour existence=17.51 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=5.457 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=78.70856 minute=791 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox-minute existence=22.3853 last="1"
+    rule-sandbox-minute vcpus=4.63526 last="2"
+    rule-sandbox-hour existence=42.98 last="1"
+    rule-sandbox-hour vcpus=8.708 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=90.50288 minute=807 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox_snapshot-minute existence=26.7117 last="1"
+    rule-sandbox_snapshot-minute size_gb=5.43918 last="2"
+    rule-sandbox_snapshot-hour existence=48.58 last="1"
+    rule-sandbox_snapshot-hour size_gb=9.772 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=165.012 minute=852 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-server_protection-minute existence=19.3404 last="1"
+    rule-server_protection-minute size_gb=39.0216 last="20"
+    rule-server_protection-hour existence=34.95 last="1"
+    rule-server_protection-hour size_gb=71.7 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=178.2941 minute=827 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-server_snapshot-minute existence=21.2539 last="1"
+    rule-server_snapshot-minute size_gb=43.5002 last="20"
+    rule-server_snapshot-hour existence=37.66 last="1"
+    rule-server_snapshot-hour size_gb=75.88 last="20"
+  share shr name="shr" net=111.2928 minute=1042 hour=18 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-share-minute existence=19.9022 last="1"
+    rule-share-minute quota_gb=20.1106 last="10"
+    rule-share-hour existence=35.46 last="1"
+    rule-share-hour quota_gb=35.82 last="10"
+  volume vol-archived name="vol-archived" net=2.988 minute=108 hour=3 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:05:40Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=1.11 last="1"
+    rule-volume-hour size=1.23 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+bill 2026-11-01T00:00:00Z..2026-12-01T00:00:00Z OPEN total=4177 items=15
+  bucket bkt name="bkt" net=233.3 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-bucket-minute existence=0.0157 last="1"
+    rule-bucket-minute size_gb=0.00489 last="3"
+    rule-bucket-hour existence=1.67 last="1"
+    rule-bucket-hour size_gb=0.519 last="3"
+    rule-bucket-month existence=179 last="1"
+    rule-bucket-month size_gb=54.3 last="3"
+  database_cluster db name="db" net=209.4 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-database_cluster-minute existence=0.0127 last="1"
+    rule-database_cluster-minute vcpus_total=0.00524 last="4"
+    rule-database_cluster-hour existence=1.37 last="1"
+    rule-database_cluster-hour vcpus_total=0.556 last="4"
+    rule-database_cluster-month existence=149 last="1"
+    rule-database_cluster-month vcpus_total=60.4 last="4"
+  floating_ip fip name="203.0.113.7" net=61 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-floating_ip-minute existence=0.0053 last="1"
+    rule-floating_ip-minute-18dp existence=0.0004012345678902 last="1"
+    rule-floating_ip-hour existence=0.59 last="1"
+    rule-floating_ip-month existence=61 last="1"
+  image img name="img" net=136.4 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-image-minute existence=0.0067 last="1"
+    rule-image-minute size_gb=0.00426 last="6"
+    rule-image-hour existence=0.73 last="1"
+    rule-image-hour size_gb=0.474 last="6"
+    rule-image-month existence=83 last="1"
+    rule-image-month size_gb=53.4 last="6"
+  instance vm-active name="vm-active" net=13.6 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=11 last="1"
+    rule-instance-month vcpus=2.6 last="2"
+  instance vm-build name="vm-build" net=13.6 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=11 last="1"
+    rule-instance-month vcpus=2.6 last="2"
+  instance vm-nomark name="vm-nomark" net=13.6 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=11 last="1"
+    rule-instance-month vcpus=2.6 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=23 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-instance_traffic-minute existence=0.0017 last="1"
+    rule-instance_traffic-hour existence=0.19 last="1"
+    rule-instance_traffic-usage total_traffic_mb=0.2863 last="7"
+    rule-instance_traffic-month existence=23 last="1"
+  kubernetes_cluster k8s name="k8s" net=142.9 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-kubernetes_cluster-minute existence=0.0097 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.00303 last="3"
+    rule-kubernetes_cluster-hour existence=1.03 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=0.321 last="3"
+    rule-kubernetes_cluster-month existence=109 last="1"
+    rule-kubernetes_cluster-month cp_replicas=33.9 last="3"
+  sandbox sbx-run name="sbx-run" net=376.4 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-sandbox-minute existence=0.0283 last="1"
+    rule-sandbox-minute vcpus=0.00586 last="2"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.622 last="2"
+    rule-sandbox-month existence=313 last="1"
+    rule-sandbox-month vcpus=63.4 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=424.8 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-sandbox_snapshot-minute existence=0.0331 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.00674 last="2"
+    rule-sandbox_snapshot-hour existence=3.47 last="1"
+    rule-sandbox_snapshot-hour size_gb=0.698 last="2"
+    rule-sandbox_snapshot-month existence=353 last="1"
+    rule-sandbox_snapshot-month size_gb=71.8 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=743 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-server_protection-minute existence=0.0227 last="1"
+    rule-server_protection-minute size_gb=0.0458 last="20"
+    rule-server_protection-hour existence=2.33 last="1"
+    rule-server_protection-hour size_gb=4.78 last="20"
+    rule-server_protection-month existence=241 last="1"
+    rule-server_protection-month size_gb=502 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=839 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-server_snapshot-minute existence=0.0257 last="1"
+    rule-server_snapshot-minute size_gb=0.0526 last="20"
+    rule-server_snapshot-hour existence=2.69 last="1"
+    rule-server_snapshot-hour size_gb=5.42 last="20"
+    rule-server_snapshot-month existence=277 last="1"
+    rule-server_snapshot-month size_gb=562 last="20"
+  share shr name="shr" net=434 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-share-minute existence=0.0191 last="1"
+    rule-share-minute quota_gb=0.0193 last="10"
+    rule-share-hour existence=1.97 last="1"
+    rule-share-hour quota_gb=1.99 last="10"
+    rule-share-month existence=211 last="1"
+    rule-share-month quota_gb=223 last="10"
+  volume vol-old name="vol-old" net=513 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-volume-minute existence=0.0029 last="1"
+    rule-volume-minute size=0.031 last="100"
+    rule-volume-hour existence=0.37 last="1"
+    rule-volume-hour size=4.1 last="100"
+    rule-volume-month existence=43 last="1"
+    rule-volume-month size=470 last="100"
+== pass 23: minute at 2026-11-01T01:02:03Z (November goes on)
+bill 2026-10-01T00:00:00Z..2026-11-01T00:00:00Z OPEN total=4127.4036094125751158 items=17
+  bucket bkt name="bkt" net=61.47448 minute=1072 hour=18 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-bucket-minute existence=16.8304 last="1"
+    rule-bucket-minute size_gb=5.24208 last="3"
+    rule-bucket-hour existence=30.06 last="1"
+    rule-bucket-hour size_gb=9.342 last="3"
+  database_cluster db name="db" net=50.00028 minute=962 hour=17 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-database_cluster-minute existence=12.2174 last="1"
+    rule-database_cluster-minute vcpus_total=5.04088 last="4"
+    rule-database_cluster-hour existence=23.29 last="1"
+    rule-database_cluster-hour vcpus_total=9.452 last="4"
+  floating_ip fip name="203.0.113.7" net=13.7644641975213524 minute=862 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-floating_ip-minute existence=4.5686 last="1"
+    rule-floating_ip-minute-18dp existence=0.3458641975213524 last="1"
+    rule-floating_ip-hour existence=8.85 last="1"
+  image img name="img" net=29.05128 minute=893 hour=16 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-image-minute existence=5.9831 last="1"
+    rule-image-minute size_gb=3.80418 last="6"
+    rule-image-hour existence=11.68 last="1"
+    rule-image-hour size_gb=7.584 last="6"
+  instance vm-active name="vm-active" net=1.18854 minute=879 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.1758 last="1"
+    rule-instance-minute vcpus=0.05274 last="2"
+    rule-instance-hour existence=0.75 last="1"
+    rule-instance-hour vcpus=0.21 last="2"
+  instance vm-build name="vm-build" net=1.1118 minute=830 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-instance-minute existence=0.166 last="1"
+    rule-instance-minute vcpus=0.0498 last="2"
+    rule-instance-hour existence=0.7 last="1"
+    rule-instance-hour vcpus=0.196 last="2"
+  instance vm-nomark name="vm-nomark" net=1.9378402150537634 minute=773 hour=14 month=2 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|2026-10-31T00:00:00Z
+    rule-instance-minute existence=0.1546 last="1"
+    rule-instance-minute vcpus=0.04638 last="2"
+    rule-instance-hour existence=0.7 last="1"
+    rule-instance-hour vcpus=0.196 last="2"
+    rule-instance-month existence=0.6801075268817204 last="1"
+    rule-instance-month vcpus=0.160752688172043 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=84.862525 minute=119 hour=15 month=0 marks=2026-10-31T11:20:00Z|2026-11-01T00:00:00Z|-
+    rule-instance_traffic-minute existence=0.2023 last="1"
+    rule-instance_traffic-hour existence=2.85 last="1"
+    rule-instance_traffic-usage total_traffic_mb=81.810225 last="2000.25"
+  kubernetes_cluster k8s name="k8s" net=35.27691 minute=967 hour=17 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-kubernetes_cluster-minute existence=9.3799 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=2.93001 last="3"
+    rule-kubernetes_cluster-hour existence=17.51 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=5.457 last="3"
+  sandbox sbx-ended name="sbx-ended" net=3.53715 minute=5 hour=1 month=0 marks=2026-10-31T09:25:00Z|2026-10-31T09:25:00Z|-
+    rule-sandbox-minute existence=0.1415 last="1"
+    rule-sandbox-minute vcpus=0.01465 last="1"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.311 last="1"
+  sandbox sbx-run name="sbx-run" net=78.70856 minute=791 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox-minute existence=22.3853 last="1"
+    rule-sandbox-minute vcpus=4.63526 last="2"
+    rule-sandbox-hour existence=42.98 last="1"
+    rule-sandbox-hour vcpus=8.708 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=90.50288 minute=807 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-sandbox_snapshot-minute existence=26.7117 last="1"
+    rule-sandbox_snapshot-minute size_gb=5.43918 last="2"
+    rule-sandbox_snapshot-hour existence=48.58 last="1"
+    rule-sandbox_snapshot-hour size_gb=9.772 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=165.012 minute=852 hour=15 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-server_protection-minute existence=19.3404 last="1"
+    rule-server_protection-minute size_gb=39.0216 last="20"
+    rule-server_protection-hour existence=34.95 last="1"
+    rule-server_protection-hour size_gb=71.7 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=178.2941 minute=827 hour=14 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-server_snapshot-minute existence=21.2539 last="1"
+    rule-server_snapshot-minute size_gb=43.5002 last="20"
+    rule-server_snapshot-hour existence=37.66 last="1"
+    rule-server_snapshot-hour size_gb=75.88 last="20"
+  share shr name="shr" net=111.2928 minute=1042 hour=18 month=0 marks=2026-11-01T00:00:00Z|2026-11-01T00:00:00Z|-
+    rule-share-minute existence=19.9022 last="1"
+    rule-share-minute quota_gb=20.1106 last="10"
+    rule-share-hour existence=35.46 last="1"
+    rule-share-hour quota_gb=35.82 last="10"
+  volume vol-archived name="vol-archived" net=2.988 minute=108 hour=3 month=0 marks=2026-10-31T12:05:40Z|2026-10-31T12:05:40Z|-
+    rule-volume-minute existence=0.3132 last="1"
+    rule-volume-minute size=0.3348 last="10"
+    rule-volume-hour existence=1.11 last="1"
+    rule-volume-hour size=1.23 last="10"
+  volume vol-old name="vol-old" net=3218.4 minute=43200 hour=720 month=0 marks=2026-10-31T11:20:00Z|2026-10-31T12:00:00Z|-
+    rule-volume-minute existence=125.28 last="1"
+    rule-volume-minute size=1339.2 last="100"
+    rule-volume-hour existence=266.4 last="1"
+    rule-volume-hour size=2952 last="100"
+bill 2026-11-01T00:00:00Z..2026-12-01T00:00:00Z OPEN total=4238.7350165432091924 items=15
+  bucket bkt name="bkt" net=236.76558 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-bucket-minute existence=0.9734 last="1"
+    rule-bucket-minute size_gb=0.30318 last="3"
+    rule-bucket-hour existence=1.67 last="1"
+    rule-bucket-hour size_gb=0.519 last="3"
+    rule-bucket-month existence=179 last="1"
+    rule-bucket-month size_gb=54.3 last="3"
+  database_cluster db name="db" net=212.43828 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-database_cluster-minute existence=0.7874 last="1"
+    rule-database_cluster-minute vcpus_total=0.32488 last="4"
+    rule-database_cluster-hour existence=1.37 last="1"
+    rule-database_cluster-hour vcpus_total=0.556 last="4"
+    rule-database_cluster-month existence=149 last="1"
+    rule-database_cluster-month vcpus_total=60.4 last="4"
+  floating_ip fip name="203.0.113.7" net=61.9434765432091924 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-floating_ip-minute existence=0.3286 last="1"
+    rule-floating_ip-minute-18dp existence=0.0248765432091924 last="1"
+    rule-floating_ip-hour existence=0.59 last="1"
+    rule-floating_ip-month existence=61 last="1"
+  image img name="img" net=138.28352 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-image-minute existence=0.4154 last="1"
+    rule-image-minute size_gb=0.26412 last="6"
+    rule-image-hour existence=0.73 last="1"
+    rule-image-hour size_gb=0.474 last="6"
+    rule-image-month existence=83 last="1"
+    rule-image-month size_gb=53.4 last="6"
+  instance vm-active name="vm-active" net=13.6 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=11 last="1"
+    rule-instance-month vcpus=2.6 last="2"
+  instance vm-build name="vm-build" net=13.6 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=11 last="1"
+    rule-instance-month vcpus=2.6 last="2"
+  instance vm-nomark name="vm-nomark" net=13.6 minute=1 hour=1 month=1 marks=2026-11-01T00:01:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-instance-minute existence=0.0002 last="1"
+    rule-instance-minute vcpus=0.00006 last="2"
+    rule-instance-hour existence=0.05 last="1"
+    rule-instance-hour vcpus=0.014 last="2"
+    rule-instance-month existence=11 last="1"
+    rule-instance-month vcpus=2.6 last="2"
+  instance_traffic instance_traffic-vm-active name="vm-active" net=23.5817 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-instance_traffic-minute existence=0.1054 last="1"
+    rule-instance_traffic-hour existence=0.19 last="1"
+    rule-instance_traffic-usage total_traffic_mb=0.2863 last="7"
+    rule-instance_traffic-month existence=23 last="1"
+  kubernetes_cluster k8s name="k8s" net=145.04026 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-kubernetes_cluster-minute existence=0.6014 last="1"
+    rule-kubernetes_cluster-minute cp_replicas=0.18786 last="3"
+    rule-kubernetes_cluster-hour existence=1.03 last="1"
+    rule-kubernetes_cluster-hour cp_replicas=0.321 last="3"
+    rule-kubernetes_cluster-month existence=109 last="1"
+    rule-kubernetes_cluster-month cp_replicas=33.9 last="3"
+  sandbox sbx-run name="sbx-run" net=382.20992 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-sandbox-minute existence=1.7546 last="1"
+    rule-sandbox-minute vcpus=0.36332 last="2"
+    rule-sandbox-hour existence=3.07 last="1"
+    rule-sandbox-hour vcpus=0.622 last="2"
+    rule-sandbox-month existence=313 last="1"
+    rule-sandbox-month vcpus=63.4 last="2"
+  sandbox_snapshot sbx-snap name="sbx-snap" net=431.43808 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-sandbox_snapshot-minute existence=2.0522 last="1"
+    rule-sandbox_snapshot-minute size_gb=0.41788 last="2"
+    rule-sandbox_snapshot-hour existence=3.47 last="1"
+    rule-sandbox_snapshot-hour size_gb=0.698 last="2"
+    rule-sandbox_snapshot-month existence=353 last="1"
+    rule-sandbox_snapshot-month size_gb=71.8 last="2"
+  server_protection server_protection-vm-active-1793436010 name="vm-active" net=754.357 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-server_protection-minute existence=1.4074 last="1"
+    rule-server_protection-minute size_gb=2.8396 last="20"
+    rule-server_protection-hour existence=2.33 last="1"
+    rule-server_protection-hour size_gb=4.78 last="20"
+    rule-server_protection-month existence=241 last="1"
+    rule-server_protection-month size_gb=502 last="20"
+  server_snapshot server_snapshot-vm-active-snap1-1793437542 name="vm-active / snap1" net=851.9646 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-server_snapshot-minute existence=1.5934 last="1"
+    rule-server_snapshot-minute size_gb=3.2612 last="20"
+    rule-server_snapshot-hour existence=2.69 last="1"
+    rule-server_snapshot-hour size_gb=5.42 last="20"
+    rule-server_snapshot-month existence=277 last="1"
+    rule-server_snapshot-month size_gb=562 last="20"
+  share shr name="shr" net=440.3408 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-share-minute existence=1.1842 last="1"
+    rule-share-minute quota_gb=1.1966 last="10"
+    rule-share-hour existence=1.97 last="1"
+    rule-share-hour quota_gb=1.99 last="10"
+    rule-share-month existence=211 last="1"
+    rule-share-month quota_gb=223 last="10"
+  volume vol-old name="vol-old" net=519.5718 minute=62 hour=1 month=1 marks=2026-11-01T01:02:00Z|2026-11-01T01:00:00Z|2026-11-01T00:00:00Z
+    rule-volume-minute existence=0.1798 last="1"
+    rule-volume-minute size=1.922 last="100"
+    rule-volume-hour existence=0.37 last="1"
+    rule-volume-hour size=4.1 last="100"
+    rule-volume-month existence=43 last="1"
+    rule-volume-month size=470 last="100"
