@@ -43,7 +43,7 @@ Functions are offered only where the operator has enabled them. A function runs 
 
 Values are examples, not fixed platform limits. A limit that is not stated has the value shown here. `minInstances` is the location's floor (`1` keeps one instance of every function running), `maxMinInstances` the highest `minInstances` a function may ask for, and `maxInstances` the highest `maxInstances` a function may set.
 
-Where functions are not offered, every route except `GET` and `DELETE` of an existing function answers **403** `functions are not offered here`. Where the platform is not set up for functions at all, the routes answer **503** `functions are not configured`.
+Where functions are not offered, every route that creates or changes something answers **403** `functions are not offered here`. The `GET` routes and `DELETE` still answer, so that a function left from before can be read and removed. Where the platform is not set up for functions at all, the routes answer **503** `functions are not configured`.
 
 ## The function object
 
@@ -144,7 +144,7 @@ A function deployed by tag pulls the tag again whenever an instance starts, so a
 
 The URL answers on the platform's network only, with the platform's certificate. There is no credential, no rate limit and no caller authentication in front of it: whoever reaches the address and knows the URL can call the function, and every call can start an instance that the project pays for. A function that needs authentication checks it itself.
 
-A request to an idle function starts an instance and waits up to about 50 seconds for it. After that the caller gets **503** with `Retry-After: 2`. A suspended function answers 503 at once.
+A request to an idle function starts an instance and waits up to about 50 seconds for it. After that the caller gets **503** with `Retry-After: 2`. When many requests already wait for the same function to start, a further one gets that 503 at once. A suspended function answers 503 at once.
 
 All functions of all projects share one parent domain. Do not set cookies with that parent as their `Domain`.
 
@@ -154,7 +154,7 @@ All functions of all projects share one parent domain. Do not set cookies with t
 |---|---|
 | 400 | An invalid field, a renamed function, a rollback target that is not `SUPERSEDED`, an unknown action, a name that is both an environment variable and a secret, registry credentials for another registry than the image |
 | 400 | `exposure: "public"`, `gpu`, a hostname of your own or a source to build from: not offered |
-| 403 | No permission on the project; functions are not offered here; the project or its billing profile cannot be billed |
+| 403 | No permission on the project; functions are not offered here (create, update, rollback and the actions); the project or its billing profile cannot be billed |
 | 404 | An unknown function or deployment, or another project's |
 | 409 | The name is already used in the project; a deployment of the function is already in progress |
 | 429 | The project has as many functions as it may have, or its function limits are used up |
@@ -164,4 +164,4 @@ No error message contains a secret value or a registry password.
 
 ## Billing
 
-A function is billed per minute for the CPU and memory of each running instance. A running period is rounded up to whole minutes. The idle wait before a stop is billed; an idle or suspended function is not. A start that never becomes ready is stopped within about two minutes and bills nothing. See [the guide](/docs/guides/functions) for the details.
+A function is billed per minute for the CPU and memory of each running instance. A running period is rounded up to whole minutes. The idle wait before a stop is billed, and a deployment that changes the size is billed at the larger of the two sizes while it rolls out; an idle or suspended function is not. A start that never becomes ready is stopped within about two minutes and bills nothing. See [the guide](/docs/guides/functions) for the details.

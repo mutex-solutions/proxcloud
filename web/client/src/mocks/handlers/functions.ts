@@ -52,8 +52,10 @@ let fns: Fn[] = [
 function enabled(pid: string) {
   if (pid !== PID) throw new ApiError(403, 403, "functions are not offered here")
 }
-function owned(pid: string, id: string) {
-  enabled(pid)
+// Where functions are off, reads and DELETE stay open, so what is left can be seen and removed;
+// create, update, rollback and the actions are refused.
+function owned(pid: string, id: string, change = false) {
+  if (change) enabled(pid)
   const f = fns.find((x) => x.id === id && x.projectId === pid)
   if (!f) throw new ApiError(404, 404, "function not found")
   return f
@@ -152,7 +154,6 @@ function settle(f: Fn) {
 }
 
 on("GET /project/:pid/functions", ({ params }) => {
-  enabled(params.pid)
   const mine = fns.filter((f) => f.projectId === params.pid)
   mine.forEach(settle)
   return { data: mine.map(view).sort((a, b) => a.name.localeCompare(b.name)) }
@@ -187,7 +188,7 @@ on("POST /project/:pid/functions", ({ params, opts }) => {
 })
 on("GET /project/:pid/functions/:fn", ({ params }) => ({ data: view(owned(params.pid, params.fn)) }))
 on("PATCH /project/:pid/functions/:fn", ({ params, opts }) => {
-  const f = owned(params.pid, params.fn)
+  const f = owned(params.pid, params.fn, true)
   const b = opts.body as Body
   checkOffered(b)
   if (b.name !== undefined && b.name !== f.name) throw new ApiError(400, 400, "a function cannot be renamed")
@@ -224,7 +225,7 @@ on("GET /project/:pid/functions/:fn/deployments", ({ params }) => {
   return { data: structuredClone(deployments.filter((d) => d.functionId === f.id).sort((a, b) => b.seq - a.seq)) }
 })
 on("POST /project/:pid/functions/:fn/rollback", ({ params, opts }) => {
-  const f = owned(params.pid, params.fn)
+  const f = owned(params.pid, params.fn, true)
   const b = (opts.body ?? {}) as { deploymentId?: string; registryAuth?: RegistryAuthReq }
   const d = deployments.find((x) => x.functionId === f.id && x.id === b.deploymentId)
   if (!d) throw new ApiError(404, 404, "deployment not found")
@@ -243,7 +244,7 @@ on("POST /project/:pid/functions/:fn/rollback", ({ params, opts }) => {
   return { data: view(f) }
 })
 on("POST /project/:pid/functions/:fn/action", ({ params, opts }) => {
-  const f = owned(params.pid, params.fn)
+  const f = owned(params.pid, params.fn, true)
   const action = (opts.body as { action?: string })?.action
   if (action !== "suspend" && action !== "resume") throw new ApiError(400, 400, "action must be suspend or resume")
   f.suspended = action === "suspend"

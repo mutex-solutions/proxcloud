@@ -56,7 +56,7 @@ A tag can move: `hello:1` today is not always `hello:1` tomorrow.
 
 ## Scale to zero and cold starts
 
-After **Stop after idle (seconds)** without a request, the instance stops and the function becomes **Idle**. The next request starts a new instance and waits for it, so that request is slower (a cold start). If the instance is not ready in about 50 seconds, the caller gets a 503 with `Retry-After` and should try again. That happens, for example, when the image is large and must be pulled first, or when the platform has no room for the instance at that moment.
+After **Stop after idle (seconds)** without a request, the instance stops and the function becomes **Idle**. The next request starts a new instance and waits for it, so that request is slower (a cold start). If the instance is not ready in about 50 seconds, the caller gets a 503 with `Retry-After` and should try again. That happens, for example, when the image is large and must be pulled first, or when the platform has no room for the instance at that moment. The platform holds only so many waiting requests for one function: when that many already wait for it to start, a further request gets the 503 at once.
 
 Where your location allows it, the dialog has **Keep one instance running**. It removes cold starts, but the function is then billed all the time.
 

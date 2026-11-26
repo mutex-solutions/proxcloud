@@ -463,6 +463,7 @@ test("the notes say who can call a function, who pays, what is billed, and what 
     ["Callers cost you", "A new function runs one instance at most"],
     ["What is billed", "every running period is rounded up to whole minutes"],
     ["What is billed", "includes the idle wait before the function stops"],
+    ["What is billed", "the larger of the two sizes while a deployment replaces one with the other"],
     ["What is billed", "is stopped within about two minutes and bills nothing"],
     ["Image tags", "a later instance can run another image than the first one"],
     ["Image tags", "A rollback always deploys the image that deployment ran, by its digest"],
@@ -515,12 +516,17 @@ test("what this release does not offer is not on the page, and the API refuses i
       answers.push(await apiFetch("/project/prj-aurora/functions", { method: "POST", body: { ...base, ...extra } }).then(() => "created", (e: { status: number; message: string }) => `${e.status} ${e.message}`))
     }
     answers.push(await apiFetch("/project/prj-aurora/functions/fn-00000000000000a1", { method: "PATCH", body: { exposure: "public" } }).then(() => "updated", (e: { status: number; message: string }) => `${e.status} ${e.message}`))
-    answers.push(await apiFetch("/project/prj-staging/functions").then(() => "listed", (e: { status: number; message: string }) => `${e.status} ${e.message}`))
+    // Where functions are off, nothing is created or changed; reads and DELETE stay open for what is left.
+    answers.push(await apiFetch("/project/prj-staging/functions", { method: "POST", body: base }).then(() => "created", (e: { status: number; message: string }) => `${e.status} ${e.message}`))
+    answers.push(await apiFetch("/project/prj-staging/functions/fn-00000000000000a1", { method: "PATCH", body: { port: 9090 } }).then(() => "updated", (e: { status: number; message: string }) => `${e.status} ${e.message}`))
+    answers.push(await apiFetch("/project/prj-staging/functions").then((l: unknown[]) => `listed ${l.length}`, (e: { status: number; message: string }) => `${e.status} ${e.message}`))
+    answers.push(await apiFetch("/project/prj-staging/functions/fn-00000000000000a1", { method: "DELETE" }).then(() => "deleted", (e: { status: number; message: string }) => `${e.status} ${e.message}`))
     return answers
   }, api)
   expect(refused).toEqual([
     "400 public endpoints are not offered", "400 GPU functions are not offered", "400 custom hostnames are not offered", "400 builds from source are not offered",
-    "400 public endpoints are not offered", "403 functions are not offered here",
+    "400 public endpoints are not offered",
+    "403 functions are not offered here", "403 functions are not offered here", "listed 0", "404 function not found",
   ])
 })
 
