@@ -68,7 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Retry-After: 2` at once. At most 32 wake calls run at a time, as for sandboxes.
   - **An instance is told the truth about the client.** TLS ends in the proxy, so `X-Forwarded-For` is the peer's
     address alone, `X-Forwarded-Proto` what the listener served and `X-Forwarded-Host` the host asked for; whatever
-    the client sent as `X-Forwarded-*`, `Forwarded`, `X-Real-IP`, `True-Client-IP` or `CF-*` is dropped.
+    the client sent as `X-Forwarded-*`, `Forwarded`, `X-Real-IP`, `True-Client-IP` or `CF-*` is dropped, and so are
+    the same names written with an underscore (`X_Forwarded_For`).
   - **Not run on a cluster.** Every test of this change uses a fake cluster and a fake portal. A request is sent
     to a second instance once, when no connection was made and its body is unread; `concurrency` is not enforced
     per instance (the pick is random); custom hostnames, public endpoints with their rate limit, and the wait of a

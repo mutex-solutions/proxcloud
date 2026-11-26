@@ -304,10 +304,13 @@ func (h *fnHeld) leave(id string) {
 // the peer's, X-Forwarded-Proto is what this listener served, and every other X-Forwarded-*
 // header (the reverse proxy itself drops only For, Host, Proto and Forwarded), True-Client-IP,
 // X-Real-IP and CF-* are dropped, which a framework may believe as readily and which here are
-// only ever the client's word.
+// only ever the client's word. So are the same names written with an underscore (X_Forwarded_For):
+// a CGI-style server hands both spellings to the code as one variable, and which of the two wins
+// is the server's choice.
 func fnForwarded(pr *httputil.ProxyRequest) {
 	for h := range pr.Out.Header {
-		if strings.HasPrefix(h, "X-Forwarded-") || h == "True-Client-Ip" || h == "X-Real-Ip" || strings.HasPrefix(h, "Cf-") {
+		k := strings.ReplaceAll(strings.ToLower(h), "_", "-")
+		if strings.HasPrefix(k, "x-forwarded-") || k == "true-client-ip" || k == "x-real-ip" || strings.HasPrefix(k, "cf-") {
 			delete(pr.Out.Header, h)
 		}
 	}
@@ -415,8 +418,12 @@ func functionHandler(domain string, lookup FnLookup, pods FnPods, waker *Waker, 
 						log.Warn("function wake", "function", f.ID, "err", werr)
 						fail(w, http.StatusServiceUnavailable, we.RetryAfter, "The function could not be started yet")
 						return
-					default:
+					case ctx.Err() != nil:
 						return // the client went away
+					default: // no status of the portal's (a wake URL that is no URL): not the empty 200 of a handler that wrote nothing
+						log.Error("function wake", "function", f.ID, "err", werr)
+						fail(w, http.StatusServiceUnavailable, "2", "The function could not be started yet")
+						return
 					}
 					woke = true
 					ready.forget(f.ID)

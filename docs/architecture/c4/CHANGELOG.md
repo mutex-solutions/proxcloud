@@ -29,6 +29,7 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated:** c3-components.md (C3e: the `sandbox-proxy` node and the `Sandbox proxy` row), c2-containers.md
 (trust boundaries: the row for the function routes, Planned).
+
 ## 2026-11-26: the platform BOM offers sandboxes (the switch of v0.12.0, #483)
 
 **What changed:** no new container, component or relation: the ones of the two entries of 2026-11-22 and 2026-11-23

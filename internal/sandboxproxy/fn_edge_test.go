@@ -68,7 +68,9 @@ func TestOneTLSListenerServesSandboxAndFunctionHosts(t *testing.T) {
 		"X-Forwarded-For": "203.0.113.9", "X-Forwarded-Proto": "http", "X-Forwarded-Host": "evil.test",
 		"Forwarded": "for=203.0.113.9;proto=http", "X-Forwarded-Port": "80", "X-Forwarded-Client-Cert": "x",
 		"X-Real-Ip": "203.0.113.9", "True-Client-Ip": "203.0.113.9", "Cf-Connecting-Ip": "203.0.113.9",
-		"X-Custom": "kept",
+		// The same names with an underscore: a CGI-style server hands both spellings to the code as one variable.
+		"X_Forwarded_For": "203.0.113.9", "X_Real_Ip": "203.0.113.9", "True_Client_Ip": "203.0.113.9", "Cf_Connecting_Ip": "203.0.113.9",
+		"X-Custom": "kept", "X_Custom": "kept",
 	}
 	if code, body := call(host, claimed); code != 200 || body != "function" {
 		t.Fatalf("function host: %d %s", code, body)
@@ -76,6 +78,7 @@ func TestOneTLSListenerServesSandboxAndFunctionHosts(t *testing.T) {
 	for h, want := range map[string]string{
 		"X-Forwarded-For": "127.0.0.1", "X-Forwarded-Proto": "https", "X-Forwarded-Host": host, "X-Custom": "kept",
 		"Forwarded": "", "X-Forwarded-Port": "", "X-Forwarded-Client-Cert": "", "X-Real-Ip": "", "True-Client-Ip": "", "Cf-Connecting-Ip": "",
+		"X_Forwarded_For": "", "X_Real_Ip": "", "True_Client_Ip": "", "Cf_Connecting_Ip": "", "X_Custom": "kept",
 	} {
 		if v := strings.Join(got.Values(h), ", "); v != want {
 			t.Errorf("the instance got %s: %q, want %q", h, v, want)
@@ -315,5 +318,25 @@ func TestServedRequestHoldsNoPlace(t *testing.T) {
 	finished()
 	if code := <-done; code != 200 {
 		t.Fatalf("status %d", code)
+	}
+}
+
+// A wake that fails before it is sent (a wake URL that is no URL) has no status of the portal's. The
+// caller is told 503 and to retry: a handler that wrote nothing would answer an empty 200, which a
+// caller takes for the function's own answer.
+func TestWakeErrorWithoutStatusIs503(t *testing.T) {
+	none := func(context.Context, Fn) ([]string, error) { return nil, ErrNotFound }
+	var lookups atomic.Int32
+	s, _ := fnServer(t, fnLookup(80, &lookups), none, NewWaker("http://127.0.0.1:1/\x7f", "tok"))
+	req, _ := http.NewRequest("GET", s.URL, nil)
+	req.Host = fnHostA + "." + fnDom
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 503 || res.Header.Get("Retry-After") != "2" || !strings.Contains(string(body), "could not be started") {
+		t.Fatalf("got %d retry=%q %q", res.StatusCode, res.Header.Get("Retry-After"), body)
 	}
 }
