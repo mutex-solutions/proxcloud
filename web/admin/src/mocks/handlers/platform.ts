@@ -11,7 +11,8 @@
 // upgradek8s (the same, and the move names the next Kubernetes patch: the plan has two parts, the platform part blocked by node_image_missing until the seed part has run) |
 // replace (the same, with an unfinished upgrade toward the release of an earlier ProxCloud: the plan also offers the move to this one's in its place) |
 // onenode (nothing saved, and the provider has one node, pve1, with 32 GiB of which 24 are free: the presets on a small site) |
-// sandboxes (nothing saved, and this release's BOM has the sandbox chart: the settings offer sandboxes) |
+// sandboxes (nothing saved; the settings offer sandboxes, as this release's BOM has the sandbox chart: the same as none) |
+// nosandboxes (nothing saved, and this release's BOM has no sandbox chart, as every release before 0.12.0: the settings offer none) |
 // sandboxready (ready, with a shared sandbox group a run built and its sandbox provider, disabled: the first check of its release gates finds the VM firewall gate open, the second finds every gate holding) |
 // onechart (nothing saved, and this release's cluster chart builds one control plane machine) | degraded (one component out of sync) | simplezone (the check warns: no tenant cluster on a simple zone) | silent (the seed does not answer) | unread (the live read fails) | removing
 // (none: enabled, nothing saved).
@@ -116,9 +117,11 @@ const bomRef = { release: bom.release, sha256: bom.sha256 }
 // Its cluster chart is the one before 0.1.14: it builds one control plane machine.
 const previous = { ...bom, release: "0.6.0", sha256: "1e0d9c8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d",
   components: bom.components.map((c) => (c.name === "pc-platform" ? { ...c, chart: { ...c.chart, version: "0.1.13" } } : c)) }
-if (preset === "onechart") bom.components = previous.components
-// A BOM that offers sandboxes: the sandbox chart as a feature component, before the cluster chart (platformlife.FeatureSandbox).
-const sandboxesOffered = ["sandboxes", "sandboxready"].includes(preset)
+if (preset === "onechart") bom.components = [...previous.components]
+// This release's BOM offers sandboxes: the sandbox chart as a feature component, before the cluster chart
+// (platformlife.FeatureSandbox). The BOM of the release before it (previous) does not, and "nosandboxes" is a build
+// of before the offer.
+const sandboxesOffered = preset !== "nosandboxes"
 if (sandboxesOffered) {
   bom.components.splice(bom.components.length - 1, 0, { name: "sandbox", cluster: "workload", wave: 3, group: "", feature: "sandbox", chart: { version: "0.1.0", digest: "sha256:8899aabbccddeeff0011223344556677889900aabb1122cc33dd44ee55ff6677" } } as any)
 }
@@ -336,7 +339,7 @@ const importOf = (serviceId: string, spec: Doc) => spec?.storage?.import || db.s
 
 // The API's own rules, as far as the page's states need them: the name, a rule only the server can know, and the two
 // of Validate (internal/platformlife/installation.go) the form cannot or does not check.
-function refuse(name: string, spec: Doc, serviceId: string) {
+function refuse(name: string, spec: Doc, serviceId: string, installedBy?: Doc) {
   const problems: string[] = []
   const imp = importOf(serviceId, spec)
   if (imp === spec?.storage?.boot) problems.push(`spec.storage.import "${imp}" is the boot store: use another store with import content, the one the provider's importStorage names (an empty spec.storage.import takes it)`)
@@ -345,8 +348,11 @@ function refuse(name: string, spec: Doc, serviceId: string) {
   const cp = spec?.clusters?.[0]?.controlPlane ?? {}
   if (![undefined, 0, 1, 3].includes(cp.replicas)) problems.push(`spec.clusters[0].controlPlane.replicas ${cp.replicas}: 1 or 3 (etcd needs an odd number of members, and this release builds no more than 3)`)
   if (cp.nodes?.length && JSON.stringify(cp.nodes) !== JSON.stringify([cp.node])) problems.push("spec.clusters[0].controlPlane.nodes: every control plane machine goes to one Proxmox node, controlPlane.node. Machines on several nodes need the node image template and the control plane disks on shared storage (CAPMOX v0.9.2 clones one template, and Proxmox moves a clone to another node only from and to shared storage), and this release does not build that: leave controlPlane.nodes out")
-  // SandboxProblems: a BOM without the sandbox chart builds no sandboxes.
-  if (spec?.sandbox && spec.sandbox.placement !== "off" && !sandboxesOffered) problems.push(`spec.sandbox: the platform's BOM (release ${bom.release}) has no sandbox chart, so this release builds no sandboxes on the platform: leave spec.sandbox out, or set placement off`)
+  // SandboxProblems: a BOM without the sandbox chart builds no sandboxes, and a platform that an earlier release
+  // installed is on such a BOM until its upgrade.
+  const asks = spec?.sandbox && spec.sandbox.placement !== "off"
+  if (asks && sandboxesOffered && installedBy?.sha256 === previous.sha256) problems.push(`spec.sandbox: the platform's BOM (release ${previous.release}) has no sandbox chart. Upgrade the platform to release ${bom.release} first, then save spec.sandbox; until then leave it out, or set placement off`)
+  if (asks && !sandboxesOffered) problems.push(`spec.sandbox: the platform's BOM (release ${bom.release}) has no sandbox chart, so this release builds no sandboxes on the platform: leave spec.sandbox out, or set placement off`)
   if (String(spec?.network?.prefix ?? "").startsWith("10.100.")) problems.push(`the platform network ${spec.network.prefix} overlaps cidrPool 10.100.0.0/16`)
   if (problems.length) throw fail(400, "invalid_installation", "The installation is not valid", { problems })
 }
@@ -359,7 +365,7 @@ function create(name: string, spec: Doc): Doc {
   return in_
 }
 
-if (preset && !["disabled", "onenode", "onechart", "sandboxes"].includes(preset)) {
+if (preset && !["disabled", "onenode", "onechart", "sandboxes", "nosandboxes"].includes(preset)) {
   const in_ = create("lab", mockSpec)
   if (preset !== "draft") mockPlatform.secrets[in_.id] = { capi: true, csi: true }
   if (preset === "running") { mockPlatform.applies = 1; newRun(in_, "apply", Date.now() - 7.5 * STAGE_MS) }
@@ -455,7 +461,7 @@ on("PUT /admin/platform/installations/:id", ({ params, opts }) => {
   strict(b, INSTALLATION)
   if (b.rev !== in_.rev) throw fail(409, "rev_conflict", "the installation changed since it was read: read it again")
   if (activeRun(in_.id)) throw fail(409, "run_active", "a run of this installation is not finished: wait for it or cancel it")
-  refuse(b.name, b.spec, in_.serviceId)
+  refuse(b.name, b.spec, in_.serviceId, in_.status.bom)
   // ControlPlaneCountProblems in internal/platformlife/installation.go: the previous release's chart builds one.
   if ((b.spec.clusters?.[0]?.controlPlane?.replicas || 1) > 1 && in_.status.bom?.sha256 === previous.sha256) {
     const why = `spec.clusters: 3 control plane machines: the platform's BOM (release ${previous.release}) names a cluster chart which builds one; more need chart 0.1.14 or newer, so keep 1 until the platform is on a release that has it`

@@ -62,6 +62,17 @@ func TestApplySandboxSite(t *testing.T) {
 	if !reflect.DeepEqual(before, doc["config"].(map[string]any)["sandbox"]) {
 		t.Fatal("a refused write changed the block")
 	}
+	// A block of someone else's that names no pool (what is left of an installer's sandbox cluster: its registry): the
+	// sync fences nothing for it, and it is not overwritten either.
+	poolless := pgdoc.M{"config": map[string]any{"sandbox": map[string]any{"registry": map[string]any{"address": "10.110.0.9", "port": 443}}}}
+	if _, err := applySandboxSite(poolless, "pi-1", site(""), seal); !errors.Is(err, platformlife.ErrProviderConflict) || poolless["config"].(map[string]any)["sandbox"].(map[string]any)["registry"] == nil ||
+		poolless["config"].(map[string]any)["sandbox"].(map[string]any)["pool"] != nil {
+		t.Fatalf("over a block without a pool: %v %v", err, poolless)
+	}
+	// An empty block is nobody's.
+	if changed, err := applySandboxSite(pgdoc.M{"config": map[string]any{"sandbox": map[string]any{}}}, "pi-1", site(""), seal); err != nil || !changed {
+		t.Fatalf("over an empty block: %v %v", changed, err)
+	}
 	// A sandbox network of someone else's with no block: not dropped either.
 	lone := pgdoc.M{"config": map[string]any{"network": map[string]any{"sandboxCidrs": []any{"10.110.0.0/24"}}}}
 	if _, err := applySandboxSite(lone, "pi-1", site(""), seal); !errors.Is(err, platformlife.ErrProviderConflict) || !strings.Contains(err.Error(), "10.110.0.0/24") {
