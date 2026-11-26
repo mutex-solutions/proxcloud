@@ -838,9 +838,24 @@ var (
 // then finds the window over and pushes them.
 func lbHoldWindow() time.Duration { return time.Duration(lbRetryTries-1) * lbRetryEvery }
 
+// lbRetrySays is what a row with a waiting change says of what happens next. It is true at any time, also after the
+// last retry (until v0.12.0-rc.1 the row kept saying "within half a minute" when nothing tried again), and its
+// figures are lbRetryEvery and lbRetryTries themselves, so the text cannot drift from the loop.
+func lbRetrySays() string {
+	span := func(d time.Duration) string {
+		if d >= time.Minute && d%time.Minute == 0 {
+			return strconv.Itoa(int(d/time.Minute)) + " minutes"
+		}
+		return strconv.Itoa(int(d/time.Second)) + " s"
+	}
+	return "the platform tries again by itself every " + span(lbRetryEvery) + " for " + span(time.Duration(lbRetryTries)*lbRetryEvery) +
+		", and after that at the next services sync or at the next change"
+}
+
 // lbRetry queues the platform's own retries of a balancer's apply, by key one loop at a time: pass runs the apply
 // and says whether a change still waits. It ends with the first pass that leaves nothing waiting, after lbRetryTries
-// of them, or with the process; the services sync stays the backstop, as for everything else a pass leaves.
+// of them, or with the process; the services sync stays the backstop, as for everything else a pass leaves. An end
+// with the change still waiting is one WARN line: from there nothing tries again before that sync or the next change.
 //
 // A pass gets a context with no deadline, as the passes of the sync and of the controller's sends have: a cluster's
 // pass may build an appliance (lbClusterBuild, up to lbBuildTimeout), and a build a deadline cuts off cannot remove
@@ -857,6 +872,8 @@ func (h *Handler) lbRetry(key string, pass func(ctx context.Context) (waiting bo
 				return
 			}
 		}
+		slog.Warn("load balancer: the platform's own retries ended and the change still waits; the next services sync or the next change tries again",
+			"key", key, "tries", lbRetryTries)
 	}()
 }
 
@@ -902,7 +919,7 @@ func lbPairStatus(apps []lbAppliance, stuck, replacing bool) (string, string) {
 	case up == 2 && holders == 1 && len(apps) == 2:
 		if why != "" {
 			// Both serve, and a change waits on one or both: what waits, why, and that nobody has to do anything.
-			return lbStatusActive, "A change waits (" + why + "). The load balancer serves meanwhile, with the configuration of before the change where it is not loaded; the platform tries again within half a minute, by itself."
+			return lbStatusActive, "A change waits (" + why + "). The load balancer serves meanwhile, with the configuration of before the change where it is not loaded; " + lbRetrySays() + "."
 		}
 		return lbStatusActive, ""
 	case up == 2:

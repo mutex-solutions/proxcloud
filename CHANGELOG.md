@@ -422,6 +422,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`internal/platform/admin/platform_sandbox.go`). Such a block (what is left of an installer's sandbox cluster, a
   registry or an entry appliance) is inert for the sync, and it was replaced by the installation's own; the write
   now refuses it like a block with a pool, and the run stops at `sandbox_refused`. Found in the review of #436.
+- **A balancer with a change that waits says truthfully when the platform tries again, and the log says when its
+  own retries ended.** The row of a pair and of a balancer on one VM said "the platform tries again within half a
+  minute, by itself". The platform's own retries are six, 20 s apart (`lbRetry`); after the last one the row kept
+  saying it while nothing tried again before the next services sync or the next change, which on a site without a
+  scheduler is the next change, and the log had no line for it (review of `v0.11.1-rc.3`, finding 4; a known issue
+  of `v0.11.1` and of `v0.12.0-rc.1`). The sentence is now true at any time: "the platform tries again by itself every 20 s for 2
+  minutes, and after that at the next services sync or at the next change". It is made of the loop's own figures
+  (`lbRetrySays`, from `lbRetryEvery` and `lbRetryTries`), so it cannot drift from them; the rest of both messages
+  is as before. A loop that ends after its six passes with the change still waiting writes one WARN line, "load
+  balancer: the platform's own retries ended and the change still waits; the next services sync or the next change
+  tries again", with the balancer's key and the number of tries and nothing else (no config, no secret); a loop
+  that a pass ended writes none. No state was added, and nothing tries more often or longer than before. Tests:
+  `TestLBRetrySaysWhatTheLoopDoes`, `TestLBPairTakesAChangeWhileAptRuns`, `TestLBSingleTakesAChangeWhileAptRuns`
+  and `TestLBRetryIsBoundedAndSingle` (the line once when every pass still waits; the control: none when a pass
+  ends the wait, also at the last try); all three message and log assertions fail on the code of before. For an
+  upgrade: nothing is pushed to any appliance and no balancer changes what it serves. A row that waits at the
+  upgrade keeps the old sentence until its next pass writes the row, and a tool that matches the old sentence in
+  `statusMessage` must match the new one, or the unchanged start "A change waits". Not verified on a lab: only
+  the text and one log line change.
 - **A node selector term with an empty key matches no node** (`cmd/lb-controller`, `parseSelector`). A term of
   `proxcloud.io/lb-node-selector` with `=` and no key (`=edge`, `=`) was dropped, so a selector made only of such
   terms was read as no selector and every node of the cluster was put behind the Service: a typo in the one
