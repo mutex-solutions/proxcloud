@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
-- **Load balancer certificates: a certificate signed over SHA-1, MD5 or MD2 is refused when it arrives, on every
-  site.** This is what the fix "a certificate whose signature an appliance's HAProxy refuses is refused at the
+- **Load balancer certificates: a certificate signed over SHA-1, MD5, MD2 or RIPEMD-160 is refused when it arrives,
+  on every site.** This is what the fix "a certificate whose signature an appliance's HAProxy refuses is refused at the
   upload" (see Fixed) does to what exists.
   - *Nothing stored is checked again.* A project's certificate and a cluster's certificate row stay as they are,
     and no balancer is pushed by the upgrade. A balancer that serves such a certificate today (appliances on the
@@ -161,36 +161,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   md too weak"), so the push was refused, the config of before stayed and the balancer read `ERROR` (0.11.1, Known
   issues, TLS). With its intermediate in the chain the upload did refuse a SHA-1 certificate, with the wrong
   reason: "Certificate 2 of the chain did not sign certificate 1".
-  - *Now:* every certificate of the chain that is signed over SHA-1, MD5 or MD2 and did not sign itself is refused
-    with its place and the algorithm: "Certificate 1 of the chain is signed with SHA1-RSA, which the load balancer
-    does not accept: have it issued again with SHA-256 or stronger". A tenant's upload answers `400` with it; a
+  - *Now:* every certificate of the chain that is signed over SHA-1, MD5, MD2 or RIPEMD-160 and did not sign itself
+    is refused with its place and the algorithm: "Certificate 1 of the chain is signed with SHA1-RSA, which the load
+    balancer does not accept: have it issued again with SHA-256 or stronger". A tenant's upload answers `400` with it; a
     Service's Secret reads unusable with it and its Service is held as it was served, where the whole balancer's
     push was refused before (upgrade note above). A certificate that signed itself is taken whatever its digest,
     an old root at the end of a chain among them: OpenSSL does not look at that signature. RSA-PSS with SHA-1 is
     among the refused ("signed with SHA1-RSAPSS"): Go has no name for that signature, so its digest is read from
-    the certificate's RSA-PSS parameters (`lbWeakSignature`). The other signatures Go has no name for, SHA-224 and
-    RSA-PSS with a salt shorter than its digest, are taken, as the HAProxy of both images takes them.
+    the certificate's RSA-PSS parameters (`lbWeakSignature`). RSA with RIPEMD-160, which Go has no name for
+    either, is refused by its identifier ("signed with RIPEMD160-RSA"). The other signatures Go has no name for,
+    SHA-224 and RSA-PSS with a salt shorter than its digest, are taken, as the HAProxy of both images takes them.
   - *The two appliance images do not agree, and the upload follows the stricter one.* The HAProxy of Ubuntu 26.04
-    (3.2.25, OpenSSL 3.5.5) refuses a SHA-1, an MD5, a DSA with SHA-1 and an RSA-PSS with SHA-1 server certificate
-    and a SHA-1 intermediate; the HAProxy of Debian 13 (3.0.11, OpenSSL 3.5.9) loads all of them. The upload cannot know which
+    (3.2.25, OpenSSL 3.5.5) refuses a SHA-1, an MD5, a DSA with SHA-1, an RSA-PSS with SHA-1 and a RIPEMD-160 server
+    certificate and a SHA-1 intermediate; the HAProxy of Debian 13 (3.0.11, OpenSSL 3.5.9) loads all of them. The upload cannot know which
     image a balancer will run on, so it refuses on every site what one of the two refuses.
-  - *Tests.* `TestLBApplianceTLS` (step 1b), in a real guest of each image: fourteen certificates (SHA-256 of
+  - *Tests.* `TestLBApplianceTLS` (step 1b), in a real guest of each image: fifteen certificates (SHA-256 of
     ECDSA and of RSA authorities as controls; SHA-1 alone, with its intermediate, of an RSA authority, on the
-    intermediate; MD5, DSA with SHA-1 and RSA-PSS with SHA-1, made by the guest's openssl; SHA-224 and RSA-PSS
-    with SHA-256 and a salt of 20 bytes, made by it too, as the controls of the signatures Go has no name for;
+    intermediate; MD5, DSA with SHA-1, RSA-PSS with SHA-1 and RIPEMD-160, made by the guest's openssl; SHA-224 and
+    RSA-PSS with SHA-256 and a salt of 20 bytes, made by it too, as the controls of the signatures Go has no name for;
     SHA-1 and MD5 that signed themselves; a chain that ends in its SHA-1 root) go to the check and to `haproxy -c`
     under the product's own config. Held on each image: what its HAProxy refuses the upload refused, and the
     controls are taken by both. Held over the two together: what the upload refuses, one image's HAProxy at least
-    refuses. `TestCheckLBCertificateSignature` holds the texts, and `TestLBWeakSignatureUnnamed` the three
+    refuses. `TestCheckLBCertificateSignature` holds the texts, and `TestLBWeakSignatureUnnamed` the four
     signatures without a name on certificates openssl made (`testdata/sig-*.pem`, no key). Without the change the
-    first fails on Ubuntu 26.04 for five certificates ("taken by the upload and refused by this HAProxy") and the
+    first fails on Ubuntu 26.04 for six certificates ("taken by the upload and refused by this HAProxy") and the
     second for four; without the reading of the RSA-PSS parameters alone, the first fails there for the RSA-PSS
-    with SHA-1 certificate and the third fails; with Debian 13 as the only image the assertion over the images
-    fails for all seven refused certificates.
+    with SHA-1 certificate and the third fails, and the same for the RIPEMD-160 certificate without the reading
+    of its identifier; with Debian 13 as the only image the assertion over the images fails for all eight refused
+    certificates.
   - *Not changed, not shown.* A chain certificate with an RSA key of 1024 bits is refused by the HAProxy of both
     images ("ca key too small", seen by hand in a container of each) and taken by the upload: still open. A
     certificate issued under its own name by another key passes the upload's check. No guest was given an MD2
-    signature. Not run on a lab.
+    signature. A signature over another short digest that neither Go nor this check names (MD4, RSA-PSS with MD5
+    or with RIPEMD-160) is taken: OpenSSL 3.5 signs none of them, so no HAProxy was asked. Not run on a lab.
 
 ## [0.12.0-rc.1] - 2026-11-26
 

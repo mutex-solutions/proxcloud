@@ -1348,7 +1348,7 @@ spec:
   were asked for come on top.
 - **What the portal does with it.** It checks the Secret exactly as a certificate uploaded to a project (the key
   fits the certificate; RSA of 2048 to 8192 bits, or ECDSA P-256 or P-384; at most five certificates that sign
-  each other in order, none of them signed over SHA-1, MD5 or MD2 unless it signed itself; no passphrase), seals chain and key with its encryption key into a row that belongs to the
+  each other in order, none of them signed over SHA-1, MD5, MD2 or RIPEMD-160 unless it signed itself; no passphrase), seals chain and key with its encryption key into a row that belongs to the
   cluster's balancer (`lb_certificates`, owner `lbc:<clusterId>`; no project lists, names or deletes it, and
   another cluster with the same Secret has a row of its own), and keeps only the hash in the cluster's state
   (`lbGatewayState`). The appliances get it as a project's certificate: a file named by the chain's fingerprint in

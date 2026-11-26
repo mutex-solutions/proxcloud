@@ -226,10 +226,11 @@ func TestCheckLBCertificateSignature(t *testing.T) {
 }
 
 // The signatures Go has no name for (x509.UnknownSignatureAlgorithm), on certificates openssl made (testdata/sig-*.pem,
-// certificates only): RSA-PSS with SHA-1 is named, as the SHA-1 signature it is; SHA-224, and RSA-PSS with SHA-256
-// and a salt of 20 bytes, are not. What the HAProxy of each appliance image says of the three: TestLBApplianceTLS.
+// certificates only): RSA-PSS with SHA-1 is named, as the SHA-1 signature it is, and RSA with RIPEMD-160; SHA-224,
+// and RSA-PSS with SHA-256 and a salt of 20 bytes, are not. What the HAProxy of each appliance image says of the
+// four: TestLBApplianceTLS.
 func TestLBWeakSignatureUnnamed(t *testing.T) {
-	for file, want := range map[string]string{"sig-rsapss-sha1.pem": "SHA1-RSAPSS", "sig-sha224.pem": "", "sig-rsapss-sha256-salt20.pem": ""} {
+	for file, want := range map[string]string{"sig-rsapss-sha1.pem": "SHA1-RSAPSS", "sig-ripemd160.pem": "RIPEMD160-RSA", "sig-sha224.pem": "", "sig-rsapss-sha256-salt20.pem": ""} {
 		text, err := os.ReadFile("testdata/" + file)
 		if err != nil {
 			t.Fatal(err)

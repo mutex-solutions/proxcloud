@@ -252,7 +252,7 @@ Load balancers on a Proxmox service (`type: LOAD_BALANCER`; [cloud-integration.m
   - `POST /api/v1/project/{id}/certificates` with `name` (as a load balancer's), `certificate` (PEM: the server's
     certificate first, then each intermediate that signed the one before it; at most 5) and `privateKey` (PEM,
     PKCS #8, PKCS #1 or SEC 1, **without a passphrase**). Checked: the key belongs to the first certificate; the
-    chain is in order; no certificate of it is signed over SHA-1, MD5 or MD2, unless it signed itself (a root); RSA
+    chain is in order; no certificate of it is signed over SHA-1, MD5, MD2 or RIPEMD-160, unless it signed itself (a root); RSA
     of 2048 to 8192 bits or ECDSA on P-256 or P-384; 16 KiB at most together. `400` with the reason otherwise,
     `409` for a name the project has or past 50 certificates. An expired certificate, one not valid yet and one
     that names no host are taken, and the answer carries `warnings`. The answer is the certificate as `GET` gives
