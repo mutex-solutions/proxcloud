@@ -14,6 +14,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/function"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/feature"
@@ -656,6 +657,16 @@ func externalServiceDto(es *externalservice.ExternalService) map[string]any {
 			"maxCpu": l.MaxCPU, "maxMemoryGiB": l.MaxMemoryGiB, "maxGpus": l.MaxGPUs,
 			"maxTimeoutSeconds": l.MaxTimeoutSeconds, "defaultTimeoutSeconds": l.DefaultTimeoutSeconds,
 			"maxConcurrent": l.MaxConcurrent, "maxConcurrentGpus": l.MaxConcurrentGPUs, "egressMbps": scfg.EgressMbps,
+		}
+		// Serverless functions: present only when the location offers them (the console's gate for its menu entry
+		// and its page, which hide together with the routes' 403), with the limits the create form checks against.
+		if f := scfg.Functions; f.Enabled && scfg.ValidateFunctions() == nil && !es.IsDisabled() {
+			dto["functions"] = map[string]any{
+				"domain": scfg.Domain, "minInstances": f.MinInstances, "maxMinInstances": f.MaxMinInstances,
+				"idleSeconds": f.IdleSeconds, "minIdleSeconds": f.MinIdleSeconds, "maxIdleSeconds": f.MaxIdleSeconds,
+				"maxCpuMillis": f.MaxCPUMillis, "maxMemoryMi": f.MaxMemoryMi, "maxFunctions": f.MaxFunctions,
+				"maxInstances": f.MaxInstances, "defaultConcurrency": function.DefaultConcurrency, "maxConcurrency": function.MaxConcurrency,
+			}
 		}
 	}
 	// dbaas: the curated engine catalog feeds the client create pickers (versions/replica choices

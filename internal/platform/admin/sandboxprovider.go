@@ -66,6 +66,9 @@ func (h *Handler) checkSandboxGoLive(ctx context.Context, doc pgdoc.M) *httpx.HT
 	if err := es.SandboxConfig().ValidateAutomaticActions(); err != nil {
 		return httpx.BadRequest(err.Error())
 	}
+	if herr := refuseFunctionsEnabled(es); herr != nil {
+		return herr
+	}
 	if doc["status"] == externalservice.StatusDisabled {
 		return nil
 	}
@@ -99,4 +102,16 @@ func (h *Handler) sandboxReleaseCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, h.sandboxGatesFor(r.Context(), es))
+}
+
+// refuseFunctionsEnabled refuses a sandbox provider doc whose functions block is switched on, whatever its status.
+// Nothing can open it yet: enabling needs proof that the platform can stop and bill what it starts (a running
+// scheduler, an encryption key, a sandbox-proxy that reports to this portal), and the check of that proof is not part
+// of this portal. The rest of the block (limits, the default quota) is stored as written.
+func refuseFunctionsEnabled(es *externalservice.ExternalService) *httpx.HTTPError {
+	if !es.SandboxConfig().Functions.Enabled {
+		return nil
+	}
+	return httpx.NewError(http.StatusConflict, http.StatusConflict,
+		"Functions cannot be enabled on a sandbox provider in this release: store the provider with config.sandbox.functions.enabled false.")
 }

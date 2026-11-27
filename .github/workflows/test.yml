@@ -156,6 +156,7 @@ jobs:
         run: |
           go test -tags=integration -timeout 60m ./test/integration/... ./cmd/api/...
           go test -tags=integration ./internal/platform/project -run '^(TestBuildArchiveSurvivesCleanupAndRestart|TestPVESubnetRefreshFollowsTheLiveZone|TestPVEServerRefreshKeepsTheRowIdentity|TestLBPairApplyOrderAndStatus|TestLBCertificatesReachThePair|TestLBClusterStateConverges|TestLBControllerEnable|TestLBTenantAddressRows)$'
+          go test -tags=integration ./internal/platform/project -run '^TestFunction'
 
   # tsc and vite build stay green on a bundle that renders a white page, so open the real build.
   spa-smoke:
