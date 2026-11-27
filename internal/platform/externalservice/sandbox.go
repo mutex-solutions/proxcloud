@@ -24,6 +24,10 @@ package externalservice
 //	      "registryPrune":    "on",                      // "dry-run" logs, "" off (secret.registryGcUser/Password)
 //	      "buildStorage": {"endpoint": "http://s3.internal:9000", "bucket": "pc-sandbox-builds", "region": "us-east-1",
 //	                       "podEndpoint": ""},           // contexts of template builds (secret.buildStorageAccessKey/SecretKey)
+//	      "functions": {"enabled": false, "minInstances": 0, "maxMinInstances": 0, "idleSeconds": 300,
+//	                    "minIdleSeconds": 60, "maxIdleSeconds": 3600, "maxCpuMillis": 2000, "maxMemoryMi": 4096,
+//	                    "maxFunctions": 20, "maxInstances": 5,
+//	                    "projectQuota": {"functions": 20, "vcpus": 8, "ramMb": 16384}},  // serverless functions (off by default)
 //	      "limits": {"maxCpu": 8, "maxMemoryGiB": 32, "maxGpus": 1, "maxTimeoutSeconds": 86400,
 //	                 "defaultTimeoutSeconds": 3600, "maxConcurrent": 10, "maxConcurrentGpus": 1}
 //	    }
@@ -77,6 +81,23 @@ func (e *ExternalService) SandboxProjectQuota(project map[string]any) sandbox.Pr
 		RAMMb:     pick("sandboxRamMb", d.RAMMb),
 		GPUs:      pick("sandboxGpus", d.GPUs),
 	}
+}
+
+// FunctionProjectQuota resolves a project's function quota key by key: the project's own value (its functionQuota
+// document: functions, vcpus, ramMb), else the provider's default (config.sandbox.functions.projectQuota), else the
+// built-in default. Never unlimited: an absent or negative key falls back, it does not lift the limit. The project's
+// values live in a document of their own, never in its quota document: a key there that is not a sandbox key turns
+// that document into a Proxmox quota, in which every absent key is unlimited.
+func (e *ExternalService) FunctionProjectQuota(project map[string]any) sandbox.FunctionQuota {
+	q := e.SandboxConfig().Functions.WithDefaults().ProjectQuota
+	for key, dst := range map[string]*int{"functions": &q.Functions, "vcpus": &q.VCPUs, "ramMb": &q.RAMMb} {
+		if v, ok := project[key]; ok {
+			if n := intOf(v); n >= 0 {
+				*dst = n
+			}
+		}
+	}
+	return q
 }
 
 // SandboxRegion is config.region, falling back to the first configured region.
@@ -141,6 +162,10 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 	decode("build", &build)
 	decode("warming", &warming)
 	decode("import", &imports)
+	// The functions block as it is written: enabled, the idle bounds, the per-function caps, the floor
+	// (minInstances, maxMinInstances) and the default quota of a project. Nothing else is read from it.
+	var functions sandbox.FunctionsConfig
+	decode("functions", &functions)
 	if b, err := json.Marshal(sb["abuse"]); err == nil {
 		_ = json.Unmarshal(b, &abuse)
 	}
@@ -150,7 +175,7 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 	rotation.Kubeconfig = str(e.secretMap()["rotationKubeconfig"])
 	return sandbox.Config{
 		EgressMbps: intOf(sb["egressMbps"]), Abuse: abuse, Rotation: rotation,
-		Startup: startup, Build: build, Warming: warming, Import: imports,
+		Startup: startup, Build: build, Warming: warming, Import: imports, Functions: functions,
 		BuildStorage: sandbox.BuildStorage{
 			Endpoint: str(bs["endpoint"]), PodEndpoint: str(bs["podEndpoint"]), Bucket: str(bs["bucket"]), Region: str(bs["region"]),
 			AccessKey: str(e.secretMap()["buildStorageAccessKey"]), SecretKey: str(e.secretMap()["buildStorageSecretKey"]),

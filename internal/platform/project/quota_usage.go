@@ -30,6 +30,9 @@ type projectQuotaUsage struct {
 	Compute   *computeQuota  `json:"compute,omitempty"`
 	Storage   *storageQuota  `json:"storage,omitempty"`
 	Network   *networkQuota  `json:"network,omitempty"`
+	// Functions is the project's function quota on a sandbox location and what its functions reserve of it
+	// (functionQuotaUsage); absent on any other service.
+	Functions map[string]any `json:"functions,omitempty"`
 	Warnings  []string       `json:"warnings"`
 }
 
@@ -215,6 +218,7 @@ func (h *Handler) quotaUsage(w http.ResponseWriter, r *http.Request) {
 			out.Warnings = append(out.Warnings, "Quota usage is temporarily unavailable")
 		}
 	}
+	out.Functions = h.functionQuotaUsage(r.Context(), proj, svcID)
 	if usage, err := h.cloud.GPUUsageByProject(r.Context(), proj.ID); err == nil {
 		out.GPU.Usage = usage
 		out.GPU.UsageAvailable = true

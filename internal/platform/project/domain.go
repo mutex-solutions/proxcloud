@@ -63,7 +63,13 @@ type Project struct {
 	ProvisionFailures map[string]ProvisionFailure `json:"provisionFailures,omitempty"`
 	// Quota is the admin-managed per-project quota config (stored JSON; enforced at the
 	// ProxCloud cloud gate, never pushed to the provider). Shape: {"gpu": {"<model>": n, "*": n}}.
-	Quota                  map[string]any `json:"quota,omitempty"`
+	Quota map[string]any `json:"quota,omitempty"`
+	// FunctionQuota is the project's own function quota {functions, vcpus, ramMb} (an absent key falls back to the
+	// provider's, then the built-in default). A field of its own and never a key of Quota: any key there other than
+	// the sandbox ones makes Quota a Proxmox quota, in which an absent key is unlimited. Written by the operator
+	// alone (admin/projectquota.go) and never by a save of the project; MarshalJSON leaves it out of API answers to
+	// members, who read it with its usage (GET /project/{id}/quota-usage).
+	FunctionQuota          map[string]any `json:"functionQuota,omitempty"`
 	ScheduledForDeletionAt *time.Time     `json:"scheduledForDeletionAt,omitempty"`
 	// StatusBeforeDeletion is the status a cancelled deletion restores. DisabledByOperator marks a DISABLED an operator set,
 	// which a billing resume must not lift. Both stay on the stored doc; MarshalJSON leaves them out of API answers.
