@@ -132,8 +132,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     That image is the build of `main` `fd0afa97`
     (`sha256:e80c082ee158a7d98528ce45927a86c2bffe80bbce082f9ef0aa04db7f3cd0d0`), the first after the proxy's function
     mode (#494) and the function names (#496) were both on `main`; without `FUNCTION_DOMAIN` it serves sandboxes as
-    before. node-setup's DaemonSet is the same bytes, so a platform moved to this chart rolls sandbox-proxy, one
-    replica at a time behind its disruption budget, and restarts containerd on no sandbox machine.
+    before. node-setup's DaemonSet is the same bytes, so a platform moved to this chart rolls sandbox-proxy and
+    restarts containerd on no sandbox machine. With the chart's two replicas the Deployment's rolling update starts a
+    new pod and waits for it to be ready before it ends an old one; the disruption budget has no part in a rollout.
   - **The portal identity's rights in a function namespace** are ClusterRole `proxcloud-function-namespace`:
     Deployments get, list, create, patch, delete; their scale patch; Secrets create and patch; pods list; pod logs
     get; ResourceQuotas create and patch. No watch, no read of a scale, no read and no delete of a Secret, no exec,
