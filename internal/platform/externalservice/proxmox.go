@@ -548,6 +548,10 @@ type PVESandbox struct {
 	VLAN   int
 	Peers  []string
 	Deny   []string
+	// ControlPlane is config.sandbox.controlPlane, "address:port": the API of the cluster the machines belong to, as
+	// a platform run writes it for mode shared before the first machine exists (no kubeconfig names it yet). The
+	// cluster isolation lets the sandbox range reach it and the peers (PVESandboxEndpoints). "" = not named.
+	ControlPlane string
 }
 
 // PVESandboxRegistry is config.sandbox.registry: the sandbox registry's address and port (docs/managed-sandbox.md §6),
@@ -576,7 +580,7 @@ func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
 		DNS: strList(s["dns"]), KubeletSources: strList(s["kubeletSources"]), SNAT: str(s["snat"]),
 		UnsecuredMinAge: 20 * time.Minute, Kubeconfig: str(e.secretMap()["sandboxKubeconfig"]),
 		Owner: str(s["platformInstallationId"]), Mode: str(s["mode"]), Bridge: str(s["bridge"]), VLAN: intOf(s["vlan"]),
-		Peers: strList(s["peers"]), Deny: strList(s["deny"]),
+		Peers: strList(s["peers"]), Deny: strList(s["deny"]), ControlPlane: str(s["controlPlane"]),
 	}
 	if m := intOf(s["unsecuredMinAgeMinutes"]); m > 0 {
 		cfg.UnsecuredMinAge = time.Duration(m) * time.Minute
@@ -603,12 +607,15 @@ func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
 // PVESandboxEndpoints are the "address:port" places outside the sandbox subnet the workers' VM firewall opens
 // (registry, build storage, portal; port 443 when unset). The cluster isolation lets the sandbox networks reach exactly
 // these, above its DROPs, or one on a management network would stay unreachable (docs/managed-sandbox.md §2).
+// With config.sandbox.controlPlane (a sandbox group of a platform cluster) the list also holds what such a machine
+// opens toward its own cluster, as pve.SandboxClusterAllow writes it from the list the VM firewall is made from: the
+// API address and the node range are blocked networks there, and the sandbox DROP would cut the machine off them.
 func (e *ExternalService) PVESandboxEndpoints() []string {
 	cfg, ok := e.PVESandboxConfig()
 	if !ok {
 		return nil
 	}
-	var out []string
+	out := pve.SandboxClusterAllow(cfg.ControlPlane, cfg.Peers)
 	for _, ep := range []PVESandboxRegistry{cfg.Registry, cfg.BuildStorage, cfg.Portal} {
 		if ep.Address == "" {
 			continue

@@ -18,6 +18,17 @@ func TestPVESandboxEndpoints(t *testing.T) {
 	if got, want := es.PVESandboxEndpoints(), []string{"10.89.0.227:443", "10.88.0.41:9000", "10.88.0.10:19459"}; !slices.Equal(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
+	// A sandbox group of a platform cluster (the run writes controlPlane and peers): what the machines open toward
+	// their own cluster is in the list too, from the list their VM firewall is made from. The installer's block names
+	// no controlPlane and gets none.
+	shared := &ExternalService{Config: map[string]any{"sandbox": map[string]any{"pool": "proxcloud-sbx", "mode": "shared",
+		"controlPlane": "10.90.0.10:6443", "peers": []any{"10.90.0.20-10.90.0.23"}}}}
+	if got, want := shared.PVESandboxEndpoints(), []string{"tcp 10.90.0.10 6443", "tcp 10.90.0.20/30 6443", "udp 10.90.0.20/30 8472", "tcp 10.90.0.20/30 4240", "icmp 10.90.0.20/30"}; !slices.Equal(got, want) {
+		t.Fatalf("shared: got %q, want %q", got, want)
+	}
+	if cfg, _ := shared.PVESandboxConfig(); cfg.ControlPlane != "10.90.0.10:6443" {
+		t.Fatalf("controlPlane %q", cfg.ControlPlane)
+	}
 }
 
 func TestPVESandboxConfig(t *testing.T) {
