@@ -1322,9 +1322,10 @@ The off of `shared` also deletes what neither ArgoCD nor Cluster API takes away,
 and waits for each:
 
 1. The sandbox chart's Application, with everything it deployed. While ArgoCD deletes, the run
-   asks it to look at the Application again (`argocd.argoproj.io/refresh`), so the deletion ends
-   when the last object is gone and not at ArgoCD's next look by itself. The same holds for the
-   Application of `pc-sandbox` with `separate`.
+   asks it to look at the Application again (`argocd.argoproj.io/refresh`), so that the deletion
+   can end when the last object is gone and not at ArgoCD's next look by itself (that wait was
+   minutes on the lab without the ask; with it, it has not been measured yet). The same holds
+   for the Application of `pc-sandbox` with `separate`.
 2. The four definitions of agent-sandbox on the platform cluster (`sandboxes.agents.x-k8s.io`
    and `sandboxclaims`, `sandboxtemplates`, `sandboxwarmpools` of
    `extensions.agents.x-k8s.io`), which a deleted Application leaves behind. Each one goes only
@@ -1333,7 +1334,10 @@ and waits for each:
    (`a sandbox definition is kept`). To remove it afterwards, with the platform cluster's admin
    kubeconfig (the Secret `pc-platform/pc-platform-kubeconfig` on the seed; the page's platform
    kubeconfig only reads): `kubectl get sandboxes.agents.x-k8s.io -A`, delete what it lists,
-   then `kubectl delete crd sandboxes.agents.x-k8s.io`.
+   then `kubectl delete crd sandboxes.agents.x-k8s.io`. The run knows the four by their names
+   and takes them for the sandbox chart's: nothing on a definition says who installed it. An
+   agent-sandbox installed by hand on the platform cluster shares them, and loses each one that
+   holds no object.
 3. The group's MachineDeployment; Cluster API deletes the machines.
 4. When no MachineDeployment, MachineSet or Machine of the group is left: the group's machine
    template and bootstrap template on the seed (`pc-platform-sandbox-<node>-<hash>`; they carry
