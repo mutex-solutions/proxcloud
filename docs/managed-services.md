@@ -2696,6 +2696,16 @@ otherwise), and it builds nothing of sandboxes. The candidate exists for the lab
 `main` keeps it as a previous BOM: from 0.12.0-rc.1 the plan to the BOM on `main` has one row, the
 release, record only, and a platform on it is taken `spec.sandbox` as one on the BOM of `main` is.
 
+The BOM of the candidate `v0.12.0-rc.2` (`0.12.0-rc.2`) has the pins of 0.12.0-rc.1 and the release
+alone different. From 0.12.0-rc.1 the plan has one row, the release, record only, also for an
+installation that built sandboxes under it; phrase `upgrade <name> to 0.12.0-rc.2`. From every other
+previous BOM it is the plan described for 0.12.0-rc.1 above. One move to these pins ran on a lab, under
+the first candidate's name: from 0.11.1 to 0.12.0-rc.1 (2026-11-26), with the rollout check on a real
+ArgoCD, in 56 s, and no machine, template, control plane or pod was replaced. That drill found the first
+candidate not fit to become the release (three defects of the sandbox code, fixed since; no placement
+reached "live"), and the second exists for the drill of the fixes
+([ci-release.md](ci-release.md#release-candidates)). No move to 0.12.0-rc.2 has run on a lab.
+
 "Moves" means that the Application's target is the new chart version and ArgoCD has compared the
 cluster with it. ArgoCD starts a sync only for an Application that is out of sync, and a hook is
 not part of the comparison: a chart version that renders the same objects as the one before is
@@ -3561,7 +3571,7 @@ instance" and stays `PENDING` (seen on a lab: 12 denied signals of `postgres` in
 
 ## Not implemented yet
 
-- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1`, that of v0.10.2 is `0.10.2`, that of v0.11.0 is `0.11.0`, that of v0.11.1 is `0.11.1` (`main` carries a `-dev` one between releases, now `0.12.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1`, `v0.11.0-rc.2`, `v0.11.1-rc.1`, `v0.11.1-rc.2`, `v0.11.1-rc.3`, `v0.11.1-rc.4`, `v0.11.1-rc.5` and `v0.12.0-rc.1` carry `0.10.0-rc.1`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.2-rc.1`, `0.11.0-rc.1`, `0.11.0-rc.2`, `0.11.1-rc.1`, `0.11.1-rc.2`, `0.11.1-rc.3`, `0.11.1-rc.4`, `0.11.1-rc.5` and `0.12.0-rc.1`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well, v0.10.2 keeps that of v0.10.1 and that of the candidate `v0.10.2-rc.1` too, v0.11.0 keeps that of v0.10.2 and those of the candidates `v0.11.0-rc.1` and `v0.11.0-rc.2` as well, v0.11.1 keeps that of v0.11.0 and those of the candidates `v0.11.1-rc.1`, `v0.11.1-rc.2`, `v0.11.1-rc.3`, `v0.11.1-rc.4` and `v0.11.1-rc.5` too, and `main` keeps that of v0.11.1 and that of the candidate `v0.12.0-rc.1` as well). `--managed-services` needs v0.8.0 or later: no
+- **No release before v0.8.0.** The BOM of v0.8.0 is `0.8.0`, that of v0.8.1 is `0.8.1`, that of v0.8.2 is `0.8.2`, that of v0.9.0 is `0.9.0`, that of v0.9.1 is `0.9.1`, that of v0.10.0 is `0.10.0`, that of v0.10.1 is `0.10.1`, that of v0.10.2 is `0.10.2`, that of v0.11.0 is `0.11.0`, that of v0.11.1 is `0.11.1` (`main` carries a `-dev` one between releases, now `0.12.0-dev`; the candidates `v0.9.0-rc.1` and `v0.9.0-rc.2` carry `0.9.0-rc.1` and `0.9.0-rc.2`, release BOMs for a lab, and the candidates `v0.10.0-rc.1`, `v0.10.1-rc.1`, `v0.10.1-rc.2`, `v0.10.2-rc.1`, `v0.11.0-rc.1`, `v0.11.0-rc.2`, `v0.11.1-rc.1`, `v0.11.1-rc.2`, `v0.11.1-rc.3`, `v0.11.1-rc.4`, `v0.11.1-rc.5`, `v0.12.0-rc.1` and `v0.12.0-rc.2` carry `0.10.0-rc.1`, `0.10.1-rc.1`, `0.10.1-rc.2`, `0.10.2-rc.1`, `0.11.0-rc.1`, `0.11.0-rc.2`, `0.11.1-rc.1`, `0.11.1-rc.2`, `0.11.1-rc.3`, `0.11.1-rc.4`, `0.11.1-rc.5`, `0.12.0-rc.1` and `0.12.0-rc.2`; v0.9.0 keeps both as previous BOMs, v0.9.1 keeps those and that of v0.9.0, v0.10.0 keeps that of v0.9.1 and that of the candidate `v0.10.0-rc.1` too, v0.10.1 keeps that of v0.10.0 and those of the candidates `v0.10.1-rc.1` and `v0.10.1-rc.2` as well, v0.10.2 keeps that of v0.10.1 and that of the candidate `v0.10.2-rc.1` too, v0.11.0 keeps that of v0.10.2 and those of the candidates `v0.11.0-rc.1` and `v0.11.0-rc.2` as well, v0.11.1 keeps that of v0.11.0 and those of the candidates `v0.11.1-rc.1`, `v0.11.1-rc.2`, `v0.11.1-rc.3`, `v0.11.1-rc.4` and `v0.11.1-rc.5` too, and `main` keeps that of v0.11.1 and that of the candidate `v0.12.0-rc.1` as well). `--managed-services` needs v0.8.0 or later: no
   earlier released image reads `PROXCLOUD_PLATFORM_ENABLED`, and the images of v0.8.0 exist once
   its tag's workflows have succeeded. For a test ahead of a release,
   `proxcloud-up.sh` takes a build of main as its version (`--version dev-<sha>`, `upgrade dev-<sha>`;
