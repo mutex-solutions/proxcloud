@@ -764,6 +764,85 @@ type fakeSeed struct {
 	ttls      []float64
 	grant     time.Duration // when set, the life every TokenRequest token gets instead of the one asked for
 	uids      int
+	// argo, when set, is ArgoCD's render of an applied Application: the objects of this cluster the chart makes of its
+	// values, by path. The fake then syncs them as ArgoCD does without prune (argoSync) and compares as ArgoCD does
+	// (argoCompare); without it an applied Application reads Synced whatever is on the cluster.
+	argo     func(app map[string]any) map[string]map[string]any
+	tracked  map[string]map[string]bool // per Application: every path a sync of it wrote
+	rendered map[string]map[string]bool // per Application: the paths of its last render
+	// refuse answers "DELETE <path>" with the denial for as long as it is listed: an admission webhook.
+	refuse map[string]denial
+}
+
+// argoSync is a sync of Application name without prune: every rendered object is written (the status a controller set
+// stays, an object in deletion is left alone), and nothing the render no longer names is deleted. Called with the lock.
+func (f *fakeSeed) argoSync(name string, objs map[string]map[string]any) {
+	if f.tracked == nil {
+		f.tracked, f.rendered = map[string]map[string]bool{}, map[string]map[string]bool{}
+	}
+	if f.tracked[name] == nil {
+		f.tracked[name] = map[string]bool{}
+	}
+	f.rendered[name] = map[string]bool{}
+	for path, o := range objs {
+		f.tracked[name][path], f.rendered[name][path] = true, true
+		cur := f.objs[path]
+		if cur != nil && str(cur, "metadata", "deletionTimestamp") != "" {
+			continue
+		}
+		if cur != nil && o["status"] == nil {
+			o["status"] = cur["status"]
+		}
+		f.objs[path] = o
+	}
+}
+
+// argoCompare is ArgoCD's comparison of Application name: OutOfSync while an object a sync of it wrote is on the
+// cluster and no longer in its render, as the lab showed for the address pool of a node group that left the settings
+// (v0120lab/y0/off1b/k8s-seed-app-resources.txt). An object with helm.sh/resource-policy keep does not count: the same
+// take lists no machine template of an earlier size, and the Application read Synced with five of them on the seed.
+// "" for an Application the fake renders nothing of. Called with the lock.
+func (f *fakeSeed) argoCompare(name string) string {
+	if f.tracked[name] == nil {
+		return ""
+	}
+	for path := range f.tracked[name] {
+		if o := f.objs[path]; o != nil && !f.rendered[name][path] && str(o, "metadata", "annotations", "helm.sh/resource-policy") != "keep" {
+			return "OutOfSync"
+		}
+	}
+	return "Synced"
+}
+
+// appSync is what a GET of the Application answers as status.sync.status.
+func (f *fakeSeed) appSync(name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s := f.argoCompare(name); s != "" {
+		return s
+	}
+	return str(f.objs[appsPath+name], "status", "sync", "status")
+}
+
+// paths are the paths of the objects under prefix, sorted.
+func (f *fakeSeed) paths(prefix string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for k := range f.objs {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// drop takes an object away as its controller does once nothing holds it (a finalizer taken off an object in deletion).
+func (f *fakeSeed) drop(path string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objs, path)
 }
 
 // denial is an error answer of the API server.
@@ -864,7 +943,21 @@ func (f *fakeSeed) serve(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"message":"the UID in the precondition does not match the UID in record"}`)
 			return
 		}
+		if d, ok := f.refuse["DELETE "+r.URL.Path]; ok {
+			w.WriteHeader(d.status)
+			_ = json.NewEncoder(w).Encode(map[string]any{"message": d.message})
+			return
+		}
 		f.writes = append(f.writes, "DELETE "+r.URL.Path)
+		// As the API server: an object with finalizers gets a deletion timestamp and stays until they are taken off.
+		// Not an Application: ArgoCD here deletes one at once (sandboxPlatform).
+		if obj := f.objs[r.URL.Path]; obj != nil && !strings.HasPrefix(r.URL.Path, appsPath) {
+			if fins, _ := dig(obj, "metadata", "finalizers").([]any); len(fins) > 0 {
+				obj["metadata"].(map[string]any)["deletionTimestamp"] = time.Now().UTC().Format(time.RFC3339)
+				_ = json.NewEncoder(w).Encode(obj)
+				return
+			}
+		}
 		delete(f.objs, r.URL.Path)
 		fmt.Fprint(w, `{}`)
 	case kind == "sa":
@@ -1125,15 +1218,28 @@ func (f *fakeSeed) object(w http.ResponseWriter, r *http.Request) {
 			body["status"] = status
 		}
 		f.objs[path] = body
+		if body["kind"] == "Application" && f.argo != nil && !f.unsynced[name] {
+			if objs := f.argo(body); objs != nil {
+				f.argoSync(name, objs)
+			}
+		}
 		answer(body)
 	case r.Method != http.MethodGet:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	case f.objs[path] != nil:
+		if sync := f.argoCompare(path[strings.LastIndex(path, "/")+1:]); sync != "" && strings.HasPrefix(path, appsPath) {
+			f.objs[path]["status"].(map[string]any)["sync"].(map[string]any)["status"] = sync
+		}
 		answer(f.objs[path])
 	case isCollection(path):
 		var keys []string
+		all := path[:strings.LastIndex(path, "/")] + "/namespaces/" // a list over every namespace: /apis/g/v/<plural>
 		for k := range f.objs {
-			if strings.HasPrefix(k, path+"/") && !strings.Contains(k[len(path)+1:], "/") && matches(f.objs[k], r.URL.Query().Get("labelSelector")) {
+			inAll := false
+			if rest := strings.Split(strings.TrimPrefix(k, all), "/"); strings.HasPrefix(k, all) && len(rest) == 3 {
+				inAll = rest[1] == path[strings.LastIndex(path, "/")+1:]
+			}
+			if (inAll || strings.HasPrefix(k, path+"/") && !strings.Contains(k[len(path)+1:], "/")) && matches(f.objs[k], r.URL.Query().Get("labelSelector")) {
 				keys = append(keys, k)
 			}
 		}

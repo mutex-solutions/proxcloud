@@ -1178,6 +1178,10 @@ func (x *acq) cluster(ctx context.Context) error {
 		note += machineNote + appNote
 		return waiting(CodeControlPlaneTimeout, "%d of %d machines are Running (%d exist); control plane initialized: %t.%s", running, total, len(machines), initialized, clip(note))
 	}
+	// After an off of the shared group: what neither ArgoCD nor Cluster API takes away, before the access goes.
+	if err := x.sandboxGroupGone(ctx, seed); err != nil {
+		return err
+	}
 	if err := x.sandboxSettled(ctx); err != nil {
 		return err
 	}

@@ -198,6 +198,9 @@ func (x *acq) sandboxAppsGone(ctx context.Context, seed *kamajik8s.Client, place
 	if err := wl.DeleteNamespace(ctx, ns); err != nil && !kamajik8s.NotFound(err) {
 		return classify(CodeWorkloadUnreachable, err)
 	}
+	if placement == SandboxShared {
+		return x.sandboxCRDsGone(ctx, wl)
+	}
 	return nil
 }
 
