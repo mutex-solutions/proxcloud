@@ -378,9 +378,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Not exercised: the write itself, which happens on `main` after the merge.
 
 ### Fixed
-    `mirror` when the mirror does not answer the guest.
-
-### Fixed
 
 - **A release that changed only the load balancer controller reached no cluster by itself.** The tenant's cluster
   page offered "Platform update available" only when the cluster's chart version differed from the provider's, and
