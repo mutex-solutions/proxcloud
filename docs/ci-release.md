@@ -179,6 +179,41 @@ that no test installs from a distribution mirror while it runs.
 
 Building them locally: [CONTRIBUTING.md](../CONTRIBUTING.md#the-guest-images-of-the-load-balancer-tests).
 
+### The build cache of the product images
+
+`docker.yml` keeps BuildKit layers of the five images in the repository's Actions cache
+(`type=gha`). GitHub keeps 10 GB per repository and evicts the least recently used
+entries first. Three rules, measured in #516:
+
+- **Only a run on `main` writes; every run reads.** An entry belongs to the ref that
+  wrote it: a pull request reads its own entries and those of `main`, a tag reads its
+  own and those of `main`, and nothing else reads what a pull request or a tag wrote.
+  Until #516 every pull request run wrote its layers (0.5 GB for the three Go images,
+  1.4 GB for all five). On 2026-11-27 the cache held 714 entries and 11.1 GB, 8.5 GB of
+  it written by six pull requests in the two hours before, and whatever `main` had
+  written went out with the rest. A pull request, a tag and a manual run from a branch
+  now write nothing (`cache-to` is empty there); a pull request from a fork or from
+  Dependabot builds the same way.
+- **One scope per image** (`scope=<image name>`). The five legs of the build matrix
+  shared the default scope, and a scope holds the entry of its last writer: a leg
+  mostly found the layers of another image.
+- **`mode=max` only for `proxcloud-sandbox-runtime`.** Its `envd` stage clones and
+  builds a pinned commit (46 seconds) that no source of ours changes, and only
+  `mode=max` keeps the layers of a stage that is not the final image. The four other
+  images write `mode=min`, the layers of the final image (4 to 33 MB an image). What
+  `mode=max` added for them was the Go module download (201 MB, in each of three
+  images), `npm ci` (137 and 161 MB) and the Go compile (49 and 168 MB, rebuilt by
+  every source change). The downloads take as long to fetch from the cache (10 to 13
+  seconds) as to run again (4 to 12 seconds).
+
+What to expect: a build whose sources did not change since `main` last built the image
+is taken from the cache whole (3 to 9 seconds a leg, in both modes); a build whose
+sources changed compiles again (16 to 79 seconds a leg), as it did before. A pull
+request that changes a Dockerfile, `go.mod` or a lockfile finds less, and one opened
+after an eviction finds nothing: the cache makes a build faster, never different.
+`security-scan.yml`, `helm.yml` and the template and VM image workflows keep no build
+cache. The two guest images of the load balancer tests (above) follow the same rule.
+
 ## Container images and chart versions
 
 Five app-release image repositories are used:

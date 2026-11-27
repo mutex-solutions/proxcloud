@@ -401,6 +401,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and the sandbox entry run, and which `TestLBApplianceTLS` showed on the plain image until now). Both fail if
     the plain image already holds what the line installs. They still need the mirror; a failure of the install says
     `mirror` when the mirror does not answer the guest.
+- **Only `main` writes the build cache of the five images** (#516, `docker.yml`; no product code, no image content).
+  Every pull request run wrote its BuildKit layers to the repository's Actions cache, 0.5 to 1.4 GB a run, where
+  only that pull request could read them: on 2026-11-27 the cache held 11.1 GB against GitHub's 10 GB, 8.5 GB of it
+  from six pull requests in two hours, and every entry was evicted within hours, those of `main` and the guest
+  images of the load balancer tests (#499) with them. Now every run reads the entries of `main` and only a run on
+  `main` writes; each image has its own scope (the five legs shared one, and a leg mostly found another image's
+  layers); and only `proxcloud-sandbox-runtime` keeps the layers of every stage, for its `envd` build. A pull
+  request's build step loses the upload (20 to 56 seconds a leg). Build steps, tags, pushes and gates are unchanged
+  ([docs/ci-release.md](docs/ci-release.md#the-build-cache-of-the-product-images)).
+  Not exercised: the write itself, which happens on `main` after the merge.
 
 ### Fixed
 
