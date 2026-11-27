@@ -163,6 +163,13 @@ func (p *platform) waits(t *testing.T, want string) {
 // fakes' model of them (realCharts, builtSharedSandbox, fakeSeed.argoCompare): what the real ones do is the lab's.
 func TestSandboxOffLeavesNothingBehind(t *testing.T) {
 	p := builtSharedSandbox(t)
+	// Not the group's, so not the off's to delete: a template whose name only begins like the group's, an address pool
+	// of another name in the namespace, and a pool of the group's name in another namespace.
+	foreign := []string{pmtPath + "pc-platform-sandboxes-pve1-0a1b2c3d", strings.Replace(sandboxPool, "/pc-platform-sandbox", "/pc-platform-other", 1),
+		strings.Replace(sandboxPool, "/namespaces/pc-platform/", "/namespaces/another/", 1)}
+	for _, path := range foreign {
+		p.seed.put(path, meta(path[strings.LastIndex(path, "/")+1:], nil))
+	}
 	templates := append(p.seed.paths(pmtPath+"pc-platform-sandbox-"), p.seed.paths(kctPath+"pc-platform-sandbox-")...)
 	others := len(p.seed.paths(pmtPath)) + len(p.seed.paths(kctPath)) - len(templates)
 	if len(templates) != 2 || others == 0 {
@@ -225,6 +232,11 @@ func TestSandboxOffLeavesNothingBehind(t *testing.T) {
 	}
 	if got := len(p.seed.paths(pmtPath)) + len(p.seed.paths(kctPath)); got != others {
 		t.Errorf("the other groups keep %d templates of %d", got, others)
+	}
+	for _, path := range foreign {
+		if p.seed.obj(path) == nil {
+			t.Errorf("the off deleted %s, which is not the group's", path)
+		}
 	}
 	if got := p.seed.appSync(ClusterName); got != "Synced" || str(p.seed.obj(appsPath+ClusterName), "status", "health", "status") != "Healthy" {
 		t.Fatalf("after the off %s reads %s", ClusterName, got)
