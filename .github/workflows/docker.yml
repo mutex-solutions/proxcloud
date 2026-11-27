@@ -168,16 +168,23 @@ jobs:
           push: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
           tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}
           build-args: ${{ matrix.build-args }}
-          # One cache scope per image: the legs of this matrix shared the default scope, and an entry
-          # of a scope is replaced by its last writer, so a leg mostly found another image's layers.
+          # The BuildKit layer cache, in the repository's Actions cache (10 GB, least recently used evicted
+          # first). Three rules, measured in #516 (docs/ci-release.md, "The build cache of the product images"):
+          # - One scope per image. The legs of this matrix shared the default scope, and a scope holds the
+          #   entry of its last writer, so a leg mostly found the layers of another image.
+          # - Only a run on main writes. Every run reads main's entries, which keeps them in use; what a
+          #   pull request or a tag writes can be read by that pull request or that tag alone, and those
+          #   writes (0.5 GB a run for the three Go images) filled the 10 GB and evicted every entry within
+          #   hours, main's with them.
+          #   An empty cache-to writes nothing; a pull request from a fork or from Dependabot builds the same.
+          # - mode=max (every stage's layers) only for proxcloud-sandbox-runtime, whose envd stage (a clone
+          #   and a build of a pinned commit, 46 seconds) no source of ours changes. The four others write
+          #   mode=min (the layers of the final image): what mode=max adds for them is the Go module and npm
+          #   downloads (137 to 201 MB each), which take as long to fetch from the cache as to download
+          #   again, and the compile, which every source change rebuilds. A build whose sources did not
+          #   change is taken from the cache whole in both modes.
           cache-from: type=gha,scope=${{ matrix.image }}
-          # mode=max (every stage's layers) only for proxcloud-sandbox-runtime, whose envd stage (a clone and
-          # a build of a pinned commit, 46 seconds) no source of ours changes. For the four others mode=min
-          # (the layers of the final image): the layers mode=max adds are the Go module and npm downloads
-          # (137 to 201 MB each), which take as long to fetch from the cache as to download again, and the
-          # compile, which every source change rebuilds. A build whose sources did not change is taken from
-          # the cache in both modes.
-          cache-to: type=gha,mode=${{ matrix.image == 'proxcloud-sandbox-runtime' && 'max' || 'min' }},scope=${{ matrix.image }}
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=gha,mode={0},scope={1}', matrix.image == 'proxcloud-sandbox-runtime' && 'max' || 'min', matrix.image) || '' }}
 
   # ---- tag v*: create the GitHub Release once every image is built -----------
   # Runs only for a tag push and only after every `build` matrix leg succeeds,
