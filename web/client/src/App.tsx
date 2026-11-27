@@ -85,6 +85,7 @@ export default function App() {
           <Route path="databases" element={lazyPage(() => import("@/pages/platform/DatabasesPage"))} />
           <Route path="databases/:resourceId" element={lazyPage(() => import("@/pages/platform/DatabaseDetailPage"))} />
           <Route path="sandboxes" element={lazyPage(() => import("@/pages/platform/SandboxesPage"))} />
+          <Route path="functions" element={lazyPage(() => import("@/pages/platform/FunctionsPage"))} />
 
           {/* Billing */}
           <Route path="billing/savings" element={lazyPage(() => import("@/pages/billing/SavingsPage"))} />
