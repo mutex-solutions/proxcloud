@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"time"
 
@@ -79,10 +80,20 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	if err != nil {
 		return err
 	}
+	// Functions first, as a whole (their namespace on every sandbox location, their records, their rows): they run
+	// customer code and bill by the minute. Where that fails their rows stay and the deletion job retries.
+	functionsLeft := false
+	if err := h.DeleteProjectFunctions(ctx, projectID); err != nil {
+		slog.Error("teardown: delete functions", "project", p.ID, "err", err)
+		functionsLeft = true
+	}
 	resources, err := h.cloud.FindAllByProjectID(ctx, projectID)
 	if err != nil {
 		return err
 	}
+	// Rows of functions that could not be removed are none of the legs' below: no leg can delete a function, the
+	// sweep would wait on them between its passes, and one archived there would hide instances that still run.
+	resources = slices.DeleteFunc(resources, func(res cloud.CloudResource) bool { return res.Type == cloud.TypeFunction })
 	SortCloudResourcesForDeletion(resources)
 
 	// Sandboxes first: they run customer code and bill by the minute, and nothing else depends on them. Their rows end
@@ -457,7 +468,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	// ponytail: rows left with no failed leg behind them (a provider since removed) do not ask for a re-run, or a project
 	// could wedge the job's sweep forever. Report them and move on.
 	expect := p.Status
-	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || sandboxesLeft || kamajiPending > 0 || dbaasPending > 0)
+	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || sandboxesLeft || functionsLeft || kamajiPending > 0 || dbaasPending > 0)
 	if _, err := h.svc.SaveIfStatus(ctx, p, expect); err != nil {
 		return err
 	}
@@ -475,6 +486,9 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	}
 	if sandboxesLeft {
 		return fmt.Errorf("teardown could not remove the project's sandboxes or their namespace; the deletion job retries")
+	}
+	if functionsLeft {
+		return fmt.Errorf("teardown could not remove the project's functions or their namespace; the deletion job retries")
 	}
 	if zonesLeft {
 		return fmt.Errorf("teardown could not remove the project's DNS zones; the deletion job retries")
