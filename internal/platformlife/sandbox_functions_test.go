@@ -155,6 +155,10 @@ func TestValidateFunctions(t *testing.T) {
 		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want) || strings.Count(err.Error(), "spec.sandbox.functions") != 1):
 			t.Errorf("%s: %v, want one problem with %q", tc.name, err, tc.want)
 		}
+		// A login someone put into the URL is refused, and the refusal does not repeat its password.
+		if err != nil && strings.Contains(err.Error(), "u:p@") {
+			t.Errorf("%s: the problem repeats the login of the URL: %v", tc.name, err)
+		}
 	}
 }
 

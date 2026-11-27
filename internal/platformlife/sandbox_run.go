@@ -101,7 +101,7 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 	}
 	if fn := sp.functions(); fn != nil {
 		if p, err := parsePortal(fn.PortalURL); err != nil || (want == SandboxSeparate && !p.addr.IsValid()) {
-			return permanent(CodeSandboxRefused, "spec.sandbox.functions.portalURL %q is not the portal's URL as sandbox-proxy reaches it (with placement separate: an IPv4 address). Nothing was changed.", fn.PortalURL)
+			return permanent(CodeSandboxRefused, "spec.sandbox.functions.portalURL %q is not the portal's URL as sandbox-proxy reaches it (with placement separate: an IPv4 address). Nothing was changed.", shownURL(fn.PortalURL))
 		}
 	}
 	if err := x.functionsOff(ctx); err != nil {

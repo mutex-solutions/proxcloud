@@ -146,6 +146,15 @@ func parsePortal(raw string) (portal, error) {
 	return p, nil
 }
 
+// shownURL is a portalURL as a message repeats it. One that carries a login is not repeated: its password would be in
+// the answer of the save and in the message of a run.
+func shownURL(raw string) string {
+	if strings.Contains(raw, "@") {
+		return "(not repeated: it carries a login)"
+	}
+	return raw
+}
+
 // validateFunctions checks spec.sandbox.functions of an active sandbox block. With placement separate the portal's
 // address goes into the fence of the sandbox machines, which takes an IPv4 address outside the sandbox range that is
 // not the sandbox cluster's own API (an address of the platform cluster's MetalLB range): one it refused would stop
@@ -177,7 +186,7 @@ func (sb *SandboxSpec) validateFunctions(bad func(string, ...any), nodeRange net
 	}
 	p, err := parsePortal(f.PortalURL)
 	if err != nil {
-		bad("spec.sandbox.functions.portalURL %q %s: it is the portal's API as sandbox-proxy reaches it, https://host[:port] (the save fills in PROXCLOUD_SELF_API_BASE_URL when that is set)", f.PortalURL, err)
+		bad("spec.sandbox.functions.portalURL %q %s: it is the portal's API as sandbox-proxy reaches it, https://host[:port] (the save fills in PROXCLOUD_SELF_API_BASE_URL when that is set)", shownURL(f.PortalURL), err)
 		return
 	}
 	if sb.Placement != SandboxSeparate {
