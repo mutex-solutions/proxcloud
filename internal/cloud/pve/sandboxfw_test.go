@@ -138,11 +138,15 @@ func TestSandboxGeneration(t *testing.T) {
 		{"out", "udp", "1.1.1.1", "53"}, {"out", "tcp", "1.1.1.1", "53"},
 		{"out", "udp", nodes, "8472"}, {"in", "udp", nodes, "8472"},
 		{"in", "tcp", nodes, "10250"}, {"in", "tcp", "10.20.0.201,10.20.0.202/31,10.20.0.204/30,10.20.0.208/31", "10250"},
-		{"out", "", "+dc/" + g.OutSet, ""},
+		{"out", "tcp", "+dc/" + g.OutSet, "1:24,26:65535"}, {"out", "udp", "+dc/" + g.OutSet, ""}, {"out", "icmp", "+dc/" + g.OutSet, ""},
 	} {
 		if !has(want[0], want[1], want[2], want[3]) {
 			t.Errorf("missing rule %v", want)
 		}
+	}
+	// No rule opens the internet for every protocol and port: that one let TCP 25 out of the machine.
+	if has("out", "", "+dc/"+g.OutSet, "") {
+		t.Fatal("a rule opens the internet on every port, direct SMTP included")
 	}
 	if has("in", "tcp", "10.20.0.214", "") || slices.ContainsFunc(g.Rules, func(r FirewallRule) bool { return r.Type == "in" && r.Source == "" }) {
 		t.Fatal("nothing comes in from anywhere")
@@ -214,6 +218,9 @@ type sandboxFake struct {
 	grpNote map[string]string
 	writes  []string
 	dcOff   bool // the datacenter firewall's master switch is off
+	netDown bool // the node does not report its networks (it is down or fenced off)
+	// cluster is the cluster firewall's rule list (cluster.fw [RULES]), top first: a new rule lands on top, as on PVE.
+	cluster []FirewallRule
 }
 
 type fakeVM struct {
@@ -278,8 +285,25 @@ func (f *sandboxFake) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/cluster/firewall/options":
 		reply(w, map[string]any{"enable": map[bool]int{false: 1, true: 0}[f.dcOff]})
+	case p == "/cluster/firewall/rules" && r.Method == http.MethodGet:
+		reply(w, listed(f.cluster))
+	case p == "/cluster/firewall/rules":
+		f.cluster = append([]FirewallRule{rule()}, f.cluster...)
+		reply(w, nil)
+	case strings.HasPrefix(p, "/cluster/firewall/rules/") && r.Method == http.MethodDelete:
+		pos, _ := strconv.Atoi(seg[len(seg)-1])
+		if d := r.Form.Get("digest"); d != "" && d != fmt.Sprint(len(f.cluster)) {
+			w.WriteHeader(500)
+			fmt.Fprint(w, `{"errors":{"digest":"detected modified configuration"}}`)
+			return
+		}
+		f.cluster = slices.Delete(f.cluster, pos, pos+1)
+		reply(w, nil)
 	case p == "/cluster/status":
 		reply(w, []map[string]any{{"type": "cluster", "name": "lab"}, {"type": "node", "name": "pve1", "ip": "192.0.2.11"}})
+	case p == "/nodes/pve1/network" && f.netDown:
+		w.WriteHeader(595)
+		fmt.Fprint(w, `{"errors":{"node":"no route to host"}}`)
 	case p == "/nodes/pve1/network":
 		reply(w, []map[string]any{
 			{"iface": "vmbr0", "address": "192.0.2.11", "cidr": "192.0.2.11/24", "gateway": "192.0.2.1"},

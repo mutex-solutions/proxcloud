@@ -996,6 +996,8 @@ are several, `errors.details.problems`.
   `warn` with one line per VM that is stopped (start it in Proxmox, `qm start <vmid>`) or that has no
   `onboot` (the next apply sets it, or `qm set <vmid> --onboot 1`) or that the token could not read (the
   other VMs are still listed), or when the pools could not be read.
+  `isolation` is a warning, never a failure, when the rules in place differ from the provider's settings only in
+  what names the installation's own sandbox range: a run writes those itself where it adds or removes the range.
   `isolation` fails, naming the CIDRs missing from `blockedCidrs` (a save of
   the installation adds them), when
   the seed, the API VIP or the node range is outside the blocked and management

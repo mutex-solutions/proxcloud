@@ -485,6 +485,17 @@ func (s *Service) DeleteProjectZoneIfEmpty(ctx context.Context, projectID string
 // endpoints the workers' own VM firewall opens (registry, build bucket, portal wake), which may well sit on a
 // management network (lab: the build bucket on 10.88.0.41:9000), accepted over TCP above the sandbox DROPs.
 // Without it a build pod's fetch timed out on every connect while the VM firewall said yes.
+// The second exception are the cluster flows of allow (SandboxClusterAllow): what a sandbox machine opens toward
+// its own cluster. For a sandbox group of the platform cluster those destinations (the API address, the node range)
+// are blocked networks by the installation's own Check, so the sandbox DROP names them. The forward chain sees
+// every routed packet, and on a node with net.bridge.bridge-nf-call-iptables = 1 also the frames bridged between
+// two guests of one bridge: there the DROP cut the machine off its cluster (lab, 2026-11-26) while its VM firewall
+// said yes. They are ACCEPTs above the DROP and not holes in the DROP's destinations, for three reasons: a
+// destination list cannot leave out a port, so a hole would open every port of the API address and the node range;
+// each ACCEPT reads as one line "this range, this protocol, this port, these machines" right above the DROP it is
+// the exception to, which stays the plain "sandbox to every blocked network"; and it is the form the endpoints
+// already have. FORWARD only: the destinations are guests, and no rule here opens a port of a node's own (the IN
+// DROP stays whole). Both layers render the same list (clusterFlows), so the VM firewall and these cannot drift.
 // There is deliberately no blanket DROP source=pool: it would also drop internet egress (SNAT).
 func isolationRules(pool string, blocked, sandbox []string, owner string, allow ...string) []FirewallRule {
 	out := []FirewallRule{
@@ -509,6 +520,9 @@ func isolationRules(pool string, blocked, sandbox []string, owner string, allow 
 					DPort: strconv.Itoa(int(ep.Port())), Enable: 1, Comment: owner})
 			}
 		}
+		for _, fl := range clusterAccepts(allow, pool) {
+			out = append(out, FirewallRule{Type: "forward", Action: "ACCEPT", Proto: fl[0], Source: src, Dest: fl[1], DPort: fl[2], Enable: 1, Comment: owner})
+		}
 		drop(src, append([]string{pool}, blocked...))
 	}
 	return out
@@ -527,6 +541,35 @@ func sandboxEndpoints(allow []string) []netip.AddrPort {
 	}
 	slices.SortFunc(out, func(a, b netip.AddrPort) int { return a.Compare(b) })
 	return slices.Compact(out)
+}
+
+// clusterAccepts parses the cluster flows among the allow entries ("proto dest[,dest] [dport]", SandboxClusterAllow)
+// as {proto, dest, dport}, in their order and each once. An entry that is no such flow is skipped (the endpoints are
+// read by sandboxEndpoints), and so is one whose destination touches the tenant pool: no sandbox machine's cluster
+// is a tenant's network.
+func clusterAccepts(allow []string, pool string) [][3]string {
+	tenant, _ := netip.ParsePrefix(pool)
+	var out [][3]string
+	for _, a := range allow {
+		f := strings.Fields(a)
+		if len(f) < 2 || len(f) > 3 || !slices.Contains([]string{"tcp", "udp", "icmp"}, f[0]) {
+			continue
+		}
+		dest, err := toCIDRs(strings.Split(f[1], ","))
+		ports, ok := portRanges(strings.Join(f[2:], ""))
+		if err != nil || len(dest) == 0 || !ok || (len(ports) == 0) != (f[0] == "icmp") {
+			continue
+		}
+		if tenant.IsValid() && overlap(dest, []netip.Prefix{tenant}) {
+			slog.Warn("pve isolation: a sandbox cluster flow into the tenant pool is not opened", "flow", a)
+			continue
+		}
+		fl := [3]string{f[0], strings.Join(cidrList(dest), ","), strings.Join(f[2:], "")}
+		if !slices.Contains(out, fl) {
+			out = append(out, fl)
+		}
+	}
+	return out
 }
 
 // managementEndpoints drops the sandbox endpoints inside the tenant pool or an operator-blocked range (tenant): only a
@@ -641,6 +684,86 @@ func refused(format string, a ...any) error {
 // endpoints are rolled out by the per-project path, or by hand.
 func (s *Service) ReconcileProviderIsolation(ctx context.Context, pool string, blocked, sandbox []string, allow ...string) error {
 	return s.reconcileDrops(ctx, true, pool, blocked, sandbox, allow)
+}
+
+// ErrIsolationNotInPlace: WriteProviderIsolation read the cluster firewall back and this portal's provider-wide rules
+// are not the set it wanted (a node that did not report its networks keeps the DROPs in place as they are, or
+// someone else changed the list in between). Nothing is wrong with the config: the caller tries again.
+var ErrIsolationNotInPlace = errors.New("pve isolation: the provider-wide rules are not in place")
+
+// WriteProviderIsolation brings this portal's provider-wide rules to this config with no project, in the form a
+// project's sync and a network create have (reconcileDrops without the refusals of ReconcileProviderIsolation), and
+// reads the cluster firewall back: nil only when it then holds exactly the set, each rule enabled. It is for the one
+// caller that has just changed the config itself and must not leave the rules to "the next provider sync": a
+// platform run that added or removed its sandbox range (lab, 2026-11-26: until that sync the installation's own Check
+// failed and every run stopped at its first stage, the one that switches sandboxes off included; with the scheduler
+// off, or on a site with no project, no sync ever came). The provider sync's refusals protect a set it did not
+// write from a call nobody asked for; here an operator's apply asks, as a tenant's network create does.
+// Idempotent: a set already in place is not touched and no request but reads is made. Rules of another owner are
+// never rewritten or removed, a project's ACCEPTs stay above the DROPs (rebuildIsolation), and the rules land in
+// the order of isolationRules whatever the order before. The caller holds the SDN apply lock, as the sync does.
+func (s *Service) WriteProviderIsolation(ctx context.Context, pool string, blocked, sandbox []string, allow ...string) error {
+	if err := s.reconcileDrops(ctx, false, pool, blocked, sandbox, allow); err != nil {
+		return err
+	}
+	want, owner, _, _, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
+	if err != nil {
+		return err
+	}
+	rules, err := s.C.ListClusterFirewallRules(ctx)
+	if err != nil {
+		return err
+	}
+	mine := slices.DeleteFunc(rules, func(r FirewallRule) bool { return r.Comment != owner })
+	switch {
+	case slices.EqualFunc(mine, want, sameLiveRule):
+		return nil
+	case !complete:
+		return fmt.Errorf("%w: a PVE node did not report its networks, so the %s rules stay as they are until it does (%d in place, %d wanted)", ErrIsolationNotInPlace, owner, len(mine), len(want))
+	}
+	return fmt.Errorf("%w: %d %s rules read back, %d wanted", ErrIsolationNotInPlace, len(mine), owner, len(want))
+}
+
+// IsolationDiffersOnlyIn reports whether this portal's provider-wide rules in place differ from the set of this
+// config in nothing but what names the networks own: with every rule from one of them left out (their DROPs and
+// the ACCEPTs above them) and each of them taken off the other rules' destinations, the two sets are the same,
+// rule for rule and each enabled. Then the tenant pool is fenced exactly as the config says, and the one thing
+// missing or left over is the fence of a range the caller is about to write or take away itself. False with the
+// datacenter firewall off or a node that did not report its networks. Read-only.
+func (s *Service) IsolationDiffersOnlyIn(ctx context.Context, own []string, pool string, blocked, sandbox []string, allow ...string) (bool, error) {
+	want, owner, _, _, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
+	if err != nil || !complete || len(own) == 0 {
+		return false, err
+	}
+	// With the datacenter firewall off no rule is enforced, whatever the list says.
+	if on, err := s.C.DatacenterFirewallEnabled(ctx); err != nil || !on {
+		return false, err
+	}
+	rules, err := s.C.ListClusterFirewallRules(ctx)
+	if err != nil {
+		return false, err
+	}
+	without := func(list string) (string, bool) {
+		if list == "" {
+			return "", true
+		}
+		kept := slices.DeleteFunc(strings.Split(list, ","), func(c string) bool { return slices.Contains(own, c) })
+		return strings.Join(kept, ","), len(kept) > 0
+	}
+	strip := func(in []FirewallRule) []FirewallRule {
+		var out []FirewallRule
+		for _, r := range in {
+			src, ok1 := without(r.Source)
+			dst, ok2 := without(r.Dest)
+			if ok1 && ok2 {
+				r.Source, r.Dest = src, dst
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	mine := slices.DeleteFunc(rules, func(r FirewallRule) bool { return r.Comment != owner })
+	return slices.EqualFunc(strip(mine), strip(want), sameLiveRule), nil
 }
 
 // poolOverManagement is the error for a cidrPool that overlaps a management network of the nodes, which

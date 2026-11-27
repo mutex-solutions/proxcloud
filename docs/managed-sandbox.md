@@ -140,6 +140,10 @@ in for code that escaped gVisor). Targets are named by role; the lab addresses a
 | SMTP :25 / :587 (IPv4) | open / open | **blocked** / open | open / open |
 | Cluster DNS | ok | ok | not its resolver |
 
+The two outer columns of the SMTP row are that lab run: since v0.12.0 the workers' VM firewall closes TCP 25 to the
+internet as well (TCP on every other port, UDP and ICMP stay open; see section 2.1), so a worker
+namespace reaches 587 and not 25. A tenant sends mail through a relay's submission port; there is no direct SMTP.
+
 "Blocked" is a timeout: Cilium drops, nothing answers. The guardrail is two `CiliumClusterwideNetworkPolicy` objects
 (EE `sandbox-tenant-egress` with an added `egressDeny` on TCP 25, and `sandbox-tenant-ingress`) plus one namespace
 policy standing in for EE's per-sandbox `<id>-egress` (internet minus the private ranges). It applied to a running
@@ -417,10 +421,14 @@ theirs.
 
 ## 2. Layer 1: the VM firewall on the workers (SB2b)
 
-Layer 0 (§1.2) sees routed traffic only. Layer 1 sees every frame a worker sends or receives, frames switched inside
-the sandbox vnet included, and pins the worker's source address. The portal applies it, not the installer: the sync
-job's pass over each Proxmox provider (`syncjob.reconcileSandboxWorkers`, `pve.StartSandboxPass`) fences every VM of
-the provider's sandbox pool on every cycle, so a new worker, a replaced one and a hand edit all come back to it.
+Layer 0 (§1.2) sees the traffic a node routes, and on a node where `net.bridge.bridge-nf-call-iptables` is 1
+(Proxmox's legacy firewall sets it, and a node moved to nftables keeps it until its next boot) also the frames switched
+between two guests of one bridge. None of its rules has the sandbox subnet as both source and destination, so traffic
+inside the sandbox vnet is not its to decide either way. Layer 1 sees every frame a worker sends or receives, frames
+switched inside the sandbox vnet included, and pins the worker's source address. The portal applies it, not the
+installer: the sync job's pass over each Proxmox provider (`syncjob.reconcileSandboxWorkers`, `pve.StartSandboxPass`)
+fences every VM of the provider's sandbox pool on every cycle, so a new worker, a replaced one and a hand edit all come
+back to it.
 
 ### 2.1 What a worker may do
 
@@ -436,7 +444,7 @@ hash><content hash>`, which is the VM's only rule. Every rule in it ACCEPTs:
 | in | TCP 10250 | `sandbox.kubeletSources` (the services cluster's nodes) |
 | in | TCP 443 (`config.sandbox.proxy.port`) | the entry appliance's vnet address only, to `sandbox-proxy`'s MetalLB address (`config.sandbox.proxy`, SB4) |
 | out | TCP 443 (`config.sandbox.registry.port`) | the sandbox registry's address only (`config.sandbox.registry`, SB6a, §6.4) |
-| out | anything | IP set `<group>-o`: `0.0.0.0/1` and `128.0.0.0/1` minus the private, CGNAT, link-local, multicast and reserved ranges, the management networks, every address a PVE node holds on any interface (uplinks, bonds and VLANs too), the sandbox's own SNAT address, `blockedCidrs`, the tenant pool, the sandbox subnet itself (its gateway is a PVE node) and the control plane address |
+| out | TCP on every port but 25, UDP, ICMP (three rules; no other IP protocol) | IP set `<group>-o`: `0.0.0.0/1` and `128.0.0.0/1` minus the private, CGNAT, link-local, multicast and reserved ranges, the management networks, every address a PVE node holds on any interface (uplinks, bonds and VLANs too), the sandbox's own SNAT address, `blockedCidrs`, the tenant pool, the sandbox subnet itself (its gateway is a PVE node) and the control plane address |
 
 Nothing else comes in: there is no rule for a tenant, for the services cluster beyond the kubelet, or for anyone on the
 internet, except the entry appliance, which may reach `sandbox-proxy`'s address on 443 (SB4, §4.3).
@@ -454,6 +462,11 @@ give up a connect after 10 s.
 - **Why the kubelet between workers.** Kamaji starts the konnectivity server with the default proxy strategy, so
   exec and logs for a pod on one worker can leave through the agent on another. The kubelet still wants an API server
   credential.
+- **Why no TCP 25.** A sandbox pod never reached port 25 (the guardrail's deny). The worker itself did: its one
+  internet rule took every protocol and port, so code on the host network, or code that left gVisor, could deliver
+  mail directly from the site's address (found on a lab on 2026-11-26). The rule is now three ACCEPTs, TCP `1:24,26:65535`,
+  UDP and ICMP, and still no DROP: a tenant gets submission (587, 465) to a relay and no direct SMTP. A site upgraded
+  from a release before gets the new generation at the first provider sync, as for any changed rule set.
 - **Why all ACCEPT.** The policies drop, so no rule order matters and no partial state opens anything: a missing rule
   drops more. A changed rule set is a new generation. Its sets and group are built while nothing references them, each
   worker then gets the new reference before the old one is removed (for that moment it allows the union of two

@@ -79,10 +79,17 @@ func (h *Handler) checkSandboxGoLive(ctx context.Context, doc pgdoc.M) *httpx.HT
 	if doc["status"] == externalservice.StatusDisabled {
 		return nil
 	}
-	if herr := h.sandboxNeedsScheduler(doc); herr != nil {
+	// Both reasons in one answer. With the scheduler off the refusal used to name the scheduler alone, so an operator
+	// who then turned it on met the gates one save later (lab, 2026-11-26); the gates are read either way.
+	herr, err := h.sandboxNeedsScheduler(doc), sandbox.GatesErr(h.sandboxGatesFor(ctx, es))
+	switch {
+	case herr != nil && err != nil:
+		herr.Msg += " Besides the scheduler: " + err.Error() + ". The provider stays DISABLED until they hold too (docs/managed-sandbox.md §3)."
 		return herr
-	}
-	if err := sandbox.GatesErr(h.sandboxGatesFor(ctx, es)); err != nil {
+	case herr != nil:
+		herr.Msg += " No release gate fails at this moment."
+		return herr
+	case err != nil:
 		return httpx.NewError(http.StatusConflict, http.StatusConflict,
 			"A sandbox provider cannot go live: "+err.Error()+". Store it with status DISABLED until they hold (docs/managed-sandbox.md §3).")
 	}
