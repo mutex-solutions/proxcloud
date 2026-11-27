@@ -354,7 +354,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     MetalLB range, another site's network) is closed to a sandbox machine by its VM firewall alone.
   - The docs said that those rules "see routed traffic only"; they now say what holds on a node with the switch on.
   - Tests: a table over the rendered rules of both layers, on the lab's addresses and the drill's packet list
-    (`TestSandboxLayersOnTheDrillsPackets`, 102 packets for `shared`, 23 for `separate`), with rc.1's rule set as
+    (`TestSandboxLayersOnTheDrillsPackets`, 111 packets for `shared`, 24 for `separate`), with rc.1's rule set as
     its control; `TestIsolationRulesOfASharedSandboxGroup` (the set line by line);
     `TestFenceGateSaysWhenTheClusterFirewallCutsTheMachineOff`; `TestForwardVerdictReadsOnlyWhatARuleSays`. The
     forward chain and the VM firewall in these tests are the tests' own model of Proxmox. Not run on a lab.
