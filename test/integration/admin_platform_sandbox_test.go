@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -134,6 +135,14 @@ func TestPlatformSandboxProviderRows(t *testing.T) {
 	if !ok || cfg.Owner != "pi-1" || cfg.Mode != "shared" || cfg.Kubeconfig != "firewall-kubeconfig-0123456789" || cfg.Bridge != "vmbr0" || cfg.VLAN != 140 ||
 		len(es.PVENetworkConfig().SandboxCIDRs) != 1 || es.PVENetworkConfig().CIDRPool != "10.100.0.0/16" || es.PVEConfig().Secret != "portal-token" {
 		t.Fatalf("the provider as the sync reads it: %+v, network %+v", cfg, es.PVENetworkConfig())
+	}
+	// What the isolation rules let the range reach of its own cluster, as every reader of the provider row gets it
+	// (the sync, a network create, the Check, the run itself): the API address and the node range, and nothing else.
+	wantAllow := []string{"tcp 192.168.140.10 6443", "tcp 192.168.140.20/30,192.168.140.24/29,192.168.140.32/29 6443",
+		"udp 192.168.140.20/30,192.168.140.24/29,192.168.140.32/29 8472", "tcp 192.168.140.20/30,192.168.140.24/29,192.168.140.32/29 4240",
+		"icmp 192.168.140.20/30,192.168.140.24/29,192.168.140.32/29"}
+	if got := es.PVESandboxEndpoints(); cfg.ControlPlane != "192.168.140.10:6443" || !slices.Equal(got, wantAllow) {
+		t.Fatalf("the cluster flows of the stored row: controlPlane %q, allow %q", cfg.ControlPlane, got)
 	}
 	raw, err := repo.FindDoc(ctx, "externalService", "svc-pve")
 	if err != nil {

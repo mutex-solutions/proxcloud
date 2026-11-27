@@ -29,7 +29,7 @@ const (
 )
 
 // Check is one row of the preflight. The ids are part of the API (docs/api.md): flags, scheduler (a warning, present only while the job scheduler is off), spec, network, bridge (a failure before the
-// first install, a warning after it), isolation,
+// first install, a warning after it), isolation (a warning when the rules in place differ from the provider's settings only in what names the installation's own sandbox range, which a run writes itself),
 // tenant-network and tenant-path (a warning or ok, never a failure; absent when the provider names no zone), sandbox (present while spec.sandbox asks for sandboxes), csi-vmid (a warning or ok, never a failure), credentials,
 // machines (a warning or ok, never a failure; absent while the installation has no VM), nodes (a warning or ok, never a failure; absent while the platform cluster cannot be read), certificates (a warning or ok, never a failure; absent while the seed or the platform cluster cannot be read), capacity (a failure before the first install; after it a warning, and a failure only where the settings make a control plane larger than the one a run built and it does not fit; a warning when it cannot be read; absent while the CAPI token is not stored), privileges:capi, privileges:csi, privileges:kubemint, mint-scope, pool-fence, token-scope, iso-store-visibility,
 // boot-iso-grant, boot-iso, placement, argocd-access (present while spec.access.argocd is set: a failure on an address or networks Validate refuses, a warning when the operator networks contain a Proxmox node's address), boot-store (a failure when the store is missing or takes no disk image, a warning
@@ -114,6 +114,53 @@ func TokenClient(es *externalservice.ExternalService, tok *TokenCredential) (*pv
 	return pve.New(cfg)
 }
 
+// isolationRow is the row isolation: the platform's addresses are blocked networks, and the cluster firewall holds
+// the provider's isolation rules (site.Mgmt and mgmt are the nodes' networks, read complete).
+func (p Preflight) isolationRow(ctx context.Context, site Site, mgmt []string) Check {
+	in := p.Installation
+	fail := func(msg string) Check { return Check{ID: "isolation", Status: CheckFail, Message: msg} }
+	ok := func(msg string) Check { return Check{ID: "isolation", Status: CheckOK, Message: msg} }
+	// Layer 0 drops tenant traffic to the management and blocked networks only.
+	if unf := in.Unfenced(append(slices.Clone(site.Blocked), mgmt...)); len(unf) > 0 {
+		return fail("Tenants could reach the seed, the API VIP or the node range: " + strings.Join(unf, ", ") +
+			" are not in the provider's blockedCidrs. Saving the settings adds them (step 1, Save settings; or by hand under Cloud providers, config.network.blockedCidrs); then run a provider sync so the cluster firewall drops them (with this installation saved it needs no project).")
+	}
+	switch err := p.Portal.CheckIsolation(ctx, site.CIDRPool, site.Blocked, site.Sandbox, p.Allow...); {
+	case err != nil && p.ownSandboxOnly(ctx, site):
+		// Never a failure: a run writes exactly these rules itself, in the step that adds or removes the range
+		// (sandboxIsolation), so it must not be stopped at its first stage for their absence. On the lab that
+		// stopped the apply that switches sandboxes off, when it was needed. The check's own words are left out:
+		// they send the operator to a provider sync or to the datacenter firewall, and neither is needed here.
+		return Check{ID: "isolation", Status: CheckWarn, Message: "The cluster firewall drops tenant traffic to the seed, the API VIP and the node range. " +
+			"Its isolation rules differ from the provider's settings only in what names this installation's own sandbox range (" + strings.Join(in.ownSandboxCIDRs(), ", ") +
+			"): the DROPs of that range and the ACCEPTs of its machines' own cluster are missing, or are left over. The next apply writes them itself in stage cluster, " +
+			"or takes them away when sandboxes are switched off; no provider sync is needed, and until then no sandbox provider passes its isolation gate."}
+	case errors.Is(err, pve.ErrIsolationPending) && p.ProviderDisabled:
+		return ok("The platform addresses are blocked networks. No cluster firewall rule is written yet: " + providerDisabled + ".")
+	case errors.Is(err, pve.ErrIsolationPending):
+		return ok("The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync (with this installation saved it needs no project), or with the first tenant network.")
+	case err != nil && p.ProviderDisabled:
+		return fail("No provider sync writes or repairs these rules: " + providerDisabled + ". " + err.Error())
+	case err != nil:
+		return fail(err.Error())
+	}
+	return ok("The cluster firewall drops tenant traffic to the seed, the API VIP and the node range.")
+}
+
+// ownSandboxOnly reports that the isolation rules in place differ from the provider's settings in nothing but what
+// names this installation's own sandbox range (pve.IsolationDiffersOnlyIn): the state between the run's write of
+// the range on the provider and its write of the rules, or what a release that left the rules to a provider sync
+// left behind. Any other difference (another pool, a blocked network missing, a disabled rule, no rule at all with
+// tenant networks in place) is none of this, and the row fails as before.
+func (p Preflight) ownSandboxOnly(ctx context.Context, site Site) bool {
+	own := p.Installation.ownSandboxCIDRs()
+	if len(own) == 0 {
+		return false
+	}
+	only, err := p.Portal.IsolationDiffersOnlyIn(ctx, own, site.CIDRPool, site.Blocked, site.Sandbox, p.Allow...)
+	return err == nil && only
+}
+
 // OK reports whether no check failed.
 func OK(checks []Check) bool {
 	return !slices.ContainsFunc(checks, func(c Check) bool { return c.Status == CheckFail })
@@ -189,24 +236,7 @@ func (p Preflight) Run(ctx context.Context) []Check {
 				s.Network.Prefix + " via the address of " + s.Seed.Node + "\" to reach the seed and the API address. No check reads that route."
 		}
 		row("network", in.SiteProblems(site), passed)
-		// Layer 0 drops tenant traffic to the management and blocked networks only.
-		if unf := in.Unfenced(append(slices.Clone(site.Blocked), mgmt...)); len(unf) > 0 {
-			row("isolation", []string{"Tenants could reach the seed, the API VIP or the node range: " + strings.Join(unf, ", ") +
-				" are not in the provider's blockedCidrs. Saving the settings adds them (step 1, Save settings; or by hand under Cloud providers, config.network.blockedCidrs); then run a provider sync so the cluster firewall drops them (with this installation saved it needs no project)."}, "")
-		} else {
-			switch err := p.Portal.CheckIsolation(ctx, site.CIDRPool, site.Blocked, site.Sandbox, p.Allow...); {
-			case errors.Is(err, pve.ErrIsolationPending) && p.ProviderDisabled:
-				row("isolation", nil, "The platform addresses are blocked networks. No cluster firewall rule is written yet: "+providerDisabled+".")
-			case errors.Is(err, pve.ErrIsolationPending):
-				row("isolation", nil, "The platform addresses are blocked networks; the cluster firewall rules are written by the next provider sync (with this installation saved it needs no project), or with the first tenant network.")
-			case err != nil && p.ProviderDisabled:
-				row("isolation", []string{"No provider sync writes or repairs these rules: " + providerDisabled + ". " + err.Error()}, "")
-			case err != nil:
-				row("isolation", []string{err.Error()}, "")
-			default:
-				row("isolation", nil, "The cluster firewall drops tenant traffic to the seed, the API VIP and the node range.")
-			}
-		}
+		out = append(out, p.isolationRow(ctx, site, mgmt))
 	}
 
 	out = append(out, p.bridge(ctx))

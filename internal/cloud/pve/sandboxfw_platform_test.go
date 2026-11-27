@@ -50,8 +50,8 @@ func TestSandboxSharedRuleSet(t *testing.T) {
 	peers := "192.168.140.20/30,192.168.140.24/29,192.168.140.32/29"
 	want := []string{
 		"in icmp NODES", "in tcp " + peers + " 10250", "in tcp NODES 4240", "in udp NODES 8472",
-		"out INTERNET", "out icmp NODES", "out tcp 192.168.140.1 53", "out tcp 192.168.140.10 6443", "out tcp " + peers + " 6443",
-		"out tcp NODES 4240", "out udp 192.168.140.1 53", "out udp NODES 8472",
+		"out icmp INTERNET", "out icmp NODES", "out tcp 192.168.140.1 53", "out tcp 192.168.140.10 6443", "out tcp " + peers + " 6443",
+		"out tcp INTERNET 1:24,26:65535", "out tcp NODES 4240", "out udp 192.168.140.1 53", "out udp INTERNET", "out udp NODES 8472",
 	}
 	if got := ruleLines(g); !slices.Equal(got, want) {
 		t.Fatalf("shared rules:\n got %q\nwant %q", got, want)
@@ -109,8 +109,8 @@ func TestSandboxSeparateRuleSet(t *testing.T) {
 	}
 	want := []string{
 		"in icmp NODES", "in tcp 192.168.140.250 443", "in tcp NODES 10250", "in tcp NODES 4240", "in tcp NODES 7946", "in udp NODES 7946", "in udp NODES 8472",
-		"out INTERNET", "out icmp NODES", "out tcp 192.168.140.1 53", "out tcp 192.168.140.201 6443,8132",
-		"out tcp NODES 10250", "out tcp NODES 4240", "out tcp NODES 7946", "out udp 192.168.140.1 53", "out udp NODES 7946", "out udp NODES 8472",
+		"out icmp INTERNET", "out icmp NODES", "out tcp 192.168.140.1 53", "out tcp 192.168.140.201 6443,8132",
+		"out tcp INTERNET 1:24,26:65535", "out tcp NODES 10250", "out tcp NODES 4240", "out tcp NODES 7946", "out udp 192.168.140.1 53", "out udp INTERNET", "out udp NODES 7946", "out udp NODES 8472",
 	}
 	if got := ruleLines(g); !slices.Equal(got, want) {
 		t.Fatalf("separate rules:\n got %q\nwant %q", got, want)
