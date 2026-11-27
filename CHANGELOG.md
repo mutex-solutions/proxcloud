@@ -370,6 +370,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   65535 open, UDP open, another IP protocol dropped); before the fix its row for port 25 read `allow`. Not run on a
   lab.
 
+- **Two sentences about the sandbox release gates were not true (drill of v0.12.0-rc.1, findings Z2-f and Z2-g).**
+  - *"The four gates fail before the sync":* two failed in v0.12.0-rc.1, `isolation` and `fence`; `noderestriction`
+    and `network-guard` hold from the start. The notes of the candidate say so now. With the fix below (the run
+    writes the isolation rules itself) one fails before the first provider sync, `fence`, and the docs say that
+    ([managed-services.md](docs/managed-services.md), "Not verified on a lab yet").
+  - *With the scheduler off the `409` on "live" named no gate.* It named the scheduler alone, so an operator who
+    turned the scheduler on met the failing gates one save later. The answer now names the scheduler and, after
+    it, every gate that does not hold with its reason, or says that no gate fails at this moment
+    (`Handler.checkSandboxGoLive`; `TestPlatformSandboxProviderNeedsTheScheduler`, whose new lines failed on the
+    old text). The status and the code stay `409`. The gates are now read at that save with the scheduler off too:
+    a few read-only calls to Proxmox and the cluster more.
+
 - **Sandboxes: every run stopped at its first stage between a change of the sandbox range and the next provider
   sync, the one that switches sandboxes off included (drill of v0.12.0-rc.1, findings Z3-A and Z4-A).** The run
   wrote the range on the provider in stage `cluster`, and took it off at "off", and left the provider-wide isolation

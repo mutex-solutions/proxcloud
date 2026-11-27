@@ -29,6 +29,8 @@ writer of the isolation set (the platform runner).
 - `internal/cloud/pve/sandboxfw.go`: the workers' rule for the internet is three ACCEPTs (TCP
   `sandboxInternetTCP` = every port but 25, UDP, ICMP) in place of one for every protocol and port (finding Z2-e:
   TCP 25 was open from the machine itself). A changed rule set is a new generation.
+- `internal/platform/admin/sandboxprovider.go`: `Handler.checkSandboxGoLive` reads the release gates also when the
+  scheduler is off, and its `409` names both (findings Z2-f, Z2-g; no route, status or field changes).
 - `internal/cloud/pve/network.go`: `Service.WriteProviderIsolation` (the provider-wide set for a config, with no
   project and without the refusals of `ReconcileProviderIsolation`, read back; `ErrIsolationNotInPlace`) and
   `Service.IsolationDiffersOnlyIn` (the set in place differs from the config's only in what names given networks).

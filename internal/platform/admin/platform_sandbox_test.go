@@ -110,6 +110,22 @@ func TestPlatformSandboxProviderNeedsTheScheduler(t *testing.T) {
 	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC", "pi-1")); herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "job scheduler is off") || !strings.Contains(herr.Msg, "placeholder rate") {
 		t.Fatalf("live with the scheduler off: %+v", herr)
 	}
+	// The same answer names the gates that fail as well (lab, 2026-11-26: with the scheduler off the 409 named none,
+	// so the operator who turned it on met the gates one save later), and says so when none fails.
+	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC", "pi-1")); herr == nil || !strings.Contains(herr.Msg, "No release gate fails") {
+		t.Fatalf("live with the scheduler off and every gate holding: %+v", herr)
+	}
+	h.SetSandboxGates(func(context.Context, *externalservice.ExternalService) []sandbox.Gate {
+		return []sandbox.Gate{{Name: sandbox.GateNodeRestriction, OK: true, Detail: "refused"}, {Name: sandbox.GateIsolation, OK: true},
+			{Name: sandbox.GateFence, Detail: "no worker is open to sandboxes yet"}, {Name: "network-guard", Detail: "its node-setup pod is not Ready"}}
+	})
+	herr := h.checkSandboxGoLive(ctx, doc("PUBLIC", "pi-1"))
+	if herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "job scheduler is off") ||
+		!strings.Contains(herr.Msg, "fence: no worker is open to sandboxes yet") || !strings.Contains(herr.Msg, "network-guard: its node-setup pod is not Ready") ||
+		strings.Contains(herr.Msg, "noderestriction") || strings.Contains(herr.Msg, "isolation:") {
+		t.Fatalf("live with the scheduler off and two gates failing: %+v", herr)
+	}
+	h.SetSandboxGates(gates)
 	if herr := h.checkSandboxGoLive(ctx, doc("DISABLED", "pi-1")); herr != nil {
 		t.Fatalf("stored disabled: %+v", herr)
 	}

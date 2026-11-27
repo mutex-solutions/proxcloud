@@ -1277,7 +1277,9 @@ back on a machine that lost its fence runs on the scheduler
 operator sync (`POST /api/v1/admin/job/external-service/sync`) fences once, and nothing watches
 afterwards. So a platform's sandbox provider is refused "live" while the scheduler is off
 (`409`), the Check's `scheduler` row says so while the settings ask for sandboxes, and the Ready
-card repeats it. The same switch starts charging usage: the price rule for sandbox minutes holds a
+card repeats it. That `409` names the scheduler and, in the same answer, every release gate that
+does not hold with its reason (or says that none fails), so turning the scheduler on is not
+followed by a second refusal you could not see coming. The same switch starts charging usage: the price rule for sandbox minutes holds a
 placeholder rate until you set one (or 0). The installer's sandbox providers are not asked for
 the scheduler.
 
@@ -3653,7 +3655,12 @@ must still show, for each placement:
    its address) and takes the `unsecured` taint off after 20 minutes, and **no VM outside pool
    `proxcloud-sbx` changed** (compare `pvesh get /nodes/<n>/qemu/<id>/firewall/options` of a
    platform machine before and after).
-3. `shared`, from a sandbox machine with its firewall in force: the Cilium agent stays Ready across
+3. `shared`, from a sandbox machine with its firewall in force, **on a node where
+   `net.bridge.bridge-nf-call-iptables` is 1** (v0.12.0-rc.1 failed exactly there: after the first
+   sync the machine opened no connection to its cluster) and on one where it is 0: `node-setup`
+   stays Ready and the Application Healthy after the first and the second provider sync, new
+   connections to the API address and to a control plane machine on TCP 6443 open, the tunnel and
+   the health port of a `system` machine answer, and the `fence` gate holds; the Cilium agent stays Ready across
    a restart (the API through the `kubernetes` Service, which is TCP 6443 to a control plane
    machine), a pod on it reaches a pod on a `system` machine and back, `kubectl logs` and `exec`
    work (TCP 10250 from the control plane), image pulls and the runsc download work, and from the
@@ -3662,16 +3669,20 @@ must still show, for each placement:
 4. `separate`: the same from a machine of `pc-sandbox`, plus a client outside the range reaching
    `https://<port>-<id>.<domain>` at the proxy address, and `sandbox-proxy` starting with the run's
    certificate.
-5. The four gates on the Ready card: failing before the sync, holding after; then set the provider
-   live, start `base` with the E2B SDK (`sudo` works, egress to the internet works, a private
+5. The gates on the Ready card. Right after the run and before any provider sync, one of the four
+   fails, `fence` (no machine has its VM firewall yet, and every Node has the `unsecured` taint),
+   and three hold: `noderestriction`, `network-guard`, and `isolation`, whose rules the run wrote
+   itself. After a sync and the 20 minutes all four hold. (v0.12.0-rc.1 left the isolation rules
+   to the sync, so two failed there, `isolation` and `fence`, not four as its notes said.) Then
+   set the provider live, start `base` with the E2B SDK (`sudo` works, egress to the internet works, a private
    address and TCP 25 do not), and read the usage row.
 6. `shared`: with the portal identity's kubeconfig, `kubectl get pods -A` and a read of a pod in
    `kube-system` are refused, a Sandbox with a privileged, runc or hostPath pod is refused, and a
    second project gets its own `sb-` namespace and RoleBinding.
 7. Edit the RuntimeClass by hand (drop its `scheduling`): the `fence` gate fails and a sandbox
    create is refused within a minute.
-8. With the scheduler off: "live" is refused with the message about the scheduler; one operator
-   sync fences and untaints once.
+8. With the scheduler off: "live" is refused with one message that names the scheduler and each
+   gate that fails with its reason; one operator sync fences and untaints once.
 9. `placement: off` with the provider live is refused; disabled, the apply removes the machines,
    the provider's sandbox settings, the range's isolation rules (the `isolation` row is `ok` right
    after the run, with no provider sync, and the next apply passes stage `validate`), the firewall
