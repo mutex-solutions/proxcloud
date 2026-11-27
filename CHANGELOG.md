@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Managed platform, sandboxes: what the upgrade from 0.12.0-rc.1 gives.** The upgrade of the portal changes
+  nothing on the seed, on the platform cluster or in Proxmox by itself. What differs afterwards:
+  - *A platform without sandboxes* (no `spec.sandbox`, or `placement: off` and nothing built): no run reads or writes
+    anything more than before. The Check has one row more while the job scheduler runs, `scheduler` with status ok
+    (it was there only as a warning while the scheduler was off): a script that counts the rows counts one more.
+  - *A platform with sandboxes built* (`shared` or `separate`): nothing is deleted and no machine is touched. An
+    apply now reads the pools and, for `shared`, the ACL rows, and writes the pool and the row only when one is
+    missing, so an apply that changes nothing sends no write to Proxmox. The API no longer logs
+    `sandbox template update: orphan sweep` every ten minutes for the platform's sandbox provider.
+  - *A platform whose sandboxes were switched off under 0.12.0-rc.1* still holds what that off left, and no run
+    looks for it, because the record of the sandboxes is gone: the InClusterIPPool `pc-platform/pc-platform-sandbox`
+    and the two templates `pc-platform-sandbox-<node>-<hash>` on the seed (the Application `pc-platform` reads
+    OutOfSync for the pool), and the four agent-sandbox definitions on the platform cluster. They do no harm. A new
+    build of `shared` with the same settings takes the pool and the templates over, and the off after it, under
+    this release, removes all three kinds. Or by hand: on the seed
+    `kubectl -n pc-platform delete inclusterippools.ipam.cluster.x-k8s.io pc-platform-sandbox` and the two
+    templates by name (`kubectl -n pc-platform get proxmoxmachinetemplates,kubeadmconfigtemplates -o name | grep /pc-platform-sandbox-`);
+    on the platform cluster, with its admin kubeconfig,
+    `kubectl delete crd sandboxes.agents.x-k8s.io sandboxclaims.extensions.agents.x-k8s.io sandboxtemplates.extensions.agents.x-k8s.io sandboxwarmpools.extensions.agents.x-k8s.io`
+    once `kubectl get sandboxes.agents.x-k8s.io -A` lists nothing. 0.12.0-rc.1 is the only release that built
+    sandboxes on a managed platform, so no installation of a released version is in this state.
+  - *Switching `shared` on or off* replaces the proxmox-csi node plugin's pod on every other machine of
+    `pc-platform` once, as under 0.12.0-rc.1; the plan now says so. A volume that is mounted stays mounted.
+  - Not run on a lab. Shown in unit tests with the charts of the tree rendered into fakes (see Fixed).
+
 - **A project's delete is refused while the job scheduler is off, with the grace period too.** Up to 0.11.1
   `DELETE /project/{id}` answered `200` and `SCHEDULED_FOR_DELETION` on such an install; it now answers the `409`
   of "Delete now" and changes nothing. A project that was scheduled under an earlier release stays scheduled and
@@ -291,6 +316,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `mirror` when the mirror does not answer the guest.
 
 ### Fixed
+
+- **Managed platform: an off of sandboxes left objects behind, and a run repeated its writes on Proxmox.** Findings
+  of the drill of 0.12.0-rc.1 on the lab.
+  - *Left after an off of `shared`:* the group's InClusterIPPool, its machine and bootstrap templates and the four
+    agent-sandbox definitions, and the Application `pc-platform` read OutOfSync from then on, because it never
+    prunes. The run now deletes the definitions once the sandbox chart's Application is gone, each only when no
+    object of its kind is left in any namespace (one with objects is kept and named in the log), and, when no
+    MachineDeployment, MachineSet or Machine of the group is left, the templates and then the pool. It waits for
+    each, and takes the access on Proxmox away only after them
+    (`sandboxCRDsGone`, `sandboxGroupGone`; `TestSandboxOffLeavesNothingBehind`, with a second build after the off,
+    and `TestSandboxOffKeepsADefinitionWithObjects`).
+  - *Repeated writes:* a run created the sandbox pool at every look at stage `cluster`, 22 times in one run with 21
+    answers of `500`, and wrote the ACL row 23 times; the first mint of the token of `pc-sandbox` deleted a token
+    that did not exist, a `500` too. The pool, the row and the token are now read first and written when missing
+    (`TestSandboxAccessIsWrittenOnce`: one write each in a run of nine looks, none in a run that changes nothing,
+    one for a row deleted by hand). A tenant cluster's release no longer sends the delete of a CAPI token that is
+    not there either.
+  - *The off of `separate` kept its token for minutes:* the run waited for ArgoCD's next look at an Application
+    whose objects were gone. It now asks ArgoCD to look (`argocd.argoproj.io/refresh`) while the Application is in
+    deletion (`TestSandboxOffAsksArgoCDToLookAgain`). The token still goes after that wait: CAPMOX needs it until
+    the cluster's objects have lost their finalizers.
+  - *Text and noise:* the plan row `sandbox-access` of an off says what is deleted, not what was written
+    (`TestSandboxOffPlanSaysWhatIsTakenAway`); the plan row `sandbox` says that adding or removing the `shared`
+    group replaces the proxmox-csi node plugin's pods on the other machines once, and why it cannot be avoided
+    (`TestSharedGroupReplacesTheStoragePluginsPodsAndThePlanSaysSo`); the Check has its row `scheduler` while the
+    scheduler runs too, as the guide said; and the API no longer logs `sandbox template update: orphan sweep` with
+    a `403` (or `401`) every ten minutes for a platform's sandbox provider, on whose cluster no mirror worker pod
+    can exist (`TestSandboxWithoutMirror`).
+  - Not run on a lab. ArgoCD, Cluster API, the address provider and Proxmox are fakes in these tests, made to
+    answer as the lab's did where the drill showed it: a Proxmox `500` with its message in the status line, an
+    object with a finalizer that stays at a delete, a delete a webhook refuses, an Application that reads OutOfSync
+    for an object its render no longer names.
 
 - **A release that changed only the load balancer controller reached no cluster by itself.** The tenant's cluster
   page offered "Platform update available" only when the cluster's chart version differed from the provider's, and
