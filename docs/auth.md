@@ -200,6 +200,7 @@ vary by auth), but no credential is required.
 | `/api/v1/callbacks/` | Third-party callbacks |
 | `/api/v1/admin/onboarding/` | Onboarding **status** read (the setup mutations are not exposed) |
 | `/api/v1/internal/sandboxes/` | sandbox-proxy's wake call (a sandbox provider's `proxyWakeToken` is the auth) |
+| `/api/v1/internal/functions/` | sandbox-proxy's function wake and activity calls (a sandbox provider's `functionWakeToken` is the auth, never its `proxyWakeToken`) |
 | `/e2b/` | E2B-compatible sandbox API (a project's `e2b_` sandbox API key is the auth, see below) |
 
 `/api/v1/admin/job/` is **not** public: it needs an admin credential (a SigV4 hmac

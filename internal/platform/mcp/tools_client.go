@@ -7,7 +7,7 @@ package mcp
 // Note: some rows embed a constant query string (e.g. ?type=SERVER) directly
 // in the path. dispatch only appends "?"+encoded when the tool declares query
 // params, so this is safe as long as such rows declare NO query params.
-var clientTools = concatTools(clientCoreTools, clientComputeTools, clientManagedTools, clientSandboxTools)
+var clientTools = concatTools(clientCoreTools, clientComputeTools, clientManagedTools, clientSandboxTools, clientFunctionTools)
 
 func concatTools(sets ...[]toolDef) []toolDef {
 	out := []toolDef{}
@@ -339,5 +339,125 @@ var clientSandboxTools = []toolDef{
 		method: "DELETE",
 		path:   "/api/v1/project/{id}/cloud/{resourceId}",
 		params: []param{projectID, resourceID("Sandbox resource id (from list_sandboxes).")},
+	},
+}
+
+// functionID is the function a per-function tool targets.
+var functionID = param{name: "fn", typ: "string", desc: "Function id (fn-…), the id field from list_functions or create_function.", required: true, in: "path"}
+
+// The registry credentials of a function, as create, update and rollback take them. A nulls param must come after
+// the field it removes: dispatch refuses the two together only when the field was already read.
+var (
+	registryAuthParam       = param{name: "registryAuth", typ: "object", desc: "Credentials for an image in a private registry: {username, password, server}. server is optional and defaults to the registry of the image (Docker Hub for a bare name). The password is write-only: it is stored sealed and never returned by any call, so it is given whole every time the credentials are set. The platform does not check them: a rollout that cannot pull fails and says so. They land in this conversation.", in: "body"}
+	removeRegistryAuthParam = param{name: "removeRegistryAuth", typ: "boolean", desc: "true removes the stored private registry credentials (not together with registryAuth).", in: "body", nulls: "registryAuth"}
+)
+
+// clientFunctionTools are the tools of serverless functions (/api/v1/project/{id}/functions): a container image
+// behind a stable internal HTTPS URL that starts on a request and stops when idle. No tool takes a GPU, a source to
+// build from, a public endpoint or a hostname of its own: the API refuses those, and there is nothing to call.
+var clientFunctionTools = []toolDef{
+	{
+		name:   "list_functions",
+		desc:   "List the project's serverless functions with their URL, status (DEPLOYING, READY, IDLE, SUSPENDED or FAILED), live instance count, size and current deployment. Secrets are listed by name only (secretNames), private registry credentials as registryAuth {server, username, setAt} without the password.",
+		method: "GET",
+		path:   "/api/v1/project/{id}/functions",
+		params: []param{projectID},
+	},
+	{
+		name:   "get_function",
+		desc:   "Get one function: URL, status, live instance count, config, lastError of a failed deployment, and reason: while DEPLOYING what the rollout is waiting for, and while IDLE with an instance that was asked for and is not ready yet (after a resume, or a request) what that start is waiting for. reason is one of a fixed set of sentences, never the cluster's own text. Secrets are shown by name only (secretNames, and secretsSetAt: when each was last set); their values are never returned. Private registry credentials are shown as registryAuth {server, username, setAt}.",
+		method: "GET",
+		path:   "/api/v1/project/{id}/functions/{fn}",
+		params: []param{projectID, functionID},
+	},
+	{
+		name:   "create_function",
+		desc:   "Deploy a container image as a serverless function. It gets a stable internal HTTPS URL (https://<name>-<6 hex>.<the location's sandbox domain>), starts on the first request, scales out to maxInstances on load and to zero when idle, and is billed per minute only while instances run. The container must listen for HTTP on the port (also given to it as PORT). It returns at once with status DEPLOYING; poll get_function until READY, or FAILED with lastError. The URL has no caller authentication and no rate limit: whoever reaches the platform network's proxy address and knows the host name can call the function, each call keeps it running, and its owner pays for that. A GPU, a build from a repository, a public endpoint and a hostname of its own are not offered: a request that names one is refused.",
+		method: "POST",
+		path:   "/api/v1/project/{id}/functions",
+		params: []param{
+			projectID,
+			{name: "name", typ: "string", desc: "1-40 lowercase letters, digits or '-', starting with a letter and ending with a letter or digit; unique in the project. It is the first part of the URL.", required: true, in: "body"},
+			{name: "image", typ: "string", desc: "Container image reference, from any registry with a DNS name the platform's machines reach (no IP address, no localhost). Name it by digest (repo@sha256:…) to always run the same bits: an instance of a tag that is started later pulls whatever the tag points at then.", required: true, in: "body"},
+			registryAuthParam,
+			{name: "port", typ: "integer", desc: "Port the container listens on for HTTP (default 8080).", in: "body"},
+			{name: "cpuMillis", typ: "integer", desc: "CPU of one instance in millicores: 250, 500, 1000 or 2000, up to the location's limit (default 250).", in: "body"},
+			{name: "memoryMi", typ: "integer", desc: "Memory of one instance in MiB, from 256 up to the location's limit (default 256).", in: "body"},
+			{name: "env", typ: "object", desc: "Environment variables {string: string}. Readable by every member of the project who may manage it; put credentials in secrets.", in: "body"},
+			{name: "secrets", typ: "object", desc: "Secrets {string: string}: environment variables whose values are write-only. They are stored sealed and never returned by any call (get_function shows the names only). A function can still print them, and every member who may read the project reads its logs. The values land in this conversation.", in: "body"},
+			{name: "command", typ: "array", desc: "Replaces the image's entrypoint (array of strings).", in: "body"},
+			{name: "args", typ: "array", desc: "Replaces the image's arguments (array of strings). Passed as written: nothing is expanded.", in: "body"},
+			{name: "minInstances", typ: "integer", desc: "Instances kept running when idle: 0 (scale to zero) or 1, if the location allows it. With 1 the function is billed all the time.", in: "body"},
+			{name: "idleSeconds", typ: "integer", desc: "Seconds without requests before the function stops (default 300, within the location's bounds, usually 60 to 3600). The idle time is billed.", in: "body"},
+			{name: "maxInstances", typ: "integer", desc: "Most instances the function is scaled to on load (default 1: one instance at most), up to the location's limit (usually 5). The project's quota counts the function at this many instances.", in: "body"},
+			{name: "concurrency", typ: "integer", desc: "Requests in flight one instance is meant to take, 1-1000 (default 50): the function runs ceil(requests in flight / concurrency) instances, up to maxInstances. A target for scaling, not a limit per instance.", in: "body"},
+		},
+	},
+	{
+		name:   "update_function",
+		desc:   "Change a function. Pass only what changes. A new image, port, size, env, command or args, a secret set or removed, or registry credentials set, replaced or removed, is rolled out as a new deployment (status DEPLOYING; a failed rollout, for instance one that cannot pull the image with new credentials, goes back to the previous deployment with its secrets and registry credentials, and sets lastError); minInstances, idleSeconds, maxInstances and concurrency apply without one. env, command and args replace the stored value as a whole; secrets are merged. Answers 409 while a deployment is in progress.",
+		method: "PATCH",
+		path:   "/api/v1/project/{id}/functions/{fn}",
+		params: []param{
+			projectID, functionID,
+			{name: "image", typ: "string", desc: "Container image reference. An image in another registry than the stored registry credentials are for is refused: send registryAuth for that registry, or removeRegistryAuth, with it.", in: "body"},
+			registryAuthParam, removeRegistryAuthParam,
+			{name: "port", typ: "integer", desc: "Port the container listens on for HTTP.", in: "body"},
+			{name: "cpuMillis", typ: "integer", desc: "CPU of one instance in millicores: 250, 500, 1000 or 2000, up to the location's limit.", in: "body"},
+			{name: "memoryMi", typ: "integer", desc: "Memory of one instance in MiB.", in: "body"},
+			{name: "env", typ: "object", desc: "Environment variables {string: string}; replaces all of them.", in: "body"},
+			{name: "secrets", typ: "object", desc: "Secrets to set or remove {string: string or null}: a string sets or replaces that secret, null removes it, names not given stay as they are. Values are write-only and land in this conversation.", in: "body"},
+			{name: "command", typ: "array", desc: "Replaces the image's entrypoint (array of strings).", in: "body"},
+			{name: "args", typ: "array", desc: "Replaces the image's arguments (array of strings).", in: "body"},
+			{name: "minInstances", typ: "integer", desc: "Instances kept running when idle: 0 or 1, if the location allows it.", in: "body"},
+			{name: "idleSeconds", typ: "integer", desc: "Seconds without requests before the function stops.", in: "body"},
+			{name: "maxInstances", typ: "integer", desc: "Most instances the function is scaled to on load (1 = one at most).", in: "body"},
+			{name: "concurrency", typ: "integer", desc: "Requests in flight one instance is meant to take, 1-1000.", in: "body"},
+		},
+	},
+	{
+		name:   "delete_function",
+		desc:   "Delete a function: its instances stop and its URL stops answering, for good (a URL is never handed out twice). Its last running interval is billed to this moment and nothing after it. Works also where functions were switched off.",
+		method: "DELETE",
+		path:   "/api/v1/project/{id}/functions/{fn}",
+		params: []param{projectID, functionID},
+	},
+	{
+		name:   "list_function_deployments",
+		desc:   "List a function's deployments, newest first (the 10 newest are kept): sequence number, image and config, state (DEPLOYING, ACTIVE, SUPERSEDED or FAILED), the failure message and, for one that became ACTIVE, imageDigest: the digest it ran. Of secrets a deployment records the names (secretNames) and an opaque secretsVersion that changes whenever they do, never a value; of private registry credentials registryAuth {server, username, version}, never the password.",
+		method: "GET",
+		path:   "/api/v1/project/{id}/functions/{fn}/deployments",
+		params: []param{projectID, functionID},
+	},
+	{
+		name:   "rollback_function",
+		desc:   "Roll a function back to an earlier deployment (state SUPERSEDED, from list_function_deployments). Its image, config and env are rolled out again as a new deployment; one that ran a tag is deployed by the digest it ran then, whatever the tag points at since. Secrets and private registry credentials are not versioned: the rollback runs with the function's current ones. When that deployment's image is in another registry than the current credentials are for, the rollback is refused unless registryAuth or removeRegistryAuth is sent with it.",
+		method: "POST",
+		path:   "/api/v1/project/{id}/functions/{fn}/rollback",
+		params: []param{
+			projectID, functionID,
+			{name: "deploymentId", typ: "string", desc: "Id of the deployment to roll back to.", required: true, in: "body"},
+			registryAuthParam, removeRegistryAuthParam,
+		},
+	},
+	{
+		name:   "function_action",
+		desc:   "Suspend or resume a function. suspend stops its instances and keeps it stopped (requests get 503, nothing is billed); resume lets requests start it again, and starts the instance of a function that keeps one running: until it is ready the response is IDLE with instances 0 and a reason. suspend answers 409 while a deployment is in progress.",
+		method: "POST",
+		path:   "/api/v1/project/{id}/functions/{fn}/action",
+		params: []param{
+			projectID, functionID,
+			{name: "action", typ: "string", desc: "\"suspend\" or \"resume\".", required: true, in: "body", enum: []string{"suspend", "resume"}},
+		},
+	},
+	{
+		name:   "get_function_logs",
+		desc:   "Get the newest log lines (stdout and stderr, timestamped) of a function's running instances. Empty while it is scaled to zero. A function that prints its secrets shows them here, to every member who may read the project.",
+		method: "GET",
+		path:   "/api/v1/project/{id}/functions/{fn}/logs",
+		params: []param{
+			projectID, functionID,
+			{name: "tail", typ: "integer", desc: "Number of lines (default 200, at most 5000).", in: "query"},
+		},
 	},
 }

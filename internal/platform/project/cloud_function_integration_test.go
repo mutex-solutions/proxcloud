@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strings"
@@ -59,6 +60,15 @@ type fnCluster struct {
 	// quotas are the ResourceQuotas as last applied, by namespace. calls counts the cluster calls by method.
 	quotas map[string]map[string]any
 	calls  map[string]int
+	// unplaced are the functions whose pod gets no node (by Deployment name): never ready. refused are the ones whose
+	// pod the cluster does not create (the namespace's quota, admission), and crashing the ones whose container
+	// keeps exiting. room is how many instances of a function get a node (absent = all): the ones beyond it are
+	// never ready.
+	// starting are the ones whose pod is not there yet: not ready, and no pod to tell why.
+	unplaced, refused, crashing, starting map[string]bool
+	room                                  map[string]int
+	// nsCreated is when a namespace was made, as the cluster tells it (absent = it tells none).
+	nsCreated map[string]time.Time
 	// hold makes EnsureNamespace wait until so many callers are in it at once (or 3 s pass), then lets them all go:
 	// every one of them has by then passed whatever a request does before it.
 	hold, held int
@@ -155,10 +165,18 @@ func (c *fnCluster) settle(dep map[string]any) {
 	md["generation"] = gen
 	replicas := intAny(dep["spec"].(map[string]any)["replicas"])
 	st := map[string]any{"observedGeneration": gen, "replicas": replicas, "updatedReplicas": replicas}
-	if replicas > 0 && c.pullError(dep) != "" {
+	name := md["name"].(string)
+	if replicas > 0 && c.refused[name] {
+		st["replicas"], st["updatedReplicas"] = 0, 0
+		st["conditions"] = []any{map[string]any{"type": "ReplicaFailure", "status": "True", "reason": "FailedCreate", "message": kubeletSaid + ": exceeded quota in fn-other"}}
+	} else if replicas > 0 && c.pullError(dep) != "" {
 		st["conditions"] = []any{map[string]any{"type": "Progressing", "status": "False", "reason": "ProgressDeadlineExceeded"}}
-	} else {
-		st["availableReplicas"], st["readyReplicas"] = replicas, replicas
+	} else if replicas == 0 || !(c.unplaced[name] || c.crashing[name] || c.starting[name]) {
+		ready := replicas
+		if room, limited := c.room[name]; limited {
+			ready = min(ready, room)
+		}
+		st["availableReplicas"], st["readyReplicas"] = ready, ready
 		if c.cached == nil {
 			c.cached = map[string]bool{}
 		}
@@ -205,8 +223,16 @@ func (c *fnCluster) ListNamespaces(context.Context, string) ([]map[string]any, e
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []map[string]any
-	for name := range c.namespaces {
-		out = append(out, map[string]any{"metadata": map[string]any{"name": name}})
+	for name, l := range c.namespaces {
+		labels := map[string]any{}
+		for k, v := range l {
+			labels[k] = v
+		}
+		md := map[string]any{"name": name, "labels": labels}
+		if at, ok := c.nsCreated[name]; ok {
+			md["creationTimestamp"] = at.UTC().Format(time.RFC3339)
+		}
+		out = append(out, map[string]any{"metadata": md})
 	}
 	return out, nil
 }
@@ -335,6 +361,9 @@ func (c *fnCluster) ListCRs(_ context.Context, _, _, _, ns, _ string) ([]map[str
 func (c *fnCluster) ListCRsAllNamespaces(_ context.Context, _, _, _, _ string) ([]map[string]any, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.called("ListCRsAllNamespaces"); err != nil {
+		return nil, err
+	}
 	var out []map[string]any
 	for _, v := range c.deps {
 		out = append(out, cloneObj(v))
@@ -358,16 +387,24 @@ func (c *fnCluster) SetScale(_ context.Context, _, _, _, ns, name string, replic
 func (c *fnCluster) ListPods(_ context.Context, ns, sel string) ([]map[string]any, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	dep := c.deps[ns+"/"+strings.TrimPrefix(sel, function.LabelID+"=")]
-	if dep == nil || intAny(dep["spec"].(map[string]any)["replicas"]) == 0 {
+	name := strings.TrimPrefix(sel, function.LabelID+"=")
+	dep := c.deps[ns+"/"+name]
+	if dep == nil || intAny(dep["spec"].(map[string]any)["replicas"]) == 0 || c.refused[name] || c.starting[name] {
 		return nil, nil
 	}
 	ready, status := "True", map[string]any{"name": "main", "imageID": c.imageID(depImage(dep)), "state": map[string]any{"running": map[string]any{}}}
 	if msg := c.pullError(dep); msg != "" {
 		ready, status = "False", map[string]any{"name": "main", "state": map[string]any{"waiting": map[string]any{"reason": "ImagePullBackOff", "message": msg}}}
 	}
+	node := "worker-1"
+	if c.crashing[name] {
+		ready, status = "False", map[string]any{"name": "main", "state": map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff", "message": kubeletSaid + ": back-off restarting"}}}
+	}
+	if room, limited := c.room[name]; c.unplaced[name] || (limited && intAny(dep["spec"].(map[string]any)["replicas"]) > room) {
+		ready, node = "False", "" // the one that waits (the ready ones tell nothing)
+	}
 	return []map[string]any{{
-		"metadata": map[string]any{"name": "pod-1"}, "spec": map[string]any{"nodeName": "worker-1"},
+		"metadata": map[string]any{"name": "pod-1"}, "spec": map[string]any{"nodeName": node},
 		"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": ready}}, "containerStatuses": []any{status}},
 	}}, nil
 }
@@ -453,7 +490,14 @@ type fnEnv struct {
 	cluster *fnCluster
 	// gates is what the location's release gates answer.
 	gates []sandbox.Gate
+	// svcErr, when set, is what building a location's function service fails with.
+	svcErr error
+	// block is the functions block set changes (the tests' provider starts with fnBlock).
+	block map[string]any
 }
+
+// fnWakeToken is the function wake token of the tests' provider: the bearer sandbox-proxy calls with.
+const fnWakeToken = "function-wake-secret"
 
 // fnBlock is the functions block the tests' provider starts with.
 func fnBlock() map[string]any {
@@ -474,8 +518,12 @@ func newFnEnv(t *testing.T) *fnEnv {
 	h.SetSandboxGates(func(context.Context, *externalservice.ExternalService) []sandbox.Gate { return e.gates })
 	e.provider(externalservice.StatusPublic, fnBlock())
 	h.SetFunctions(func(es *externalservice.ExternalService) (*function.Service, error) {
+		if e.svcErr != nil {
+			return nil, e.svcErr
+		}
 		return function.NewWithAPI(e.cluster, es.SandboxConfig(), es.ID), nil // like function.New: also when functions are off
 	}, db.C("functions"), db.C("function_deployments"), db.C("function_hosts"), fnTestKeys(t))
+	h.SetFunctionScheduler(true)
 	if err := h.EnsureFunctionIndexes(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -489,9 +537,11 @@ func newFnEnv(t *testing.T) *fnEnv {
 func (e *fnEnv) provider(status string, functions map[string]any) {
 	e.t.Helper()
 	config := map[string]any{"provider": "sandbox", "region": "az1", "sandbox": map[string]any{"domain": "fn.example", "functions": functions}}
-	if _, err := e.db.C("externalService").SetByID(e.ctx, "svc", pgdoc.M{"status": status, "config": config}, nil); err != nil {
+	secret := e.h.esSvc.EncryptSecret(map[string]any{"functionWakeToken": fnWakeToken})
+	if _, err := e.db.C("externalService").SetByID(e.ctx, "svc", pgdoc.M{"status": status, "config": config, "secret": secret}, nil); err != nil {
 		e.t.Fatal(err)
 	}
+	e.h.ForgetFunctionTokens()
 	e.h.gateMu.Lock()
 	e.h.gateCache = nil // the verdict of the provider as it was
 	e.h.gateMu.Unlock()
@@ -587,6 +637,69 @@ func (e *fnEnv) settle(id string, final bool) bool {
 		e.t.Fatalf("function %s has no deployment in progress (deployingId %q)", id, fn.DeployingID)
 	}
 	return e.h.settleDeployment(e.ctx, e.fs(), &dep, final)
+}
+
+// set changes keys of the provider's functions block, as an operator's save would, and leaves the rest as it is.
+func (e *fnEnv) set(kv map[string]any) {
+	e.t.Helper()
+	if e.block == nil {
+		e.block = fnBlock()
+	}
+	for k, v := range kv {
+		e.block[k] = v
+	}
+	e.provider(externalservice.StatusPublic, e.block)
+}
+
+// proxy makes a call of sandbox-proxy (wake: "<id>/wake", or "activity") with bearer and returns the status and
+// the body.
+func (e *fnEnv) proxyRaw(bearer, path, body string) (int, string) {
+	e.t.Helper()
+	r := httptest.NewRequest("POST", "/internal/functions/"+path, strings.NewReader(body)).WithContext(e.ctx)
+	if bearer != "" {
+		r.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	w := httptest.NewRecorder()
+	e.router.ServeHTTP(w, r)
+	return w.Code, w.Body.String()
+}
+
+func (e *fnEnv) proxy(bearer, path, body string) int {
+	e.t.Helper()
+	code, _ := e.proxyRaw(bearer, path, body)
+	return code
+}
+
+// idle makes the function's last activity d ago.
+func (e *fnEnv) idle(id string, d time.Duration) {
+	e.t.Helper()
+	if _, err := e.h.fns.SetByID(e.ctx, id, pgdoc.M{"lastActiveAt": time.Now().UTC().Add(-d)}, nil); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// reap is one run of the reaper that follows another closely, as on a portal whose scheduler runs: the run before
+// it is on record as a moment ago.
+func (e *fnEnv) reap() {
+	e.t.Helper()
+	if err := e.h.fnProxies().Upsert(e.ctx, fnReaperID, pgdoc.M{"at": time.Now().UTC().Add(-15 * time.Second)}); err != nil {
+		e.t.Fatal(err)
+	}
+	e.h.ReapFunctions(e.ctx)
+}
+
+// sync is one run of the deploy sync.
+func (e *fnEnv) sync() {
+	e.t.Helper()
+	e.h.SyncFunctionDeployments(e.ctx)
+}
+
+// seenAgo makes the deploy sync's first sighting of what is not ready (or not placed) d ago: its next run acts.
+func (e *fnEnv) seenAgo(id, field string, d time.Duration) {
+	e.t.Helper()
+	if _, err := e.h.fns.SetByID(e.ctx, id, pgdoc.M{field: time.Now().UTC().Add(-d)}, nil); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 // create makes a function and returns its id (the rollout is left in progress).
@@ -1621,7 +1734,6 @@ func TestFunctionRefusesWhatIsNotOffered(t *testing.T) {
 	for _, c := range [][2]string{
 		{"POST", base + "/" + id + "/builds"}, {"POST", base + "/" + id + "/domains"}, {"DELETE", base + "/" + id + "/domains/shop.example.com"},
 		{"GET", base + "/" + id + "/deployments/0123456789abcdef01234567/build-log"}, {"GET", "/project/p/github/installations"}, {"POST", "/github/callback"},
-		{"POST", "/internal/functions/" + id + "/wake"}, {"POST", "/internal/functions/activity"},
 	} {
 		if code, _ := e.raw("owner-p", c[0], c[1], `{}`); code != 404 && code != 405 {
 			t.Errorf("%s %s: %d, want no such route", c[0], c[1], code)

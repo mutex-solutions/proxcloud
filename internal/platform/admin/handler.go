@@ -102,7 +102,10 @@ type Handler struct {
 	dbaasFor func(es *externalservice.ExternalService) (*dbaas.Service, error)
 	hmacEnc  *textcrypt.Encryptor // seals the secrets of generated hmac keys
 	// sandboxGates checks a sandbox provider's release gates (SetSandboxGates; nil = none can go live).
-	sandboxGates         func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
+	sandboxGates func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
+	// functionGate is what the gate of a sandbox provider's functions block reads beside the scheduler
+	// (SetFunctionGate; unset = functions cannot be switched on).
+	functionGate         FunctionGate
 	seedArtifacts        *pve.SeedArtifactRepo // secret-free operator cleanup status
 	pveIncidents         chi.Router            // operator-only DB observation reads; nil until explicitly wired
 	mailOutbox           mailOutboxReader

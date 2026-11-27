@@ -27,6 +27,16 @@ func TestJobPrefixNotPublic(t *testing.T) {
 		t.Error("/api/v1/notifications/ must NOT be public")
 	}
 	// Legitimate public paths still pass.
+	// sandbox-proxy's function calls carry a provider's token, no user credential: the prefix, and nothing beside it.
+	for path, want := range map[string]bool{
+		"/api/v1/internal/functions/fn-0123456789abcdef/wake": true, "/api/v1/internal/functions/activity": true,
+		"/api/v1/internal/functions": false, "/api/v1/internal/function-secrets/x": false, "/api/v1/internal/": false,
+		"/api/v1/project/p1/functions": false,
+	} {
+		if IsPublic(path) != want {
+			t.Errorf("IsPublic(%s) = %v, want %v", path, !want, want)
+		}
+	}
 	if !IsPublic("/api/v1/callbacks/x") {
 		t.Error("/api/v1/callbacks/ should remain public")
 	}

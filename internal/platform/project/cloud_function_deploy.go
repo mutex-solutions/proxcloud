@@ -8,6 +8,10 @@ package project
 //	finishDeployment  bring the function in line with the settled record: adopt the snapshot, or go
 //	                  back to the one that was serving
 //
+// and the job that keeps record, row and cluster equal:
+//
+//	SyncFunctionDeployments  settle the rollouts whose poller died, then reconcileFunctions per provider
+//
 // The record's state change is the commit point and finishDeployment can be repeated, so a crash anywhere can be
 // repaired from the records. The claim on the function and the record's first state are written together: there is no
 // claim without its record.
@@ -19,16 +23,25 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/function"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
 const (
 	// keepDeployments is how many deployment records a function keeps (newest first).
 	keepDeployments = 10
+	// functionStuckAfter: a rollout still unsettled this long after it started (per instance, rolloutTime) has lost
+	// its poller (an API restart) and is settled by the deploy sync.
+	functionStuckAfter = 3 * time.Minute
 	// functionStaleFailure: a progress-deadline failure cannot be real this soon after a rollout started; one seen
 	// earlier is the previous rollout's condition, not yet replaced.
 	functionStaleFailure = 30 * time.Second
+	// functionUnreadyAfter is how long after the deploy sync first saw a running interval without a ready instance
+	// (or instances the cluster has not placed) it acts on it: its next run, a minute later. Half a period, so a
+	// run that is a little early still counts as the next one.
+	functionUnreadyAfter = 30 * time.Second
 )
 
 // functionPollEvery is the rollout poll period, and functionRolloutBound how long the poller watches the rollout of
@@ -330,8 +343,9 @@ func (h *Handler) closeDeployment(ctx context.Context, fs *function.Service, dep
 //   - ACTIVE: the function adopts the snapshot (and, when the rollout changed them, its secrets and its registry
 //     credentials) and the deployment becomes the serving one;
 //   - FAILED: the cluster goes back to the snapshot and the secrets that were serving (the function record still
-//     holds them). With nothing healthy to go back to, the function is scaled to zero instead of being billed for a
-//     crash loop, and stays FAILED until a deployment succeeds.
+//     holds them). With nothing healthy to go back to, the function is scaled to zero and its interval ended as
+//     void: a first deployment that never became ready is billed nothing. It stays FAILED until a deployment
+//     succeeds.
 //
 // Either way the record and its cloud row change in one transaction: the size billing reads is never the size of a
 // snapshot the record no longer has.
@@ -368,6 +382,11 @@ func (h *Handler) finishDeployment(ctx context.Context, fs *function.Service, de
 		s := dep.Snapshot
 		set := snapshotFields(s)
 		set["currentDeploymentId"], set["currentSeq"], set["deployedAt"], set["updatedAt"] = dep.ID, dep.Seq, dep.FinishedAt, now
+		// A rollout that is done with instances running has them ready: the interval serves, and billing may
+		// charge it from its start.
+		if fn.Instances > 0 && fn.ReadyAt == nil {
+			set["readyAt"] = now
+		}
 		unset := append([]string{"lastError"}, fnClaimFields...)
 		switch {
 		case s.SecretsVersion == fn.SecretsVersion: // the serving secrets stay
@@ -395,7 +414,10 @@ func (h *Handler) finishDeployment(ctx context.Context, fs *function.Service, de
 				l.Error("function: restore the previous deployment", "err", err)
 				return // the claim stays: settled again from the record
 			}
-		} else if err := h.scaleFunction(ctx, fs, &fn, 0); err != nil && !errors.Is(err, function.ErrNotFound) {
+		} else if err := h.stopFunction(ctx, fs, &fn, fnStop{void: true}); err != nil && fn.Instances > 0 {
+			// A start that never had a ready instance is nobody's cost: its interval is void. The stop is on record
+			// even when the cluster did not take it (the deploy sync repeats that call); only a record that could
+			// not be written keeps the claim.
 			l.Error("function: stop after a failed first deployment", "err", err)
 			return
 		}
@@ -404,5 +426,364 @@ func (h *Handler) finishDeployment(ctx context.Context, fs *function.Service, de
 			l.Warn("function: release deployment claim", "err", err)
 		}
 		l.Info("function: deployment failed", "reason", dep.Message)
+	}
+}
+
+// SyncFunctionDeployments is the scheduler's backstop for functions, every minute at second 20 (before the charge at
+// second 30):
+//
+//   - a rollout whose poller died with its API process (the function still holds the claim long after the rollout
+//     started) is settled from the cluster's current state;
+//   - the sandbox-proxy replicas not heard from for fnProxyKeep are forgotten;
+//   - each provider's cloud rows, function records and cluster are brought back in line where they drifted apart
+//     (reconcileFunctions).
+//
+// Run twice on the same state, the second run changes nothing.
+func (h *Handler) SyncFunctionDeployments(ctx context.Context) {
+	if h.fns == nil || h.functionFor == nil {
+		return
+	}
+	now := time.Now().UTC()
+	var stuck []functionDoc
+	if err := h.fns.Find(ctx, pgdoc.M{"deployingId": pgdoc.M{"$exists": true}, "updatedAt": pgdoc.M{"$lt": now.Add(-functionStuckAfter)}}, &stuck); err != nil {
+		slog.Warn("function sync: list stuck rollouts", "err", err)
+	}
+	for i := range stuck {
+		fn := &stuck[i]
+		_, fs, err := h.functionSvc(ctx, fn.ServiceID)
+		if err != nil {
+			slog.Warn("function sync: service", "function", fn.ID, "err", err)
+			continue
+		}
+		var dep functionDeployment
+		found, err := h.fnDeps.Get(ctx, fn.DeployingID, &dep)
+		if err != nil {
+			continue
+		}
+		if !found { // a claim without its record: nothing would ever release it
+			_, _ = h.fns.SetFieldsOne(ctx, pgdoc.M{"_id": fn.ID, "deployingId": fn.DeployingID}, pgdoc.M{"updatedAt": now}, fnClaimFields)
+			continue
+		}
+		// Settled as the cluster has it; one still in progress is failed only once the time of all its instances has
+		// passed (its poller may be watching it for as long).
+		final := fn.UpdatedAt == nil || now.Sub(*fn.UpdatedAt) >= rolloutTime(functionStuckAfter, fn.Instances)
+		slog.Info("function sync: settling a rollout without a poller", "function", fn.ID, "deployment", dep.ID, "final", final)
+		h.settleDeployment(ctx, fs, &dep, final)
+	}
+	h.forgetProxies(ctx, now)
+	h.reconcileFunctions(ctx, now)
+}
+
+// reconcileFunctions brings each provider's cloud rows, function records and cluster back in line. Every writer
+// changes them one after the other from a copy it read earlier, so a race or a crash between two steps can leave
+// them apart, and nothing else would ever notice:
+//
+//   - a row whose function record is gone is a deleted function's: it is ended and archived (the archived row is
+//     what billing rates to the end of its last interval);
+//   - a row that no longer says what its record says (instances, status, billed size, the interval's bounds) is
+//     written again from the record: billing reads the row;
+//   - a Deployment whose scale is not the recorded one is scaled to the record. The record is what is billed and
+//     what the reaper decides on: an instance running at a recorded zero would be neither billed nor ever stopped
+//     (the proxy never wakes a function that has a ready pod). This is also what repeats a stop the cluster did not
+//     take when it was recorded (scale);
+//   - a Deployment without a function record is deleted: an apply that raced the function's delete, or a delete
+//     that failed half way. Nothing routes, bills or reaps it otherwise;
+//   - a function with a serving deployment and no Deployment on the cluster gets it again from its record, at the
+//     recorded count (restoreFunction): a sandbox cluster that was rebuilt comes back with its functions;
+//   - a function namespace whose project is gone, or holds no function record any more, is deleted
+//     (sweepNamespaces);
+//   - a running interval that has a ready instance is stamped readyAt, which is what lets billing charge it; one
+//     that is recorded at one instance or more and has none on two runs in a row is ended (settleReadiness): it
+//     serves nothing, and its callers' retries would keep it "active", and billed, without end;
+//   - a function scaled on its load to more instances than the cluster can place is brought down to the ones that
+//     are ready (trimUnplaced): the others are billed and serve nothing.
+//
+// After a good list of a provider's Deployments its meter heartbeat is stamped: billing may trust the rows of a
+// provider whose cluster was seen lately, and writes off the time of one that was not (cloud.MeterStaleAfter).
+//
+// Functions with a rollout in progress are left to the deploy flow.
+//
+// ponytail: reads every function row and record, and lists every function Deployment, of each sandbox provider once
+// a minute; narrow the queries when the function count makes that matter.
+func (h *Handler) reconcileFunctions(ctx context.Context, now time.Time) {
+	svcs, err := h.esSvc.List(ctx)
+	if err != nil {
+		slog.Warn("function sync: list providers", "err", err)
+		return
+	}
+	for i := range svcs {
+		if !svcs[i].IsSandbox() {
+			continue
+		}
+		id := svcs[i].ID
+		rows, err := h.cloud.FindByServiceAndType(ctx, id, cloud.TypeFunction)
+		if err != nil {
+			continue
+		}
+		var fns []functionDoc
+		if err := h.fns.Find(ctx, pgdoc.M{"serviceId": id}, &fns); err != nil {
+			continue
+		}
+		byID := make(map[string]*functionDoc, len(fns))
+		for j := range fns {
+			byID[fns[j].ID] = &fns[j]
+		}
+		for j := range rows {
+			row := &rows[j]
+			if fn := byID[row.ExternalID]; fn != nil {
+				if functionRowStale(row.Data, h.functionRowData(ctx, fn)) {
+					h.resyncFunctionRow(ctx, fn.ID, now)
+				}
+				continue
+			}
+			// Asked again: a function created since the records were read has its row already.
+			if exists, err := h.fns.Exists(ctx, pgdoc.M{"_id": row.ExternalID}); err != nil || exists {
+				continue
+			}
+			slog.Warn("function sync: ending a cloud row without a function record", "function", row.ExternalID)
+			row.Data, row.UpdatedAt = deletedFunctionRow(row.Data, now), &now
+			if err := h.cloud.DeleteAndArchive(ctx, row, now); err != nil {
+				slog.Warn("function sync: cloud row", "function", row.ExternalID, "err", err)
+			}
+		}
+
+		// The cluster: only where functions are, or were, in use (a sandbox provider that never offered them need
+		// not even grant the read).
+		es, fs, err := h.functionSvc(ctx, id)
+		if err != nil || (len(fns) == 0 && len(rows) == 0 && !functionsOffered(es, fs)) {
+			continue
+		}
+		live, err := fs.ListAll(ctx)
+		if err != nil {
+			slog.Warn("function sync: list deployments", "service", id, "err", err)
+			continue
+		}
+		if err := h.cloud.SetMeterFields(ctx, id, pgdoc.M{"lastOkAt": now}); err != nil {
+			slog.Warn("function sync: meter heartbeat", "service", id, "err", err)
+		}
+		for fnID, d := range live {
+			fn := byID[fnID]
+			if fn == nil {
+				// Asked again: a function created since the records were read is not an orphan (its record is
+				// written before its Deployment).
+				if exists, err := h.fns.Exists(ctx, pgdoc.M{"_id": fnID}); err != nil || exists {
+					continue
+				}
+				slog.Warn("function sync: deleting a Deployment without a function record", "function", fnID, "project", d.ProjectID)
+				if err := fs.Delete(ctx, d.ProjectID, fnID); err != nil {
+					slog.Warn("function sync: delete orphan", "function", fnID, "err", err)
+				}
+				continue
+			}
+			if fn.DeployingID != "" || h.settleReadiness(ctx, fs, fn, d.Ready, now) || h.trimUnplaced(ctx, fs, fn, d, now) || d.Desired == fn.Instances {
+				continue
+			}
+			// A scale change in flight looks the same for a moment: decide on a fresh read.
+			var cur functionDoc
+			if found, err := h.fns.Get(ctx, fnID, &cur); err != nil || !found || cur.DeployingID != "" || cur.Instances == d.Desired {
+				continue
+			}
+			slog.Warn("function sync: scale drift", "function", fnID, "recorded", cur.Instances, "cluster", d.Desired)
+			if err := fs.SetScale(ctx, cur.ProjectID, fnID, cur.Instances); err != nil {
+				slog.Warn("function sync: repair scale", "function", fnID, "err", err)
+			}
+		}
+		offered := functionsOffered(es, fs)
+		for j := range fns {
+			fn := &fns[j]
+			if _, has := live[fn.ID]; has || fn.DeployingID != "" {
+				continue
+			}
+			// No Deployment: nothing of it is ready. A recorded interval ends like any other that serves nothing.
+			if !h.settleReadiness(ctx, fs, fn, 0, now) && offered {
+				h.restoreFunction(ctx, es, fs, fn.ID)
+			}
+		}
+		h.sweepNamespaces(ctx, fs, id, now)
+	}
+}
+
+// settleReadiness is reconcileFunctions' look at whether a function's running interval serves (ready is the number
+// of its ready instances as just listed; the function has no rollout in progress). It reports whether it ended the
+// interval.
+//
+//   - Ready, and not yet stamped: readyAt is written, with the row. From then on billing charges the interval from
+//     its start.
+//   - Not ready: the run that sees it first only notes when (unreadyAt): the instance may be on its way. The next
+//     run, a minute later, ends the interval: as void when it never had a ready instance (no room on the machines, a
+//     refusal by the namespace's quota or by admission, an image that cannot be pulled, a container that keeps
+//     exiting: none of that is its owner's cost), and as any other interval when it had one. Either way within two
+//     minutes of the start, whatever its callers retry: a held request counts as activity, so the idle rule alone
+//     would never stop it.
+//
+// A function with a floor of one is started again by the reaper, and ended again here while nothing becomes ready:
+// one attempt every two minutes, none of them billed.
+func (h *Handler) settleReadiness(ctx context.Context, fs *function.Service, fn *functionDoc, ready int, now time.Time) bool {
+	if fn.Instances == 0 || fn.RunningSince == nil {
+		return false
+	}
+	if ready > 0 {
+		if fn.ReadyAt != nil && fn.UnreadyAt == nil {
+			return false
+		}
+		set := pgdoc.M{}
+		if fn.ReadyAt == nil {
+			set["readyAt"] = now
+		}
+		if err := h.markInterval(ctx, fn, set, []string{"unreadyAt"}, now); err != nil {
+			slog.Warn("function sync: stamp a ready interval", "function", fn.ID, "err", err)
+		}
+		return false
+	}
+	if fn.UnreadyAt == nil || now.Sub(*fn.UnreadyAt) < functionUnreadyAfter {
+		if fn.UnreadyAt == nil {
+			if err := h.markInterval(ctx, fn, pgdoc.M{"unreadyAt": now}, nil, now); err != nil {
+				slog.Warn("function sync: note an interval without a ready instance", "function", fn.ID, "err", err)
+			}
+		}
+		return false
+	}
+	var cur functionDoc // decided on a fresh read, like every scale change here
+	if found, err := h.fns.Get(ctx, fn.ID, &cur); err != nil || !found || cur.DeployingID != "" || cur.Instances == 0 ||
+		cur.RunningSince == nil || !cur.RunningSince.Equal(*fn.RunningSince) || cur.UnreadyAt == nil {
+		return false
+	}
+	slog.Warn("function sync: ending an interval that has no ready instance", "function", fn.ID, "project", fn.ProjectID, "everReady", cur.ReadyAt != nil)
+	if err := h.stopFunction(ctx, fs, &cur, fnStop{void: true}); err != nil {
+		slog.Warn("function sync: end an interval that has no ready instance", "function", fn.ID, "err", err)
+	}
+	return cur.Instances == 0
+}
+
+// markInterval writes marks of the running interval fn was read in (readyAt, unreadyAt) and the row that follows,
+// under the record's lock and only while the function is still in that interval: a mark is never written onto a
+// later one, nor onto a function that has stopped or begun a rollout meanwhile.
+func (h *Handler) markInterval(ctx context.Context, fn *functionDoc, set pgdoc.M, unset []string, now time.Time) error {
+	return h.fns.DB().WithTx(ctx, func(tc context.Context) error {
+		var cur functionDoc
+		if found, err := h.fns.GetForUpdate(tc, fn.ID, &cur); err != nil || !found {
+			return err
+		}
+		if cur.Instances == 0 || cur.DeployingID != "" || cur.RunningSince == nil || !cur.RunningSince.Equal(*fn.RunningSince) {
+			return nil
+		}
+		if _, err := h.fns.SetByID(tc, fn.ID, set, unset); err != nil {
+			return err
+		}
+		var next functionDoc
+		if found, err := h.fns.Get(tc, fn.ID, &next); err != nil || !found {
+			return cmp.Or(err, function.ErrNotFound)
+		}
+		_, err := h.syncFunctionRow(tc, &next, now)
+		return err
+	})
+}
+
+// restoreFunction applies a function's serving deployment to a cluster that has no Deployment of it (the cluster was
+// rebuilt, or the Deployment was deleted behind the portal), at the count on record. Decided on a fresh read: a
+// function that is being deleted, or deployed, is left to that. A new Deployment starts with one instance; the scale
+// call right after brings it to the record, zero for a function that sleeps.
+func (h *Handler) restoreFunction(ctx context.Context, es *externalservice.ExternalService, fs *function.Service, id string) {
+	var fn functionDoc
+	if found, err := h.fns.Get(ctx, id, &fn); err != nil || !found || fn.DeployingID != "" || fn.CurrentDeploymentID == "" {
+		return
+	}
+	if _, err := fs.Status(ctx, fn.ProjectID, fn.ID); !errors.Is(err, function.ErrNotFound) {
+		return // it is there after all, or the cluster cannot say
+	}
+	proj, err := h.svc.repo.FindByID(ctx, fn.ProjectID)
+	if err != nil || proj == nil {
+		return // a project that is gone is the deletion's to finish
+	}
+	slog.Warn("function sync: the cluster has no Deployment of a function on record, applying it again", "function", fn.ID, "project", fn.ProjectID)
+	err = h.ensureFunctionNamespace(ctx, &fnCaller{proj: proj, es: es, fs: fs})
+	if err == nil {
+		err = h.applyFunction(ctx, fs, &fn, fn.Snapshot)
+	}
+	if err == nil {
+		err = fs.SetScale(ctx, fn.ProjectID, fn.ID, fn.Instances)
+	}
+	if err != nil && !errors.Is(err, function.ErrNotFound) {
+		slog.Warn("function sync: apply a function again", "function", fn.ID, "err", err)
+	}
+}
+
+// functionNamespaceGrace is how old a function namespace without any function record must be before the sweep
+// deletes it: a create makes the namespace a moment before it writes the record.
+const functionNamespaceGrace = 10 * time.Minute
+
+// sweepNamespaces deletes the provider's function namespaces nothing on record needs: one whose project is gone (a
+// deletion that lost its last step), and one that holds no function record and is older than
+// functionNamespaceGrace (the last function was deleted; the next create makes it again). With the namespace go
+// whatever Deployments, pods and Secrets were left in it.
+func (h *Handler) sweepNamespaces(ctx context.Context, fs *function.Service, serviceID string, now time.Time) {
+	nss, err := fs.Namespaces(ctx)
+	if err != nil {
+		slog.Warn("function sync: list namespaces", "service", serviceID, "err", err)
+		return
+	}
+	for _, ns := range nss {
+		if has, err := h.fns.Exists(ctx, pgdoc.M{"projectId": ns.ProjectID, "serviceId": serviceID}); err != nil || has {
+			continue
+		}
+		proj, err := h.svc.repo.FindByID(ctx, ns.ProjectID)
+		if err != nil || (proj != nil && (ns.Created.IsZero() || now.Sub(ns.Created) < functionNamespaceGrace)) {
+			continue
+		}
+		slog.Warn("function sync: deleting a function namespace nothing on record needs", "service", serviceID, "project", ns.ProjectID, "projectGone", proj == nil)
+		if err := fs.DeleteNamespace(ctx, ns.ProjectID); err != nil {
+			slog.Warn("function sync: delete namespace", "project", ns.ProjectID, "err", err)
+		}
+	}
+}
+
+// trimUnplaced is reconcileFunctions' step down of a function that is recorded, and billed, at more instances than
+// the cluster has placed (d is its Deployment as just listed): the ones with no node, or no pod (the namespace's
+// quota, admission). It reports whether it changed the count. A function with no ready instance at all is
+// settleReadiness' to end.
+//
+// The run that sees them first only notes when (unplacedAt): they may be on their way to a node. The next run takes
+// them off the count, down to the ready ones, as the load would (rescaleFunction: a compare-and-set on the count as
+// it was read, the row follows). From the first sighting until functionUnplacedHold after the last, the load adds no
+// instance (scaleOnLoad). Without this the instances that wait keep requests in flight, the load asks for more of
+// them up to the function's cap, all of them billed, and no rollout can finish.
+//
+// ponytail: unplaced instances beside a ready one are billed for the one or two minutes until the second run, and
+// again after each hold while the cluster stays full; bill the ready count if that matters.
+func (h *Handler) trimUnplaced(ctx context.Context, fs *function.Service, fn *functionDoc, d function.Deployed, now time.Time) bool {
+	if fn.DeployingID != "" || fn.Instances < 2 || d.Desired != fn.Instances || d.Ready >= fn.Instances {
+		return false
+	}
+	if st, err := fs.Status(ctx, fn.ProjectID, fn.ID); err != nil || (st.Reason != function.ReasonUnplaced && st.Reason != function.ReasonNotCreated) {
+		return false
+	}
+	trimmed := false
+	if seen := fn.UnplacedAt; seen != nil && now.Sub(*seen) >= functionUnreadyAfter && now.Sub(*seen) < 6*functionUnreadyAfter {
+		n := max(d.Ready, 1)
+		slog.Warn("function sync: taking instances the cluster could not place off the count", "function", fn.ID, "project", fn.ProjectID, "recorded", fn.Instances, "ready", d.Ready)
+		if err := h.rescaleFunction(ctx, fs, fn, n, now); err != nil {
+			slog.Warn("function sync: take unplaced instances off the count", "function", fn.ID, "err", err)
+		}
+		trimmed = fn.Instances == n
+	}
+	if _, err := h.fns.SetByID(ctx, fn.ID, pgdoc.M{"unplacedAt": now}, nil); err != nil {
+		slog.Warn("function sync: note unplaced instances", "function", fn.ID, "err", err)
+	}
+	return trimmed
+}
+
+// resyncFunctionRow writes a function's cloud row again from a fresh read of its record.
+func (h *Handler) resyncFunctionRow(ctx context.Context, id string, now time.Time) {
+	err := h.fns.DB().WithTx(ctx, func(tc context.Context) error {
+		var fn functionDoc
+		if found, err := h.fns.GetForUpdate(tc, id, &fn); err != nil || !found {
+			return err
+		}
+		slog.Warn("function sync: cloud row out of line with its record", "function", id)
+		_, err := h.syncFunctionRow(tc, &fn, now)
+		return err
+	})
+	if err != nil {
+		slog.Warn("function sync: cloud row", "function", id, "err", err)
 	}
 }

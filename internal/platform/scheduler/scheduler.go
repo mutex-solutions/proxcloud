@@ -66,6 +66,13 @@ const (
 	// SandboxRegistryPruneSpec — hourly at :17: unreferenced template images (registryPrune).
 	SandboxRegistryPruneSpec = "0 17 * * * *"
 
+	// FunctionReaperSpec — every 15 seconds: idle functions go down to their floor, and every function of a provider
+	// that no longer offers them to zero. Its lock is held 10 s at least, below its period, so the next fire runs.
+	FunctionReaperSpec = "*/15 * * * * *"
+	// FunctionDeploySyncSpec — every minute at :20, after the sandbox read at :10 and before the charge at :30:
+	// function records, cloud rows and the cluster are brought in line, so the charge reads rows that are true.
+	FunctionDeploySyncSpec = "20 * * * * *"
+
 	// PVETaskPollSpec — every 20 seconds (Proxmox task log poller).
 	PVETaskPollSpec = "*/20 * * * * *"
 

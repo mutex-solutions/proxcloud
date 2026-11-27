@@ -4,13 +4,15 @@ A function is a customer's container image behind a stable internal HTTPS URL, r
 sandbox provider's cluster. This page says what the portal does for a function, what it stores, and what it
 does not do yet.
 
-**State of this page: the portal's API is built and switched off.** No sandbox provider can have functions
-enabled in this release (the provider save refuses `config.sandbox.functions.enabled: true`), so the routes
-below answer `403` to everything but a read and a delete, and there is nothing to read. The parts that are
-still missing are listed under [What is not built yet](#what-is-not-built-yet). Nothing on this page has run
+**State of this page: the portal's side is built and cannot be switched on yet.** A sandbox provider's
+functions block is accepted only through [its gate](#switching-functions-on), and one row of that gate asks for
+a `sandbox-proxy` that reports to this portal with the provider's function wake token. No platform this release
+can build has such a proxy (the sandbox chart with the function objects is not pinned), so the row cannot hold,
+the routes below answer `403` to everything but a read and a delete, and there is nothing to read. The parts that
+are still missing are listed under [What is not built yet](#what-is-not-built-yet). Nothing on this page has run
 on a cluster: every statement about the cluster was tested against an in-memory one
-(`internal/platform/project/cloud_function_integration_test.go`), every statement about records against a real
-PostgreSQL.
+(`internal/platform/project/cloud_function_*_integration_test.go`), every statement about records against a
+real PostgreSQL. Scaling on load has never run on a cluster anywhere.
 
 ## What a function is
 
@@ -88,10 +90,16 @@ failed`, with `detail`) and into no answer, record or audit event.
 | The portal has no function service | `503` "functions are not configured", on every route |
 | The provider's `functions` block is off or not valid, the provider is `DISABLED`, or the project has no sandbox provider | `GET` routes and `DELETE` are answered, everything else is `403` "functions are not offered here" |
 | A release gate of the provider does not hold | create, a deployment, a rollback and a resume answer `503`; the reason stays the operator's |
+| The job scheduler is off (`PROXCLOUD_JOBS_SCHEDULER_ENABLED`) | the same four answer `503`: nothing would stop an idle function or charge a running one |
 | The project cannot be billed (disabled, in deletion, its billing profile suspended) | the same four are refused (`403` or `409`) |
 
 An update that raises `minInstances` or `maxInstances` passes the same two checks as a deployment; one that
 lowers them, or changes only `idleSeconds` or `concurrency`, does not.
+
+Where functions are off (the second row) every function of the provider is stopped by the next run of the
+reaper, within 15 seconds, whatever its traffic and its `minInstances`, and nothing of it is billed from then
+on. The functions, their deployments and their addresses are kept; they run again when functions are offered
+again (one with a floor at once, the others on their next request).
 
 Reads and the delete stay open so that what is left where functions were switched off can be seen and removed.
 The service a project's console reads (`GET /project/{id}/service`) carries a `functions` block, with the limits
@@ -152,18 +160,175 @@ functions is also held to the provider's `maxFunctions`.
   `functionRamMb` and `functionQuota`: a key in that document that is not a sandbox key makes it a Proxmox
   quota, in which every absent key is unlimited.
 
+## Scale to zero and wake
+
+A function runs between its floor and its `maxInstances`. The portal alone writes the count: the tenant's API,
+the proxy's wake, the load and the two jobs all go through one function (`scale` in
+`internal/platform/project/cloud_function_scale.go`), so the billing check, suspension and the row that is billed
+have one writer.
+
+- **Idle.** `lastActiveAt` on the function's record is the only source. Each `sandbox-proxy` replica reports
+  every 5 seconds which functions had a request or hold one. A function idle for its `idleSeconds` (default 300,
+  held to the provider's `minIdleSeconds` and `maxIdleSeconds` at the moment of the check) goes down to its
+  floor: `minInstances`, at most the provider's `maxMinInstances`, at least the provider's `minInstances`, and
+  zero for a function that never had a deployment become ready.
+- **Wake.** A request for a function without a ready instance is held by the proxy, which asks the portal to
+  start one and waits up to 50 seconds for it. The portal sets the count to one and answers at once.
+- **Load.** With `maxInstances` above 1 a function runs `ceil(requests in flight / concurrency)` instances, the
+  requests in flight being the sum over the replicas heard from within two of their report periods. Up at once,
+  down one instance per 60 seconds and only while no report asked for every instance. One API replica decides
+  per provider at a time (a PostgreSQL advisory lock, tried and not waited for). `concurrency` is a target for
+  this sum and no limit per instance: the proxy picks an instance at random.
+- **A stop that meets activity yields.** The reaper decides on a fresh read; when a wake or a report stamped
+  the function between that read and the write, nothing is stopped and the cluster is put back to the recorded
+  count.
+
+### The two routes `sandbox-proxy` calls
+
+Both are in the main router beside the sandbox wake route, reachable without a user credential, and answer in
+the portal's envelope. The bearer is the provider's **function wake token** (`secret.functionWakeToken`), a
+token of its own: `secret.proxyWakeToken`, the bearer of the sandbox wake route, is never compared here, and the
+function token is refused there. The token is checked before anything is looked up. Bodies are read up to
+64 KiB. The providers' tokens are kept in memory for 3 seconds, so a replaced token is still taken for that
+long on each API replica.
+
+`POST /api/v1/internal/functions/{functionID}/wake`
+
+| Answer | When |
+|---|---|
+| `200` `{functionID, instances}` | the function is at one instance or more (a second wake changes nothing) |
+| `401` | no bearer in the `Bearer` form, or one that is no provider's function wake token; the same answer whatever was asked for |
+| `404` | no such function for this token: an unknown id, or the function of another provider |
+| `403` | functions are off where it lives, it is suspended, or its project cannot be billed |
+| `409` | nothing to run: no deployment ever became ready and none is in progress |
+| `429` | the cluster refuses the instance for the namespace's quota (`Retry-After`) |
+| `503` | the job scheduler is off, a release gate does not hold, or a read or the cluster failed (`Retry-After`) |
+
+`POST /api/v1/internal/functions/activity` with `{ids, every, replica, partial, load: {id: {peak, requests}}}`
+answers `204`. It stamps `lastActiveAt` of the named functions **of the token's provider only**, keeps the
+replica's report (unless `partial`) and then scales that provider's functions to the load. At most 1000 ids and
+1000 loads; `replica` is a pod name.
+
+What the token can do: keep every function of its provider awake, and through the load at its `maxInstances`,
+which its owner pays for; and write the report the gate below reads. It reads nothing and changes no function's
+configuration. Rotating it is an apply of the installation.
+
+## The jobs that keep record, row and cluster equal
+
+Both run on the job scheduler ([jobs-scheduling.md](jobs-scheduling.md)), under a lock, once across the API
+replicas. Run twice on the same state, the second run changes nothing.
+
+**`functionReaper`**, every 15 seconds. Beside the idle rule it stops every function of a provider that no longer
+offers functions and of a project that cannot be billed, and raises a function below its floor.
+
+- An idle function is ended **at the moment its idle time ran out** (`lastActiveAt` plus the idle time, never
+  before the interval's start), not at the moment the reaper got to it. A reaper that was away, because the
+  scheduler was off or the portal down, does not make the owner pay for the time nobody looked.
+- The first run after a gap of 45 seconds or more stops nothing for being idle: the reports that keep serving
+  functions awake were away as long. They arrive every 5 seconds, so the next run decides on fresh stamps.
+- A stop is recorded whatever the cluster answers; see below.
+
+**`functionDeploySync`**, every minute at second 20, before the charge at second 30:
+
+- settles a rollout whose API process ended (the function held its claim for 3 minutes per instance);
+- writes a cloud row again that no longer says what its record says, and ends and archives one whose record is
+  gone;
+- scales a Deployment to the recorded count, either way. This is also what repeats a stop the cluster did not
+  take;
+- deletes a Deployment without a record, and applies again, from the record and at the recorded count, a
+  Deployment that is missing (with its Secrets and, when it is gone too, the namespace and its quota): a sandbox
+  cluster that was rebuilt gets its functions back. Not where functions are off;
+- deletes a function namespace whose project is gone, and one that holds no function record and is older than
+  10 minutes;
+- settles whether a running interval serves (next section), and takes instances the cluster cannot place beside
+  a ready one off the count;
+- forgets `sandbox-proxy` replicas not heard from for 90 seconds;
+- stamps the provider's meter heartbeat after each good list of its Deployments, and not otherwise.
+
+### A start that never serves
+
+A wake, a resume or a first deployment starts an instance and a running interval. Whether it serves is not
+known then: the machines may have no room, the namespace's quota or admission may refuse the pod, the image may
+not pull, the container may keep exiting. A held request counts as activity, so the idle rule alone would keep
+such a function "running" for as long as its callers retry.
+
+- The record carries `readyAt` per running interval: stamped when a rollout finishes with instances running,
+  and by the deploy sync when it sees a ready instance. A start removes it.
+- The deploy sync notes a running interval without a ready instance on one run (`unreadyAt`) and **ends it on
+  the next**, a minute later: within two minutes of the start.
+- An interval that never had a ready instance is ended as **void**: it joins no ended interval, and the record
+  and the row keep no bound of it. Nothing of it is ever billed. So is the start of a first deployment that
+  fails.
+- An interval that had a ready instance and lost it is ended like any other, and billed to that moment.
+- The next request starts the function again; while nothing becomes ready that start is ended the same way. A
+  function with a floor of one is started again by the reaper: one attempt every two minutes, none billed.
+
+### A cluster that is gone or does not answer
+
+- **A stop is recorded even when the cluster call fails**, and the cluster's error is returned after that. The
+  record and the row say zero from that moment; the deploy sync repeats the call until the Deployment is at
+  zero. For the time between, instances may run that nothing bills.
+- **The meter heartbeat** of the provider (`meterState.lastOkAt`) moves only when the deploy sync listed the
+  provider's Deployments. Nothing reads it for functions yet: the meter that writes off the time of a provider
+  not seen for 30 minutes is not built.
+- **A platform run that deletes the cluster** ends the intervals first: `EndFunctions` ends every running
+  interval of a provider in the records without any cluster call, and `FunctionsExist` tells whether a provider
+  holds a function record. Both are in the portal for the platform run to call; nothing calls them yet.
+
+## Switching functions on
+
+`config.sandbox.functions.enabled: true` is accepted by the provider save only while these hold. A save that
+fails one answers `409` and names it; `POST /api/v1/admin/service/{id}/sandbox/release-check` lists the rows
+after the provider's release gates wherever the provider holds a function wake token or has the block on.
+
+| Row | Holds when |
+|---|---|
+| `function-scheduler` | the job scheduler is on: the reaper, the deploy sync and the minute charge are scheduler jobs |
+| `function-sealing-key` | the portal has an encryption key: secrets and registry passwords are stored sealed |
+| `function-proxy` | a `sandbox-proxy` replica of this provider sent this portal an activity report in the last 90 seconds |
+| `function-billing` | billing is not the external provider (`PROXCLOUD_BILLING_PROVIDER=external`): it is not sent a function's running intervals and would bill its idle time |
+| `function-price` (a warning, refuses nothing) | an enabled price plan has a rule for resource type `function` |
+
+- **`function-proxy` is the evidence that the wake path works at this site.** A report is taken only with the
+  provider's own token, so one on record means the proxy runs the function mode, holds the token, reaches the
+  portal, and the portal's routes answer it. An empty report counts: a proxy reports before any function
+  exists. The records are kept exactly as long as the row counts them.
+- **It is asked at the save that switches the block on**, also for a provider that is `DISABLED`. A later save
+  of a provider whose functions are on is not refused because its proxies were restarting at that moment: the
+  only answer to that refusal would be to switch functions off, which stops them all. The other three rows are
+  asked at every save that leaves the block on.
+- **A new provider is never created with functions on**: no proxy can have reported for an id that did not
+  exist.
+- **Without a price rule functions run and bill nothing.** A rule added later bills a running function back to
+  the start of the billing cycle or to its start, whichever is later.
+- **Off is always accepted**, and stops every function of the provider within 15 seconds.
+
+## MCP tools
+
+Nine tools of the tenant toolset reach the nine routes above: `list_functions`, `get_function`,
+`create_function`, `update_function`, `delete_function`, `list_function_deployments`, `rollback_function`,
+`function_action` (suspend, resume) and `get_function_logs`. They go through the same routes with the caller's
+own credential, so the same permissions, gates and quota apply. No tool takes a GPU, a source to build from, a
+public endpoint or a hostname. A secret value and a registry password given to a tool land in the agent's
+conversation. The tool dispatch writes no log line of a call; the request it makes is logged like any API
+request (method and path), never its body.
+
 ## The record, the cloud row, and what billing will read
 
 - `functions`: one record per function (configuration, host, the sealed values, the deployment that serves and
   the one in progress, the instance count, the running intervals). `function_deployments`: one per rollout.
-  `function_hosts`: every host ever issued.
+  `function_hosts`: every host ever issued. `function_proxies`: the last complete report of each `sandbox-proxy`
+  replica per provider (kept 90 seconds), and the reaper's own last run.
 - Each function has one cloud resource row of type `FUNCTION`, a projection of its record: `name`, `host`,
   `url`, `image`, `cpuMillis`, `memoryMi`, `instances`, `billedInstances`, `status`
-  (`RUNNING`, `IDLE`, `SUSPENDED`, `DELETED`), `runningSince`, `stoppedAt`, `endedIntervals
+  (`RUNNING`, `IDLE`, `SUSPENDED`, `DELETED`), `runningSince`, `readyAt`, `stoppedAt`, `endedIntervals
   [{from, to, instances, cpuMillis, memoryMi}]` (kept ten minutes).
-- **The record and its row change in one transaction**, at every boundary of a running interval and at every
-  change of the size that is billed. One function (`scaleFunction`) writes the instance count, under the
-  record's lock: of two writers of the same start or stop exactly one makes a boundary.
+- **`readyAt` is what a meter must wait for.** A running interval without it is one nobody has seen serve: it
+  is charged from `runningSince` once `readyAt` is stamped, or once it ends some other way than as void. A void
+  interval leaves no `runningSince` and no `stoppedAt` on the row, and no entry in `endedIntervals`.
+- **The record and its row change in one transaction**, at every boundary of a running interval, at every
+  change of the size that is billed, and when `readyAt` is stamped. One function (`scale`) writes the instance
+  count, under the record's lock: of two writers of the same start or stop exactly one makes a boundary.
 - **A delete archives the row at once**, marked `DELETED` with `stoppedAt` set when the function was running.
   No row lingers among the live ones. A create that could not be started leaves an archived row with no running
   interval at all. A project's deletion does the same for every function, after deleting
@@ -175,21 +340,34 @@ functions is also held to the provider's `maxFunctions`.
 
 Each of these is a later part of the same work; until all are in, functions cannot be switched on.
 
-- **Scale to zero and wake.** Nothing stops an idle function and nothing starts a sleeping one on a request:
-  the reaper, the wake and activity routes of the proxy, scaling on load. `minInstances`, `idleSeconds` and
-  `concurrency` are stored and do nothing yet.
-- **The jobs that keep record and cluster equal.** A rollout is settled by the API process that started it. A
-  process that ends meanwhile leaves the function claimed by that rollout: it stays `DEPLOYING`, and a new
-  deployment is refused ("a deployment of this function is already in progress") until the job that settles
-  such rollouts exists. A Deployment with no record is not swept either.
-- **The enabling gate**: the checks under which an operator may switch the provider's block on.
-- **Billing**: the meter of `FUNCTION` rows and its price rule.
+- **Billing**: the meter of `FUNCTION` rows, its rule for a provider whose cluster was not seen (the heartbeat
+  above), and its price rule.
 - **The cluster's side of a platform**: the role `proxcloud-function-namespace`, the policies and the proxy's
-  function mode in the sandbox chart, and the platform run that sets them up.
-- **Consoles and tools**: the customer console's page, the operator's forms, the MCP tools.
+  function mode in the sandbox chart, and the platform run that sets them up, mints the function wake token and
+  calls `EndFunctions` before it deletes a cluster.
+- **The operator's forms** for the provider's functions block and the gate's rows.
+
+Known limits of what is built, to be measured on a lab before functions are offered:
+
+- Scaling on load has not run on a cluster, and `concurrency` is not enforced per instance.
+- Record and cluster can differ for up to a minute after two writers raced in opposite directions, until the
+  deploy sync runs.
+- Instances the cluster cannot place **beside a ready one** are billed for one to two minutes, until the deploy
+  sync takes them off the count.
+- A scale-down ends requests that run longer than the pod's grace period.
+- A proxy replica that is killed loses up to one report period of activity.
+- After a gap, a replica whose first report takes longer than one reaper period to arrive can lose a serving
+  function to the idle rule: it is woken again by the next request.
 
 ## Upgrading and rolling back
 
-Nothing changes for an installation that upgrades: three empty collections and their indexes are created at
-start. A portal rolled back to a release without this code ignores them; no `FUNCTION` row can exist, because
-no function can be created while the provider's block cannot be switched on.
+Nothing changes for an installation that upgrades: four empty collections (`functions`,
+`function_deployments`, `function_hosts`, `function_proxies`) and their indexes are created at start, and two
+scheduler jobs run that find nothing to do. No `FUNCTION` row can exist while the provider's block cannot be
+switched on.
+
+**Before a portal is rolled back to a release without functions, once functions exist:** switch the functions
+block of every sandbox provider off and wait until no function runs (one run of the reaper, 15 seconds; `GET`
+of a function shows `instances: 0`). The older portal has no reaper and no deploy sync: an instance left running
+would run without end, unbilled and unstopped, and a project that holds a `FUNCTION` row could not finish its
+deletion there. Roll forward again, switch the block on, and the functions run as before.

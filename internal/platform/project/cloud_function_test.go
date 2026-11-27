@@ -476,7 +476,8 @@ func TestFunctionHold(t *testing.T) {
 }
 
 // The function routes of this release are registered, and nothing of the later ones is: no hostnames, no builds, no
-// build log, no repository links. The proxy-facing routes are not this handler's yet either.
+// build log, no repository links. The two routes sandbox-proxy calls are registered beside the sandbox wake, in the
+// main router and under no other mount.
 func TestFunctionRoutes(t *testing.T) {
 	api := chi.NewRouter()
 	(&Handler{}).Routes(api)
@@ -493,6 +494,8 @@ func TestFunctionRoutes(t *testing.T) {
 		{http.MethodPost, fn + "/action"},
 		{http.MethodGet, fn + "/logs"},
 		{http.MethodPost, "/internal/sandboxes/sbx-0123456789abcdef/wake"},
+		{http.MethodPost, "/internal/functions/fn-0123456789abcdef/wake"},
+		{http.MethodPost, "/internal/functions/activity"},
 	} {
 		if !match(tc.method, tc.path) {
 			t.Errorf("no route for %s %s", tc.method, tc.path)
@@ -511,6 +514,9 @@ func TestFunctionRoutes(t *testing.T) {
 		{http.MethodGet, "/project/p1/github/installations/42/repos"},
 		{http.MethodPut, fn},
 		{http.MethodPost, fn + "/deployments"},
+		{http.MethodGet, "/internal/functions/activity"},
+		{http.MethodPost, "/e2b/internal/functions/activity"},
+		{http.MethodPost, "/internal/functions/fn-0123456789abcdef/sleep"},
 	} {
 		if match(tc.method, tc.path) {
 			t.Errorf("%s %s is registered: it is not offered in this release", tc.method, tc.path)

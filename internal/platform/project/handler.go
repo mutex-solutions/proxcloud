@@ -126,6 +126,10 @@ type Handler struct {
 	functionFor          func(es *externalservice.ExternalService) (*function.Service, error)
 	fns, fnDeps, fnHosts *pgdoc.Store
 	fnKeys               *textcrypt.BlobKeys
+	// fnScheduler: the job scheduler runs (SetFunctionScheduler; false = no function usage starts). fnTokens are the
+	// providers' function wake tokens as last read (functionTokenServices).
+	fnScheduler bool
+	fnTokens    fnTokens
 	// lbCerts holds the projects' TLS certificates, each sealed with lbCertKeys (SetLBCertificates; nil = no
 	// certificate is taken, and no tls or https listener is served).
 	lbCerts    *pgdoc.Store
@@ -294,6 +298,10 @@ func cloudResourceName(cr *cloud.CloudResource) string {
 // subset; cloud/billing-usage endpoints are deferred).
 func (h *Handler) Routes(r chi.Router) {
 	r.Post("/internal/sandboxes/{sandboxID}/wake", h.sandboxWake) // sandbox-proxy, its own bearer (public in pkg/auth)
+	// sandbox-proxy's function calls, with the provider's function wake token (public in pkg/auth). The activity
+	// route is registered first: "activity" is no function id.
+	r.Post("/internal/functions/activity", h.functionActivity)
+	r.Post("/internal/functions/{functionID}/wake", h.functionWake)
 	r.Get("/project", h.list)
 	r.Post("/project", h.create)
 	r.Get("/project/{id}", h.get)

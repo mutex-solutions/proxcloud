@@ -55,7 +55,8 @@ func TestFunctionProjectQuota(t *testing.T) {
 
 // The functions block is read from the provider document as it is written: the switch, the idle bounds, the caps of
 // one function, the floor (minInstances, maxMinInstances) and the default quota of a project. The token functions
-// are woken with is not read here.
+// are woken with is the secret's functionWakeToken and nothing else: never the sandbox wake token, and a provider
+// that holds only the sandbox one has no function token.
 func TestSandboxConfigReadsFunctions(t *testing.T) {
 	es := &ExternalService{Config: map[string]any{"provider": "sandbox", "sandbox": map[string]any{
 		"domain": "sbx.example.org",
@@ -69,8 +70,12 @@ func TestSandboxConfigReadsFunctions(t *testing.T) {
 	if cfg.Functions != want || cfg.ValidateFunctions() != nil {
 		t.Errorf("functions block: %+v (%v), want %+v", cfg.Functions, cfg.ValidateFunctions(), want)
 	}
-	if cfg.FunctionWakeToken != "" || cfg.ProxyWakeToken != "" {
-		t.Errorf("a wake token was read: function %q, sandbox %q", cfg.FunctionWakeToken, cfg.ProxyWakeToken)
+	if cfg.FunctionWakeToken != "t0ken" || cfg.ProxyWakeToken != "" {
+		t.Errorf("the wake tokens: function %q, sandbox %q, want the function token alone", cfg.FunctionWakeToken, cfg.ProxyWakeToken)
+	}
+	other := &ExternalService{Config: es.Config, Secret: map[string]any{"proxyWakeToken": "sandbox-t0ken"}}
+	if cfg := other.SandboxConfig(); cfg.FunctionWakeToken != "" || cfg.ProxyWakeToken != "sandbox-t0ken" {
+		t.Errorf("a provider with the sandbox wake token alone: function %q, sandbox %q", cfg.FunctionWakeToken, cfg.ProxyWakeToken)
 	}
 	if off := (&ExternalService{Config: map[string]any{"provider": "sandbox", "sandbox": map[string]any{"domain": "sbx.example.org"}}}).SandboxConfig(); off.Functions.Enabled {
 		t.Error("a provider without a functions block has functions on")

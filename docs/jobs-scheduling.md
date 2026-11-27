@@ -138,6 +138,8 @@ cron specs from `scheduler.go`. All specs are 6-field seconds-first, UTC.
 | `sandboxTemplateAdopt` | `0 */5 * * * *` | every 5 minutes | 10m / 1m | Sandboxes: a built-in template moves to the digest the prepull DaemonSet runs once every Ready node has pulled it; only for providers with `imageAdoption` `on` (`dry-run` logs) (docs/managed-sandbox.md §6) |
 | `sandboxBuildSync` | `40 * * * * *` | every minute at :40 | 10m / 20s | Sandboxes: record the result of custom template builds nobody polls, before the build pod is cleaned up |
 | `sandboxAutoPause` | `5 * * * * *` | every minute at :05 | 30m / 20s | Registered, but skips managed saved-lifecycle work while the fixed capability is false; no AutoPause enable flag |
+| `functionReaper` | `*/15 * * * * *` | every 15 seconds | 5m / 10s | Functions: an idle function goes down to its floor (usually zero), one below its floor up to it, and every function of a provider that no longer offers functions, or of a project that cannot be billed, to zero. An idle function is ended at the moment its idle time ran out, not at the moment of the run; the first run after a gap of 45 seconds or more stops nothing for being idle. The lock is held 10 seconds at least, under the 15 second period ([managed-functions.md](managed-functions.md)) |
+| `functionDeploySync` | `20 * * * * *` | every minute at :20 | 10m / 20s | Functions, after the sandbox read at :10 and before the charge at :30: settles a rollout whose API process ended; rewrites a cloud row that no longer says what its record says and archives one whose record is gone; scales a Deployment to the recorded count, deletes one without a record and applies one that is missing again; stamps `readyAt` on a running interval with a ready instance and ends one that has none on two runs in a row; deletes a function namespace nothing on record needs; forgets `sandbox-proxy` replicas not heard from for 90 seconds; stamps the provider's meter heartbeat after a good list of its Deployments |
 | `sandboxRegistryPrune` | `0 17 * * * *` | every hour at :17 | 30m / 5m | `dry-run` previews old unreferenced candidates; configured `on` returns physical-delete HOLD, including project teardown |
 | `pveTaskPoll` | `*/20 * * * * *` | every 20 seconds | 1m / 10s | Proxmox: finished VM tasks past each node's cursor; records them (`LIST_EVENTS`), audits the ones the platform did not run, re-syncs their project |
 | `pveTrafficSample` | `45 * * * * *` | every minute at :45 | 2m / 30s | Proxmox: public-NIC counters of the VMs holding a public IP into `usageMetrics` |
@@ -239,6 +241,8 @@ Each is `POST /debug/<name>` and returns a small JSON result:
 | `run-sandbox-abuse` | one sandbox abuse sampling pass ([managed-sandbox.md](managed-sandbox.md)) |
 | `run-sandbox-rotation` | one sandbox worker rotation pass, honouring its interval and scope |
 | `run-sandbox-autopause` | invokes the same capability-gated runner; does not bypass the saved-lifecycle hold |
+| `run-function-reaper` | one run of `functionReaper` |
+| `run-function-deploy-sync` | one run of `functionDeploySync` |
 | `run-registry-prune` | preview/HOLD as configured; `?grace=10m` lowers only the candidate age floor, never enables real DELETE |
 | `run-pve-tasks` | one Proxmox task poll |
 | `run-pve-traffic` | one Proxmox public-NIC sample |

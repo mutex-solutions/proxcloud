@@ -194,6 +194,10 @@ type param struct {
 	// enum, when set, lists the only values the param takes (schema "enum", refused at dispatch otherwise): a tool
 	// that takes one of several actions cannot be sent one that has its own destructive tool.
 	enum []string
+	// nulls names a body field this boolean param sends as null when it is true, instead of itself: for a route
+	// where a null field means "remove". A null argument cannot say that: it is left out like any argument that is
+	// not set (clients send null for those).
+	nulls string
 }
 
 type toolDef struct {
@@ -315,7 +319,14 @@ func (h *Handler) dispatch(ctx context.Context, d toolDef, args map[string]any) 
 		case "query":
 			q.Set(p.name, fmt.Sprintf("%v", v))
 		case "body":
-			body[p.name] = v
+			if p.nulls == "" {
+				body[p.name] = v
+			} else if v == true {
+				if _, both := body[p.nulls]; both {
+					return 0, nil, fmt.Errorf("give either %s or %s, not both", p.nulls, p.name)
+				}
+				body[p.nulls] = nil
+			}
 		case "rawbody":
 			rawBody, hasRaw = v, true
 		}

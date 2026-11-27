@@ -191,3 +191,59 @@ func TestServerActionEnum(t *testing.T) {
 		}
 	}
 }
+
+// The nine function tools reach the nine function routes, and nothing reaches a route this portal does not have (a
+// hostname of its own, a build, the GitHub set). removeRegistryAuth sends registryAuth as null, which is how the
+// route removes the stored credentials; with registryAuth itself it is refused before anything is sent.
+func TestClientFunctionTools(t *testing.T) {
+	const fnURI = "/api/v1/project/p1/functions/fn-0123456789abcdef"
+	fn := map[string]any{"id": "p1", "fn": "fn-0123456789abcdef"}
+	auth := map[string]any{"username": "u", "password": "p"}
+	runToolCases(t, clientTools, []toolCase{
+		{"list_functions", map[string]any{"id": "p1"}, sent{"GET", "/api/v1/project/p1/functions", nil}},
+		{"get_function", fn, sent{"GET", fnURI, nil}},
+		{"create_function", map[string]any{"id": "p1", "name": "api", "image": "nginx:1", "maxInstances": float64(2), "secrets": map[string]any{"TOKEN": "t"}},
+			sent{"POST", "/api/v1/project/p1/functions", map[string]any{"name": "api", "image": "nginx:1", "maxInstances": float64(2), "secrets": map[string]any{"TOKEN": "t"}}}},
+		{"update_function", with(fn, "image", "nginx:2", "secrets", map[string]any{"OLD": nil}), sent{"PATCH", fnURI, map[string]any{"image": "nginx:2", "secrets": map[string]any{"OLD": nil}}}},
+		{"update_function", with(fn, "registryAuth", auth), sent{"PATCH", fnURI, map[string]any{"registryAuth": auth}}},
+		{"update_function", with(fn, "removeRegistryAuth", true), sent{"PATCH", fnURI, map[string]any{"registryAuth": nil}}},
+		{"update_function", with(fn, "removeRegistryAuth", false, "port", float64(9000)), sent{"PATCH", fnURI, map[string]any{"port": float64(9000)}}},
+		{"delete_function", fn, sent{"DELETE", fnURI, nil}},
+		{"list_function_deployments", fn, sent{"GET", fnURI + "/deployments", nil}},
+		{"rollback_function", with(fn, "deploymentId", "d1"), sent{"POST", fnURI + "/rollback", map[string]any{"deploymentId": "d1"}}},
+		{"rollback_function", with(fn, "deploymentId", "d1", "removeRegistryAuth", true), sent{"POST", fnURI + "/rollback", map[string]any{"deploymentId": "d1", "registryAuth": nil}}},
+		{"function_action", with(fn, "action", "suspend"), sent{"POST", fnURI + "/action", map[string]any{"action": "suspend"}}},
+		{"get_function_logs", with(fn, "tail", float64(50)), sent{"GET", fnURI + "/logs?tail=50", nil}},
+	})
+
+	byName := map[string]toolDef{}
+	for _, d := range clientTools {
+		byName[d.name] = d
+	}
+	if got := len(clientFunctionTools); got != 9 {
+		t.Errorf("%d function tools, want 9", got)
+	}
+	for _, later := range []string{"add_function_domain", "remove_function_domain", "build_function", "get_function_build_log",
+		"list_github_installations", "refresh_github_installation", "disconnect_github_installation"} {
+		if _, has := byName[later]; has {
+			t.Errorf("tool %s names a route this portal does not have", later)
+		}
+	}
+	for _, d := range clientFunctionTools {
+		for _, p := range d.params {
+			if p.name == "gpu" || p.name == "source" || p.name == "exposure" || p.name == "domains" || p.name == "publicRateLimit" {
+				t.Errorf("%s offers %s, which the API refuses", d.name, p.name)
+			}
+		}
+	}
+
+	h := testHandler()
+	h.SetRoot(chi.NewRouter())
+	ctx := context.WithValue(context.Background(), credKey{}, cred{jwt: "x.y.z"})
+	if _, _, err := h.dispatch(ctx, byName["update_function"], with(fn, "registryAuth", auth, "removeRegistryAuth", true)); err == nil {
+		t.Error("registryAuth together with removeRegistryAuth was sent")
+	}
+	if _, _, err := h.dispatch(ctx, byName["function_action"], with(fn, "action", "delete")); err == nil {
+		t.Error("function_action took an action that is neither suspend nor resume")
+	}
+}

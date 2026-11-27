@@ -33,7 +33,8 @@ package externalservice
 //	    }
 //	  },
 //	  "secret": {"kubeconfig": "<proxcloud SA kubeconfig of the sandbox cluster>",
-//	             "proxyWakeToken": "<the bearer sandbox-proxy sends to the wake endpoint (stage 56 generates it)>"}
+//	             "proxyWakeToken": "<the bearer sandbox-proxy sends to the wake endpoint (stage 56 generates it)>",
+//	             "functionWakeToken": "<the bearer sandbox-proxy sends to the function wake and activity routes>"}
 //	}
 //
 // Like dbaas, nothing lands on PVE for a project: the sandbox cluster belongs to the platform.
@@ -193,6 +194,8 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 		TemplateRegistry: str(sb["templateRegistry"]),
 		RegistryCA:       str(sb["registryCa"]),
 		ProxyWakeToken:   str(e.secretMap()["proxyWakeToken"]),
+		// The functions' own bearer, never the one above: proxyWakeToken staying empty keeps autoResume refused.
+		FunctionWakeToken: str(e.secretMap()["functionWakeToken"]),
 		RegistryGC: sandbox.RegistryCredential{
 			User: str(e.secretMap()["registryGcUser"]), Password: str(e.secretMap()["registryGcPassword"]),
 		},
