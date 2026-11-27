@@ -140,8 +140,9 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 	if scope.Zone, scope.Vnet, err = x.platformVnet(ctx); err != nil {
 		return classify(CodeSandboxAccessFailed, err)
 	}
-	// A token an earlier attempt made and could not store has a secret nobody holds: it goes first.
-	if err := x.portal.RevokeClusterTokens(ctx, SandboxClusterName); err != nil {
+	// A token an earlier attempt made and could not store has a secret nobody holds: it goes first, when there is one
+	// (a delete of a token that does not exist is a 500 in the node's log).
+	if err := x.portal.RevokeStaleClusterTokens(ctx, SandboxClusterName); err != nil {
 		return classify(CodeSandboxAccessFailed, err)
 	}
 	t, err := x.portal.MintClusterTokens(ctx, SandboxClusterName, scope)

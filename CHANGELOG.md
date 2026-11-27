@@ -331,8 +331,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     answers of `500`, and wrote the ACL row 23 times; the first mint of the token of `pc-sandbox` deleted a token
     that did not exist, a `500` too. The pool, the row and the token are now read first and written when missing
     (`TestSandboxAccessIsWrittenOnce`: one write each in a run that waits eight looks, none in a run that changes nothing,
-    one for a row deleted by hand). A tenant cluster's release no longer sends the delete of a CAPI token that is
-    not there either.
+    one for a row deleted by hand). What a tenant cluster's mint and release send is unchanged.
   - *The off of `separate` kept its token for minutes:* the run waited for ArgoCD's next look at an Application
     whose objects were gone. It now asks ArgoCD to look (`argocd.argoproj.io/refresh`) while the Application is in
     deletion (`TestSandboxOffAsksArgoCDToLookAgain`). The token still goes after that wait: CAPMOX needs it until

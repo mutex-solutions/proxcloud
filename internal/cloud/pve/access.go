@@ -176,9 +176,16 @@ func (c *Client) SetSandboxPoolAccess(ctx context.Context, del bool) error {
 	return c.SetACL(ctx, path, roleCAPI, []string{CAPITokenID}, del)
 }
 
-// RevokeClusterTokens deletes the tokens the cluster has, each after its own ACL rows (DeleteAPIToken).
+// RevokeClusterTokens deletes the tokens, each after its own ACL rows (DeleteAPIToken).
 func (c *Client) RevokeClusterTokens(ctx context.Context, clusterID string) error {
-	return errors.Join(c.revokeMinted(ctx, capiUser, clusterID), c.RevokeClusterCSIToken(ctx, clusterID))
+	return errors.Join(c.DeleteAPIToken(ctx, capiUser, clusterID), c.RevokeClusterCSIToken(ctx, clusterID))
+}
+
+// RevokeStaleClusterTokens is RevokeClusterTokens for a caller that cannot know whether a token exists: a mint that
+// first takes away what an earlier attempt may have left. It lists before each delete (revokeMinted), so a first mint
+// sends no delete at all. A release of a cluster that has its token keeps RevokeClusterTokens and its one call.
+func (c *Client) RevokeStaleClusterTokens(ctx context.Context, clusterID string) error {
+	return errors.Join(c.revokeMinted(ctx, capiUser, clusterID), c.revokeMinted(ctx, csiUser, clusterID))
 }
 
 // RevokeClusterCSIToken deletes the cluster's csi@pve!<id> token alone: a cluster moved onto the CSI gateway keeps its
@@ -188,8 +195,8 @@ func (c *Client) RevokeClusterCSIToken(ctx context.Context, clusterID string) er
 }
 
 // revokeMinted deletes the token user!name when it exists. PVE answers the delete of a token that was never made with
-// a 500 in the node's log (a mint revokes first, so every first mint wrote one), so the user's tokens are listed first
-// and nothing is sent when the list answers without it. A list that fails proves nothing: the delete is sent as before.
+// a 500 in the node's log, so the user's tokens are listed first and nothing is sent when the list answers without
+// it. A list that fails proves nothing: the delete is sent as before.
 func (c *Client) revokeMinted(ctx context.Context, user, name string) error {
 	var have []struct {
 		TokenID string `json:"tokenid"`

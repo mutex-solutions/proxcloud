@@ -18,8 +18,9 @@ functions read before they write.
 - `internal/platformlife/sandbox_run.go`: `sandboxAccess` lists the pools and creates the sandbox pool only when it is
   missing. `sandboxAppsGone` sets `argocd.argoproj.io/refresh` on an Application that is in deletion.
 - `internal/cloud/pve/access.go`: `SetSandboxPoolAccess` reads the ACL and writes the row only when it is not there;
-  `RevokeClusterTokens` lists the user's tokens before it deletes the CAPI token (`revokeMinted`, which
-  `RevokeClusterCSIToken` already did for the CSI token).
+  `RevokeStaleClusterTokens` (new, the sandbox mint's) lists the user's tokens before each delete (`revokeMinted`,
+  the listing `RevokeClusterCSIToken` already did). `RevokeClusterTokens`, and with it what a tenant cluster's mint
+  and release send, is unchanged.
 - `internal/cloud/kamajik8s/client.go`: `DeleteClusterScoped`.
 - `internal/platformlife/sandbox.go`: the plan row `sandbox` names the storage plugin's pods being replaced for the
   shared group (`sandboxCSIRoll`), and the row `sandbox-access` of an off has its own text.
