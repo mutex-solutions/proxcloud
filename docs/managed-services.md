@@ -1137,15 +1137,21 @@ the Ready card, and the release gates still required.
 **What a run writes on the Proxmox provider.** In stage `cluster`, before a sandbox machine
 exists, the run writes on the installation's Proxmox provider, in one write:
 
-- `config.network.sandboxCidrs`: the one entry `nodeRange`. The next provider sync writes the
-  isolation rules for it (tenant networks to and from the range, the range to the blocked and
-  management networks).
+- `config.network.sandboxCidrs`: the one entry `nodeRange`. In the same step the run writes the
+  provider's isolation rules for it itself (tenant networks to and from the range, the range to
+  the blocked and management networks, and for `shared` the ACCEPTs of the machines' own cluster)
+  and reads them back from the cluster firewall before it makes a machine. It does not wait for a
+  provider sync, so it works with the scheduler off and on a site with no project. It takes the
+  site's SDN lock for it, the one a provider sync and a tenant's network change take; while that
+  lock is held the stage waits. Every apply asserts the set again and writes nothing when it is in
+  place.
 - `config.sandbox`: `pool` (`proxcloud-sbx`), `nodes` (`[nodeRange]`), `dns`,
   `unsecuredMinAgeMinutes` (20), and what the platform network adds: `platformInstallationId` (the
   owner), `mode`, `bridge` and `vlan` (where the machines' NIC is: no vnet is looked up), and
   `deny` (the platform prefix, so that a platform network that is not RFC 1918 is as closed to a
   sandbox machine as one that is). `shared` adds `peers` and `kubeletSources`, both the cluster's
-  `nodeRange`. `separate` adds `loadBalancers` and `proxy` (the proxy address, port 443).
+  `nodeRange`, and `controlPlane` (the API address and port 6443). `separate` adds `loadBalancers`
+  and `proxy` (the proxy address, port 443).
 
 In stage `register` it adds `secret.sandboxKubeconfig` (sealed): the identity
 `proxcloud-sandbox-firewall` of the sandbox chart, which may read and patch Nodes, read the
@@ -1170,7 +1176,7 @@ bridge or tag. Both policies are DROP and every rule is an ACCEPT, so a missing 
 | MetalLB memberlist (7946) | none | inside the sandbox range |
 | sandbox-proxy | none: it runs on the `system` group | TCP 443 to the proxy address, from any source |
 | DNS | UDP and TCP 53 to `dns` | the same |
-| Internet | everything outside the private, CGNAT and link-local ranges, the platform prefix, the nodes' own addresses, the management and blocked networks and the tenant pool | the same |
+| Internet | TCP on every port but 25, UDP and ICMP, to everything outside the private, CGNAT and link-local ranges, the platform prefix, the nodes' own addresses, the management and blocked networks and the tenant pool. No other IP protocol | the same |
 
 - TCP 6443 to the whole `nodeRange` in `shared`: the Cilium agent, kube-proxy and the network
   guard reach the API through the `kubernetes` Service, which kube-proxy rewrites inside the VM to
@@ -1179,9 +1185,57 @@ bridge or tag. Both policies are DROP and every rule is an ACCEPT, so a missing 
 - The proxy address takes any source in `separate`: there is no entry appliance on a managed
   platform, so a client's own address arrives. The address must not be reachable from a network
   you do not want sandboxes served to; that is your router's rule.
+- **Mail.** Outbound TCP 25 is closed at the machine, on top of the sandbox chart's policy that
+  closes it for every sandbox pod: a tenant gets submission (TCP 587, and 465) to a relay of its
+  own, and no direct SMTP to a mail exchanger. v0.12.0-rc.1 left 25 open from the machine itself.
 - The IP filter of each machine admits its own address once its Node has reported it (and in
   `separate` the proxy address, which any machine of the sandbox cluster may announce). A sandbox
   machine cannot answer for the API address, a platform machine or a MetalLB address.
+
+**The cluster firewall around the sandbox range (layer 0).** The provider's isolation rules name
+the range as a sandbox network: `FORWARD DROP` and `IN DROP` from the tenant pool to it, and from
+it to the tenant pool and to every blocked and management network. The API address and the
+cluster's `nodeRange` are blocked networks (the Check's `isolation` row requires it), so in
+`shared` that DROP names the very machines a sandbox machine belongs to. Above it the rule set
+therefore holds, for `shared`, exactly what the VM firewall opens toward the cluster and nothing
+else, each as one `FORWARD ACCEPT` from the range:
+
+| Rule | To | Why |
+|---|---|---|
+| TCP 6443 | the API address | the kubelet's and the join's endpoint |
+| TCP 6443 | the cluster's `nodeRange` | the `kubernetes` Service, after kube-proxy's rewrite |
+| UDP 8472 | the cluster's `nodeRange` | Cilium's tunnel |
+| TCP 4240 | the cluster's `nodeRange` | Cilium's health check |
+| ICMP | the cluster's `nodeRange` | Cilium's health check |
+
+- **Where these rules apply.** A cluster `FORWARD` rule sees every packet a node routes. On a node
+  where `net.bridge.bridge-nf-call-iptables` is 1 it also sees every frame bridged between two
+  guests of one bridge: Proxmox's legacy firewall sets that switch, and a node moved to nftables
+  keeps it until its next boot. On a node where it is 0, traffic between two guests of the
+  platform bridge never reaches these rules, and the VM firewall alone decides. The rule set is
+  written to be right in both cases. v0.12.0-rc.1 wrote the DROP without the ACCEPTs: on a node
+  with the switch on, a shared sandbox machine could open no new connection to its cluster.
+- **Both layers come from one list** in the code, so a port opened in the VM firewall and
+  forgotten here cannot happen. Everything else stays dropped at both layers: every other port of
+  the API address and of the cluster's machines (kubelet, etcd, ssh), the seed, the portal's VM,
+  the gateway, the Proxmox nodes and the rest of the management network, and the tenant pool.
+- **What layer 0 does not hold.** A private address that is in no blocked network of the provider
+  (the MetalLB range, which tenants must reach; another site's networks) is not named by the
+  DROP: there the VM firewall alone closes it, for both placements.
+- **The resolvers are not opened at layer 0.** The VM firewall opens UDP and TCP 53 to `dns`;
+  the isolation rules have no ACCEPT for them. Name resolvers that are in no blocked and no
+  management network (a public resolver, as the lab's drill did): a resolver inside one, the
+  platform network's gateway for instance, is dropped wherever layer 0 sees the query, which is
+  always when a node routes it and, between two guests of one bridge, on a node with the switch
+  on. No check reads this yet.
+- **The kubelet** is reached from the cluster's `nodeRange`. No rule of layer 0 has that range as
+  a source, so nothing is needed for it.
+- **`separate` needs no ACCEPT.** Its control plane is a pod of the platform cluster's `kamaji`
+  group, published as a LoadBalancer Service at an address of the platform cluster's MetalLB
+  range, API on TCP 6443 and konnectivity on TCP 8132. That range is no blocked network, so no
+  DROP names it. The platform cluster's own API address and machines are not that machine's
+  cluster: they stay dropped at both layers. The `fence` gate checks this from the rule list (see
+  the gates below).
 - A NIC that is not on the platform bridge with the platform's VLAN tag gets an empty filter.
 
 **The portal's identities on the cluster.** The sandbox chart makes two service accounts and the
@@ -1224,8 +1278,8 @@ gates**).
 | Gate | Holds when | On a `shared` cluster |
 |---|---|---|
 | `noderestriction` | the API server refuses a node identity a `node-restriction.kubernetes.io/` label on its own Node | the same |
-| `isolation` | the cluster firewall holds the isolation rules for `nodeRange` | the same; with a bridged platform network those rules see routed traffic only, and the VM firewall is what holds inside the network |
-| `fence` | every Node that may take a sandbox is a VM of the sandbox pool whose firewall reads back as written, pinned to the Node's address | first the RuntimeClass `gvisor` must select exactly the sandbox group (`node-restriction.kubernetes.io/proxcloud-node-group: sandbox`) and tolerate `proxcloud.io/sandbox` alone; then only that group's Nodes are asked. A class changed by hand fails the gate |
+| `isolation` | the cluster firewall holds the isolation rules for `nodeRange`, exactly as written | the same, with the five ACCEPTs of the machines' own cluster. With a bridged platform network those rules see routed traffic, and on a node with `net.bridge.bridge-nf-call-iptables` at 1 also the frames between two guests of the bridge; where they do not, the VM firewall is what holds inside the network |
+| `fence` | every Node that may take a sandbox is a VM of the sandbox pool whose firewall reads back as written, pinned to the Node's address; and no `FORWARD` rule of the cluster firewall, read top down, drops what the VM firewall opens toward the machines' own cluster before an ACCEPT lets it through. The gate computes that from the rule list and names the rule; it does not probe a machine | first the RuntimeClass `gvisor` must select exactly the sandbox group (`node-restriction.kubernetes.io/proxcloud-node-group: sandbox`) and tolerate `proxcloud.io/sandbox` alone; then only that group's Nodes are asked. A class changed by hand fails the gate |
 | `network-guard` | Cilium leaves the CNI config to the network guard and its heartbeat is fresh, on every schedulable node | on the sandbox group's Nodes alone, by the label a kubelet cannot set |
 
 A new sandbox machine passes `fence` about 20 minutes after it joined (the join token on its disk
@@ -1238,7 +1292,9 @@ back on a machine that lost its fence runs on the scheduler
 operator sync (`POST /api/v1/admin/job/external-service/sync`) fences once, and nothing watches
 afterwards. So a platform's sandbox provider is refused "live" while the scheduler is off
 (`409`), the Check's `scheduler` row says so while the settings ask for sandboxes, and the Ready
-card repeats it. The same switch starts charging usage: the price rule for sandbox minutes holds a
+card repeats it. That `409` names the scheduler and, in the same answer, every release gate that
+does not hold with its reason (or says that none fails), so turning the scheduler on is not
+followed by a second refusal you could not see coming. The same switch starts charging usage: the price rule for sandbox minutes holds a
 placeholder rate until you set one (or 0). The installer's sandbox providers are not asked for
 the scheduler.
 
@@ -1246,9 +1302,20 @@ the scheduler.
 sandbox_provider_live`) while the sandbox provider is not disabled, and so is the run: every
 running sandbox would end without notice. Disable the provider, let its sandboxes end, then save
 and apply. Once the machines are gone and the pool is empty, the run takes `config.sandbox`, the
-`sandboxCidrs` entry and `secret.sandboxKubeconfig` off the Proxmox provider, deletes the pool's
-firewall groups and IP sets from the cluster firewall, then the ACL row or the token and the
-pool. The sandbox provider row stays, disabled, and is adopted when sandboxes come back; a Remove
+`sandboxCidrs` entry and `secret.sandboxKubeconfig` off the Proxmox provider, writes the
+provider's isolation rules without the range (its DROPs and ACCEPTs go, the tenant pool's stay;
+read back before anything else is recorded), deletes the pool's firewall groups and IP sets from
+the cluster firewall, then the ACL row or the token and the pool. The Check's `isolation` row is
+`ok` right after it, with no provider sync, also on a site with no project. Rules of another owner
+in the cluster firewall are never rewritten or removed; a rewrite puts this provider's rules on
+top of the list, in a fixed order, so the others move down as a block.
+
+An apply is never stopped at its first stage by an `isolation` row that differs only in what names
+the installation's own sandbox range (a run cancelled between its two writes, or rules a release
+candidate left to a provider sync): the row is then a warning that names the range, and the run
+writes the rules itself. Every other cause of that row still stops a run, the one that switches
+sandboxes off included: a blocked network the rules do not drop, a disabled rule, the datacenter
+firewall off, a sandbox network that is not the installation's. The sandbox provider row stays, disabled, and is adopted when sandboxes come back; a Remove
 disables it with the two others, and a new install does not give it its status back.
 
 The off of `shared` also deletes what neither ArgoCD nor Cluster API takes away, in this order,
@@ -1368,6 +1435,10 @@ blocked and management networks, with the comment `proxcloud:isolation` (pool pr
 `proxcloud:isolation/<poolPrefix>`. They do not depend on any project, and two things write them:
 a provider sync (the scheduler's, **Run a provider sync, then check again**, or
 `POST /api/v1/admin/job/external-service/sync`), and the first tenant network before it goes live.
+A third writer exists for one case: a platform run that adds or removes its sandbox range writes
+the set for the provider's new config itself, in the form a network create has (none of the
+refusals below), because nothing else would until some sync
+([The sandbox provider](#the-sandbox-provider)).
 
 A sync writes them without a project only for a provider that has a managed-services installation,
 in any phase, the saved draft of step 1 and a `removed` installation included, and only with `PROXCLOUD_PLATFORM_ENABLED=true`.
@@ -3619,15 +3690,21 @@ Proxmox for the VM firewall (it stores rules and does not filter a packet), fake
 gates and the registration, and a model of the shared identity's RBAC for the portal's calls. A lab
 must still show, for each placement:
 
-1. After stage `cluster`: the provider row holds `config.sandbox` and the one `sandboxCidrs` entry,
-   a provider sync writes the isolation rules for the range, and a tenant network create still
-   works.
+1. After stage `cluster`, with no provider sync run: the provider row holds `config.sandbox` and
+   the one `sandboxCidrs` entry, the cluster firewall holds the isolation rules for the range
+   (for `shared` with the five ACCEPTs above the range's DROP), the Check's `isolation` row is
+   `ok`, the rules of other owners are byte-equal, and a tenant network create still works.
 2. After stage `register`: the provider "… Sandboxes" exists DISABLED, a provider sync fences each
    sandbox VM (both policies DROP, the generation's group as its only rule, the IP filter pinned to
    its address) and takes the `unsecured` taint off after 20 minutes, and **no VM outside pool
    `proxcloud-sbx` changed** (compare `pvesh get /nodes/<n>/qemu/<id>/firewall/options` of a
    platform machine before and after).
-3. `shared`, from a sandbox machine with its firewall in force: the Cilium agent stays Ready across
+3. `shared`, from a sandbox machine with its firewall in force, **on a node where
+   `net.bridge.bridge-nf-call-iptables` is 1** (v0.12.0-rc.1 failed exactly there: after the first
+   sync the machine opened no connection to its cluster) and on one where it is 0: `node-setup`
+   stays Ready and the Application Healthy after the first and the second provider sync, new
+   connections to the API address and to a control plane machine on TCP 6443 open, the tunnel and
+   the health port of a `system` machine answer, and the `fence` gate holds; the Cilium agent stays Ready across
    a restart (the API through the `kubernetes` Service, which is TCP 6443 to a control plane
    machine), a pod on it reaches a pod on a `system` machine and back, `kubectl logs` and `exec`
    work (TCP 10250 from the control plane), image pulls and the runsc download work, and from the
@@ -3636,19 +3713,25 @@ must still show, for each placement:
 4. `separate`: the same from a machine of `pc-sandbox`, plus a client outside the range reaching
    `https://<port>-<id>.<domain>` at the proxy address, and `sandbox-proxy` starting with the run's
    certificate.
-5. The four gates on the Ready card: failing before the sync, holding after; then set the provider
-   live, start `base` with the E2B SDK (`sudo` works, egress to the internet works, a private
+5. The gates on the Ready card. Right after the run and before any provider sync, one of the four
+   fails, `fence` (no machine has its VM firewall yet, and every Node has the `unsecured` taint),
+   and three hold: `noderestriction`, `network-guard`, and `isolation`, whose rules the run wrote
+   itself. After a sync and the 20 minutes all four hold. (v0.12.0-rc.1 left the isolation rules
+   to the sync, so two failed there, `isolation` and `fence`, not four as its notes said.) Then
+   set the provider live, start `base` with the E2B SDK (`sudo` works, egress to the internet works, a private
    address and TCP 25 do not), and read the usage row.
 6. `shared`: with the portal identity's kubeconfig, `kubectl get pods -A` and a read of a pod in
    `kube-system` are refused, a Sandbox with a privileged, runc or hostPath pod is refused, and a
    second project gets its own `sb-` namespace and RoleBinding.
 7. Edit the RuntimeClass by hand (drop its `scheduling`): the `fence` gate fails and a sandbox
    create is refused within a minute.
-8. With the scheduler off: "live" is refused with the message about the scheduler; one operator
-   sync fences and untaints once.
+8. With the scheduler off: "live" is refused with one message that names the scheduler and each
+   gate that fails with its reason; one operator sync fences and untaints once.
 9. `placement: off` with the provider live is refused; disabled, the apply removes the machines,
-   the provider's sandbox settings, the firewall groups and IP sets (`pvesh get
-   /cluster/firewall/groups` names none of `sbx…`), the access and the pool.
+   the provider's sandbox settings, the range's isolation rules (the `isolation` row is `ok` right
+   after the run, with no provider sync, and the next apply passes stage `validate`), the firewall
+   groups and IP sets (`pvesh get /cluster/firewall/groups` names none of `sbx…` of this pool),
+   the access and the pool.
 10. The datacenter firewall off: the Check's `sandbox` row fails.
 
 **The address of the platform cluster's ArgoCD** (`spec.access.argocd`) was run once on a lab

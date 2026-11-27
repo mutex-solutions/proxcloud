@@ -43,6 +43,54 @@ the ProxmoxMachines have lost their finalizers, and the record that drives the r
 
 **Diagrams updated:** none (no element of C1 to C3 moves). [c3-components.md](c3-components.md): the file list of
 the row Platform runs.
+## 2026-11-27: a sandbox machine's own cluster passes the cluster firewall, and the run writes the isolation rules (#515, drill of v0.12.0-rc.1)
+
+**What changed:** no new component, container, listener or route. One rule kind more in the managed rule set of the
+cluster firewall, one key more in a provider's `config.sandbox`, one more reading in the `fence` gate, and one more
+writer of the isolation set (the platform runner).
+
+- `internal/cloud/pve/sandboxfw.go`: `clusterFlows` is the one list of what a sandbox worker opens toward its own
+  cluster outside its range (a cluster of its own: TCP API and konnectivity to the control plane; a node group of a
+  shared cluster: TCP API to the endpoint and the peers, and `sandboxNodeFlows`, UDP 8472, TCP 4240 and ICMP, with
+  the peers). `SandboxFirewall.generation` renders the VM firewall from it; `SandboxClusterAllow` writes it as
+  allow entries (`proto dest[,dest] [dport]`); `sandboxReach` and `forwardVerdict` read a cluster rule list top
+  down and say whether a flow is dropped before an ACCEPT covers it. `CheckSandboxFence` reads the cluster rules
+  and calls `sandboxReach`.
+- `internal/cloud/pve/network.go`: `isolationRules` writes one `FORWARD ACCEPT` per cluster flow of its allow
+  entries (`clusterAccepts`), below the endpoint ACCEPTs and above the sandbox DROPs. A flow into `cidrPool` is
+  skipped.
+- `internal/platform/externalservice/proxmox.go`: `PVESandbox.ControlPlane` (`config.sandbox.controlPlane`,
+  `address:port`); `PVESandboxEndpoints` puts `pve.SandboxClusterAllow(controlPlane, peers)` before the endpoints,
+  so every caller of the isolation reconcile and check gets it with no change of its own.
+- `internal/platformlife/sandbox_provider.go`: `SandboxSiteConfig` writes `controlPlane` for `shared` (the address
+  and port `WorkloadServer` gives the kubeconfigs).
+
+- `internal/cloud/pve/sandboxfw.go`: the workers' rule for the internet is three ACCEPTs (TCP
+  `sandboxInternetTCP` = every port but 25, UDP, ICMP) in place of one for every protocol and port (finding Z2-e:
+  TCP 25 was open from the machine itself). A changed rule set is a new generation.
+- `internal/platform/admin/sandboxprovider.go`: `Handler.checkSandboxGoLive` reads the release gates also when the
+  scheduler is off, and its `409` names both (findings Z2-f, Z2-g; no route, status or field changes).
+- `internal/cloud/pve/network.go`: `Service.WriteProviderIsolation` (the provider-wide set for a config, with no
+  project and without the refusals of `ReconcileProviderIsolation`, read back; `ErrIsolationNotInPlace`) and
+  `Service.IsolationDiffersOnlyIn` (the set in place differs from the config's only in what names given networks).
+- `internal/platformlife/sandbox_provider.go`: `acq.sandboxIsolation` reads the provider again and calls
+  `WriteProviderIsolation` under `Runner.SDNLock`; `sandbox_run.go` calls it after the write of the range in
+  `sandboxAccess` (stage `cluster`) and after its removal in `removeSandboxAccess` (off, Remove). A new relation in
+  words only: the platform runner now writes cluster firewall rules of the isolation set, which until now only the
+  sync job and the project handlers did.
+- `internal/platformlife/preflight.go`: `Preflight.isolationRow` (the row, taken out of `Run`) answers a warning
+  when `Preflight.ownSandboxOnly` holds, so stage `validate` does not stop on the installation's own range.
+
+**Why:** two findings of the drill of v0.12.0-rc.1 (2026-11-26). Z3-A and Z4-A: the run left the rules to the next
+provider sync, and until then its own Check failed and every run stopped at stage `validate`, the off included.
+Z2-A: the DROP of the sandbox range to the blocked networks
+covers the platform's API address and node range, and on a node with `net.bridge.bridge-nf-call-iptables` at 1 the
+forward chain also sees bridged frames, so a shared sandbox machine could not open a connection to its cluster while
+the gates read ok. ACCEPTs above the DROP rather than holes in it: a destination list cannot leave out a port.
+
+**Diagrams updated:** none (no element of C1 to C3 moves). [c4-code.md](c4-code.md): rule 6 of the managed rule
+set, the sentence on what the forward rules see, the `Service.CheckSandboxFence` row, the rows
+`Service.WriteProviderIsolation` and `acq.sandboxIsolation`.
 
 ## 2026-11-27: PR #513 functions API with deploy, roll back and secrets (v0.13.0, switched off)
 

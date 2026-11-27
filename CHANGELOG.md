@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Sandboxes: the isolation rules around a sandbox range, and what an upgrade does to them.** These notes belong
+  to the fixes "a shared sandbox machine was cut off from its own cluster" and the ones after it (see Fixed), found
+  by the drill of v0.12.0-rc.1.
+  - *An installed platform without sandboxes* (every platform installed by a release up to 0.11.1, and one that
+    never saved `spec.sandbox`): nothing is written at the upgrade and nothing changes. Its provider names no
+    sandbox network, so its isolation rules are the four DROPs of before, byte for byte, and the Check's
+    `isolation` row reads as before.
+  - *A site with the installer's sandbox cluster* (`docs/managed-sandbox.md`): its isolation rules do not change.
+    Its `config.sandbox` names no `controlPlane`, so no ACCEPT is added, and the `isolation` gate compares the
+    same rules as before. The `fence` gate reads the cluster firewall's rule list once more per check, and fails,
+    with the rule named, if a `FORWARD` DROP there covers the sandbox control plane's address and ports: on such a
+    site the workers could not have joined, so a gate that held before holds after.
+  - *A platform that built `shared` sandboxes with v0.12.0-rc.1* (a release candidate, on a lab): its provider's
+    `config.sandbox` has no `controlPlane` yet, so until the next apply the rules stay as rc.1 wrote them and the
+    `fence` gate fails with the reason. The next apply writes `controlPlane` and the rules with the five ACCEPTs in
+    stage `cluster`, with no provider sync before or after it. A platform whose rules rc.1 left without the range
+    (no sync ran after the apply) reads `isolation` as a warning that names the range, and the same apply, or the
+    one that switches sandboxes off, passes stage `validate` and puts the rules right.
+  - *Every site with sandbox workers, the installer's sandbox cluster included: the workers' firewall gets a new
+    generation at the first provider sync after the upgrade.* The rule that opened the internet on every protocol
+    and port is now three: TCP on every port but 25, UDP, ICMP. The sync builds the new group and its IP sets,
+    moves each worker to it (for that moment a worker holds both groups, the union of two complete sets) and
+    deletes the old one; no worker is tainted for it. Between the upgrade and that sync the `fence` gate fails,
+    as for any changed rule set, and it holds again after it. While it fails a live sandbox provider starts
+    nothing new: a tenant's sandbox create, and anything else that adds usage, answers `503` ("Sandboxes are not
+    available on this location right now"); sandboxes that run keep running. The window ends with the first
+    provider sync after the upgrade, the timed one or one an operator runs right after the upgrade. What changes
+    for traffic: a worker no longer opens
+    TCP 25 to the internet, and no longer sends an IP protocol other than TCP, UDP and ICMP there. Sandbox pods
+    were already kept off port 25 by the sandbox chart's policy; submission (587, 465) stays open.
+  - *Who writes the isolation rules now:* a provider sync and a tenant's network create, as before, and a platform
+    run in the one step that adds or removes its sandbox range. An installation whose settings never name
+    sandboxes makes no such write. A rewrite puts this provider's rules on top of the cluster firewall's list in a
+    fixed order; rules of another owner are never rewritten or removed and keep their order among themselves.
+
 - **Managed platform, sandboxes: what the upgrade from 0.12.0-rc.1 gives.** The upgrade of the portal changes
   nothing on the seed, on the platform cluster or in Proxmox by itself. What differs afterwards:
   - *A platform without sandboxes* (no `spec.sandbox`, or `placement: off` and nothing built): no run reads or writes
@@ -393,6 +428,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `mirror` when the mirror does not answer the guest.
 
 ### Fixed
+
+- **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of
+  v0.12.0-rc.1, finding Z2-A).** The provider-wide isolation rules drop the sandbox range towards every blocked
+  network, and the platform's API address and node range are blocked networks (the Check's `isolation` row requires
+  it). A cluster `FORWARD` rule sees every routed packet, and on a node where
+  `net.bridge.bridge-nf-call-iptables` is 1 (Proxmox's legacy firewall sets it; a node moved to nftables keeps it
+  until its next boot) also the frames bridged between two guests of one bridge. On the lab's third node the shared
+  sandbox machine could open no new connection to its cluster after the first provider sync: API, tunnel and health
+  all timed out, `node-setup` lost Ready, the Application degraded and go-live was impossible, while the gates
+  `isolation` and `fence` read ok.
+  - *The fix:* above the DROP of the sandbox range the rule set now holds one `FORWARD ACCEPT` per thing the VM
+    firewall opens toward the cluster in `shared`: TCP 6443 to the API address; TCP 6443, UDP 8472, TCP 4240 and
+    ICMP to the cluster's node range. Nothing else opens: every other port of those machines, the seed, the
+    portal's VM, the Proxmox nodes, the management network and the tenant pool stay dropped at both layers.
+  - *Why ACCEPTs and not a narrower DROP:* a destination list cannot leave out a port, so a hole in the DROP would
+    open every port of the API address and the node range; each ACCEPT reads as one line right above the DROP it
+    is the exception to; and it is the form the sandbox endpoints already have. `FORWARD` only: the destinations
+    are guests, and no port of a node opens.
+  - *One list:* the VM firewall of a sandbox machine and these ACCEPTs are rendered from the same list in the code
+    (`pve.clusterFlows`), so the two layers cannot drift. The run writes the API address on the provider
+    (`config.sandbox.controlPlane`) in stage `cluster`, before the first machine exists.
+  - *The `fence` gate fails with the reason* when the cluster firewall, read top down, drops what the VM firewall
+    opens toward the machines' own cluster before an ACCEPT lets it through: it names the rule, the protocol and
+    port, and the two networks. It is computed from the rule list; no machine is probed. A rule with a macro, an
+    alias or an IP set in its source or destination is not read.
+  - *`separate` needs no ACCEPT:* its control plane is a LoadBalancer address of the platform cluster's MetalLB
+    range (API on 6443, konnectivity on 8132), which is no blocked network. The same gate says so when a site's
+    blocked networks cover it.
+  - *What layer 0 never held and still does not:* a private address in no blocked network of the provider (the
+    MetalLB range, another site's network) is closed to a sandbox machine by its VM firewall alone.
+  - The docs said that those rules "see routed traffic only"; they now say what holds on a node with the switch on.
+  - Tests: a table over the rendered rules of both layers, on the lab's addresses and the drill's packet list
+    (`TestSandboxLayersOnTheDrillsPackets`, 111 packets for `shared`, 24 for `separate`), with rc.1's rule set as
+    its control; `TestIsolationRulesOfASharedSandboxGroup` (the set line by line);
+    `TestFenceGateSaysWhenTheClusterFirewallCutsTheMachineOff`; `TestForwardVerdictReadsOnlyWhatARuleSays`. The
+    forward chain and the VM firewall in these tests are the tests' own model of Proxmox. Not run on a lab.
+
+- **Outbound TCP 25 was open from a sandbox machine (drill of v0.12.0-rc.1, finding Z2-e).** The notes and the
+  plan said closed, and for a sandbox pod it was (the sandbox chart's Cilium policy). The machine's own VM firewall
+  had one rule for the internet, every protocol and port, so two probes to port 25 from the machine itself
+  answered. The rule is now three ACCEPTs where the firewall is rendered (`SandboxFirewall.generation`): TCP
+  `1:24,26:65535`, UDP and ICMP to the internet set. No DROP is added: the group stays a set of ACCEPTs under DROP
+  policies, in which no order matters. A tenant gets submission (TCP 587, and 465) to a relay of its own and no
+  direct SMTP. It holds for both placements of a managed platform and for the installer's sandbox cluster. The table
+  test of the two layers holds the line (`TestSandboxLayersOnTheDrillsPackets`: 25 dropped, 24, 26, 465, 587 and
+  65535 open, UDP open, another IP protocol dropped); before the fix its row for port 25 read `allow`. Not run on a
+  lab.
+
+- **Two sentences about the sandbox release gates were not true (drill of v0.12.0-rc.1, findings Z2-f and Z2-g).**
+  - *"The four gates fail before the sync":* two failed in v0.12.0-rc.1, `isolation` and `fence`; `noderestriction`
+    and `network-guard` hold from the start. The notes of the candidate say so now. With the fix below (the run
+    writes the isolation rules itself) one fails before the first provider sync, `fence`, and the docs say that
+    ([managed-services.md](docs/managed-services.md), "Not verified on a lab yet").
+  - *With the scheduler off the `409` on "live" named no gate.* It named the scheduler alone, so an operator who
+    turned the scheduler on met the failing gates one save later. The answer now names the scheduler and, after
+    it, every gate that does not hold with its reason, or says that no gate fails at this moment
+    (`Handler.checkSandboxGoLive`; `TestPlatformSandboxProviderNeedsTheScheduler`, whose new lines failed on the
+    old text). The status and the code stay `409`. The gates are now read at that save with the scheduler off too:
+    a few read-only calls to Proxmox and the cluster more.
+
+- **Sandboxes: every run stopped at its first stage between a change of the sandbox range and the next provider
+  sync, the one that switches sandboxes off included (drill of v0.12.0-rc.1, findings Z3-A and Z4-A).** The run
+  wrote the range on the provider in stage `cluster`, and took it off at "off", and left the provider-wide isolation
+  rules to "the next provider sync". Until that sync the Check's `isolation` row failed and stage `validate`
+  stopped every run: on the lab the "off" was refused when it was needed (two machines running), and after a
+  successful off the next apply failed. With the scheduler off nothing healed it, and on a site with no project
+  the provider-level sync refuses to remove a DROP in place, so the operator had to delete rules by hand.
+  - *The fix:* the run brings the provider-wide rule set to the provider's new config itself, in the step that adds
+    the range (stage `cluster`, before any machine is made) and in the step that removes it (the end of the off,
+    and a Remove): `pve.WriteProviderIsolation`, the form a project's sync and a network create have, with no
+    project and none of the provider-level sync's refusals. It runs under the site's SDN lock, which that sync
+    takes; while the lock is held the stage waits. It reads the rules back from the cluster firewall, and the run
+    goes on only when they are the set, each enabled. A set already in place gets no request but reads, so every
+    apply asserts it.
+  - *The first stage:* an `isolation` row that differs from the provider's settings only in what names the
+    installation's own sandbox range is a warning, and no run is stopped by it. It is decided from the rules: with
+    the range's own DROPs and ACCEPTs left out and the range taken off the other rules' destinations, the set in
+    place must be the wanted one, rule for rule, each enabled, with the datacenter firewall on. Every other cause
+    still stops a run, an "off" included.
+  - *Other owners:* rules that are not this provider's (another stack's isolation set under its own pool prefix,
+    the platform's PVE API rule, an operator's rules) are never rewritten or removed, and another stack's firewall
+    groups and IP sets are not touched. A project's ACCEPTs stay above the DROPs.
+  - *Order:* a rewrite leaves this provider's rules in one fixed order on top of the list, whatever order they
+    were in; a pass with nothing to change writes nothing.
+  - *Not changed:* the provider-level sync still refuses to add, replace or remove rules on a set in place it did
+    not write; it does not add the ACCEPTs of a shared sandbox group to a set that lacks them. An apply does.
+  - Tests, against a fake Proxmox that keeps the rule list as Proxmox does (a new rule on top, a delete by
+    position) and holds another stack's rules, group and IP sets, with no provider sync anywhere:
+    `TestApplyTwiceWithNoSyncInBetween` (both placements), `TestOffThenApplyWithNoSyncInBetween`,
+    `TestOffOnASiteWithNoProjectLeavesIsolationOK`, `TestValidateIsNotStoppedByTheOwnSandboxRange` (with four other
+    causes that still stop the off), `TestSandboxIsolationWaitsForTheSDNLock`, `TestWriteProviderIsolation`. The
+    fake stores rules and filters no packet. Not run on a lab.
 
 - **Managed platform: an off of sandboxes left objects behind, and a run repeated its writes on Proxmox.** Findings
   of the drill of 0.12.0-rc.1 on the lab.
