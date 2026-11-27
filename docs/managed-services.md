@@ -1213,6 +1213,12 @@ else, each as one `FORWARD ACCEPT` from the range:
 - **What layer 0 does not hold.** A private address that is in no blocked network of the provider
   (the MetalLB range, which tenants must reach; another site's networks) is not named by the
   DROP: there the VM firewall alone closes it, for both placements.
+- **The resolvers are not opened at layer 0.** The VM firewall opens UDP and TCP 53 to `dns`;
+  the isolation rules have no ACCEPT for them. Name resolvers that are in no blocked and no
+  management network (a public resolver, as the lab's drill did): a resolver inside one, the
+  platform network's gateway for instance, is dropped wherever layer 0 sees the query, which is
+  always when a node routes it and, between two guests of one bridge, on a node with the switch
+  on. No check reads this yet.
 - **The kubelet** is reached from the cluster's `nodeRange`. No rule of layer 0 has that range as
   a source, so nothing is needed for it.
 - **`separate` needs no ACCEPT.** Its control plane is a pod of the platform cluster's `kamaji`
