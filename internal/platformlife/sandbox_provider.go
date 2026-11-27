@@ -211,6 +211,16 @@ func SandboxOffBlocked(es *externalservice.ExternalService) string {
 		"Set the provider DISABLED under Cloud providers and let its sandboxes end, then set spec.sandbox.placement off.", es.Name, es.Status)
 }
 
+// SandboxWithoutMirror reports a sandbox provider on whose cluster no mirror worker pod of a sandbox template update
+// can exist, so nothing has to look for one: an installation's own provider (ProviderMarker) without a registry mirror
+// account. A run registers it without a registry, the sandbox chart makes no namespace sbx-build, and the chart's
+// identity may neither create nor list a pod there: the look answered 403 every ten minutes on the lab, and 401 once
+// the provider was disabled and its identity gone (v0120-reports/drill-D2.md Z2-d, drill-D3.md Z3-D). An installer's
+// provider is always looked at, and so is an installation's that was given a mirror account by hand.
+func SandboxWithoutMirror(es *externalservice.ExternalService) bool {
+	return es != nil && es.IsSandbox() && str(es.Config, ProviderMarker) != "" && es.SandboxConfig().RegistryMirror.Password == ""
+}
+
 // sandboxKubeconfigs reads the tokens of the sandbox chart's two identities from the cluster that runs sandboxes and
 // answers a kubeconfig for each: the portal's (the sandbox provider) and the firewall's (the Proxmox provider's sync
 // and the release gates). Shared: the platform cluster, at its endpoint. Separate: pc-sandbox, reached with the admin

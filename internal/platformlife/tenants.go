@@ -124,6 +124,10 @@ const SchedulerOffNote = "The job scheduler is off. Until it is on, a tenant can
 	"installed: ./proxcloud-up.sh install --scheduler on a Compose install, PROXCLOUD_JOBS_SCHEDULER_ENABLED=true for the API elsewhere. " +
 	"It starts charging usage on a timer, so set the prices first."
 
+// SchedulerOnNote is the Check's row scheduler while the job scheduler runs: the row is always there, so the Check
+// lists the same rows on every site and a reader sees that it was looked at.
+const SchedulerOnNote = "The job scheduler runs: providers are synced, tenants' deletes are carried out and usage is charged on a timer."
+
 // SchedulerOffSandboxNote is what the same row adds while the settings ask for sandboxes. The jobs that keep sandboxes
 // safe run on the scheduler: the provider sync that fences a sandbox machine, takes its unsecured taint off and puts it
 // back on a machine that lost its fence, and the minutely read and abuse check. One operator sync fences once and

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
 const (
@@ -329,5 +330,60 @@ func TestSharedGroupReplacesTheStoragePluginsPodsAndThePlanSaysSo(t *testing.T) 
 		if want := placement == SandboxShared; strings.Contains(on, says) != want || strings.Contains(off, says) != want {
 			t.Errorf("%s: the plan must name the plugin's pods being replaced only where they are: on %q, off %q", placement, on, off)
 		}
+	}
+}
+
+// The plan of an off says of the row sandbox-access what the run takes away, in its own words: the lab's plan carried
+// the text of the row being written ("The portal token writes this one row, so ... may clone and delete VMs",
+// v0120-reports/drill-D4.md Z4-e).
+func TestSandboxOffPlanSaysWhatIsTakenAway(t *testing.T) {
+	b := sandboxBOM(t)
+	in := validInstallation(t)
+	in.Status.BOM, in.Status.Clusters = &BOMRef{Release: b.Release, SHA256: b.SHA256}, []ClusterStatus{{Name: ClusterName}}
+	access := func() PlanChange {
+		p, err := PlanFor(in, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range p.Changes {
+			if c.Name == "sandbox-access" {
+				return c
+			}
+		}
+		t.Fatal("no row sandbox-access")
+		return PlanChange{}
+	}
+	now := in.CreatedAt
+	for placement, sb := range map[string]*SandboxSpec{SandboxShared: sharedSandbox(), SandboxSeparate: separateSandbox()} {
+		in.Spec.Sandbox, in.Status.Sandbox = sb, nil
+		added := access()
+		in.Spec.Sandbox, in.Status.Sandbox = &SandboxSpec{Placement: SandboxOff}, &SandboxStatus{Placement: placement, BuiltAt: &now}
+		removed := access()
+		if removed.To != "deleted: "+added.To || removed.Impact == added.Impact || !strings.Contains(removed.Impact, "The portal token deletes") ||
+			!strings.Contains(removed.Impact, "once the sandbox pool holds no VM") || strings.Contains(removed.Impact, "writes this one row") || strings.Contains(removed.Impact, "mints it") {
+			t.Errorf("%s: the off's row %q: %q", placement, removed.To, removed.Impact)
+		}
+	}
+}
+
+// The look for mirror worker pods of sandbox template updates skips a provider on whose cluster none can exist: an
+// installation's own, as a run registers it. Every other sandbox provider is looked at.
+func TestSandboxWithoutMirror(t *testing.T) {
+	body, err := SandboxProviderBody(sandboxRender(sharedSandbox()), "svc-pve", "kubeconfig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := &externalservice.ExternalService{Config: body["config"].(map[string]any), Secret: body["secret"]}
+	if !SandboxWithoutMirror(own) {
+		t.Fatal("an installation's sandbox provider, as the run registers it, is still looked at")
+	}
+	own.Secret = map[string]any{"kubeconfig": "kubeconfig", "registryMirror": "mirror-password-0123456789"}
+	if SandboxWithoutMirror(own) {
+		t.Error("an installation's provider that was given a mirror account is not looked at")
+	}
+	installer := &externalservice.ExternalService{Config: map[string]any{"provider": "sandbox"}, Secret: map[string]any{"kubeconfig": "kubeconfig"}}
+	proxmox := &externalservice.ExternalService{Config: map[string]any{"provider": "proxmox", ProviderMarker: "pi-0a1b2c3d"}}
+	if SandboxWithoutMirror(installer) || SandboxWithoutMirror(proxmox) || SandboxWithoutMirror(nil) {
+		t.Error("an installer's sandbox provider must be looked at; a provider that is no sandbox provider, or none, is not this case")
 	}
 }

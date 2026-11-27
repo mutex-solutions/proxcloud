@@ -1117,7 +1117,8 @@ func run() error {
 				total := 0
 				for i := range services {
 					es := &services[i]
-					if !es.IsSandbox() {
+					// Not an installation's own provider without a mirror account: no worker pod can exist on its cluster.
+					if !es.IsSandbox() || platformlife.SandboxWithoutMirror(es) {
 						continue
 					}
 					ss, err := sandboxServiceFor(es)

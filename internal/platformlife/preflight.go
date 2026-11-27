@@ -141,13 +141,16 @@ func (p Preflight) Run(ctx context.Context) []Check {
 		flags = append(flags, "No GitHub integration is saved: Template updates finds the platform images through it. Save one under Integrations, GitHub.")
 	}
 	row("flags", flags, "Managed services and VM template updates are on, and a GitHub integration is saved.")
-	if p.SchedulerOff { // the operator's call (it starts charging), so never a failure
-		note := SchedulerOffNote
+	// The operator's call (it starts charging), so never a failure: a warning while it is off, and the row all the same
+	// while it runs.
+	scheduler := Check{ID: "scheduler", Status: CheckOK, Message: SchedulerOnNote}
+	if p.SchedulerOff {
+		scheduler.Status, scheduler.Message = CheckWarn, SchedulerOffNote
 		if in.Spec.sandboxMode() != "" {
-			note += SchedulerOffSandboxNote
+			scheduler.Message += SchedulerOffSandboxNote
 		}
-		out = append(out, Check{ID: "scheduler", Status: CheckWarn, Message: note})
 	}
+	out = append(out, scheduler)
 
 	var spec []string
 	if err := in.Validate(); err != nil {

@@ -444,14 +444,21 @@ func (in *Installation) sandboxChanges() []PlanChange {
 	site := func(name, to, impact string) PlanChange {
 		return PlanChange{Cluster: ClusterName, Name: name, To: to, Class: ClassSite, Stage: stageCluster, Impact: impact}
 	}
-	access := func(placement string) (string, string) {
+	// The row or the token that opens the pool, with what a plan says of it when a run writes it and when a run takes it
+	// away.
+	access := func(placement string) (row, added, removed string) {
 		if placement == SandboxShared {
 			return "ACL row: " + pve.CAPITokenID + " holds ProxCloudCAPI on /pool/" + pve.SandboxPool,
-				"The portal token writes this one row, so the platform's own Cluster API may clone and delete VMs in the sandbox pool. No other pool and no other token."
+				"The portal token writes this one row, so the platform's own Cluster API may clone and delete VMs in the sandbox pool. No other pool and no other token.",
+				"The portal token deletes this one row once the sandbox pool holds no VM: the platform's own Cluster API can then no longer clone or delete a VM there. " +
+					"No other row of that token and no other token is touched."
 		}
 		return "token capmox@pve!" + SandboxClusterName + " with ProxCloudCAPI on /pool/" + pve.SandboxPool,
 			"The portal token mints it as it mints a tenant cluster's token: the sandbox pool, the template pool (clone only), the boot and ISO stores, /nodes and the " +
-				"platform network's bridge or vnet. Its secret is kept sealed and reaches the platform cluster as one Secret."
+				"platform network's bridge or vnet. Its secret is kept sealed and reaches the platform cluster as one Secret.",
+			"The portal token deletes the token and every row it holds (the sandbox pool, the template pool, the boot and ISO stores, /nodes, the platform network's " +
+				"bridge or vnet) once the sandbox pool holds no VM. Its sealed secret leaves the record, and the Secret that held it on the platform cluster goes with the " +
+				"namespace " + SandboxClusterName + ". No other token is touched."
 	}
 	switch {
 	case want == "" && built == nil:
@@ -463,7 +470,7 @@ func (in *Installation) sandboxChanges() []PlanChange {
 			what = "the cluster " + SandboxClusterName + " with its machines and its control plane on the kamaji group"
 			storage = ""
 		}
-		row, impact := access(built.Placement)
+		row, _, impact := access(built.Placement)
 		return []PlanChange{
 			{Cluster: ClusterName, Name: "sandbox", From: built.Placement, To: SandboxOff, Class: ClassMachines, Stage: stageCluster,
 				Impact: "Sandboxes are switched off: the run deletes " + what + ". Every running sandbox ends. Disable the sandbox provider and let its sandboxes end before the apply." + storage},
@@ -493,7 +500,7 @@ func (in *Installation) sandboxChanges() []PlanChange {
 	if built != nil {
 		from = built.Placement
 	}
-	row, why := access(want)
+	row, why, _ := access(want)
 	return []PlanChange{
 		{Cluster: ClusterName, Name: "sandbox", From: from, To: want + " (" + strings.Join(machines, "; ") + ")", Class: ClassMachines, Stage: stageCluster, Impact: impact},
 		site("sandbox-pool", "pool "+pve.SandboxPool, "The portal token creates the pool. The portal token holds its platform role there (through /pool), which is what lets the provider sync write the VM firewall of a sandbox machine; on "+pve.SystemPool+" it holds NoAccess."),

@@ -168,15 +168,19 @@ func TestPreflight(t *testing.T) {
 	if !OK(checks) {
 		t.Fatalf("a set-up site: %+v", checks)
 	}
-	if got := len(checks); got != 21 {
-		t.Errorf("%d rows, want 21: %+v", got, checks)
+	if got := len(checks); got != 22 {
+		t.Errorf("%d rows, want 22: %+v", got, checks)
 	}
 	for _, c := range checks {
 		if c.Status != CheckOK {
 			t.Errorf("a set-up site: row %s is %s: %s", c.ID, c.Status, c.Message)
 		}
 	}
-	// The scheduler is the operator's call: a warning with the command while it is off, no row while it is on.
+	// The scheduler is the operator's call: a warning with the command while it is off, and the row is there while it
+	// runs too (the lab's Check had none then, and the guide said it adds one: v0120-reports/drill-D4.md Z4-c).
+	if c, ok := checkMap(checks)["scheduler"]; !ok || c.Status != CheckOK || c.Message != SchedulerOnNote {
+		t.Errorf("scheduler on: %+v (a row: %t)", c, ok)
+	}
 	pf.SchedulerOff = true
 	if c := checkMap(pf.Run(ctx))["scheduler"]; c.Status != CheckWarn || !strings.Contains(c.Message, "--scheduler") || !strings.Contains(c.Message, "delete a project") {
 		t.Errorf("scheduler off: %+v", c)
