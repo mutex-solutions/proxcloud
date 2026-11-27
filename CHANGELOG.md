@@ -327,10 +327,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     each, and takes the access on Proxmox away only after them
     (`sandboxCRDsGone`, `sandboxGroupGone`; `TestSandboxOffLeavesNothingBehind`, with a second build after the off,
     and `TestSandboxOffKeepsADefinitionWithObjects`).
-  - *Repeated writes:* a run created the sandbox pool at every look at stage `cluster`, 22 times in one run with 21
+  - *Repeated writes:* a run created the sandbox pool at every look at stage `cluster`, 23 times in one run with 22
     answers of `500`, and wrote the ACL row 23 times; the first mint of the token of `pc-sandbox` deleted a token
     that did not exist, a `500` too. The pool, the row and the token are now read first and written when missing
-    (`TestSandboxAccessIsWrittenOnce`: one write each in a run of nine looks, none in a run that changes nothing,
+    (`TestSandboxAccessIsWrittenOnce`: one write each in a run that waits eight looks, none in a run that changes nothing,
     one for a row deleted by hand). A tenant cluster's release no longer sends the delete of a CAPI token that is
     not there either.
   - *The off of `separate` kept its token for minutes:* the run waited for ArgoCD's next look at an Application

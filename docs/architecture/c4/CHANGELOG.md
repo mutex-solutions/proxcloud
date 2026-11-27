@@ -29,7 +29,7 @@ functions read before they write.
 
 **Why:** the drill of v0.12.0-rc.1 on the lab. After an off of `shared` the address pool, two templates and four
 definitions stayed, and the Application `pc-platform` read OutOfSync from then on, because it never prunes. A run
-created the pool at each of its 22 looks at stage `cluster` (21 answers of 500) and wrote the row 23 times; the first
+created the pool at each of its 23 looks at stage `cluster` (22 answers of 500) and wrote the row 23 times; the first
 mint deleted a token that did not exist. The API logged a WARN every ten minutes for a namespace the platform's
 sandbox chart does not make. The off of `separate` kept its token 8.5 minutes after the last machine was gone.
 
