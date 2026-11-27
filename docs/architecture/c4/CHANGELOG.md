@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-27: an off of sandboxes leaves nothing behind (drill of v0.12.0-rc.1: Z3-B, Z2-c, Z4-d, Z3-C, Z4-e, Z4-c, Z2-d, Z4-b)
+## 2026-11-27: an off of sandboxes leaves nothing behind (#514, drill of v0.12.0-rc.1: Z3-B, Z2-c, Z4-d, Z3-C, Z4-e, Z4-c, Z2-d, Z4-b)
 
 **What changed:** no new component, container, route or relation. One new file in the platform runs, and existing
 functions read before they write.
