@@ -175,6 +175,20 @@ class ClassifyTests(unittest.TestCase):
             self.assertTrue((ROOT / dockerfile).is_file(), dockerfile)
             self.assertTrue((ROOT / context).is_dir(), context)
 
+    def test_only_main_writes_the_build_cache(self):
+        # A type=gha entry counts against the repository's 10 GB and is read by the ref that wrote it and, when
+        # that ref is main, by everyone (#516): cache-to is empty off main, and every image has its own scope.
+        seen = 0
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "type=gha" not in line or line.lstrip().startswith("#"):
+                    continue
+                seen += 1
+                self.assertIn("scope=", line, f"{path.name}: {line.strip()}")
+                if "cache-to" in line:
+                    self.assertRegex(line, r"cache-to: \$\{\{ github\.(event_name == 'push'|ref == 'refs/heads/main') && .* \|\| '' \}\}$", path.name)
+        self.assertTrue(seen, "no type=gha line found: this test reads nothing")
+
     def test_dockerfile_copy_sources_select_their_image(self):
         # RULES repeats the COPY sources of each Dockerfile by hand. When a Dockerfile starts to copy another
         # path, a later pull request that only edits that path must still build and scan the image.
