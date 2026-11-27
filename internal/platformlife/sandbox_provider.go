@@ -102,7 +102,7 @@ func SandboxTemplates() (map[string]any, error) {
 // SandboxSiteConfig is config.sandbox of the installation's Proxmox provider: the keys installer stage 60 writes (pool,
 // nodes, loadBalancers, dns, kubeletSources, unsecuredMinAgeMinutes, proxy), and what the platform network adds: the
 // owner, the mode, the bridge and tag of the machines' NIC, the platform prefix as a network no sandbox machine
-// reaches, and with shared the platform cluster's own machines (peers).
+// reaches, and with shared the platform cluster's own machines (peers) and its API (controlPlane).
 //
 // Shared names no proxy and no load balancer: sandbox-proxy runs on the system group, so no sandbox machine answers
 // for its address, and none may. Separate names the proxy address as the one load balancer address: the sandbox
@@ -117,6 +117,10 @@ func SandboxSiteConfig(in RenderInput) map[string]any {
 	if sb.Mode == SandboxShared {
 		// The API server of the platform cluster runs on its control plane machines and calls the kubelet itself.
 		cfg["peers"], cfg["kubeletSources"] = anyList(in.Cluster.NodeRange), anyList(in.Cluster.NodeRange)
+		// The cluster's API as the kubeconfigs will name it, known before any machine exists: the provider's
+		// isolation rules let the sandbox range reach it and the peers (pve.SandboxClusterAllow), or the machine's
+		// own join would be dropped by the DROP of its range to the blocked networks.
+		cfg["controlPlane"] = strings.TrimPrefix(WorkloadServer(in.Cluster.Endpoint), "https://")
 	} else {
 		cfg["loadBalancers"] = []any{sb.ProxyAddress}
 		cfg["proxy"] = map[string]any{"address": sb.ProxyAddress, "port": 443}

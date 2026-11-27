@@ -105,6 +105,64 @@ type sandboxGen struct {
 	Nodes   []IPSet // the workers' addresses
 	Out     []IPSet // the internet: 0.0.0.0/1 and 128.0.0.0/1 minus every denied network
 	Rules   []FirewallRule
+	// Not part of the generation's content: the workers' own addresses and what they open toward their cluster
+	// (clusterFlows), which the fence gate holds against the cluster firewall (sandboxReach).
+	workers []netip.Prefix
+	flows   []sandboxFlow
+}
+
+// sandboxFlow is one kind of new connection a sandbox worker opens toward the cluster it belongs to, to a
+// destination outside the workers' own range.
+type sandboxFlow struct {
+	Proto string
+	Dest  []netip.Prefix // the control plane's address, or the cluster's other machines (Nodes)
+	DPort string         // "" for icmp
+	Nodes bool           // Dest are the machines of the node set, which open the same toward the worker
+}
+
+// sandboxNodeFlows are what the machines of one cluster open between each other, both ways: Cilium's VXLAN tunnel,
+// its health check and ICMP.
+var sandboxNodeFlows = []sandboxFlow{{Proto: "udp", DPort: "8472"}, {Proto: "tcp", DPort: "4240"}, {Proto: "icmp"}}
+
+// clusterFlows is THE list of what a sandbox worker opens toward its own cluster outside the workers' range. Three
+// things are made from it and from nothing else, so they cannot drift apart:
+//   - the worker's VM firewall (generation), layer 1;
+//   - the ACCEPTs above the sandbox DROPs of the cluster firewall (SandboxClusterAllow, isolationRules), layer 0;
+//   - the fence gate's answer to "can a worker reach its cluster by the rules in place" (sandboxReach).
+//
+// A cluster of its own (no peers): the control plane's address, API and konnectivity (exec and logs ride
+// konnectivity, so nothing comes in for them). A node group of a shared cluster (peers): the API at the endpoint
+// and at every peer (kube-proxy turns the kubernetes Service into a control plane machine's own address before
+// the VM firewall sees the packet, and which peers are control plane machines changes with every roll, so the
+// flow names them all), and sandboxNodeFlows with every peer. Nothing else: no ssh, no etcd, no kubelet of a peer.
+func clusterFlows(cp netip.Addr, apiPort int, peers []netip.Prefix) []sandboxFlow {
+	host, api := []netip.Prefix{netip.PrefixFrom(cp, 32)}, strconv.Itoa(apiPort)
+	if len(peers) == 0 {
+		return []sandboxFlow{{Proto: "tcp", Dest: host, DPort: api + "," + strconv.Itoa(sandboxKonnectivityPort)}}
+	}
+	out := []sandboxFlow{{Proto: "tcp", Dest: host, DPort: api}, {Proto: "tcp", Dest: peers, DPort: api}}
+	for _, f := range sandboxNodeFlows {
+		out = append(out, sandboxFlow{Proto: f.Proto, Dest: peers, DPort: f.DPort, Nodes: true})
+	}
+	return out
+}
+
+// SandboxClusterAllow is clusterFlows as allow entries of the isolation rules ("proto dest[,dest] [dport]"), for a
+// provider whose config.sandbox names the cluster's API ("address:port", controlPlane) beside the peers: the
+// platform's run writes it for a shared sandbox group before the first machine exists, when no kubeconfig says it
+// yet. Nothing for a config that names no control plane: a sandbox cluster of its own reaches a control plane the
+// isolation rules must not drop in the first place, and the fence gate says so when they do.
+func SandboxClusterAllow(controlPlane string, peers []string) []string {
+	ep, err := netip.ParseAddrPort(strings.TrimSpace(controlPlane))
+	ps, perr := toCIDRs(peers)
+	if err != nil || perr != nil || !ep.Addr().Is4() || ep.Port() == 0 {
+		return nil
+	}
+	var out []string
+	for _, f := range clusterFlows(ep.Addr(), int(ep.Port()), ps) {
+		out = append(out, strings.TrimSpace(f.Proto+" "+strings.Join(cidrList(f.Dest), ",")+" "+f.DPort))
+	}
+	return out
 }
 
 // sandboxPrefix names the generations of one pool: "sbx" + 4 hex of the pool, so portals sharing a PVE cluster with
@@ -303,17 +361,12 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 		}
 		return r
 	}
-	rules := []FirewallRule{
-		// its control plane: API and konnectivity (exec and logs ride konnectivity, so nothing comes in for them)
-		rule("out", "tcp", "", cp.String(), strconv.Itoa(apiPort)+","+strconv.Itoa(sandboxKonnectivityPort)),
-	}
-	if shared {
-		// The endpoint, and the control plane machines themselves: the Cilium agent, kube-proxy and the network guard
-		// reach the API through the kubernetes Service, which kube-proxy rewrites inside the VM to a machine's own
-		// address. Which peers are control plane machines changes with every roll, so the rule names them all.
-		rules = []FirewallRule{
-			rule("out", "tcp", "", cp.String(), strconv.Itoa(apiPort)),
-			rule("out", "tcp", "", strings.Join(cidrList(peers), ","), strconv.Itoa(apiPort)),
+	// What the worker opens toward its cluster outside its own range comes from the one list (clusterFlows).
+	g.workers, g.flows = nodes, clusterFlows(cp, apiPort, peers)
+	var rules []FirewallRule
+	for _, fl := range g.flows {
+		if !fl.Nodes {
+			rules = append(rules, rule("out", fl.Proto, "", strings.Join(cidrList(fl.Dest), ","), fl.DPort))
 		}
 	}
 	if len(dns) > 0 {
@@ -324,11 +377,9 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 	// konnectivity's: Kamaji runs its server with the default proxy strategy, so exec and logs for a pod on one worker
 	// can leave through the agent on another (the kubelet still wants an API server credential).
 	for _, dir := range []string{"out", "in"} {
-		rules = append(rules,
-			rule(dir, "udp", nodeRef, nodeRef, "8472"),
-			rule(dir, "tcp", nodeRef, nodeRef, "4240"),
-			rule(dir, "icmp", nodeRef, nodeRef, ""),
-		)
+		for _, fl := range sandboxNodeFlows {
+			rules = append(rules, rule(dir, fl.Proto, nodeRef, nodeRef, fl.DPort))
+		}
 		if !shared { // a shared cluster's API server reaches the kubelet itself (KubeletFrom), and no worker runs MetalLB
 			rules = append(rules,
 				rule(dir, "tcp", nodeRef, nodeRef, "7946"),
@@ -501,6 +552,14 @@ func (s *Service) CheckSandboxFence(ctx context.Context, f SandboxFirewall, open
 	if err := s.checkSandboxGeneration(ctx, p.g); err != nil {
 		return err
 	}
+	// The VM firewall says yes to the worker's own cluster; the cluster firewall must not say no above it.
+	cluster, err := s.C.ListClusterFirewallRules(ctx)
+	if err != nil {
+		return err
+	}
+	if err := sandboxReach(cluster, p.g.workers, p.g.flows); err != nil {
+		return err
+	}
 	if len(open) == 0 {
 		return errors.New("pve sandbox: no worker is open to sandboxes yet (every Node still has the unsecured taint)")
 	}
@@ -556,6 +615,103 @@ func (s *Service) checkSandboxGeneration(ctx context.Context, g sandboxGen) erro
 		return fmt.Errorf("%w: group %s", ErrSandboxDrift, g.Group)
 	}
 	return nil
+}
+
+// sandboxReach is nil when the cluster firewall's forward rules, as listed, let a worker open every connection of
+// flows (clusterFlows): for each one, top down, an ACCEPT that covers it comes before any DROP that touches it. It
+// is computed from the rules alone, for the case in which they bite: the forward chain sees every routed packet,
+// and on a node with net.bridge.bridge-nf-call-iptables = 1 (the legacy firewall sets it, and a node moved to
+// nftables keeps it until its next boot) also every frame bridged between two guests of one bridge. Lab, 2026-11-26:
+// on such a node the DROP of the sandbox range to the blocked networks cut a shared sandbox machine off the API
+// address and the node range, which are blocked networks, while every gate read ok.
+func sandboxReach(rules []FirewallRule, workers []netip.Prefix, flows []sandboxFlow) error {
+	for _, fl := range flows {
+		for _, w := range workers {
+			for _, d := range fl.Dest {
+				if verdict, r := forwardVerdict(rules, w, d, fl.Proto, fl.DPort); verdict != "" && verdict != "ACCEPT" {
+					what := fl.Proto
+					if fl.DPort != "" {
+						what += " " + fl.DPort
+					}
+					return fmt.Errorf("pve sandbox: the cluster firewall cuts the sandbox machines off their own cluster: rule %d (FORWARD %s, %s to %s, %q) "+
+						"matches %s from %s to %s and no ACCEPT above it lets that through. On a node where bridged frames pass the forward chain "+
+						"(net.bridge.bridge-nf-call-iptables = 1) such a machine opens no new connection to its cluster. Apply the installation's settings "+
+						"again or run a provider sync: both write the rules with the ACCEPTs of the machines' own cluster",
+						r.Pos, r.Action, r.Source, r.Dest, r.Comment, what, pveCIDR(w), pveCIDR(d))
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// forwardVerdict is what the cluster firewall's enabled forward rules, first match first, do with a new connection
+// of proto to dport ("" none, or a port list) from src to dst: "ACCEPT" with the rule that covers all of it, the
+// action and the rule of a DROP or REJECT that touches any of it, "" when no rule says anything (it passes). For
+// one address and one port that is the firewall's own first match.
+// ponytail: a rule with a macro, an alias or an IP set in source or dest, or a named port is skipped: what it
+// matches is not in the rule list. Resolve them here if a site fences its sandbox range with such rules by hand.
+func forwardVerdict(rules []FirewallRule, src, dst netip.Prefix, proto, dport string) (string, FirewallRule) {
+	side := func(list string, p netip.Prefix) (covers, touches, known bool) {
+		if list == "" {
+			return true, true, true
+		}
+		ps, err := toCIDRs(strings.Split(list, ","))
+		for _, e := range ps {
+			touches = touches || e.Overlaps(p)
+			covers = covers || e.Bits() <= p.Bits() && e.Contains(p.Addr())
+		}
+		return covers, touches, err == nil
+	}
+	want, _ := portRanges(dport)
+	for _, r := range rules {
+		if r.Enable != 1 || r.Type != "forward" || r.Macro != "" || (r.Proto != "" && !strings.EqualFold(r.Proto, proto)) {
+			continue
+		}
+		sc, st, ok1 := side(r.Source, src)
+		dc, dt, ok2 := side(r.Dest, dst)
+		covers, touches := sc && dc && r.SPort == "" && r.ICMPType == "", st && dt
+		if r.DPort != "" {
+			have, ok := portRanges(r.DPort)
+			if !ok || len(want) == 0 {
+				continue
+			}
+			inAll, inAny := true, false
+			for _, w := range want {
+				inAll = inAll && slices.ContainsFunc(have, func(h [2]int) bool { return h[0] <= w[0] && w[1] <= h[1] })
+				inAny = inAny || slices.ContainsFunc(have, func(h [2]int) bool { return h[0] <= w[1] && w[0] <= h[1] })
+			}
+			covers, touches = covers && inAll, touches && inAny
+		}
+		switch {
+		case !ok1 || !ok2:
+		case r.Action == "ACCEPT" && covers:
+			return "ACCEPT", r
+		case r.Action != "ACCEPT" && touches:
+			return r.Action, r
+		}
+	}
+	return "", FirewallRule{}
+}
+
+// portRanges parses a PVE port list ("6443", "6443,8132", "1:24,26:65535"); ok is false for a named service.
+func portRanges(s string) (out [][2]int, ok bool) {
+	if s == "" {
+		return nil, true
+	}
+	for _, p := range strings.Split(s, ",") {
+		lo, hi, isRange := strings.Cut(strings.TrimSpace(p), ":")
+		if !isRange {
+			hi = lo
+		}
+		a, err1 := strconv.Atoi(lo)
+		b, err2 := strconv.Atoi(hi)
+		if err1 != nil || err2 != nil || a > b {
+			return nil, false
+		}
+		out = append(out, [2]int{a, b})
+	}
+	return out, true
 }
 
 // Group is the current generation's security group.

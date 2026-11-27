@@ -94,19 +94,20 @@ func TestSandboxRegistrationFollowsTheInstaller(t *testing.T) {
 	if got, want := site(separateSandbox()), less(installer, "snat", "registry", "buildStorage", "portal", "kubeletSources"); !slices.Equal(got, want) {
 		t.Errorf("separate writes config.sandbox keys %v, the installer's are %v", got, want)
 	}
-	// Shared has no proxy and no load balancer on a sandbox machine, and names the cluster's other machines.
-	if got, want := site(sharedSandbox()), slices.Sorted(slices.Values(append(less(installer, "snat", "registry", "buildStorage", "portal", "proxy", "loadBalancers"), "peers"))); !slices.Equal(got, want) {
+	// Shared has no proxy and no load balancer on a sandbox machine, and names the cluster's other machines and its
+	// API: the isolation rules must let the sandbox range reach both, before a kubeconfig names the API.
+	if got, want := site(sharedSandbox()), slices.Sorted(slices.Values(append(less(installer, "snat", "registry", "buildStorage", "portal", "proxy", "loadBalancers"), "peers", "controlPlane"))); !slices.Equal(got, want) {
 		t.Errorf("shared writes config.sandbox keys %v, want %v", got, want)
 	}
 	shared := SandboxSiteConfig(sandboxRender(sharedSandbox()))
 	want := map[string]any{ProviderMarker: "pi-0123abcd", "mode": "shared", "pool": "proxcloud-sbx", "nodes": []any{"192.0.2.64/28"}, "dns": []any{"192.0.2.53"},
 		"unsecuredMinAgeMinutes": 20, "bridge": "vmbr1", "vlan": 0, "deny": []any{"192.0.2.0/24"},
-		"peers": []any{"192.0.2.20-192.0.2.39"}, "kubeletSources": []any{"192.0.2.20-192.0.2.39"}}
+		"peers": []any{"192.0.2.20-192.0.2.39"}, "kubeletSources": []any{"192.0.2.20-192.0.2.39"}, "controlPlane": "192.0.2.10:6443"}
 	if !reflect.DeepEqual(shared, want) {
 		t.Errorf("shared config.sandbox:\n got %v\nwant %v", shared, want)
 	}
 	sep := SandboxSiteConfig(sandboxRender(separateSandbox()))
-	if !reflect.DeepEqual(sep["proxy"], map[string]any{"address": "192.0.2.150", "port": 443}) || !reflect.DeepEqual(sep["loadBalancers"], []any{"192.0.2.150"}) || sep["peers"] != nil {
+	if !reflect.DeepEqual(sep["proxy"], map[string]any{"address": "192.0.2.150", "port": 443}) || !reflect.DeepEqual(sep["loadBalancers"], []any{"192.0.2.150"}) || sep["peers"] != nil || sep["controlPlane"] != nil {
 		t.Errorf("separate config.sandbox: %v", sep)
 	}
 

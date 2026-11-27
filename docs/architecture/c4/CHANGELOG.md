@@ -4,6 +4,35 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-27: a sandbox machine's own cluster passes the cluster firewall, and the run writes the isolation rules (drill of v0.12.0-rc.1)
+
+**What changed:** no new component, container, listener or route. One rule kind more in the managed rule set of the
+cluster firewall, one key more in a provider's `config.sandbox`, and one more reading in the `fence` gate.
+
+- `internal/cloud/pve/sandboxfw.go`: `clusterFlows` is the one list of what a sandbox worker opens toward its own
+  cluster outside its range (a cluster of its own: TCP API and konnectivity to the control plane; a node group of a
+  shared cluster: TCP API to the endpoint and the peers, and `sandboxNodeFlows`, UDP 8472, TCP 4240 and ICMP, with
+  the peers). `SandboxFirewall.generation` renders the VM firewall from it; `SandboxClusterAllow` writes it as
+  allow entries (`proto dest[,dest] [dport]`); `sandboxReach` and `forwardVerdict` read a cluster rule list top
+  down and say whether a flow is dropped before an ACCEPT covers it. `CheckSandboxFence` reads the cluster rules
+  and calls `sandboxReach`.
+- `internal/cloud/pve/network.go`: `isolationRules` writes one `FORWARD ACCEPT` per cluster flow of its allow
+  entries (`clusterAccepts`), below the endpoint ACCEPTs and above the sandbox DROPs. A flow into `cidrPool` is
+  skipped.
+- `internal/platform/externalservice/proxmox.go`: `PVESandbox.ControlPlane` (`config.sandbox.controlPlane`,
+  `address:port`); `PVESandboxEndpoints` puts `pve.SandboxClusterAllow(controlPlane, peers)` before the endpoints,
+  so every caller of the isolation reconcile and check gets it with no change of its own.
+- `internal/platformlife/sandbox_provider.go`: `SandboxSiteConfig` writes `controlPlane` for `shared` (the address
+  and port `WorkloadServer` gives the kubeconfigs).
+
+**Why:** the drill of v0.12.0-rc.1 (2026-11-26, finding Z2-A): the DROP of the sandbox range to the blocked networks
+covers the platform's API address and node range, and on a node with `net.bridge.bridge-nf-call-iptables` at 1 the
+forward chain also sees bridged frames, so a shared sandbox machine could not open a connection to its cluster while
+the gates read ok. ACCEPTs above the DROP rather than holes in it: a destination list cannot leave out a port.
+
+**Diagrams updated:** none (no element of C1 to C3 moves). [c4-code.md](c4-code.md): rule 6 of the managed rule
+set, the sentence on what the forward rules see, the `Service.CheckSandboxFence` row.
+
 ## 2026-11-26: the load balancer gateway bounds a cluster's calls (#492, Known issues of v0.11.1)
 
 **What changed:** no new component, container, listener, route or relation, and no new wire field. One existing

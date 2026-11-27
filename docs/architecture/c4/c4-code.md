@@ -469,10 +469,18 @@ sequenceDiagram
    `buildStorage`, `portal`; `ExternalService.PVESandboxEndpoints`), one address and port per rule: such an endpoint
    may sit on a management network (the lab's build bucket does), and the DROP would otherwise undo the VM
    firewall's opening. An endpoint inside `cidrPool` or an operator `blockedCidrs` range is never opened. The isolation
-   gate reads these as part of the exact rule set.
+   gate reads these as part of the exact rule set. Below the endpoints and still above the two DROPs, only for a
+   provider whose `config.sandbox` names `controlPlane` and `peers` (a sandbox group of a managed platform's cluster,
+   whose API address and node range are blocked networks): one `FORWARD ACCEPT` from `<sandboxCidrs>` per flow of
+   `pve.clusterFlows` (TCP 6443 to the API address; TCP 6443, UDP 8472, TCP 4240 and ICMP to the peers), the same
+   list the workers' VM firewall is rendered from (`pve.SandboxClusterAllow`, through
+   `ExternalService.PVESandboxEndpoints`). `FORWARD` only: the destinations are guests, and no port of a node opens.
+   A flow into `cidrPool` is never opened.
 
 **Layer 1, the sandbox workers' VM firewall** (`internal/cloud/pve/sandboxfw.go`, `syncjob/sandboxfw.go`, provider
-`config.sandbox`). The rules above see routed traffic only. Every VM of the sandbox pool also gets `firewall=1` on each
+`config.sandbox`). The rules above see routed traffic, and on a node with `net.bridge.bridge-nf-call-iptables` at 1
+(the legacy firewall sets it; a node moved to nftables keeps it until its next boot) also the frames bridged between
+two guests of one bridge. Every VM of the sandbox pool also gets `firewall=1` on each
 NIC, VM options `policy_in`/`policy_out` `DROP` with `ipfilter` and `macfilter`, and as its only rule a reference to a
 cluster security group `sbx<pool hash><content hash>` whose rules all ACCEPT: its control plane's API and konnectivity
 ports, DNS to the configured resolvers, VXLAN, Cilium health, MetalLB memberlist and the kubelet between workers (IP set
@@ -804,7 +812,7 @@ as 300 s; stock defaults do not guarantee the longer wait. [Compatibility limits
 | `Job.SandboxReleaseGates` | `internal/cloud/syncjob/sandboxgate.go` | NodeRestriction, isolation and fence, read through the Proxmox provider of the workers (`config.sandbox.proxmoxServiceId`) |
 | `probeNodeRestriction` | `sandboxgate.go` | Two dry-run Node creates impersonating a node: plain must pass, with a `node-restriction.kubernetes.io/` label must be refused by NodeRestriction |
 | `Service.CheckSandboxIsolation` | `internal/cloud/pve/network.go` | Datacenter firewall on and this portal's isolation DROPs exactly those `ReconcileIsolation` writes for `sandboxCidrs` |
-| `Service.CheckSandboxFence` | `internal/cloud/pve/sandboxfw.go` | Read-only: the current generation's sets and group exist unchanged, every untainted Node is a pool VM whose firewall reads back in place and whose filter is pinned to its address |
+| `Service.CheckSandboxFence` | `internal/cloud/pve/sandboxfw.go` | Read-only: the current generation's sets and group exist unchanged, every untainted Node is a pool VM whose firewall reads back in place and whose filter is pinned to its address; and `sandboxReach`: no enabled `FORWARD` rule of the cluster firewall, first match first, drops a flow of `clusterFlows` before an ACCEPT covers it (computed from the rule list by `forwardVerdict`, no probe) |
 | `Handler.DeleteProjectSandboxes` | `cloud_sandbox.go` | D9: called by `billingCloudSuspender` on suspend; deletes every live sandbox and ends its row |
 | `Handler.teardownSandboxes` | `cloud_sandbox.go` | Project deletion: delete, end and archive every sandbox row, then `DeleteProjectNamespace` |
 

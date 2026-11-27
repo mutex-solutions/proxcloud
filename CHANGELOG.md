@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Sandboxes: the isolation rules around a sandbox range, and what an upgrade does to them.** These notes belong
+  to the fixes "a shared sandbox machine was cut off from its own cluster" and the ones after it (see Fixed), found
+  by the drill of v0.12.0-rc.1.
+  - *An installed platform without sandboxes* (every platform installed by a release up to 0.11.1, and one that
+    never saved `spec.sandbox`): nothing is written at the upgrade and nothing changes. Its provider names no
+    sandbox network, so its isolation rules are the four DROPs of before, byte for byte, and the Check's
+    `isolation` row reads as before.
+  - *A site with the installer's sandbox cluster* (`docs/managed-sandbox.md`): its isolation rules do not change.
+    Its `config.sandbox` names no `controlPlane`, so no ACCEPT is added, and the `isolation` gate compares the
+    same rules as before. The `fence` gate reads the cluster firewall's rule list once more per check, and fails,
+    with the rule named, if a `FORWARD` DROP there covers the sandbox control plane's address and ports: on such a
+    site the workers could not have joined, so a gate that held before holds after.
+  - *A platform that built `shared` sandboxes with v0.12.0-rc.1* (a release candidate, on a lab): its provider's
+    `config.sandbox` has no `controlPlane` yet, so until the next apply the rules stay as rc.1 wrote them and the
+    `fence` gate fails with the reason. The next apply writes `controlPlane` and the rules with the five ACCEPTs in
+    stage `cluster`. If that apply is refused at stage `validate` (`isolation_not_enforced`), run one provider
+    sync first.
+
 - **A project's delete is refused while the job scheduler is off, with the grace period too.** Up to 0.11.1
   `DELETE /project/{id}` answered `200` and `SCHEDULED_FOR_DELETION` on such an install; it now answers the `409`
   of "Delete now" and changes nothing. A project that was scheduled under an earlier release stays scheduled and
@@ -291,6 +309,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `mirror` when the mirror does not answer the guest.
 
 ### Fixed
+
+- **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of
+  v0.12.0-rc.1, finding Z2-A).** The provider-wide isolation rules drop the sandbox range towards every blocked
+  network, and the platform's API address and node range are blocked networks (the Check's `isolation` row requires
+  it). A cluster `FORWARD` rule sees every routed packet, and on a node where
+  `net.bridge.bridge-nf-call-iptables` is 1 (Proxmox's legacy firewall sets it; a node moved to nftables keeps it
+  until its next boot) also the frames bridged between two guests of one bridge. On the lab's third node the shared
+  sandbox machine could open no new connection to its cluster after the first provider sync: API, tunnel and health
+  all timed out, `node-setup` lost Ready, the Application degraded and go-live was impossible, while the gates
+  `isolation` and `fence` read ok.
+  - *The fix:* above the DROP of the sandbox range the rule set now holds one `FORWARD ACCEPT` per thing the VM
+    firewall opens toward the cluster in `shared`: TCP 6443 to the API address; TCP 6443, UDP 8472, TCP 4240 and
+    ICMP to the cluster's node range. Nothing else opens: every other port of those machines, the seed, the
+    portal's VM, the Proxmox nodes, the management network and the tenant pool stay dropped at both layers.
+  - *Why ACCEPTs and not a narrower DROP:* a destination list cannot leave out a port, so a hole in the DROP would
+    open every port of the API address and the node range; each ACCEPT reads as one line right above the DROP it
+    is the exception to; and it is the form the sandbox endpoints already have. `FORWARD` only: the destinations
+    are guests, and no port of a node opens.
+  - *One list:* the VM firewall of a sandbox machine and these ACCEPTs are rendered from the same list in the code
+    (`pve.clusterFlows`), so the two layers cannot drift. The run writes the API address on the provider
+    (`config.sandbox.controlPlane`) in stage `cluster`, before the first machine exists.
+  - *The `fence` gate fails with the reason* when the cluster firewall, read top down, drops what the VM firewall
+    opens toward the machines' own cluster before an ACCEPT lets it through: it names the rule, the protocol and
+    port, and the two networks. It is computed from the rule list; no machine is probed. A rule with a macro, an
+    alias or an IP set in its source or destination is not read.
+  - *`separate` needs no ACCEPT:* its control plane is a LoadBalancer address of the platform cluster's MetalLB
+    range (API on 6443, konnectivity on 8132), which is no blocked network. The same gate says so when a site's
+    blocked networks cover it.
+  - *What layer 0 never held and still does not:* a private address in no blocked network of the provider (the
+    MetalLB range, another site's network) is closed to a sandbox machine by its VM firewall alone.
+  - The docs said that those rules "see routed traffic only"; they now say what holds on a node with the switch on.
+  - Tests: a table over the rendered rules of both layers, on the lab's addresses and the drill's packet list
+    (`TestSandboxLayersOnTheDrillsPackets`, 102 packets for `shared`, 23 for `separate`), with rc.1's rule set as
+    its control; `TestIsolationRulesOfASharedSandboxGroup` (the set line by line);
+    `TestFenceGateSaysWhenTheClusterFirewallCutsTheMachineOff`; `TestForwardVerdictReadsOnlyWhatARuleSays`. The
+    forward chain and the VM firewall in these tests are the tests' own model of Proxmox. Not run on a lab.
 
 - **A release that changed only the load balancer controller reached no cluster by itself.** The tenant's cluster
   page offered "Platform update available" only when the cluster's chart version differed from the provider's, and

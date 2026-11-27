@@ -214,6 +214,8 @@ type sandboxFake struct {
 	grpNote map[string]string
 	writes  []string
 	dcOff   bool // the datacenter firewall's master switch is off
+	// cluster is the cluster firewall's rule list (cluster.fw [RULES]), top first: a new rule lands on top, as on PVE.
+	cluster []FirewallRule
 }
 
 type fakeVM struct {
@@ -278,6 +280,20 @@ func (f *sandboxFake) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/cluster/firewall/options":
 		reply(w, map[string]any{"enable": map[bool]int{false: 1, true: 0}[f.dcOff]})
+	case p == "/cluster/firewall/rules" && r.Method == http.MethodGet:
+		reply(w, listed(f.cluster))
+	case p == "/cluster/firewall/rules":
+		f.cluster = append([]FirewallRule{rule()}, f.cluster...)
+		reply(w, nil)
+	case strings.HasPrefix(p, "/cluster/firewall/rules/") && r.Method == http.MethodDelete:
+		pos, _ := strconv.Atoi(seg[len(seg)-1])
+		if d := r.Form.Get("digest"); d != "" && d != fmt.Sprint(len(f.cluster)) {
+			w.WriteHeader(500)
+			fmt.Fprint(w, `{"errors":{"digest":"detected modified configuration"}}`)
+			return
+		}
+		f.cluster = slices.Delete(f.cluster, pos, pos+1)
+		reply(w, nil)
 	case p == "/cluster/status":
 		reply(w, []map[string]any{{"type": "cluster", "name": "lab"}, {"type": "node", "name": "pve1", "ip": "192.0.2.11"}})
 	case p == "/nodes/pve1/network":

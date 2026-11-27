@@ -1136,7 +1136,8 @@ exists, the run writes on the installation's Proxmox provider, in one write:
   owner), `mode`, `bridge` and `vlan` (where the machines' NIC is: no vnet is looked up), and
   `deny` (the platform prefix, so that a platform network that is not RFC 1918 is as closed to a
   sandbox machine as one that is). `shared` adds `peers` and `kubeletSources`, both the cluster's
-  `nodeRange`. `separate` adds `loadBalancers` and `proxy` (the proxy address, port 443).
+  `nodeRange`, and `controlPlane` (the API address and port 6443). `separate` adds `loadBalancers`
+  and `proxy` (the proxy address, port 443).
 
 In stage `register` it adds `secret.sandboxKubeconfig` (sealed): the identity
 `proxcloud-sandbox-firewall` of the sandbox chart, which may read and patch Nodes, read the
@@ -1173,6 +1174,45 @@ bridge or tag. Both policies are DROP and every rule is an ACCEPT, so a missing 
 - The IP filter of each machine admits its own address once its Node has reported it (and in
   `separate` the proxy address, which any machine of the sandbox cluster may announce). A sandbox
   machine cannot answer for the API address, a platform machine or a MetalLB address.
+
+**The cluster firewall around the sandbox range (layer 0).** The provider's isolation rules name
+the range as a sandbox network: `FORWARD DROP` and `IN DROP` from the tenant pool to it, and from
+it to the tenant pool and to every blocked and management network. The API address and the
+cluster's `nodeRange` are blocked networks (the Check's `isolation` row requires it), so in
+`shared` that DROP names the very machines a sandbox machine belongs to. Above it the rule set
+therefore holds, for `shared`, exactly what the VM firewall opens toward the cluster and nothing
+else, each as one `FORWARD ACCEPT` from the range:
+
+| Rule | To | Why |
+|---|---|---|
+| TCP 6443 | the API address | the kubelet's and the join's endpoint |
+| TCP 6443 | the cluster's `nodeRange` | the `kubernetes` Service, after kube-proxy's rewrite |
+| UDP 8472 | the cluster's `nodeRange` | Cilium's tunnel |
+| TCP 4240 | the cluster's `nodeRange` | Cilium's health check |
+| ICMP | the cluster's `nodeRange` | Cilium's health check |
+
+- **Where these rules apply.** A cluster `FORWARD` rule sees every packet a node routes. On a node
+  where `net.bridge.bridge-nf-call-iptables` is 1 it also sees every frame bridged between two
+  guests of one bridge: Proxmox's legacy firewall sets that switch, and a node moved to nftables
+  keeps it until its next boot. On a node where it is 0, traffic between two guests of the
+  platform bridge never reaches these rules, and the VM firewall alone decides. The rule set is
+  written to be right in both cases. v0.12.0-rc.1 wrote the DROP without the ACCEPTs: on a node
+  with the switch on, a shared sandbox machine could open no new connection to its cluster.
+- **Both layers come from one list** in the code, so a port opened in the VM firewall and
+  forgotten here cannot happen. Everything else stays dropped at both layers: every other port of
+  the API address and of the cluster's machines (kubelet, etcd, ssh), the seed, the portal's VM,
+  the gateway, the Proxmox nodes and the rest of the management network, and the tenant pool.
+- **What layer 0 does not hold.** A private address that is in no blocked network of the provider
+  (the MetalLB range, which tenants must reach; another site's networks) is not named by the
+  DROP: there the VM firewall alone closes it, for both placements.
+- **The kubelet** is reached from the cluster's `nodeRange`. No rule of layer 0 has that range as
+  a source, so nothing is needed for it.
+- **`separate` needs no ACCEPT.** Its control plane is a pod of the platform cluster's `kamaji`
+  group, published as a LoadBalancer Service at an address of the platform cluster's MetalLB
+  range, API on TCP 6443 and konnectivity on TCP 8132. That range is no blocked network, so no
+  DROP names it. The platform cluster's own API address and machines are not that machine's
+  cluster: they stay dropped at both layers. The `fence` gate checks this from the rule list (see
+  the gates below).
 - A NIC that is not on the platform bridge with the platform's VLAN tag gets an empty filter.
 
 **The portal's identities on the cluster.** The sandbox chart makes two service accounts and the
@@ -1215,8 +1255,8 @@ gates**).
 | Gate | Holds when | On a `shared` cluster |
 |---|---|---|
 | `noderestriction` | the API server refuses a node identity a `node-restriction.kubernetes.io/` label on its own Node | the same |
-| `isolation` | the cluster firewall holds the isolation rules for `nodeRange` | the same; with a bridged platform network those rules see routed traffic only, and the VM firewall is what holds inside the network |
-| `fence` | every Node that may take a sandbox is a VM of the sandbox pool whose firewall reads back as written, pinned to the Node's address | first the RuntimeClass `gvisor` must select exactly the sandbox group (`node-restriction.kubernetes.io/proxcloud-node-group: sandbox`) and tolerate `proxcloud.io/sandbox` alone; then only that group's Nodes are asked. A class changed by hand fails the gate |
+| `isolation` | the cluster firewall holds the isolation rules for `nodeRange`, exactly as written | the same, with the five ACCEPTs of the machines' own cluster. With a bridged platform network those rules see routed traffic, and on a node with `net.bridge.bridge-nf-call-iptables` at 1 also the frames between two guests of the bridge; where they do not, the VM firewall is what holds inside the network |
+| `fence` | every Node that may take a sandbox is a VM of the sandbox pool whose firewall reads back as written, pinned to the Node's address; and no `FORWARD` rule of the cluster firewall, read top down, drops what the VM firewall opens toward the machines' own cluster before an ACCEPT lets it through. The gate computes that from the rule list and names the rule; it does not probe a machine | first the RuntimeClass `gvisor` must select exactly the sandbox group (`node-restriction.kubernetes.io/proxcloud-node-group: sandbox`) and tolerate `proxcloud.io/sandbox` alone; then only that group's Nodes are asked. A class changed by hand fails the gate |
 | `network-guard` | Cilium leaves the CNI config to the network guard and its heartbeat is fresh, on every schedulable node | on the sandbox group's Nodes alone, by the label a kubelet cannot set |
 
 A new sandbox machine passes `fence` about 20 minutes after it joined (the join token on its disk

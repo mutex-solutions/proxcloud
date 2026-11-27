@@ -485,6 +485,17 @@ func (s *Service) DeleteProjectZoneIfEmpty(ctx context.Context, projectID string
 // endpoints the workers' own VM firewall opens (registry, build bucket, portal wake), which may well sit on a
 // management network (lab: the build bucket on 10.88.0.41:9000), accepted over TCP above the sandbox DROPs.
 // Without it a build pod's fetch timed out on every connect while the VM firewall said yes.
+// The second exception are the cluster flows of allow (SandboxClusterAllow): what a sandbox machine opens toward
+// its own cluster. For a sandbox group of the platform cluster those destinations (the API address, the node range)
+// are blocked networks by the installation's own Check, so the sandbox DROP names them. The forward chain sees
+// every routed packet, and on a node with net.bridge.bridge-nf-call-iptables = 1 also the frames bridged between
+// two guests of one bridge: there the DROP cut the machine off its cluster (lab, 2026-11-26) while its VM firewall
+// said yes. They are ACCEPTs above the DROP and not holes in the DROP's destinations, for three reasons: a
+// destination list cannot leave out a port, so a hole would open every port of the API address and the node range;
+// each ACCEPT reads as one line "this range, this protocol, this port, these machines" right above the DROP it is
+// the exception to, which stays the plain "sandbox to every blocked network"; and it is the form the endpoints
+// already have. FORWARD only: the destinations are guests, and no rule here opens a port of a node's own (the IN
+// DROP stays whole). Both layers render the same list (clusterFlows), so the VM firewall and these cannot drift.
 // There is deliberately no blanket DROP source=pool: it would also drop internet egress (SNAT).
 func isolationRules(pool string, blocked, sandbox []string, owner string, allow ...string) []FirewallRule {
 	out := []FirewallRule{
@@ -509,6 +520,9 @@ func isolationRules(pool string, blocked, sandbox []string, owner string, allow 
 					DPort: strconv.Itoa(int(ep.Port())), Enable: 1, Comment: owner})
 			}
 		}
+		for _, fl := range clusterAccepts(allow, pool) {
+			out = append(out, FirewallRule{Type: "forward", Action: "ACCEPT", Proto: fl[0], Source: src, Dest: fl[1], DPort: fl[2], Enable: 1, Comment: owner})
+		}
 		drop(src, append([]string{pool}, blocked...))
 	}
 	return out
@@ -527,6 +541,35 @@ func sandboxEndpoints(allow []string) []netip.AddrPort {
 	}
 	slices.SortFunc(out, func(a, b netip.AddrPort) int { return a.Compare(b) })
 	return slices.Compact(out)
+}
+
+// clusterAccepts parses the cluster flows among the allow entries ("proto dest[,dest] [dport]", SandboxClusterAllow)
+// as {proto, dest, dport}, in their order and each once. An entry that is no such flow is skipped (the endpoints are
+// read by sandboxEndpoints), and so is one whose destination touches the tenant pool: no sandbox machine's cluster
+// is a tenant's network.
+func clusterAccepts(allow []string, pool string) [][3]string {
+	tenant, _ := netip.ParsePrefix(pool)
+	var out [][3]string
+	for _, a := range allow {
+		f := strings.Fields(a)
+		if len(f) < 2 || len(f) > 3 || !slices.Contains([]string{"tcp", "udp", "icmp"}, f[0]) {
+			continue
+		}
+		dest, err := toCIDRs(strings.Split(f[1], ","))
+		ports, ok := portRanges(strings.Join(f[2:], ""))
+		if err != nil || len(dest) == 0 || !ok || (len(ports) == 0) != (f[0] == "icmp") {
+			continue
+		}
+		if tenant.IsValid() && overlap(dest, []netip.Prefix{tenant}) {
+			slog.Warn("pve isolation: a sandbox cluster flow into the tenant pool is not opened", "flow", a)
+			continue
+		}
+		fl := [3]string{f[0], strings.Join(cidrList(dest), ","), strings.Join(f[2:], "")}
+		if !slices.Contains(out, fl) {
+			out = append(out, fl)
+		}
+	}
+	return out
 }
 
 // managementEndpoints drops the sandbox endpoints inside the tenant pool or an operator-blocked range (tenant): only a
