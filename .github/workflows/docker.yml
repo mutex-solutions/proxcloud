@@ -168,8 +168,10 @@ jobs:
           push: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
           tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}
           build-args: ${{ matrix.build-args }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # One cache scope per image: the legs of this matrix shared the default scope, and an entry
+          # of a scope is replaced by its last writer, so a leg mostly found another image's layers.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
   # ---- tag v*: create the GitHub Release once every image is built -----------
   # Runs only for a tag push and only after every `build` matrix leg succeeds,
