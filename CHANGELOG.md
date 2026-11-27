@@ -127,8 +127,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Secret the portal already holds a row for is not looked at again until its content changes.
   - Not run on a lab. Shown in real guests of both images and in unit tests (see Fixed).
 
+- **Functions: nothing to do at this upgrade, and what a rollback will mean once they can be enabled** (#513). This
+  release creates three empty collections (`functions`, `function_deployments`, `function_hosts`) and can hold a
+  `functionQuota` on a project; a portal rolled back to 0.12.x ignores all four. No function can be created, so
+  there is no `FUNCTION` row. For the release that lets an operator switch functions on, the rule is already
+  fixed by this code: **before rolling the portal back, switch the provider's functions block off and delete or
+  stop every function.** A 0.12.x portal does not bill a `FUNCTION` row, never stops a function's pods, and its
+  project deletion does not know the row: every pass reports it as left, so the deletion of a project that holds
+  one never finishes, and the project's `fn-<project>` namespace keeps running. The function quota is not in the
+  project's quota document, so an older portal reads that document as before.
+
 ### Added
 
+- **Serverless functions, the portal's API (switched off: no provider can enable them)** (#513,
+  [managed-functions.md](docs/managed-functions.md)). The second part of functions on the managed platform
+  (v0.13.0): the records, the project routes and the deploy flow on top of #496. **Nothing is reachable.** A save of
+  a sandbox provider with `config.sandbox.functions.enabled: true` is refused (`409`), so every route below answers
+  `403 functions are not offered here` to all but a read and a delete, and there is nothing to read. What stops an
+  idle function, wakes a sleeping one, settles a rollout whose API process ended, bills a function and lets an
+  operator switch functions on are later parts.
+  - **Routes** under `/api/v1/project/{id}/functions`: list, create, get, `PATCH`, `DELETE`, `/deployments`,
+    `/rollback`, `/action` (`suspend`, `resume`), `/logs`. Reads need `project:cloud_resource:read`, the rest
+    `project:cloud_resource:manage`. No route for hostnames, builds or repository links exists; a body that names
+    `gpu`, `source`, `exposure: public`, `publicRateLimit` or `domains` is refused (`400`), not ignored.
+  - **Records** `functions`, `function_deployments` (ten kept per function, and the one that serves) and
+    `function_hosts` (every host ever issued: a URL is never handed out twice), created empty at start with their
+    indexes. One cloud row of type `FUNCTION` per function, written in the same transaction as the record at every
+    start, stop and change of size; a delete archives it at once with the end of its last running interval.
+  - **Secrets and registry passwords are write-only**, sealed in the record with the portal's encryption key and
+    bound to project, function and name (a blob copied to another function's record does not open, and that
+    function is not deployed). Without a key a write of one answers `503` and stores nothing. Answers, deployment
+    records, cloud rows, audit events and log lines carry names only; a body that does not decode is never
+    quoted.
+  - **A rollback deploys the digest that ran.** A deployment records the digest of its instances when it becomes
+    active; a rollback to one that named a tag deploys `<repository>@<digest>`.
+  - **A project's function quota** is `functionQuota {functions, vcpus, ramMb}` on the project, else the
+    provider's `functions.projectQuota`, else 20 functions, 8 vCPUs, 16384 MiB; never unlimited. What a function
+    holds of it is reserved (`cpuMillis` and `memoryMi` times `maxInstances`), checked at a create, at a change
+    that raises it and at a resume (`429`), and shown in `GET /project/{id}/quota-usage` (`functions`). New
+    operator route `PUT /api/v1/admin/project/{id}/function-quota`. **The project's quota document is not used
+    for it**, and `PUT /api/v1/admin/project/{id}/quota` now refuses the keys `functions`, `functionVcpus`,
+    `functionRamMb` and `functionQuota` (`400`): a key there that is not a sandbox key makes the document a
+    Proxmox quota in which an absent key is unlimited.
+  - **Usage gates.** A create, a deployment, a rollback and a resume pass the checks a sandbox passes (the
+    project can be billed, the provider's release gates hold). Where functions are off, reads and the delete stay
+    open.
+  - **Project deletion** removes the project's `fn-<project>` namespace on every sandbox provider, then the
+    records, and archives the rows; where a namespace cannot be deleted nothing is dropped and the deletion job
+    retries.
+  - The provider's `functions` block is now read from the provider document (`enabled`, the idle bounds,
+    `minInstances`, `maxMinInstances`, `maxCpuMillis`, `maxMemoryMi`, `maxFunctions`, `maxInstances`,
+    `projectQuota`), and a project's service carries a `functions` block for the console only where functions are
+    offered.
+  - **Known and accepted until the next part:** a rollout is settled by the API process that started it. If that
+    process ends first, the function stays `DEPLOYING` and refuses a new deployment; the job that settles such
+    rollouts is not in this change. It cannot happen on an installation, where no function can be created.
+  Tested on real PostgreSQL against an in-memory cluster only: no function has run on a cluster from this code.
 - **Serverless functions, the cluster side (not reachable yet)** (#496). The first part of functions on the managed
   platform (v0.13.0): package `internal/cloud/function`, which renders and drives one function as a gVisor
   Deployment `fn-<16 hex>` in the project's `fn-<project>` namespace on the sandbox provider's cluster. No route,

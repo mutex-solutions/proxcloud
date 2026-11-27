@@ -196,6 +196,37 @@ func TestSandboxProviderGoLive(t *testing.T) {
 	}
 }
 
+// Functions cannot be switched on: a sandbox provider whose functions block is enabled is refused at the save, live
+// or DISABLED, with every release gate holding, and before any write. The rest of the block is stored as written.
+func TestSandboxProviderFunctionsCannotBeEnabled(t *testing.T) {
+	gates := []sandbox.Gate{{Name: "fence", OK: true}}
+	h := &Handler{sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate { return gates }}
+	ctx := httpx.WithRC(t.Context(), &httpx.RequestContext{SigV4KeyID: "pk-test"})
+	doc := func(status string, functions any) pgdoc.M {
+		return pgdoc.M{"_id": "s1", "status": status, "secret": map[string]any{"kubeconfig": "x"},
+			"config": map[string]any{"provider": "sandbox", "sandbox": map[string]any{"domain": "sbx.example.org", "functions": functions,
+				"templates": map[string]any{"python": map[string]any{"image": "python:3.12-slim"}}}}}
+	}
+	for _, status := range []string{"DISABLED", "PUBLIC", "PRIVATE"} {
+		herr := h.checkSandboxGoLive(ctx, doc(status, map[string]any{"enabled": true, "maxInstances": float64(3)}))
+		if herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "Functions cannot be enabled") {
+			t.Errorf("%s with functions enabled: %#v, want 409", status, herr)
+		}
+		for name, block := range map[string]any{"off": map[string]any{"enabled": false, "maxInstances": float64(3), "projectQuota": map[string]any{"vcpus": float64(4)}}, "absent": nil, "not a switch": map[string]any{"enabled": "true"}} {
+			if herr := h.checkSandboxGoLive(ctx, doc(status, block)); herr != nil {
+				t.Errorf("%s with the functions block %s: %#v, want it stored", status, name, herr)
+			}
+		}
+	}
+	// Through the route: nothing is written (the handler has no repository to write to).
+	body := `{"name":"sbx","status":"DISABLED","config":{"provider":"sandbox","sandbox":{"domain":"sbx.example.org","functions":{"enabled":true},"templates":{"python":{"image":"python:3.12-slim"}}}},"secret":{"kubeconfig":"x"}}`
+	rec := httptest.NewRecorder()
+	h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service", strings.NewReader(body)).WithContext(ctx))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Functions cannot be enabled") {
+		t.Fatalf("create with functions enabled: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // A kamaji config still carrying the tenant-side proxmox-csi keys is refused on create and on an update whose cluster
 // block has them; an update that leaves the cluster block alone passes, so a stored leftover does not lock the row.
 func TestKamajiRemovedKeysRefused(t *testing.T) {

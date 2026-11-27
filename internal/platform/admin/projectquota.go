@@ -10,6 +10,12 @@ package admin
 // Enforcement is the project cloud gate (project/gpuquota.go, project/cloud_quota_pve.go,
 // project/cloud_sandbox.go). An empty body clears the quota; a Proxmox project then falls
 // back to its provider's default quota.
+//
+// PUT /admin/project/{id}/function-quota stores the project's function quota in a document of its own,
+// doc.functionQuota = {functions, vcpus, ramMb} (an absent key falls back to the provider's
+// functions.projectQuota, then the built-in default; an empty body clears it). It is NOT part of doc.quota,
+// and the quota route refuses its keys: any key of doc.quota other than the sandbox ones makes that document a
+// Proxmox quota, in which every absent key is unlimited.
 
 import (
 	"encoding/json"
@@ -148,6 +154,11 @@ func validateProjectQuota(body pgdoc.M) *httpx.HTTPError {
 // aliases at the write boundary so admin/API/MCP callers all match flavor aliases.
 func normalizeProjectQuota(body pgdoc.M) (pgdoc.M, *httpx.HTTPError) {
 	normalizedBody := maps.Clone(body)
+	for _, key := range functionQuotaStrayKeys {
+		if _, ok := body[key]; ok {
+			return nil, httpx.BadRequest(fmt.Sprintf("quota.%s is not a key of the project quota: function limits are set with PUT /project/{id}/function-quota (functions, vcpus, ramMb)", key))
+		}
+	}
 	for _, key := range append(slices.Clone(externalservice.PVEQuotaKeys), externalservice.SandboxQuotaKeys...) {
 		v, ok := body[key]
 		if !ok {
@@ -189,4 +200,66 @@ func normalizeProjectQuota(body pgdoc.M) (pgdoc.M, *httpx.HTTPError) {
 	}
 	normalizedBody["gpu"] = normalizedGPU
 	return normalizedBody, nil
+}
+
+// FunctionQuotaKeys are the keys of a project's function quota document (doc.functionQuota).
+var FunctionQuotaKeys = []string{"functions", "vcpus", "ramMb"}
+
+// functionQuotaStrayKeys are what a function limit could be mistaken for in the shared quota document. One of them
+// there would limit no function and, on a project that held no Proxmox key, lift every Proxmox limit.
+var functionQuotaStrayKeys = []string{"functions", "functionVcpus", "functionRamMb", "functionQuota"}
+
+// normalizeFunctionQuota checks a function quota body: only FunctionQuotaKeys, each a non-negative integer.
+func normalizeFunctionQuota(body pgdoc.M) (pgdoc.M, *httpx.HTTPError) {
+	out := pgdoc.M{}
+	for key, v := range body {
+		if !slices.Contains(FunctionQuotaKeys, key) {
+			return nil, httpx.BadRequest(fmt.Sprintf("functionQuota.%s is not a function quota key (%s)", key, strings.Join(FunctionQuotaKeys, ", ")))
+		}
+		if f, ok := v.(float64); !ok || f < 0 || f != float64(int64(f)) {
+			return nil, httpx.BadRequest(fmt.Sprintf("functionQuota.%s must be a non-negative integer", key))
+		}
+		out[key] = v
+	}
+	return out, nil
+}
+
+// projectSetFunctionQuota handles PUT /project/{id}/function-quota: validate, store doc.functionQuota = body (an
+// empty body removes it), audit the change, answer the shaped doc. It writes that one field: the project's quota
+// document is not read and not written. ADMIN_PROJECT_UPDATE.
+func (h *Handler) projectSetFunctionQuota(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, projectUpdatePerm) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var body pgdoc.M
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
+		return
+	}
+	body, validationErr := normalizeFunctionQuota(body)
+	if validationErr != nil {
+		httpx.WriteError(w, validationErr)
+		return
+	}
+	doc, ok := h.findProjectOr404(w, r, id)
+	if !ok {
+		return
+	}
+	before := maps.Clone(doc)
+	var err error
+	if len(body) == 0 {
+		_, err = h.repo.SetAndUnsetFields(r.Context(), projectCollection, id, nil, pgdoc.M{"functionQuota": nil})
+	} else {
+		_, err = h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"functionQuota": body})
+	}
+	if httpx.WriteError(w, err) {
+		return
+	}
+	after, err := h.repo.FindDoc(r.Context(), projectCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	audit.RecordSnapshots(r.Context(), before, after)
+	httpx.OK(w, shapeDoc(after))
 }

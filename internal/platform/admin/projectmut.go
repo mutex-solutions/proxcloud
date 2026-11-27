@@ -69,6 +69,7 @@ func (h *Handler) routeProjectMut(r chi.Router) {
 	r.Post("/project/{id}/sync", h.projectSync)
 	r.Put("/project/{id}", h.projectUpdate)
 	r.Put("/project/{id}/quota", h.projectSetQuota)
+	r.Put("/project/{id}/function-quota", h.projectSetFunctionQuota)
 	r.Put("/project/{id}/public-networks", h.projectSetPublicNetworks)
 	r.Put("/project/{id}/gpu-capacity-visible", h.projectSetGPUCapacityVisible)
 	r.Delete("/project/{id}", h.projectScheduleDeletion)
