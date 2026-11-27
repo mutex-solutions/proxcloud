@@ -647,8 +647,10 @@ func sandboxReach(rules []FirewallRule, workers []netip.Prefix, flows []sandboxF
 					}
 					return fmt.Errorf("pve sandbox: the cluster firewall cuts the sandbox machines off their own cluster: rule %d (FORWARD %s, %s to %s, %q) "+
 						"matches %s from %s to %s and no ACCEPT above it lets that through. On a node where bridged frames pass the forward chain "+
-						"(net.bridge.bridge-nf-call-iptables = 1) such a machine opens no new connection to its cluster. Apply the installation's settings "+
-						"again or run a provider sync: both write the rules with the ACCEPTs of the machines' own cluster",
+						"(net.bridge.bridge-nf-call-iptables = 1) such a machine opens no new connection to its cluster. For a sandbox group of a managed "+
+						"platform, apply the installation's settings again: the run names the cluster on the provider and writes the ACCEPTs of the "+
+						"machines' own cluster above the isolation DROP, and needs no provider sync for it. For a sandbox cluster of its own, the "+
+						"control plane's address must be in no blocked network. A rule that is not this portal's is its owner's to change",
 						r.Pos, r.Action, r.Source, r.Dest, r.Comment, what, pveCIDR(w), pveCIDR(d))
 				}
 			}

@@ -411,6 +411,10 @@ func TestFenceGateSaysWhenTheClusterFirewallCutsTheMachineOff(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cuts the sandbox machines off their own cluster") || !strings.Contains(err.Error(), "FORWARD DROP, "+labSandbox+" to "+labPool+",10.88.0.0/24,10.90.0.0/26") {
 		t.Fatalf("the fence gate on a machine the cluster firewall cuts off: %v", err)
 	}
+	// What to do about it is the apply: rc.1's provider row names no control plane, so a provider sync writes no ACCEPT.
+	if !strings.Contains(err.Error(), "apply the installation's settings again") || strings.Contains(err.Error(), "or run a provider sync") {
+		t.Fatalf("the gate's advice: %v", err)
+	}
 	f.cluster = labClusterRules(SandboxClusterAllow(labAPI+":6443", []string{labPeers})...)
 	if err := s.CheckSandboxFence(ctx, fw, open); err != nil {
 		t.Fatalf("the fence gate with the cluster's ACCEPTs in place: %v", err)
