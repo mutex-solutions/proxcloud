@@ -374,6 +374,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every previous BOM as an installation without sandboxes does, and `TestSandboxIsOffered` holds that a platform on
   it is taken `spec.sandbox` while one on a BOM from before 0.12.0 is refused it. No apply on such a platform was
   run on a lab by this change.
+- **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.12.0-rc.2`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.12.0-rc.2.yaml`, sha256
+  `f45d5dd6e516798a5d178b01f81dd74dea4ec6df409eab1ceae8b99fd72c48a5`, the file of the tag byte for byte). The
+  candidate's commit left the BOM at `0.12.0-rc.2`, and the release gate refuses only `-dev`. A platform moved to
+  that BOM (the second candidate's drill) is not refused (`bom_unsupported`) under a later build while the file is
+  carried. Its pins are those of `main` and of `0.12.0-rc.1`, so the plan from it has one change, the release,
+  record only. `TestPreviousBOMsMoveCertManager` states that answer, and `TestUpgradeRollsNoMachine` compares
+  sixteen of the twenty-five previous BOMs with the BOM on `main`, none of them rolling. It names the sandbox chart
+  as `0.12.0-rc.1` does, so `TestSandboxIsOffered` holds that a platform on it is taken `spec.sandbox`. No apply on
+  such a platform was run on a lab by this change.
 
 - **Fourteen dependency updates (November)**, the open Dependabot pull requests taken together. Go modules:
   `aws-sdk-go-v2/service/s3` 1.116.0, `aws-sdk-go-v2/service/ecr` 1.69.0, `aws-sdk-go-v2/credentials` 1.21.3,
