@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -208,7 +209,7 @@ func TestSandboxProviderFunctionGate(t *testing.T) {
 	reports, readErr := 1, error(nil)
 	open := func() *Handler {
 		return &Handler{jobsScheduler: true, sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate { return gates },
-			functionGate: FunctionGate{SealingKey: true, Proxies: func(_ context.Context, id string) (int, error) {
+			functionGate: FunctionGate{SealingKey: true, ProxyWindow: 90 * time.Second, Proxies: func(_ context.Context, id string) (int, error) {
 				if id != "s1" {
 					t.Errorf("the reports of provider %q were asked for, want s1", id)
 				}

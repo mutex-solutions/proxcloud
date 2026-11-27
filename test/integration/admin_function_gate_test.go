@@ -54,7 +54,7 @@ func TestAdminFunctionGate(t *testing.T) {
 	projectH.Routes(proxyAPI)
 
 	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, nil, esSvc, "r1", iss, cid)
-	gate := admin.FunctionGate{SealingKey: projectH.FunctionSealingKey(), Proxies: projectH.FunctionProxiesReporting}
+	gate := admin.FunctionGate{SealingKey: projectH.FunctionSealingKey(), Proxies: projectH.FunctionProxiesReporting, ProxyWindow: project.FunctionProxyWindow}
 	h.SetFunctionGate(gate)
 	h.SetJobsScheduler(true)
 	router := chi.NewRouter()
@@ -163,6 +163,9 @@ func TestAdminFunctionGate(t *testing.T) {
 	if got := rows("sbx"); !got["function-proxy"] {
 		t.Fatalf("the proxy row after a report: %v", got)
 	}
+	if _, body := call(http.MethodPost, "/service/sbx/sandbox/release-check", ""); !strings.Contains(body, "1 sandbox-proxy replica(s) reported in the last 90 seconds") {
+		t.Fatalf("the proxy row does not say what it counted, and over how long: %s", body)
+	}
 	if code, body := save(true); code != http.StatusOK || !stored() {
 		t.Fatalf("switch on after a report: %d %s", code, body)
 	}
@@ -171,10 +174,10 @@ func TestAdminFunctionGate(t *testing.T) {
 	if code, body := save(false); code != http.StatusOK || stored() {
 		t.Fatalf("switch off: %d %s", code, body)
 	}
-	age(admin.FunctionProxyWindow + time.Second)
+	age(91 * time.Second) // the window is 90 seconds
 	code, body = save(true)
 	refused("a report older than the window", "function-proxy", code, body)
-	age(admin.FunctionProxyWindow - 10*time.Second)
+	age(80 * time.Second)
 	if code, body := save(true); code != http.StatusOK || !stored() {
 		t.Fatalf("switch on with a report inside the window: %d %s", code, body)
 	}

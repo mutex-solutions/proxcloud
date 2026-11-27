@@ -23,11 +23,8 @@ const (
 	// activityEveryDefault is the report period, in seconds, taken for a proxy that names none or one that is out
 	// of bounds. Reports that come more often than this are the normal case (sandbox-proxy reports every 5 s).
 	activityEveryDefault = 30
-	// fnProxyKeep is how long a replica's last report stays on record, and so how old a report may be to count as
-	// "this provider's proxy reaches the portal": the deploy sync forgets a replica not heard from for this long,
-	// and the gate that lets an operator switch functions on asks for a report younger than it. One constant for
-	// both, so a record the gate may count is never one the sync has already removed.
-	fnProxyKeep = 90 * time.Second
+	// fnProxyKeep is how long a replica's last report stays on record: FunctionProxyWindow.
+	fnProxyKeep = FunctionProxyWindow
 	// functionTokenTTL is how long the providers' function wake tokens are kept in memory (functionTokenServices).
 	// A token an operator's apply replaced is therefore still accepted for this long.
 	functionTokenTTL = 3 * time.Second
@@ -39,6 +36,12 @@ const (
 	// the reaper.
 	functionReaperGap = 45 * time.Second
 )
+
+// FunctionProxyWindow is how old a sandbox-proxy replica's last report may be to count as "this provider's proxy
+// reaches the portal", and how long that report stays on record: the gate that lets an operator switch functions on
+// asks for a report younger than it (and prints it), and the deploy sync forgets a replica not heard from for as
+// long. One constant for both, so a record the gate may count is never one the sync has already removed.
+const FunctionProxyWindow = 90 * time.Second
 
 // fnLoad is the load of one function through one sandbox-proxy replica over a report period: the most requests it
 // had in flight at once, and how many requests it started.

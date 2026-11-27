@@ -703,7 +703,7 @@ func run() error {
 	// What lets an operator switch a sandbox provider's functions block on, beside the scheduler: a sealing key, a
 	// sandbox-proxy that reports to this portal with the provider's token, and billing that is not external.
 	adminH.SetFunctionGate(admin.FunctionGate{SealingKey: projectH.FunctionSealingKey(), ExternalBilling: cfg.Billing.Provider == billingprovider.External,
-		Proxies: projectH.FunctionProxiesReporting})
+		Proxies: projectH.FunctionProxiesReporting, ProxyWindow: project.FunctionProxyWindow})
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	if cfg.Mail.SavingsExpiredOutboxEnabled {

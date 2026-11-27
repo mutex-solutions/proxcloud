@@ -125,14 +125,13 @@ type FunctionGate struct {
 	// ExternalBilling: usage is rated by an outside billing service (PROXCLOUD_BILLING_PROVIDER=external). It is
 	// not sent a function's running intervals, and would bill every idle gap as running.
 	ExternalBilling bool
-	// Proxies is how many sandbox-proxy replicas of the provider sent this portal an activity report in the last
-	// FunctionProxyWindow, with the provider's function wake token (project.Handler.FunctionProxiesReporting).
-	Proxies func(ctx context.Context, serviceID string) (int, error)
+	// Proxies is how many sandbox-proxy replicas of the provider sent this portal an activity report within
+	// ProxyWindow, with the provider's function wake token (project.Handler.FunctionProxiesReporting), and
+	// ProxyWindow that age as the rows print it (project.FunctionProxyWindow: the one constant the count, the
+	// records' keep and this text share).
+	Proxies     func(ctx context.Context, serviceID string) (int, error)
+	ProxyWindow time.Duration
 }
-
-// FunctionProxyWindow is the age a sandbox-proxy report may have to count for the gate, as the rows say it. The
-// records are kept exactly that long (project.fnProxyKeep).
-const FunctionProxyWindow = 90 * time.Second
 
 // SetFunctionGate wires the inputs of the function gate (cmd/api).
 func (h *Handler) SetFunctionGate(g FunctionGate) { h.functionGate = g }
@@ -154,7 +153,7 @@ const (
 //   - the job scheduler is on: the reaper that stops an idle function, the sync that ends a start that serves
 //     nothing and the minute charge are scheduler jobs;
 //   - a sealing key is configured: without one no secret and no registry password can be stored;
-//   - a sandbox-proxy replica of this provider reported to this portal within FunctionProxyWindow. A report is taken
+//   - a sandbox-proxy replica of this provider reported to this portal within FunctionGate.ProxyWindow. A report is taken
 //     only with the provider's function wake token, so this is the evidence that the wake path works at this site:
 //     the proxy runs the function mode, holds the token, reaches the portal, and the portal answers it;
 //   - billing is not the external provider;
@@ -174,7 +173,7 @@ func (h *Handler) functionGates(ctx context.Context, es *externalservice.Externa
 	if !g.SealingKey {
 		rows[1].Detail = "the portal has no encryption key: function secrets and registry passwords could not be stored. Set an encryption key of 32 characters or more"
 	}
-	seconds := int(FunctionProxyWindow / time.Second)
+	seconds := int(g.ProxyWindow / time.Second)
 	if g.Proxies == nil {
 		rows[2].Detail = "this API cannot read the sandbox-proxy reports"
 	} else if n, err := g.Proxies(ctx, es.ID); err != nil {

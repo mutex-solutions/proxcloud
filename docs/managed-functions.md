@@ -275,6 +275,13 @@ such a function "running" for as long as its callers retry.
   interval of a provider in the records without any cluster call, and `FunctionsExist` tells whether a provider
   holds a function record. Both are in the portal for the platform run to call; nothing calls them yet.
 
+### Machine rotation
+
+Read in the code, not run. With a sandbox cluster of its own (`separate`), the rotation of sandbox machines waits
+for every pod on the machines it replaces: a running function instance holds a rotation back, under a message
+that names sandboxes. With the shared node group the rotation looks at sandbox namespaces only and does not wait
+for function instances: they end with their machine and the Deployment starts them on another.
+
 ## Switching functions on
 
 `config.sandbox.functions.enabled: true` is accepted by the provider save only while these hold. A save that
