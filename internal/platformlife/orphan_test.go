@@ -262,7 +262,7 @@ func TestMoveCarriesARollUnderALaterBOM(t *testing.T) {
 // gate. Under 0.10.2 it is not carried either, although the two BOMs differ in the release line alone: the move from
 // 0.10.0 to 0.10.2 is refused by the same gate. 0.10.2 itself has these pins too and is taken the same way, for the
 // same reason, and so are 0.11.0-rc.1, 0.11.0-rc.2, 0.11.0, 0.11.1-rc.1, 0.11.1-rc.2, 0.11.1-rc.3, 0.11.1-rc.4,
-// 0.11.1-rc.5, 0.11.1 and 0.12.0-rc.1.
+// 0.11.1-rc.5, 0.11.1, 0.12.0-rc.1 and 0.12.0-rc.2.
 func TestRollTowardAKeptCandidateGoesOn(t *testing.T) {
 	cur, err := Current()
 	if err != nil {

@@ -92,9 +92,10 @@ func separateSandbox() *SandboxSpec {
 // This build's BOM offers sandboxes: it names the sandbox chart, published and marked with the feature, after every
 // other component of the platform cluster, and cluster charts that give a node group a pool and a range of its own.
 // An installation on it is taken the block in both placements, and so is one on a kept BOM that offers them too
-// (0.12.0-rc.1, the first). No BOM of a release before 0.12.0 names the chart, so a platform one of them installed is
-// refused the block at the save and in the Check's spec row until an upgrade has moved it to this one, and the sentence
-// names that upgrade. A build whose BOM takes the offer away fails here: its release notes must then say so.
+// (0.12.0-rc.1, the first, and 0.12.0-rc.2). No BOM of a release before 0.12.0 names the chart, so a platform one of
+// them installed is refused the block at the save and in the Check's spec row until an upgrade has moved it to this
+// one, and the sentence names that upgrade. A build whose BOM takes the offer away fails here: its release notes must
+// then say so.
 func TestSandboxIsOffered(t *testing.T) {
 	cur := sandboxBOM(t)
 	c := cur.Feature(FeatureSandbox)
