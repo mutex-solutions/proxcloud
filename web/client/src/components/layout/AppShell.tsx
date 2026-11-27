@@ -2,10 +2,10 @@ import { NavLink, Outlet, useLocation, useNavigate, useParams } from "react-rout
 import {
   Boxes, BarChart3, BookOpen, Camera, Check, ChevronsUpDown, CreditCard, Database, DatabaseZap, FileClock, FolderKanban, HardDrive,
   Image, KeyRound, LayoutDashboard, LogOut, Monitor, Moon, Network, Receipt, Scale,
-  ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, ShieldCheck, SquareTerminal, Sun, UserCircle, Users, Wallet, FolderTree, Globe } from "lucide-react"
+  ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, ShieldCheck, SquareFunction, SquareTerminal, Sun, UserCircle, Users, Wallet, FolderTree, Globe } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAuth } from "@/lib/auth"
-import { useCloudFeatures, useFeatures, useLocations, useProjects, useProjectInit, useUIMenu, type CloudFeature } from "@/lib/hooks"
+import { useCloudFeatures, useFeatures, useLocations, useProjects, useProjectInit, useProjectServices, useUIMenu, type CloudFeature } from "@/lib/hooks"
 import { EmptyState } from "@/components/empty-state"
 import { useTheme, type ThemePref } from "@/lib/theme"
 import { Button } from "@/components/ui/button"
@@ -33,6 +33,8 @@ type Item = {
   feature?: string
   // hidden unless the compute provider serves it (/init features).
   cloudFeature?: CloudFeature
+  // hidden unless a service of the project carries the `functions` block (GET /project/{id}/service).
+  functions?: boolean
 }
 type Group = { label: string; items: Item[] }
 
@@ -78,6 +80,7 @@ function navGroups(pid: string): Group[] {
         // DatabaseZap: plain Database is taken by object storage above.
         { to: `${p}/databases`, label: "Databases", icon: DatabaseZap, service: "database" },
         { to: `${p}/sandboxes`, label: "Sandboxes", icon: SquareTerminal, service: "sandbox" },
+        { to: `${p}/functions`, label: "Functions", icon: SquareFunction, service: "sandbox", functions: true },
       ],
     },
     {
@@ -115,16 +118,20 @@ function useNavGate(pid: string) {
   const locations = useLocations(pid)
   const { data: features } = useFeatures()
   const cloudFeatures = useCloudFeatures(pid)
+  const services = useProjectServices(pid)
+  const functionsOn = !!services.data?.some((s) => s.functions)
   const items = init.data?.menu?.items
   const featureSet = features ? new Set(features) : undefined
   const allows = (it: Item) => {
     if (it.service && items && !(items[it.service]?.enabled === true)) return false
     if (it.feature && featureSet && !featureSet.has(it.feature)) return false
     if (it.cloudFeature && !cloudFeatures.has(it.cloudFeature)) return false
+    // Unlike the gates above, hidden also while the services load: an entry nobody offers must not flash.
+    if (it.functions && !functionsOn) return false
     return true
   }
   // Until /init and the locations have answered, the provider's features are unknown: a route waits, the menu does not.
-  return { items, allows, pending: init.isPending || locations.isPending }
+  return { items, allows, pending: init.isPending || locations.isPending, servicesPending: services.isPending }
 }
 
 function useGatedNavGroups(pid: string): Group[] {
@@ -155,12 +162,12 @@ function useGatedNavGroups(pid: string): Group[] {
 // The menu item a path belongs to, the page itself or one below it (a bucket, a cluster), when the menu hides it.
 // "pending" while the gates are still loading: the page must not start its requests before the answer.
 function usePageHidden(pid: string, pathname: string): Item | "pending" | undefined {
-  const { allows, pending } = useNavGate(pid)
+  const { allows, pending, servicesPending } = useNavGate(pid)
   const item = navGroups(pid)
     .flatMap((g) => g.items)
     .find((it) => pathname === it.to || pathname.startsWith(it.to + "/"))
   if (!item || !(item.service || item.feature || item.cloudFeature)) return undefined
-  if (pending) return "pending"
+  if (pending || (item.functions && servicesPending)) return "pending"
   return allows(item) ? undefined : item
 }
 

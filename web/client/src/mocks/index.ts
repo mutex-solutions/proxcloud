@@ -5,6 +5,7 @@ import { dispatch } from "./router"
 
 import "./handlers/platform"
 import "./handlers/sandbox-templates"
+import "./handlers/functions"
 import "./handlers/cloud"
 import "./handlers/billing"
 import "./handlers/people"

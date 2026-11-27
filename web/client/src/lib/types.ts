@@ -105,6 +105,9 @@ export type ProjectService = {
   sandboxLimits?: SandboxLimits
   // true when the location offers the E2B-compatible API (envd and a sandbox domain).
   sandboxE2B?: boolean
+  // Sandbox services only, present only when functions are enabled there: the console's gate for
+  // the Functions page, and the limits its form checks against. `true` = enabled, default limits.
+  functions?: true | Partial<FunctionLimits>
   name?: string
   type?: string
   status?: string
@@ -382,3 +385,82 @@ export type ProjectSandboxTemplate = {
 }
 
 export type SandboxExecResult = { stdout: string; stderr: string; exitCode: number; truncated?: boolean }
+
+// Functions (/project/{id}/functions): a container image behind a stable internal HTTPS URL that
+// stops when idle and starts again on the next request. FunctionLimits is the `functions` block
+// of the location's service.
+export type FunctionLimits = {
+  /** The parent domain of every function's host. "" = not stated. */
+  domain: string
+  /** The platform's floor for every function (0 = may stop when idle) and the highest floor a function may ask for (0 or 1). */
+  minInstances: number
+  maxMinInstances: number
+  idleSeconds: number
+  minIdleSeconds: number
+  maxIdleSeconds: number
+  maxCpuMillis: number
+  maxMemoryMi: number
+  /** Functions per project. */
+  maxFunctions: number
+  /** The highest maxInstances a function may set. */
+  maxInstances: number
+  defaultConcurrency: number
+  maxConcurrency: number
+}
+export type FunctionStatus = "DEPLOYING" | "READY" | "IDLE" | "SUSPENDED" | "FAILED"
+export type CloudFunction = {
+  id: string
+  name: string
+  image: string
+  port: number
+  cpuMillis: number
+  memoryMi: number
+  /** Values are blank for callers who may not manage the project's resources. */
+  env?: Record<string, string>
+  /** Secrets are write-only: the API returns their names, and when each was last set, never a value. */
+  secretNames?: string[]
+  secretsSetAt?: Record<string, string>
+  /** Credentials of the private registry the image is pulled from. The password is write-only: never returned. */
+  registryAuth?: { server: string; username: string; setAt?: string }
+  minInstances: number
+  idleSeconds: number
+  /** The most instances the function is scaled to on load. */
+  maxInstances: number
+  /** Requests in flight one instance is meant to take: the scaling target, not a limit. */
+  concurrency: number
+  host: string
+  url: string
+  status: FunctionStatus
+  /** What an unfinished rollout is waiting for (single-function reads only). */
+  reason?: string
+  /** Ready instances, live. */
+  instances: number
+  suspended: boolean
+  /** Why the newest deployment failed: one of a fixed set of reasons, never the registry's own text. */
+  lastError?: string
+  currentDeployment?: { id: string; seq: number; image: string; deployedAt?: string }
+  lastActiveAt?: string
+  createdAt?: string
+  updatedAt?: string
+}
+export type FunctionDeployment = {
+  id: string
+  functionId: string
+  seq: number
+  image: string
+  /** The digest its first ready instance ran: what a rollback to it deploys. */
+  imageDigest?: string
+  port: number
+  cpuMillis: number
+  memoryMi: number
+  env?: Record<string, string>
+  secretNames?: string[]
+  /** The registry credentials it pulled with, never the password. */
+  registryAuth?: { server: string; username: string; version?: string }
+  /** seq of the deployment this one re-applies. */
+  rollbackOf?: number
+  state: "DEPLOYING" | "ACTIVE" | "SUPERSEDED" | "FAILED"
+  message?: string
+  createdAt?: string
+  finishedAt?: string
+}

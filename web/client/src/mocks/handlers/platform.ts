@@ -5,6 +5,7 @@ import { db } from "../db"
 import { features, ORG_ID, PID, organizations, uiMenu } from "../fixtures/platform"
 import { mockProfile } from "../enabled"
 import { myInvites } from "../fixtures/people"
+import { FUNCTION_LIMITS } from "./functions"
 
 // Page-URL preview flags (mock runs in-browser): "/?no-projects" previews the
 // "/" onboarding states without touching fixtures — combine with "no-org"
@@ -57,7 +58,7 @@ on("DELETE /project/:pid/now", ({ params }) => {
 })
 on("PUT /project/:pid/organization", () => ({ data: {} }))
 on("POST /project/:pid/billing/:bpId", () => ({ data: {} }))
-on("GET /project/:pid/service", () => ({
+on("GET /project/:pid/service", ({ params }) => ({
   data: [
     { id: "svc-proxmox-1", name: "ProxCloud Compute", type: "CLOUD", status: "ACTIVE" },
     { id: "svc-ceph-1", name: "ProxCloud S3", type: "CLOUD", status: "ACTIVE" },
@@ -70,6 +71,8 @@ on("GET /project/:pid/service", () => ({
       sandboxTemplates: [{ name: "base", image: "registry.example.com/approved/base@sha256:" + "a".repeat(64), cpu: 2, memoryGiB: 2 }],
       sandboxLimits: { maxCpu: 8, maxMemoryGiB: 28, egressMbps: 100, maxTimeoutSeconds: 86400 },
       sandboxGpuModels: ["nvidia-a10"],
+      // The gate of the Functions page and its menu entry: only prj-aurora previews a location that runs functions.
+      ...(params.pid === PID ? { functions: FUNCTION_LIMITS } : {}),
     },
     {
       id: "svc-dbaas-1",

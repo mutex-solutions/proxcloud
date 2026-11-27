@@ -51,6 +51,7 @@ export const routes: RouteEntry[] = [
   { path: `${P}/kubernetes`, name: "kubernetes", hasTable: true, hasDialogs: true },
   // A cluster that needs attention: the amber badge and card, and the reason per node group.
   { path: `${P}/kubernetes/res-pc-c-stuck`, name: "kubernetes-stuck", hasTable: true, hasDialogs: true },
+  { path: `${P}/functions`, name: "functions", hasTable: true, hasDialogs: true },
   { path: `${P}/stacks`, name: "stacks", hasTable: true, hasDialogs: true },
   { path: `${P}/secrets`, name: "secrets", hasTable: true, hasDialogs: true },
 
