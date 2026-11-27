@@ -409,6 +409,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     loaded from such a host on that. The console stays on 1.36.0 until the owner has decided.
   Not verified on a lab: no VM artifact was exported with the new `setup-oras` pin (neither workflow runs on a
   pull request).
+- **Eight dependency updates (late November)**, the open Dependabot pull requests taken together. Go modules:
+  `golang.org/x/net` 0.63.0; the module minimum stays `go 1.26.0`. Customer console (`web/client`):
+  `@tanstack/react-query` 5.108.4, `tailwindcss` 4.3.5 and `oxlint` 1.95.0. Operator console (`web/admin`):
+  `@tanstack/react-query` 5.108.4, `recharts` 3.11.1, `lucide-react` 1.78.0 and `oxlint` 1.95.0. No licence and no
+  minimum Node changed. What changes with them:
+  - **`oxlint` 1.95.0 reports more warnings and no error**: 51 instead of 45 in `web/client`, 72 instead of 68 in
+    `web/admin`, all from the React Compiler rules in files that carry an ESLint suppression comment, which 1.94.0
+    passed over. `npm run lint` still exits 0.
+  - **`tailwindcss` 4.3.5 in `web/client` does not change the bundle yet.** The compiler is the copy inside
+    `@tailwindcss/vite`, which stays on 4.3.3 until its own update: the built CSS is byte for byte the one of
+    `main`, and the lockfile holds both versions until then, as Dependabot wrote it. `web/admin` has both
+    packages on 4.3.5.
+  - **Not taken: `tailwind-merge` 3.7.1 in `web/client`.** It is the update left out of `web/admin` above, and it
+    does the same here: with this package alone, 44 of the 192 screenshots of the customer console differed from
+    `main` by more than 20000 pixels and 6 more by 2000 to 20000, where two runs of `main` differ by 54 pixels at
+    most. With the eight updates and without it, no screenshot differs by more than 35 pixels. Both consoles stay
+    on 3.7.0, so the same card renders the same in both; the new spacing is a design decision for the two
+    together.
+  - **Not taken: `@airwallex/components-sdk` 1.37.1 in `web/client`**, as above: it waits for the owner.
 - **The real-guest load balancer tests run on images that already hold their packages** (#499,
   `test/integration/images`, `test/integration/lb_guest_test.go`, the `go-test` job; no product code). Each of the
   eight tests installed systemd, HAProxy, keepalived, nftables and its tools from the distribution's mirror while it
