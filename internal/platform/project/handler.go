@@ -16,6 +16,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/function"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
@@ -118,6 +119,13 @@ type Handler struct {
 	sandboxGates func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
 	gateMu       sync.Mutex
 	gateCache    map[string]gateVerdict
+	// functionFor builds the function service for a sandbox provider; fns, fnDeps and fnHosts are the functions,
+	// function_deployments and function_hosts (every host ever issued) collections (cloud_function.go); fnKeys seals
+	// function secrets and registry passwords at rest (nil = no write of one is taken). SetFunctions; unset = every
+	// function route answers 503.
+	functionFor          func(es *externalservice.ExternalService) (*function.Service, error)
+	fns, fnDeps, fnHosts *pgdoc.Store
+	fnKeys               *textcrypt.BlobKeys
 	// lbCerts holds the projects' TLS certificates, each sealed with lbCertKeys (SetLBCertificates; nil = no
 	// certificate is taken, and no tls or https listener is served).
 	lbCerts    *pgdoc.Store
@@ -312,6 +320,17 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/project/{id}/certificates", h.lbCertCreate)
 	r.Get("/project/{id}/certificates/{certId}", h.lbCertGet)
 	r.Delete("/project/{id}/certificates/{certId}", h.lbCertDelete)
+	// Serverless functions (cloud_function.go). Nothing else of them is registered: no hostnames, no builds, no
+	// repository links.
+	r.Get("/project/{id}/functions", h.functionList)
+	r.Post("/project/{id}/functions", h.functionCreate)
+	r.Get("/project/{id}/functions/{fn}", h.functionGet)
+	r.Patch("/project/{id}/functions/{fn}", h.functionUpdate)
+	r.Delete("/project/{id}/functions/{fn}", h.functionDelete)
+	r.Get("/project/{id}/functions/{fn}/deployments", h.functionDeployments)
+	r.Post("/project/{id}/functions/{fn}/rollback", h.functionRollback)
+	r.Post("/project/{id}/functions/{fn}/action", h.functionAction)
+	r.Get("/project/{id}/functions/{fn}/logs", h.functionLogs)
 	// Sandbox API keys: the E2B_API_KEY of the E2B-compatible API (e2b_keys.go).
 	r.Get("/project/{id}/sandbox-paused", h.nativePausedList)
 	r.Post("/project/{id}/sandbox-paused/{sandboxID}/resume", h.nativePausedResume)

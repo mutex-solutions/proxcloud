@@ -115,6 +115,9 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 - [managed-sandbox.md](managed-sandbox.md) — gVisor sandboxes on a platform-owned
   Kamaji cluster: isolation, release gates, the public entry and wake, the sandbox
   registry and custom templates, with what ran on the lab.
+- [managed-functions.md](managed-functions.md) — serverless functions from container images on the
+  sandbox cluster: the API, secrets, quota, the records and the row billing will read, and what is not
+  built yet (the portal's API is in and switched off).
 - [e2b-compat.md](e2b-compat.md) — the E2B-compatible sandbox API under `/e2b`.
 - [saved-runtime-admission.md](saved-runtime-admission.md) — deliberate managed lifecycle
   admission hold, retained-copy/TTL boundaries, separate capture/pinned CREATE, truthful

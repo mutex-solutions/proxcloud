@@ -44,6 +44,48 @@ the ProxmoxMachines have lost their finalizers, and the record that drives the r
 **Diagrams updated:** none (no element of C1 to C3 moves). [c3-components.md](c3-components.md): the file list of
 the row Platform runs.
 
+## 2026-11-27: PR #513 functions API with deploy, roll back and secrets (v0.13.0, switched off)
+
+**What changed**
+
+- New component, C3e, **Functions, portal side** (`internal/platform/project/cloud_function*.go`): Implemented,
+  switched off. The project routes `/api/v1/project/{id}/functions` (list, create, get, change, delete,
+  deployments, rollback, suspend and resume, logs), the records `functions`, `function_deployments` and
+  `function_hosts`, the deploy flow with its in-process poller, and the one writer of a function's instance count.
+  No function can be created: the provider save refuses `config.sandbox.functions.enabled: true`
+  (`refuseFunctionsEnabled`), and without that block on the routes answer `403` to all but a read and a delete.
+- **Functions, cluster side** (`internal/cloud/function`): from "not wired" to used by those routes. Still no job
+  and no chart object.
+- New data: three collections, one `FUNCTION` cloud row per function (the row type exists since #496), and
+  `functionQuota` on the project document, written only by the new operator route
+  `PUT /api/v1/admin/project/{id}/function-quota`.
+- `ExternalService.SandboxConfig` now reads the provider's `functions` block; `GET /project/{id}/service` carries
+  a `functions` block only where functions are offered; `GET /project/{id}/quota-usage` carries `functions` on a
+  sandbox service.
+- `TeardownProject` gains a first leg, `DeleteProjectFunctions`: the project's `fn-<project>` namespace on every
+  sandbox provider, then records and rows. A failure keeps the project in deletion.
+- No new container, no new external system, no new credential and no new network path: the portal reaches the
+  sandbox cluster with the identity and kubeconfig it already holds for sandboxes. The trust boundary row
+  "sandbox-proxy to the function routes" stays Planned: those routes are not in this change.
+
+**Why**
+
+- v0.13.0 brings serverless functions from container images. This is the API half that has no timing of its own:
+  what a function is in the portal's records, how a deployment is made and undone, how its secrets are kept. The
+  half that acts by itself (scale to zero, wake, the jobs that repair, the gate that lets an operator switch
+  functions on) follows, and until it does nothing may be enabled: without a reaper a function never stops, and
+  without a meter it is never billed.
+- Secrets are sealed with the key and the construction the load balancer certificates use, bound to their place:
+  a database row copied or edited by hand cannot make one tenant's value run in another tenant's function.
+- The function quota is a document of its own because the project's quota document is read as a Proxmox quota as
+  soon as it holds a key that is not a sandbox key, and an absent key there is unlimited: a function limit in it
+  would lift a project's server, vCPU, memory and disk limits.
+- Record and cloud row are written in one transaction, and the count under the record's lock, because the row is
+  what the meter will read: a boundary of a running interval that is in one and not in the other is a minute
+  billed twice or never.
+
+**Diagrams updated:** `c3-components.md` (C3e: the new row, the status of "Functions, cluster side"). No diagram
+element moves: the relation portal to sandbox cluster exists.
 ## 2026-11-26: the load balancer gateway bounds a cluster's calls (#492, Known issues of v0.11.1)
 
 **What changed:** no new component, container, listener, route or relation, and no new wire field. One existing

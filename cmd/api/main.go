@@ -24,6 +24,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/csigw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/function"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/lbgw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
@@ -336,6 +337,16 @@ func run() error {
 	// TLS certificates of load balancers, sealed with the portal's encryption key. blobKeys is nil when the key is
 	// missing or shorter than 32 characters: uploads then answer 503 and nothing is stored in clear.
 	projectH.SetLBCertificates(pg.C("lb_certificates"), blobKeys)
+	// Serverless functions, on a sandbox provider whose config.sandbox.functions block is on: their records, and the
+	// same key for their secrets and registry passwords (blobKeys nil: a write of one answers 503 and nothing is
+	// stored). No provider can have the block on in this release (the provider save refuses it), so the routes answer
+	// 403 to everything but a read and a DELETE.
+	projectH.SetFunctions(func(es *externalservice.ExternalService) (*function.Service, error) {
+		return function.New(es.SandboxConfig(), es.ID)
+	}, pg.C("functions"), pg.C("function_deployments"), pg.C("function_hosts"), blobKeys)
+	if err := projectH.EnsureFunctionIndexes(context.Background()); err != nil {
+		return fmt.Errorf("function stores: %w", err)
+	}
 	// Custom templates and their builds (the E2B v3 template API).
 	projectH.SetSandboxTemplates(pg.C("sandbox_templates"))
 	if err := registrypins.EnsureSchema(context.Background(), pg); err != nil {
