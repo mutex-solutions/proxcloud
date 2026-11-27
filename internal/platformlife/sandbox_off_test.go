@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
@@ -385,5 +386,51 @@ func TestSandboxWithoutMirror(t *testing.T) {
 	proxmox := &externalservice.ExternalService{Config: map[string]any{"provider": "proxmox", ProviderMarker: "pi-0a1b2c3d"}}
 	if SandboxWithoutMirror(installer) || SandboxWithoutMirror(proxmox) || SandboxWithoutMirror(nil) {
 		t.Error("an installer's sandbox provider must be looked at; a provider that is no sandbox provider, or none, is not this case")
+	}
+}
+
+// While ArgoCD deletes what the sandbox Application deployed, the run asks it to look at the Application again, once
+// per look of ArgoCD's own: on the lab the Application of the separate cluster stayed for minutes after its last
+// object was gone, and the token, its rows and the pool with it (v0120-reports/drill-D4.md Z4-b).
+//
+// The fake only keeps the annotation. That a real ArgoCD ends the deletion sooner for it is the lab's to show.
+func TestSandboxOffAsksArgoCDToLookAgain(t *testing.T) {
+	for placement, name := range map[string]string{SandboxShared: "pc-platform-sandbox", SandboxSeparate: SandboxClusterName} {
+		t.Run(placement, func(t *testing.T) {
+			p := sandboxPlatform(t, RunApply, &SandboxSpec{Placement: SandboxOff})
+			now := time.Now().UTC()
+			p.mutate(func(_ *Run, in *Installation, _ *Secrets) {
+				in.Status.Sandbox = &SandboxStatus{Placement: placement, NodeRange: "10.200.200.64/28", ProxyAddress: "10.200.200.210", Count: 1, BuiltAt: &now}
+			})
+			p.pve.pools = []string{pve.SandboxPool}
+			app := meta(name, nil)
+			app["metadata"].(map[string]any)["deletionTimestamp"] = now.Format(time.RFC3339)
+			app["metadata"].(map[string]any)["finalizers"] = []any{resourcesFinalizer}
+			p.seed.put(appsPath+name, app)
+			p.upTo(stageCluster)
+			asked := func() int {
+				n := 0
+				for _, w := range p.seed.callsOf("sa") {
+					if w == "PATCH "+appsPath+name {
+						n++
+					}
+				}
+				return n
+			}
+			annotation := func() string { return str(p.seed.obj(appsPath+name), "metadata", "annotations", refreshAnnotation) }
+			p.waits(t, "ArgoCD is deleting what Application "+name+" deployed")
+			if asked() != 1 || annotation() != "normal" {
+				t.Fatalf("asked %d times in four looks while ArgoCD had not looked, annotation %q", asked(), annotation())
+			}
+			// ArgoCD has looked (it takes the annotation off) and is not done: it is asked once more.
+			delete(p.seed.obj(appsPath + name)["metadata"].(map[string]any), "annotations")
+			p.waits(t, "ArgoCD is deleting")
+			if asked() != 2 || slices.Contains(p.seed.writes, "DELETE "+appsPath+name) {
+				t.Fatalf("asked %d times after ArgoCD looked once; an Application in deletion was deleted again: %v", asked(), p.seed.writes)
+			}
+			if len(p.pve.pools) != 1 {
+				t.Fatal("the pool went while ArgoCD still deletes")
+			}
+		})
 	}
 }

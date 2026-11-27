@@ -1219,6 +1219,13 @@ func (f *fakeSeed) object(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		if add, ok := dig(body, "metadata", "annotations").(map[string]any); ok { // annotations are merged, as the API server does
+			m := cur["metadata"].(map[string]any)
+			if m["annotations"] == nil {
+				m["annotations"] = map[string]any{}
+			}
+			maps.Copy(m["annotations"].(map[string]any), add)
+		}
 		if body["operation"] != nil { // ArgoCD takes the operation off the Application as it starts it
 			name := path[strings.LastIndex(path, "/")+1:]
 			f.syncs = append(f.syncs, name)

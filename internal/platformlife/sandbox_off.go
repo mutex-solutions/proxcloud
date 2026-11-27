@@ -4,8 +4,9 @@ package platformlife
 // the Applications and the access on Proxmox are sandbox_run.go):
 //
 //   - On the platform cluster the CustomResourceDefinitions of agent-sandbox. The sandbox chart installs them, and
-//     ArgoCD's cascade deletes every object of a deleted Application but a CustomResourceDefinition. A definition goes
-//     only when no object of its kind is left in any namespace: deleting it deletes them all.
+//     the cascade of the Application's deletion left all four on the lab, with no finalizer and no owner
+//     (v0120lab/z3/c/crds-left.txt): ArgoCD's controller is understood to leave definitions out of a cascade. A
+//     definition goes only when no object of its kind is left in any namespace: deleting it deletes them all.
 //   - On the seed the sandbox group's address pool and its machine and bootstrap templates. The cluster's Application
 //     never prunes, so the pool stays when the group leaves the render and the Application reads OutOfSync from then
 //     on; the templates carry helm.sh/resource-policy keep, as every group's do, so that no template is deleted under a

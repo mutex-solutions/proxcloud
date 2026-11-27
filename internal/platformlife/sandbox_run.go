@@ -44,6 +44,8 @@ const (
 	CodeSandboxAccessFailed = "sandbox_access_failed"
 
 	resourcesFinalizer = "resources-finalizer.argocd.argoproj.io"
+	// refreshAnnotation asks ArgoCD's controller for a comparison of the Application now ("normal": no new render).
+	refreshAnnotation = "argocd.argoproj.io/refresh"
 )
 
 // sandboxAppName is the Application of the sandbox chart on the platform cluster (shared).
@@ -170,6 +172,13 @@ func asAccess(err error) error {
 // platform's Applications have none and a plain delete would leave every object) or the sandbox cluster's (separate:
 // Cluster API deletes its machines before the Application goes). Needs the platform cluster's Kamaji and Cluster API
 // alive for separate, which is why it comes before anything else of the stage.
+//
+// The access on Proxmox is taken away after this wait and not during it. Machines gone is not enough to take the
+// separate cluster's token: CAPMOX is understood to open the Proxmox API with it at every look at the ProxmoxCluster
+// and the ProxmoxMachines, their deletion included (read from its source, not tried on a lab), so a token revoked
+// before their finalizers are off could leave them, the namespace and the Application in deletion for good. And the record that drives the rest of the off (the namespace,
+// the provider's settings, the pool) is what removeSandboxAccess deletes last. So the wait itself is shortened
+// instead: ArgoCD is asked to look again (refreshAnnotation).
 func (x *acq) sandboxAppsGone(ctx context.Context, seed *kamajik8s.Client, placement string) error {
 	name, ns := x.sandboxAppName(), sandboxNamespace
 	if placement == SandboxSeparate {
@@ -189,6 +198,17 @@ func (x *acq) sandboxAppsGone(ctx context.Context, seed *kamajik8s.Client, place
 				return classify(CodeSeedAPIUnreachable, err)
 			}
 			if err := seed.DeleteApplication(ctx, argoNamespace, name); err != nil && !kamajik8s.NotFound(err) {
+				return classify(CodeSeedAPIUnreachable, err)
+			}
+		} else if str(app, "metadata", "annotations", refreshAnnotation) == "" {
+			// ArgoCD is asked to look at the Application again, once per look of its own (it takes the annotation off
+			// when it has): on the lab the Application of pc-sandbox stayed 4 min 40 s after the last object it deployed
+			// was gone, until ArgoCD's next look by itself, and the token, its rows and the pool lived that long.
+			if err := x.check(ctx); err != nil {
+				return err
+			}
+			patch := map[string]any{"metadata": map[string]any{"annotations": map[string]any{refreshAnnotation: "normal"}}}
+			if _, err := seed.MergePatchCR(ctx, argoGroup, argoVersion, "applications", argoNamespace, name, patch); err != nil && !kamajik8s.NotFound(err) {
 				return classify(CodeSeedAPIUnreachable, err)
 			}
 		}
