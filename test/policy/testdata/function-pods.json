@@ -1,0 +1,150 @@
+{
+  "full": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+      "annotations": {
+        "kubernetes.io/egress-bandwidth": "100M",
+        "proxcloud.io/function-port": "3000",
+        "proxcloud.io/function-registry-auth-version": "v1",
+        "proxcloud.io/function-secrets-version": "v1"
+      },
+      "labels": {
+        "app.kubernetes.io/managed-by": "proxcloud",
+        "proxcloud.io/function-id": "fn-0123456789abcdef",
+        "proxcloud.io/project": "p1",
+        "proxcloud.io/service": "svc"
+      },
+      "name": "fn-0123456789abcdef-5d4f8c7b9-abcde",
+      "namespace": "fn-p1"
+    },
+    "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+        {
+          "args": [
+            "--serve"
+          ],
+          "command": [
+            "/app"
+          ],
+          "env": [
+            {
+              "name": "PORT",
+              "value": "3000"
+            },
+            {
+              "name": "A",
+              "value": "1"
+            }
+          ],
+          "envFrom": [
+            {
+              "secretRef": {
+                "name": "fn-0123456789abcdef"
+              }
+            }
+          ],
+          "image": "ghcr.io/acme/api@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "imagePullPolicy": "Always",
+          "lifecycle": {
+            "preStop": {
+              "sleep": {
+                "seconds": 3
+              }
+            }
+          },
+          "name": "main",
+          "readinessProbe": {
+            "periodSeconds": 1,
+            "tcpSocket": {
+              "port": 3000
+            }
+          },
+          "resources": {
+            "limits": {
+              "cpu": "1000m",
+              "ephemeral-storage": "1Gi",
+              "memory": "1024Mi"
+            },
+            "requests": {
+              "cpu": "1000m",
+              "ephemeral-storage": "1Gi",
+              "memory": "1024Mi"
+            }
+          }
+        }
+      ],
+      "enableServiceLinks": false,
+      "imagePullSecrets": [
+        {
+          "name": "fn-0123456789abcdef-registry"
+        }
+      ],
+      "runtimeClassName": "gvisor",
+      "terminationGracePeriodSeconds": 13
+    }
+  },
+  "plain": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+      "annotations": {
+        "kubernetes.io/egress-bandwidth": "100M",
+        "proxcloud.io/function-port": "8080"
+      },
+      "labels": {
+        "app.kubernetes.io/managed-by": "proxcloud",
+        "proxcloud.io/function-id": "fn-0123456789abcdef",
+        "proxcloud.io/project": "p1",
+        "proxcloud.io/service": "svc"
+      },
+      "name": "fn-0123456789abcdef-5d4f8c7b9-abcde",
+      "namespace": "fn-p1"
+    },
+    "spec": {
+      "automountServiceAccountToken": false,
+      "containers": [
+        {
+          "env": [
+            {
+              "name": "PORT",
+              "value": "8080"
+            }
+          ],
+          "image": "ghcr.io/acme/api:1",
+          "imagePullPolicy": "Always",
+          "lifecycle": {
+            "preStop": {
+              "sleep": {
+                "seconds": 3
+              }
+            }
+          },
+          "name": "main",
+          "readinessProbe": {
+            "periodSeconds": 1,
+            "tcpSocket": {
+              "port": 8080
+            }
+          },
+          "resources": {
+            "limits": {
+              "cpu": "250m",
+              "ephemeral-storage": "1Gi",
+              "memory": "256Mi"
+            },
+            "requests": {
+              "cpu": "250m",
+              "ephemeral-storage": "1Gi",
+              "memory": "256Mi"
+            }
+          }
+        }
+      ],
+      "enableServiceLinks": false,
+      "runtimeClassName": "gvisor",
+      "terminationGracePeriodSeconds": 13
+    }
+  }
+}

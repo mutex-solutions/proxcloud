@@ -780,16 +780,17 @@ func TestImageDigest(t *testing.T) {
 }
 
 // What the portal's identity may do in a function namespace is the chart's ClusterRole proxcloud-function-namespace,
-// held to these verbs. Everything the service does on the cluster, in the whole life of a function with secrets and
-// registry credentials, is among them: in particular it never reads a Secret, never deletes one, never watches, and
-// never reads a scale.
+// held to these verbs (functionRoleRules in internal/cloud/sandbox/chart_functions_test.go is the same list, read
+// from the chart's render). Everything the service does on the cluster, in the whole life of a function with secrets
+// and registry credentials, is among them, and each of them is something it does: in particular it never reads a
+// Secret, never deletes one, never watches, never reads a scale, and reads neither a single pod nor a quota.
 var roleVerbs = map[string][]string{
 	"deployments":       {"get", "list", "create", "patch", "delete"},
 	"deployments/scale": {"patch"},
 	"secrets":           {"create", "patch"},
-	"pods":              {"get", "list"},
+	"pods":              {"list"},
 	"pods/log":          {"get"},
-	"resourcequotas":    {"get", "list", "create", "patch"},
+	"resourcequotas":    {"create", "patch"},
 }
 
 func lifecycle(t *testing.T, s *Service, f *fakeAPI) {
@@ -854,6 +855,13 @@ func TestClusterCallsAreTheRolesVerbs(t *testing.T) {
 			if !used[w] && !(w == "list deployments" && !shared && used["list deployments (cluster)"]) {
 				t.Errorf("shared=%v: the lifecycle never did %q", shared, w)
 			}
+		}
+		granted := 0
+		for _, verbs := range roleVerbs {
+			granted += len(verbs)
+		}
+		if granted != len(want) {
+			t.Errorf("the role grants %d verbs and the lifecycle needs %d: every right of the role is one the service uses", granted, len(want))
 		}
 		if shared && used["list deployments (cluster)"] {
 			t.Error("a shared cluster was asked for every Deployment on it")

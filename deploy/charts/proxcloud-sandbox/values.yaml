@@ -67,12 +67,36 @@ proxy:
   # -- Where the proxy wakes a paused autoResume sandbox: <portal API>/api/v1/internal/sandboxes. Empty = no wake.
   wakeURL: ""
 
+# -- Serverless functions on the cluster that runs sandboxes: gVisor Deployments fn-<16 hex> in fn-<projectId>
+# namespaces, which the portal's sandbox identity writes and scales, served by sandbox-proxy as
+# https://<name>-<6 hex>.<proxy.domain>. Off (the default) renders nothing of it: the chart is then what 0.1.0 was but
+# for the proxy image. On adds: ClusterRole proxcloud-function-namespace (bound by the portal in each fn-* namespace
+# in mode shared, part of its cluster-wide rules in mode separate), the fn- prefix in the namespace and RoleBinding
+# policies of mode shared, two rules of the pod policy that hold in fn-* alone (no mounted token, no volume), policy
+# proxcloud-function-objects (the identity's Deployments, scales and Secrets in fn-* tenant namespaces only),
+# CiliumClusterwideNetworkPolicy function-tenant-egress-internet, and the proxy's function mode with its cluster-wide
+# list of Deployments.
+functions:
+  enabled: false
+  # -- Where the proxy wakes a function and reports traffic: <portal API>/api/v1/internal/functions. Required when
+  # enabled. Its bearer is PROXCLOUD_FUNCTION_WAKE_TOKEN, a second key of Secret sandbox-proxy-wake, which the run
+  # writes; never a value here.
+  wakeURL: ""
+  # -- PEM of the CA the portal's certificate chains to, when no public one signs it. The chart mounts it into the
+  # proxy and points SSL_CERT_FILE at it. Empty = the image's own roots.
+  portalCA: ""
+  # -- Names the wake token without being it (the run sets a new value when it writes a new token). A pod template
+  # annotation of the proxy: the proxy reads the token when it starts, so a new token needs new pods.
+  wakeTokenVersion: ""
+
 # -- By digest. runtime: envd, sandbox-init and sandbox-netguard (deploy/sandbox-runtime.Dockerfile), the CI build of
 # main d26edd2e, the first whose sandbox-netguard reads a node's CiliumNodeConfig (shared mode needs it: an older one
-# never lets node-setup become Ready there); proxy: cmd/sandbox-proxy, the CI build of tag v0.11.0-rc.1. busybox as
-# deploy/sandbox-cluster/registry.yaml, pause as the installer's versions.yml.
+# never lets node-setup become Ready there); proxy: cmd/sandbox-proxy, the CI build of main fd0afa97, the first build
+# after the function mode (FUNCTION_DOMAIN; without it the binary serves sandboxes as before) and the function names
+# it shares with the portal were both on main. busybox as deploy/sandbox-cluster/registry.yaml, pause as the
+# installer's versions.yml.
 images:
   runtime: ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:dev-d26edd2@sha256:cd4173bec686383ac25147f0851f7c1633b1ee8a2e68a3e061eea23f5d6873fb
-  proxy: ghcr.io/mutex-solutions/proxcloud-sandbox-proxy:v0.11.0-rc.1@sha256:afc0e6e53262ce517d341c428093f7e81106272dda9af0dda6297498bca0e37e
+  proxy: ghcr.io/mutex-solutions/proxcloud-sandbox-proxy:dev-fd0afa9@sha256:e80c082ee158a7d98528ce45927a86c2bffe80bbce082f9ef0aa04db7f3cd0d0
   busybox: docker.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
   pause: registry.k8s.io/pause:3.10@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a

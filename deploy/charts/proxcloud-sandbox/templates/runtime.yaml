@@ -103,3 +103,23 @@ spec:
       proxcloud.io/sandbox-warm: "true"
   ingress: []
   egress: []
+{{- if .Values.functions.enabled }}
+---
+{{- /* Functions reach the internet: the guardrail above gives a tenant pod DNS alone, and a sandbox gets the rest from
+a policy of its own, which a function has not. The guardrail's denies win over this allow (the private, CGNAT and
+link-local ranges, guardrail.extraDeny, TCP 25), and a CIDR rule matches no endpoint of the cluster: another pod, a
+node and the API server stay closed. It selects a namespace by BOTH labels, so it can never open the internet for a
+pod the denies do not hold. */}}
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: function-tenant-egress-internet
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s:io.cilium.k8s.namespace.labels.proxcloud.io/tenant: "true"
+      k8s:io.cilium.k8s.namespace.labels.proxcloud.io/function-tenant: "true"
+  egress:
+  - toCIDRSet:
+    - cidr: 0.0.0.0/0
+{{- end }}

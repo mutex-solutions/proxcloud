@@ -4,6 +4,39 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-27: PR #510, the sandbox chart carries the function objects (off: `functions.enabled` is false and nothing pins 0.2.0)
+
+**What changed**
+
+- Chart `proxcloud-sandbox` (`deploy/charts/proxcloud-sandbox`, 0.2.0 in the source): behind the value
+  `functions.enabled`, default false. Off, the render is 0.1.0's but for the proxy image (the build of `main`
+  `fd0afa97`, which holds the function mode of #494).
+- Trust boundary, the portal's sandbox identity on the sandbox cluster: a second namespaced role,
+  `proxcloud-function-namespace` (Deployments, their scale, Secrets write-only, pod lists, logs, the quota; no exec, no
+  Sandbox kind). Mode shared: bound per `fn-*` namespace, and the RoleBinding policy holds each of the two roles to
+  its prefix. Mode separate: cluster-wide rules, held by the new policy `proxcloud-function-objects` (both modes) to
+  `fn-*` tenant namespaces and to Secrets of type `Opaque` or `kubernetes.io/dockerconfigjson`.
+- The pod policy gains two rules that hold in `fn-*` alone: no mounted service account token, no volume.
+- New policy `function-tenant-egress-internet`: internet egress for pods of a namespace labelled as a tenant and as a
+  function tenant, under the guardrail's denies.
+- Component `Sandbox proxy` in the chart: `FUNCTION_DOMAIN`, `PROXCLOUD_FUNCTION_WAKE_URL`, a cluster-wide list of
+  Deployments, the portal's CA through `SSL_CERT_FILE`, and the wake token's version as a pod template annotation.
+- No container, route, collection or job is added, and the platform BOM is not touched.
+
+**Why**
+
+- Serverless functions (v0.13.0) run as Deployments the portal's identity writes, so that identity needs rights on
+  Deployments and Secrets it never had. A second role bound only in `fn-*` keeps a stolen token from gaining Secret
+  writes in sandbox namespaces or exec in function namespaces. In mode separate no RoleBinding narrows the identity,
+  and a Deployment in the release namespace would be a pod outside gVisor that could mount the proxy's key: an
+  admission policy is the only place to refuse it.
+- A function pod has no reason for a token or a volume, and a volume is how a Secret or a host path would reach it.
+- The proxy reads its token once at start and the token is written outside the chart: without the version on the
+  pod template a rotated token would leave every wake answered 401.
+
+**Diagrams updated:** c2-containers.md (the chart's node; trust boundaries: the row of the portal's identity in a
+function namespace, Planned).
+
 ## 2026-11-26: the load balancer gateway bounds a cluster's calls (#492, Known issues of v0.11.1)
 
 **What changed:** no new component, container, listener, route or relation, and no new wire field. One existing

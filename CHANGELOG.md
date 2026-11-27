@@ -124,6 +124,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `FUNCTION`. A provider gains `secret.functionWakeToken` as a field of its own, apart from `proxyWakeToken`,
     which stays empty.
   Tested against a fake cluster only: no function has run on a cluster from this code.
+- **Serverless functions, the chart objects (off by default, pinned by nothing)** (#510,
+  `deploy/charts/proxcloud-sandbox`). Chart `proxcloud-sandbox` is 0.2.0 in the source and gains the value
+  `functions {enabled, wakeURL, portalCA, wakeTokenVersion}`. The platform BOM still pins the published 0.1.0, no tag
+  `proxcloud-sandbox-v0.2.0` exists, and nothing sets the value: no platform renders any of it.
+  - **With `functions.enabled: false` (the default) the chart renders what 0.1.0 rendered but for the proxy image.**
+    That image is the build of `main` `fd0afa97`
+    (`sha256:e80c082ee158a7d98528ce45927a86c2bffe80bbce082f9ef0aa04db7f3cd0d0`), the first after the proxy's function
+    mode (#494) and the function names (#496) were both on `main`; without `FUNCTION_DOMAIN` it serves sandboxes as
+    before. node-setup's DaemonSet is the same bytes, so a platform moved to this chart rolls sandbox-proxy and
+    restarts containerd on no sandbox machine. With the chart's two replicas the Deployment's rolling update starts a
+    new pod and waits for it to be ready before it ends an old one; the disruption budget has no part in a rollout.
+  - **The portal identity's rights in a function namespace** are ClusterRole `proxcloud-function-namespace`:
+    Deployments get, list, create, patch, delete; their scale patch; Secrets create and patch; pods list; pod logs
+    get; ResourceQuotas create and patch. No watch, no read of a scale, no read and no delete of a Secret, no exec,
+    no Sandbox kind. That is two rights fewer than announced with #496 (`pods get`, `resourcequotas get, list`):
+    nothing calls them. Mode shared: the identity may bind it beside the sandbox role, and the RoleBinding policy
+    holds each role to its prefix (the function role only in a tenant's `fn-*`, the sandbox role only in a tenant's
+    `sb-*`). Mode separate: the same rules join its cluster-wide list.
+  - **Policy `proxcloud-function-objects`, in both modes**: the identity writes Deployments, their scale and Secrets
+    only inside `fn-*` namespaces that carry `proxcloud.io/tenant=true`, and Secrets only of type `Opaque` or
+    `kubernetes.io/dockerconfigjson`. In mode separate this is what keeps the new cluster-wide rights out of the
+    release namespace, where a Deployment would be a pod outside gVisor beside the proxy's key.
+  - **A pod of an `fn-*` namespace** is held to everything a sandbox pod is (gVisor, no host access) and to two
+    rules more: `automountServiceAccountToken: false` and no volume of any kind.
+  - **`function-tenant-egress-internet`** (CiliumClusterwideNetworkPolicy) lets pods of a namespace that carries
+    both `proxcloud.io/tenant=true` and `proxcloud.io/function-tenant=true` reach the internet. The guardrail's
+    denies win over it: the private, CGNAT and link-local ranges, the platform prefix, TCP 25.
+  - **sandbox-proxy** gets `FUNCTION_DOMAIN` (the sandbox domain) and `PROXCLOUD_FUNCTION_WAKE_URL`, the right to
+    list Deployments cluster-wide (in mode shared that reads every Deployment of the platform cluster, as it reads
+    every pod), the portal's CA as a mounted file named by `SSL_CERT_FILE` when `functions.portalCA` is given, and
+    two pod template annotations: `functions.wakeTokenVersion`, so that a new wake token replaces the pods that read
+    the old one at their start, and a digest of the domain, the URL and the CA. The token is never a chart value.
+  Rendered and run through the API server's CEL in tests only (`internal/cloud/sandbox/chart_functions_test.go`,
+  `test/policy`): none of it has been applied to a cluster from this chart.
 - **Sandboxes on the managed platform are offered** (#483, `deploy/platform/platform-bom.yaml`,
   [managed-services.md](docs/managed-services.md#sandboxes-on-the-platform)). The platform BOM names the sandbox
   chart, `proxcloud-sandbox` 0.1.0 at its published digest, as the component `sandbox` (`feature: sandbox`), and

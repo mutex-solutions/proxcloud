@@ -4,9 +4,17 @@ sandbox-proxy (deploy/sandbox-cluster/sandbox-proxy.yaml): https://<port>-<sandb
 wildcard key and the wake token. The run writes Secret sandbox-proxy-tls (tls.crt, tls.key) and, with a wake URL,
 sandbox-proxy-wake (PROXCLOUD_WAKE_TOKEN) into this namespace; never through values. No cert-sync identity: the
 certificate does not come from another cluster here.
+
+With functions.enabled the same pods also serve https://<name>-<6 hex>.<domain> (FUNCTION_DOMAIN is the sandbox
+domain: one address, one certificate), find a function by one cluster-wide list of Deployments, and call the portal's
+function routes (functions.wakeURL) with PROXCLOUD_FUNCTION_WAKE_TOKEN, a second key of Secret sandbox-proxy-wake and a
+token of its own. The proxy reads its environment, the token and its roots once, when it starts, so the pod template
+carries what must replace the pods: a digest of the function settings and the token's version (never the token).
 */ -}}
 {{- $ns := .Release.Namespace }}
 {{- $sys := (include "sbx.placement" . | fromJson).system }}
+{{- $fn := .Values.functions }}
+{{- $ca := and $fn.enabled $fn.portalCA }}
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: sandbox-proxy-config, namespace: {{ $ns }}}
@@ -15,6 +23,19 @@ data:
   {{- with .Values.proxy.wakeURL }}
   PROXCLOUD_WAKE_URL: {{ . | quote }}
   {{- end }}
+  {{- if $fn.enabled }}
+  FUNCTION_DOMAIN: {{ .Values.proxy.domain | quote }}
+  PROXCLOUD_FUNCTION_WAKE_URL: {{ required "functions.wakeURL is required with functions.enabled" $fn.wakeURL | quote }}
+  {{- end }}
+{{- if $ca }}
+---
+# The CA the portal's certificate chains to. Not a secret.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: sandbox-proxy-portal-ca, namespace: {{ $ns }}}
+data:
+  ca.crt: {{ $fn.portalCA | quote }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -26,6 +47,11 @@ kind: ClusterRole
 metadata: {name: sandbox-proxy}
 rules:
   - {apiGroups: [""], resources: [pods], verbs: [list]}
+  {{- if $fn.enabled }}
+  # Function mode: one list of the Deployments that carry proxcloud.io/function-host, across the fn-<project>
+  # namespaces. In mode shared that reads the spec of every Deployment of the platform cluster, as it reads every pod.
+  - {apiGroups: [apps], resources: [deployments], verbs: [list]}
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -43,6 +69,13 @@ spec:
   template:
     metadata:
       labels: {app: sandbox-proxy}
+      {{- if $fn.enabled }}
+      annotations:
+        checksum/function-config: {{ printf "%s\n%s\n%s" .Values.proxy.domain $fn.wakeURL $fn.portalCA | sha256sum }}
+        {{- with $fn.wakeTokenVersion }}
+        proxcloud.io/function-wake-token-version: {{ . | quote }}
+        {{- end }}
+      {{- end }}
     spec:
       serviceAccountName: sandbox-proxy
       nodeSelector: {{ toJson (required "system.nodeSelector must not be empty: the proxy must never land on a sandbox node" $sys.nodeSelector) }}
@@ -57,6 +90,9 @@ spec:
           image: {{ .Values.images.proxy }}
           env:
             - {name: SANDBOX_TLS_DIR, value: /etc/sandbox-proxy/tls}
+            {{- if $ca }}
+            - {name: SSL_CERT_FILE, value: /etc/sandbox-proxy/portal-ca/ca.crt}
+            {{- end }}
           envFrom:
             - configMapRef: {name: sandbox-proxy-config}
             - secretRef: {name: sandbox-proxy-wake, optional: true}
@@ -71,9 +107,16 @@ spec:
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           volumeMounts:
             - {name: tls, mountPath: /etc/sandbox-proxy/tls, readOnly: true}
+            {{- if $ca }}
+            - {name: portal-ca, mountPath: /etc/sandbox-proxy/portal-ca, readOnly: true}
+            {{- end }}
       volumes:
         - name: tls
           secret: {secretName: sandbox-proxy-tls}
+        {{- if $ca }}
+        - name: portal-ca
+          configMap: {name: sandbox-proxy-portal-ca}
+        {{- end }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
