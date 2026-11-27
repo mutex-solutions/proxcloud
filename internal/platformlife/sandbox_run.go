@@ -93,8 +93,12 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 	if err := x.check(ctx); err != nil {
 		return err
 	}
-	if err := x.portal.CreatePool(ctx, pve.SandboxPool, "ProxCloud sandbox machines (not tenant)"); err != nil {
-		return classify(CodeSandboxAccessFailed, err)
+	// Created only when the list does not name it: the stage passes here at every look, and Proxmox answers the create
+	// of a pool that exists with a 500 in the node's log. A list that fails proves nothing: the create is sent.
+	if pools, err := x.portal.ListPools(ctx); err != nil || !slices.ContainsFunc(pools, func(p pve.PoolInfo) bool { return p.PoolID == pve.SandboxPool }) {
+		if err := x.portal.CreatePool(ctx, pve.SandboxPool, "ProxCloud sandbox machines (not tenant)"); err != nil {
+			return classify(CodeSandboxAccessFailed, err)
+		}
 	}
 	// The record first: a Remove or an off after a run that failed further on knows what to take away.
 	sb := sp.Sandbox
@@ -123,7 +127,7 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 		return err
 	}
 	if want == SandboxShared {
-		// Written at every apply, so a row deleted by hand comes back.
+		// Looked at at every apply and written when it is missing, so a row deleted by hand comes back.
 		return asAccess(x.portal.SetSandboxPoolAccess(ctx, false))
 	}
 	if x.sec.Sandbox != nil {

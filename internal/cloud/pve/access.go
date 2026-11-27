@@ -159,33 +159,51 @@ func SandboxPoolPrivileges() PrivCheck {
 // SetSandboxPoolAccess writes (or with del removes) the one ACL row that lets the platform's own CAPMOX build machines
 // in SandboxPool: ProxCloudCAPI for the token CAPITokenID, on that pool alone. The user capmox@pve holds the role on
 // /pool already (ManagedACLs); a privilege-separated token holds the intersection, so this row is what opens the pool.
+//
+// A write reads the rows first and sends nothing when the row is there: a run passes here at every look of its stage,
+// and each PUT is a line in the node's log. A row deleted by hand is not listed, so it is written again. A list that
+// fails, or that does not show the row (a token that may not modify the path sees no row of it), proves nothing: the
+// write is sent.
 func (c *Client) SetSandboxPoolAccess(ctx context.Context, del bool) error {
-	return c.SetACL(ctx, "/pool/"+SandboxPool, roleCAPI, []string{CAPITokenID}, del)
+	path := "/pool/" + SandboxPool
+	if acls, err := c.ListACL(ctx); err == nil && !del {
+		for _, a := range acls {
+			if a.Path == path && a.RoleID == roleCAPI && a.Type == "token" && a.UGID == CAPITokenID && a.Propagate == 1 {
+				return nil
+			}
+		}
+	}
+	return c.SetACL(ctx, path, roleCAPI, []string{CAPITokenID}, del)
 }
 
-// RevokeClusterTokens deletes the tokens, each after its own ACL rows (DeleteAPIToken).
+// RevokeClusterTokens deletes the tokens the cluster has, each after its own ACL rows (DeleteAPIToken).
 func (c *Client) RevokeClusterTokens(ctx context.Context, clusterID string) error {
-	return errors.Join(c.DeleteAPIToken(ctx, capiUser, clusterID), c.RevokeClusterCSIToken(ctx, clusterID))
+	return errors.Join(c.revokeMinted(ctx, capiUser, clusterID), c.RevokeClusterCSIToken(ctx, clusterID))
 }
 
 // RevokeClusterCSIToken deletes the cluster's csi@pve!<id> token alone: a cluster moved onto the CSI gateway keeps its
-// CAPI token. A token already gone counts as revoked. No cluster made since the CSI gateway has one, and PVE answers
-// the delete of a token that was never made with a 500 in its log, so the user's tokens are listed first and nothing
-// is sent when the list answers without it. A list that fails proves nothing: the delete is sent as before.
+// CAPI token. A token already gone counts as revoked. No cluster made since the CSI gateway has one.
 func (c *Client) RevokeClusterCSIToken(ctx context.Context, clusterID string) error {
+	return c.revokeMinted(ctx, csiUser, clusterID)
+}
+
+// revokeMinted deletes the token user!name when it exists. PVE answers the delete of a token that was never made with
+// a 500 in the node's log (a mint revokes first, so every first mint wrote one), so the user's tokens are listed first
+// and nothing is sent when the list answers without it. A list that fails proves nothing: the delete is sent as before.
+func (c *Client) revokeMinted(ctx context.Context, user, name string) error {
 	var have []struct {
 		TokenID string `json:"tokenid"`
 	}
-	if err := c.get(ctx, "/access/users/"+url.PathEscape(csiUser)+"/token", nil, &have); err == nil {
+	if err := c.get(ctx, "/access/users/"+url.PathEscape(user)+"/token", nil, &have); err == nil {
 		minted := false
 		for _, t := range have {
-			minted = minted || t.TokenID == clusterID
+			minted = minted || t.TokenID == name
 		}
 		if !minted {
 			return nil
 		}
 	}
-	return c.DeleteAPIToken(ctx, csiUser, clusterID)
+	return c.DeleteAPIToken(ctx, user, name)
 }
 
 // PrivCheck is one ACL path and the privileges the token must hold there.

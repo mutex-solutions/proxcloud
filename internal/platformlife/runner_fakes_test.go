@@ -267,6 +267,7 @@ type fakePVE struct {
 	acl       []string
 	tokens    []string
 	refuseACL bool
+	failed    []string // the requests of the above that Proxmox answered with a 500
 	maxMem    int64 // every node's memory in bytes (0: the nodes report none)
 	// The sandbox fence's generations in the cluster firewall (security groups and IP sets by name, each with the
 	// sandbox comment), and the datacenter firewall's switch.
@@ -372,6 +373,34 @@ func (f *fakePVE) writeCount(prefix string) int {
 		}
 	}
 	return n
+}
+
+// pveDies answers a 500 as Proxmox does when a handler dies: the message is in the status line, where the client
+// reads it, and the body holds no data.
+func pveDies(w http.ResponseWriter, msg string) {
+	conn, buf, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer conn.Close()
+	body := `{"data":null}`
+	fmt.Fprintf(buf, "HTTP/1.1 500 %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", msg, len(body), body)
+	_ = buf.Flush()
+}
+
+// aclRows are the rows the ACL writes so far leave, each "<path> <role> <token>", in the order they were first
+// written. Called with the lock.
+func (f *fakePVE) aclRows() []string {
+	var rows []string
+	for _, w := range f.acl {
+		row, del, _ := strings.Cut(w, " delete=")
+		rows = slices.DeleteFunc(rows, func(r string) bool { return r == row })
+		if del == "0" {
+			rows = append(rows, row)
+		}
+	}
+	return rows
 }
 
 func (f *fakePVE) pooled() []int {
@@ -690,9 +719,22 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			f.iso = slices.DeleteFunc(f.iso, func(n string) bool { return n == name })
 		}
 		data(f.upid("imgdel", 0))
+	// The pool, the ACL and the tokens as Proxmox answers them: a create of a pool that exists and a delete of a token
+	// that does not are a 500 (and a line in the node's log, counted in failed), and the lists show what is there.
 	case path == "/pools" && r.Method == http.MethodPost:
+		if slices.Contains(f.pools, r.Form.Get("poolid")) {
+			f.failed = append(f.failed, "POST /pools")
+			pveDies(w, fmt.Sprintf("pool '%s' already exists", r.Form.Get("poolid")))
+			return
+		}
 		f.pools = append(f.pools, r.Form.Get("poolid"))
 		data(nil)
+	case path == "/pools":
+		list := []any{}
+		for _, p := range f.pools {
+			list = append(list, map[string]any{"poolid": p})
+		}
+		data(list)
 	case path == "/pools/"+pve.SandboxPool && r.Method == http.MethodDelete:
 		f.pools = slices.DeleteFunc(f.pools, func(p string) bool { return p == pve.SandboxPool })
 		data(nil)
@@ -712,7 +754,12 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 		f.acl = append(f.acl, r.Form.Get("path")+" "+r.Form.Get("roles")+" "+r.Form.Get("tokens")+" delete="+del)
 		data(nil)
 	case path == "/access/acl":
-		data([]any{})
+		rows := []any{}
+		for _, row := range f.aclRows() {
+			p := strings.Fields(row)
+			rows = append(rows, map[string]any{"path": p[0], "roleid": p[1], "type": "token", "ugid": p[2], "propagate": 1})
+		}
+		data(rows)
 	case strings.HasPrefix(path, "/access/users/") && strings.Contains(path, "/token"):
 		parts := strings.Split(strings.TrimPrefix(path, "/access/users/"), "/token")
 		id := parts[0] + "!" + strings.TrimPrefix(parts[1], "/")
@@ -721,10 +768,21 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			f.tokens = append(f.tokens, id)
 			data(map[string]any{"full-tokenid": id, "value": "minted-" + strings.TrimPrefix(parts[1], "/") + "-secret-0001"})
 		case http.MethodDelete:
+			if !slices.Contains(f.tokens, id) {
+				f.failed = append(f.failed, "DELETE "+path)
+				pveDies(w, fmt.Sprintf("no such token '%s' for user '%s'", strings.TrimPrefix(parts[1], "/"), parts[0]))
+				return
+			}
 			f.tokens = slices.DeleteFunc(f.tokens, func(t string) bool { return t == id })
 			data(nil)
 		default:
-			data([]any{})
+			list := []any{}
+			for _, t := range f.tokens {
+				if user, name, _ := strings.Cut(t, "!"); user == parts[0] {
+					list = append(list, map[string]any{"tokenid": name})
+				}
+			}
+			data(list)
 		}
 	default:
 		f.t.Errorf("fake PVE: no route %s %s", r.Method, path)
