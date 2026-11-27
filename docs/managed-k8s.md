@@ -883,6 +883,24 @@ call for its own cluster, and minting it again rotates it.
   dropped, the valid ones too: their addresses then went by the state the portal last stored. While a Service is
   being deleted, a state over the limit costs that controller a second request a turn: it cannot tell this `413`
   from that of an older portal (the controller's part, below), so it asks once more without those Services.
+- A cluster's calls are limited: 30 at once, then one more every 2 s (30 a minute for as long as it lasts). A call
+  over that is answered `429` `TooManyRequests` with a `Retry-After` header before its body is read: nothing of it
+  is stored, the cluster's balancer and every address stay as they are, and the next call that is taken carries the
+  whole state, so a change arrives late and is never lost. A controller's turn is one call, two when a certificate
+  is asked for or a refused state is asked once more without its Services that are being deleted (above), and a
+  quiet cluster sends one per 30 s: the limit is met by a cluster whose Services, Nodes or TLS
+  Secrets change about once a second for a minute (a Service that flaps), which costs a call a second since the
+  controller watches (chart 0.1.19). The controller is the one of v0.11.1, unchanged: it says the refusal in a
+  Warning Event `TooManyRequests` on each of its Services, with the seconds until the next call is taken, takes no
+  address from that turn and sends again at the next change, or after its interval (10 s) with none: the newest
+  state is the one that arrives, at most about 10 s after the last change. A certificate the portal asks for is the
+  second call of a turn, which a cluster at the limit has refused, and the controller sends one Secret at most once
+  a minute: a new or renewed certificate of such a cluster is served up to a minute after its changes stop, and the
+  old one until then. While the changes go on, about every second turn is refused, and a Service's Events go
+  between that Warning and `EnsuredLoadBalancer`. The API logs `lb gateway: rate limit` with the cluster and writes one audit event of the
+  cluster's project, each at most once per cluster a minute. The figures are fixed, with no setting. A refused
+  credential takes none of a cluster's calls. The count is kept per API process: two API replicas take twice as
+  many, and a restart starts every cluster at 30.
 - The answer is the state as it is: per Service `ready` with its address, `building`, or `refused`. Nothing is built in
   the request: the state is stored (`lbGatewayState`) and a converge starts when there is something to converge. The
   controller sends its state when it changes and, unchanged, every 30 s (a controller of v0.11.0 every 10 s, whether
@@ -1078,7 +1096,8 @@ second one of the `proxcloud-api` image: no image, tag or workflow of its own.
 - The answers become Events on the Service, one per change: `EnsuringLoadBalancer`, `EnsuredLoadBalancer` with the
   address, and a Warning with the gateway's reason (`UDPNotSupported`, `NoNodePort`, `TooManySourceRanges`,
   `IPFamilyNotSupported`, `QuotaExceeded`, `PublicNetworkUnavailable`, `TooLarge`, `ProtocolNotSupported`,
-  `InternalNotSupported`, `InvalidAnnotation`; for the whole request `ControllerTooOld`, `ProjectNotEnabled`).
+  `InternalNotSupported`, `InvalidAnnotation`; for the whole request `ControllerTooOld`, `ProjectNotEnabled`,
+  `TooManyRequests`).
   `spec.loadBalancerIP` was ignored in v0.11.0 with a Warning `LoadBalancerIPIgnored`; from v0.11.1 the portal
   reads it, gives the Service that address when the cluster keeps it, and raises the same Warning when it does not
   ("Keeping a Service's address" below). From v0.11.1 it also says the Events of
