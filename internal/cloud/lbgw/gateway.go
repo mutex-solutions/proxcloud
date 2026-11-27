@@ -76,6 +76,7 @@ const (
 	ReasonNotAWorker               = "NotAWorker"
 	ReasonControllerTooOld         = "ControllerTooOld"
 	ReasonProjectNotEnabled        = "ProjectNotEnabled"
+	ReasonTooManyRequests          = "TooManyRequests" // the cluster's calls are over rateBurst and rateEvery: the whole request, 429
 )
 
 // Limits of one state. The 45 KiB config cap (pve.LBMaxConfig) is the portal's check, on the rendered config.
@@ -233,7 +234,54 @@ type Handler struct {
 	mu      sync.Mutex
 	audited map[string]string    // cluster -> the refusals last audited
 	denied  map[string]time.Time // known cluster and reason -> when a refused credential was last audited
+	rates   map[string]rate      // cluster -> its bucket of calls (overLimit)
 	now     func() time.Time     // the tests' clock; nil = time.Now
+}
+
+// The limit on an authenticated cluster's calls: a bucket of rateBurst calls that gets one back every rateEvery, so
+// 30 a minute for as long as it likes. A controller's turn is at most two calls and a quiet cluster sends one per
+// 30 s; a Service that flaps makes about one a second since the controller watches (chart 0.1.19), each one database
+// work.
+const (
+	rateBurst     = 30
+	rateEvery     = 2 * time.Second
+	rateSaidEvery = time.Minute
+)
+
+// rate is one cluster's bucket: when it is full again (each call taken moves that rateEvery later, and a call is
+// taken while the bucket is under rateBurst calls from full), and when a refusal was last logged and audited.
+type rate struct{ full, said time.Time }
+
+// overLimit takes one call from the cluster's bucket. With none left it answers how long until the next call is
+// taken, and whether to say so: at most one log line and one audit event per cluster in rateSaidEvery, since a
+// controller over the limit comes back with every change. auditChange would not do: at the limit 200 and 429
+// alternate, and each refusal would be audited as a new one.
+// ponytail: the buckets are kept per API process, one entry per cluster that ever called: two replicas allow twice
+// the rate, and a restart fills every bucket. A counter in the database when that matters.
+func (h *Handler) overLimit(clusterID string) (wait time.Duration, say bool) {
+	now := time.Now()
+	if h.now != nil {
+		now = h.now()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.rates == nil {
+		h.rates = map[string]rate{}
+	}
+	rt := h.rates[clusterID]
+	if rt.full.Before(now) {
+		rt.full = now
+	}
+	if wait = rt.full.Sub(now) - (rateBurst-1)*rateEvery; wait <= 0 {
+		rt.full = rt.full.Add(rateEvery)
+		h.rates[clusterID] = rt
+		return 0, false
+	}
+	if say = now.Sub(rt.said) >= rateSaidEvery; say {
+		rt.said = now
+	}
+	h.rates[clusterID] = rt
+	return wait, say
 }
 
 // Why a credential was refused. The caller is told none of it: every refusal is the same 401.
@@ -281,6 +329,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.log().Warn("lb gateway: refused credential", "remote", r.RemoteAddr, "cluster", deny.cluster, "reason", deny.why)
 		h.auditDenied(deny, r.RemoteAddr)
 		writeRefusal(w, &Refusal{http.StatusUnauthorized, "", "authentication failure"})
+		return
+	}
+	// The cluster's own limit, before the body is read and before anything is written: a call over it costs one
+	// credential lookup. A refused credential never comes here, so nobody uses up another cluster's calls.
+	if wait, say := h.overLimit(cred.ID); wait > 0 {
+		secs := int((wait + time.Second - 1) / time.Second)
+		if say {
+			h.log().Warn("lb gateway: rate limit", "cluster", cred.ID, "remote", r.RemoteAddr, "retryAfterSeconds", secs)
+			h.audit(cred, "rate limit: more than "+strconv.Itoa(rateBurst)+" calls at once and one every "+rateEvery.String()+" after them",
+				map[string]any{"clusterId": cred.ID, "status": http.StatusTooManyRequests, "reason": ReasonTooManyRequests, "remote": r.RemoteAddr})
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeRefusal(w, &Refusal{http.StatusTooManyRequests, ReasonTooManyRequests,
+			fmt.Sprintf("This cluster sends load balancer changes faster than the portal takes them. Nothing changed; the next ones are taken in %d s", secs)})
 		return
 	}
 	// The protocol the controller names is kept with its last call, and written at once when it changes: a cluster

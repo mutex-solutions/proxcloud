@@ -37,6 +37,30 @@ and rules: [README.md](README.md#maintenance-rule).
 **Diagrams updated:** c2-containers.md (the chart's node; trust boundaries: the row of the portal's identity in a
 function namespace, Planned).
 
+## 2026-11-26: the load balancer gateway bounds a cluster's calls (#492, Known issues of v0.11.1)
+
+**What changed:** no new component, container, listener, route or relation, and no new wire field. One existing
+handler refuses one case more.
+
+- `internal/cloud/lbgw/gateway.go`: `Handler.ServeHTTP` asks `Handler.overLimit` once the credential is accepted
+  and before it writes the last call or reads the body. Each cluster id has 30 calls at once and one more every
+  2 s (`rateBurst`, `rateEvery`), kept in the handler's memory beside `audited` and `denied`. Over it the answer is
+  `429` with `Retry-After` and the reason `TooManyRequests` (`ReasonTooManyRequests`), with one log line and one
+  audit event per cluster a minute (`rateSaidEvery`). A refused credential never reaches it.
+- `internal/cloud/lbgw/gateway_test.go`: `TestClusterRateLimit`, on the tests' clock, with another cluster's call
+  in the same instant as its control.
+- `cmd/lb-controller/watch_test.go`: `TestStateRefusedAtTheGatewaysLimitStillLands`, the controller with its
+  watch against `lbgw.Handler`: the state the gateway refused is at the portal with no further change in the
+  cluster. No controller code changes.
+
+**Why:** the gateway took every `PUT /lb/v1/state`, and since the controller watches (chart 0.1.19) a Service that
+flaps makes about one a second, each one a credential lookup, a body of up to 64 KiB and a write of the state. One
+tenant could keep the portal's database busy for as long as it liked. The controller is not changed: the one of
+v0.11.1 reports any refusal as a Warning Event on each Service, takes no address from that turn and sends its
+whole state again later. The count is per API process, so two replicas take twice as many; a count in the
+database is the step after, if that shows.
+
+**Diagrams updated:** none (no element of C1 to C3 moves). [c4-code.md](c4-code.md): the `lbgw.Handler` row.
 ## 2026-11-26: a balancer's row says when the platform tries a waiting change again (review of v0.11.1-rc.3, #490)
 
 **What changed:** no component, container, relation or wire field. One sentence of `statusMessage` and one log line.

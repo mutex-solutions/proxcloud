@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -629,5 +630,71 @@ func TestPollsWithoutWatch(t *testing.T) {
 	}
 	if n := a.count(a.watches, "services") + a.count(a.watches, "nodes") + a.count(a.watches, "secrets"); n != 0 {
 		t.Fatalf("%d watches without -watch", n)
+	}
+}
+
+// behindGateway puts a portal behind the gateway itself: what lbgw.Handler lets through is what the portal gets.
+type behindGateway struct{ *portal }
+
+func (b behindGateway) LBClusterState(ctx context.Context, _ *lbgw.Credential, services []lbgw.Service, nodes []lbgw.Node, _ []lbgw.CertificateData, _ []lbgw.Gone) (*lbgw.Answer, error) {
+	return b.put(ctx, &lbgw.Request{Services: services, Nodes: nodes})
+}
+
+// The controller against the gateway itself (lbgw.Handler over TLS) and its limit per cluster, which refuses a call
+// and never a state. A Service that flaps is a new state at every turn, until the gateway answers one of them 429
+// TooManyRequests; then nothing changes in the cluster any more. The state that was refused is the newest, and it is
+// at the portal with no event to ask for the turn: a turn that failed comes again after -interval (run) and sends
+// the state the portal did not answer (turn), and a call that is refused takes none of the calls that come back.
+// The Service keeps its address all the while. Without the limit no state is refused, and a controller that took
+// the refusal for an answer would leave the portal one state behind until the resync, an hour here.
+func TestStateRefusedAtTheGatewaysLimitStillLands(t *testing.T) {
+	a, p := newAPIServer(t), &portal{}
+	ts := httptest.NewTLSServer(&lbgw.Handler{Reg: oneCluster{}, Portal: behindGateway{p}, Log: quiet()})
+	defer ts.Close()
+	g := &gateway{url: ts.URL, dir: gatewayDir(t, ts)}
+	var mu sync.Mutex
+	refused := map[int]bool{} // the node port of each state the gateway answered 429
+	c := &controller{watching: true, interval: 100 * time.Millisecond, resync: time.Hour, debounce: 5 * time.Millisecond}
+	c.api, c.log = a.client, quiet()
+	c.put = func(ctx context.Context, req *lbgw.Request) (*lbgw.Answer, error) {
+		ans, err := g.put(ctx, req)
+		var rf *lbgw.Refusal
+		if errors.As(err, &rf) && rf.Status == http.StatusTooManyRequests && rf.Reason == lbgw.ReasonTooManyRequests && len(req.Services) == 1 {
+			mu.Lock()
+			refused[req.Services[0].Ports[0].NodePort] = true
+			mu.Unlock()
+		}
+		return ans, err
+	}
+	wasRefused := func(nodePort int) bool { mu.Lock(); defer mu.Unlock(); return refused[nodePort] }
+	landed := func(nodePort int) bool {
+		l := p.last().Services
+		return len(l) == 1 && l[0].Ports[0].NodePort == nodePort
+	}
+	a.set("nodes//w1", readyNode("w1", "10.0.0.11"))
+	a.set("services/shop/web", map[string]any{"spec": lbSpec(Class, tcp(80, 30080))})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.run(ctx) }()
+	defer func() { cancel(); <-done }()
+	within(t, 2*time.Second, "the Service served", func() bool { return len(ingress(a.get("services/shop/web"))) == 1 })
+
+	newest := 0
+	for i := 0; newest == 0; i++ {
+		if i == 200 {
+			t.Fatalf("200 states in a row were taken, %d requests at the portal: the gateway has no limit per cluster", p.sent())
+		}
+		nodePort := 30100 + i
+		svc := a.get("services/shop/web")
+		svc["spec"] = lbSpec(Class, tcp(80, nodePort))
+		a.set("services/shop/web", svc)
+		within(t, 2*time.Second, "state "+strconv.Itoa(i)+" taken or refused", func() bool { return landed(nodePort) || wasRefused(nodePort) })
+		if !landed(nodePort) {
+			newest = nodePort
+		}
+	}
+	within(t, 10*time.Second, "the state the gateway refused at the portal, with no change after it", func() bool { return landed(newest) })
+	if got := ingress(a.get("services/shop/web")); len(got) != 1 {
+		t.Fatalf("the Service's address after the refusal: %v", got)
 	}
 }
