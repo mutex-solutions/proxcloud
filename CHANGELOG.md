@@ -189,6 +189,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     to a second instance once, when no connection was made and its body is unread; `concurrency` is not enforced
     per instance (the pick is random); custom hostnames, public endpoints with their rate limit, and the wait of a
     GPU function for its GPU are not in this proxy.
+- **Customer console: a Functions page, not reachable yet** (`web/client`, first of the v0.13.0 serverless functions
+  work). Platform → Functions lists a project's functions and creates one from a container image (port, CPU, memory,
+  environment, secrets, a registry login, idle time and instances), shows its URL with a copy button, its
+  deployments with roll back, suspend and resume, and its logs. Nothing reaches it on this release: the menu entry
+  and the route both need a `functions` value on the project's sandbox service, which no backend sets, and a
+  location without it answers "Functions is not available in this project". Builds from a repository, public URLs,
+  hostnames of one's own and GPUs are not on the page. What the page states:
+  - a new function runs **one instance at most** unless its owner raises the maximum, because whoever reaches the
+    address keeps a function awake and, under load, at its maximum, and the owner pays;
+  - the URL is internal and has **no login in front of it**, its six characters are not a secret, and it is served
+    with the platform's own certificate;
+  - what is billed (each running period rounded up to whole minutes, the idle wait included; nothing while idle or
+    suspended, and nothing for a start that never became ready), that a tag can move and a rollback deploys the
+    digest that ran, and that a cookie must never be set for the shared parent domain;
+  - a function can print its secrets, every member who can view the project's resources reads its logs, and on
+    machines shared with other projects a break-out of the sandbox runtime could read the secrets of the functions
+    running there.
+  A secret value and a registry password are typed into a password field, sent once and never rendered again: they
+  are kept only in the open dialog, never as the variables of a mutation, so neither the query cache nor the
+  mutation cache nor the browser's storage holds them after a save (`e2e/functions.spec.ts` reads all three). The
+  form refuses a name that could be a sandbox host (one starting with a digit) and an image whose registry is an IP
+  address or `localhost`. Guide `guides/functions` and API reference `api/functions` in the console's docs. Written
+  against the mock API: no route of it exists on the server yet.
 
 ### Changed
 
