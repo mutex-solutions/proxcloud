@@ -427,6 +427,15 @@ func sandboxRoom(cores int) string {
 	return fmt.Sprintf(" By CPU each machine holds about %d sandboxes of one vCPU.", cores-1)
 }
 
+// sandboxCSIRoll is what a plan row says of the storage plugin when the shared group comes or goes. The node plugin's
+// DaemonSet tolerates every taint, so only its own node affinity keeps it off the sandbox machines, and the affinity is
+// written with the group alone (render.go, workload/proxmox-csi): an installation without sandboxes renders the
+// component as every release before did. Adding or removing the group therefore changes the DaemonSet's pod template,
+// and Kubernetes replaces the plugin's pod on every other node, one node at a time (16 seconds for four nodes on the
+// lab, both ways). Separate changes nothing of the platform cluster's plugin.
+const sandboxCSIRoll = "its DaemonSet changes for that, so Kubernetes replaces the plugin's pod on every other machine of " + ClusterName +
+	" once, one machine at a time (some seconds each): a volume that is mounted stays mounted, and a pod that mounts or unmounts one in those seconds waits for the plugin."
+
 // sandboxChanges are the plan rows of spec.sandbox on an installed platform, against what a run built: adding lists
 // the machines, the pool and the access a run writes on Proxmox, and what is deployed; off lists what is deleted. A
 // placement that differs from the built one is refused (the save refuses it too: sandboxFixed).
@@ -449,13 +458,15 @@ func (in *Installation) sandboxChanges() []PlanChange {
 		return nil
 	case want == "":
 		what := "the node group sandbox of " + ClusterName + " and its machines, the sandbox chart's Application"
+		storage := " The proxmox-csi node plugin no longer has to keep off the group: " + sandboxCSIRoll
 		if built.Placement == SandboxSeparate {
 			what = "the cluster " + SandboxClusterName + " with its machines and its control plane on the kamaji group"
+			storage = ""
 		}
 		row, impact := access(built.Placement)
 		return []PlanChange{
 			{Cluster: ClusterName, Name: "sandbox", From: built.Placement, To: SandboxOff, Class: ClassMachines, Stage: stageCluster,
-				Impact: "Sandboxes are switched off: the run deletes " + what + ". Every running sandbox ends. Disable the sandbox provider and let its sandboxes end before the apply."},
+				Impact: "Sandboxes are switched off: the run deletes " + what + ". Every running sandbox ends. Disable the sandbox provider and let its sandboxes end before the apply." + storage},
 			site("sandbox-access", "deleted: "+row, impact),
 			site("sandbox-pool", "deleted: pool "+pve.SandboxPool, "Deleted once it holds no VM."),
 		}
@@ -470,7 +481,7 @@ func (in *Installation) sandboxChanges() []PlanChange {
 		machines = append(machines, fmt.Sprintf("%s: %d x %d cores, %s, %d GiB disk on %s", g.Name, g.Count, g.Cores, gib(g.MemoryMiB), g.DiskGiB, strings.Join(g.Nodes, ", ")))
 	}
 	impact := "A node group of " + ClusterName + " in pool " + pve.SandboxPool + ", with addresses from " + sb.NodeRange + ". Only gVisor sandboxes run on it; the sandbox chart " +
-		"(Application " + ClusterName + "-sandbox) installs runsc there and puts sandbox-proxy on the system group at " + sb.ProxyAddress + ". The proxmox-csi node plugin keeps off these machines. " +
+		"(Application " + ClusterName + "-sandbox) installs runsc there and puts sandbox-proxy on the system group at " + sb.ProxyAddress + ". The proxmox-csi node plugin keeps off these machines: " + sandboxCSIRoll + " " +
 		"Code that escapes a sandbox is root on a machine of the cluster that runs every tenant's control plane and database: docs/managed-services.md says what that means."
 	if want == SandboxSeparate {
 		impact = "The cluster " + SandboxClusterName + ", a cluster of its own: its control plane runs as pods on the kamaji group (about 0.6 GiB), its machines are in pool " + pve.SandboxPool +

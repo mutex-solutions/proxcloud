@@ -273,3 +273,61 @@ func TestSandboxOffKeepsADefinitionWithObjects(t *testing.T) {
 		t.Fatalf("definitions left %v; the object %v\n%s", got, p.wl.obj(sandboxOneCRD), p.logs)
 	}
 }
+
+// Why the proxmox-csi node plugin's pods are replaced on the other machines when the shared group comes or goes (the
+// lab: v0120-reports/drill-D2.md Z2-a and drill-D3.md Z3-C, the Application's spec changed at 21:53:01 and back at
+// 22:34:03 in v0120lab/z2/b/changes-and-ctd.txt and z3/c/watch-changes-head.txt): the group changes the values of the
+// platform's storage component, by the node affinity alone, which is in the DaemonSet's pod template. Separate changes
+// nothing of it. It cannot go without changing what an installation without sandboxes renders, so the plan rows say it
+// where it happens, and only there.
+func TestSharedGroupReplacesTheStoragePluginsPodsAndThePlanSaysSo(t *testing.T) {
+	b := sandboxBOM(t)
+	csi := func(sb *SandboxSpec) map[string]any {
+		spec, in := validInstallation(t).Spec, renderInput()
+		if sb != nil {
+			spec.Sandbox, in = sb, sandboxRender(sb)
+		}
+		for _, a := range renderAll(t, b.For(spec), in).apps {
+			if str(a, "metadata", "name") == "pc-platform-proxmox-csi" {
+				return dig(a, "spec", "source", "helm", "valuesObject").(map[string]any)
+			}
+		}
+		t.Fatal("no Application of proxmox-csi")
+		return nil
+	}
+	none, shared, separate := csi(nil), csi(sharedSandbox()), csi(separateSandbox())
+	if !sameJSON(none, separate) || sameJSON(none, shared) {
+		t.Fatal("the storage component's values: separate must leave them, shared must change them")
+	}
+	delete(shared["node"].(map[string]any), "affinity")
+	if !sameJSON(none, shared) {
+		t.Fatal("the shared group changes more of the storage component than the node plugin's affinity")
+	}
+
+	in := validInstallation(t)
+	in.Status.BOM, in.Status.Clusters = &BOMRef{Release: b.Release, SHA256: b.SHA256}, []ClusterStatus{{Name: ClusterName}}
+	impact := func() string {
+		p, err := PlanFor(in, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range p.Changes {
+			if c.Name == "sandbox" {
+				return c.Impact
+			}
+		}
+		t.Fatal("no row sandbox")
+		return ""
+	}
+	const says = "replaces the plugin's pod on every other machine"
+	now := in.CreatedAt
+	for placement, sb := range map[string]*SandboxSpec{SandboxShared: sharedSandbox(), SandboxSeparate: separateSandbox()} {
+		in.Spec.Sandbox, in.Status.Sandbox = sb, nil
+		on := impact()
+		in.Spec.Sandbox, in.Status.Sandbox = &SandboxSpec{Placement: SandboxOff}, &SandboxStatus{Placement: placement, BuiltAt: &now}
+		off := impact()
+		if want := placement == SandboxShared; strings.Contains(on, says) != want || strings.Contains(off, says) != want {
+			t.Errorf("%s: the plan must name the plugin's pods being replaced only where they are: on %q, off %q", placement, on, off)
+		}
+	}
+}

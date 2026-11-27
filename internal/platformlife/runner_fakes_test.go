@@ -268,7 +268,7 @@ type fakePVE struct {
 	tokens    []string
 	refuseACL bool
 	failed    []string // the requests of the above that Proxmox answered with a 500
-	maxMem    int64 // every node's memory in bytes (0: the nodes report none)
+	maxMem    int64    // every node's memory in bytes (0: the nodes report none)
 	// The sandbox fence's generations in the cluster firewall (security groups and IP sets by name, each with the
 	// sandbox comment), and the datacenter firewall's switch.
 	fwGroups, fwSets []string
