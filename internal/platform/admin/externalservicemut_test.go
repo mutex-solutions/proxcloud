@@ -3,11 +3,14 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -196,34 +199,94 @@ func TestSandboxProviderGoLive(t *testing.T) {
 	}
 }
 
-// Functions cannot be switched on: a sandbox provider whose functions block is enabled is refused at the save, live
-// or DISABLED, with every release gate holding, and before any write. The rest of the block is stored as written.
-func TestSandboxProviderFunctionsCannotBeEnabled(t *testing.T) {
+// The functions block of a sandbox provider is switched on only through its gate: the job scheduler runs, the portal
+// has a sealing key, a sandbox-proxy of this provider reports to this portal, and billing is not the external
+// provider. Each row that does not hold refuses the save by name, live or DISABLED, with every release gate holding
+// and before any write; the missing price rule warns and refuses nothing. A handler nothing was wired into refuses.
+// The rest of the block is stored as written, and off is always accepted.
+func TestSandboxProviderFunctionGate(t *testing.T) {
 	gates := []sandbox.Gate{{Name: "fence", OK: true}}
-	h := &Handler{sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate { return gates }}
+	reports, readErr := 1, error(nil)
+	open := func() *Handler {
+		return &Handler{jobsScheduler: true, sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate { return gates },
+			functionGate: FunctionGate{SealingKey: true, ProxyWindow: 90 * time.Second, Proxies: func(_ context.Context, id string) (int, error) {
+				if id != "s1" {
+					t.Errorf("the reports of provider %q were asked for, want s1", id)
+				}
+				return reports, readErr
+			}}}
+	}
 	ctx := httpx.WithRC(t.Context(), &httpx.RequestContext{SigV4KeyID: "pk-test"})
 	doc := func(status string, functions any) pgdoc.M {
 		return pgdoc.M{"_id": "s1", "status": status, "secret": map[string]any{"kubeconfig": "x"},
 			"config": map[string]any{"provider": "sandbox", "sandbox": map[string]any{"domain": "sbx.example.org", "functions": functions,
 				"templates": map[string]any{"python": map[string]any{"image": "python:3.12-slim"}}}}}
 	}
+	on := map[string]any{"enabled": true, "maxInstances": float64(3)}
 	for _, status := range []string{"DISABLED", "PUBLIC", "PRIVATE"} {
-		herr := h.checkSandboxGoLive(ctx, doc(status, map[string]any{"enabled": true, "maxInstances": float64(3)}))
-		if herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "Functions cannot be enabled") {
-			t.Errorf("%s with functions enabled: %#v, want 409", status, herr)
+		if herr := open().checkSandboxGoLive(ctx, doc(status, on)); herr != nil {
+			t.Errorf("%s with every function row holding: %#v, want it stored", status, herr)
 		}
-		for name, block := range map[string]any{"off": map[string]any{"enabled": false, "maxInstances": float64(3), "projectQuota": map[string]any{"vcpus": float64(4)}}, "absent": nil, "not a switch": map[string]any{"enabled": "true"}} {
-			if herr := h.checkSandboxGoLive(ctx, doc(status, block)); herr != nil {
-				t.Errorf("%s with the functions block %s: %#v, want it stored", status, name, herr)
+		for name, broken := range map[string]func(h *Handler){
+			gateFunctionScheduler: func(h *Handler) { h.jobsScheduler = false },
+			gateFunctionKey:       func(h *Handler) { h.functionGate.SealingKey = false },
+			gateFunctionBilling:   func(h *Handler) { h.functionGate.ExternalBilling = true },
+			gateFunctionProxy: func(h *Handler) {
+				h.functionGate.Proxies = func(context.Context, string) (int, error) { return 0, nil }
+			},
+			gateFunctionProxy + " (unread)": func(h *Handler) {
+				h.functionGate.Proxies = func(context.Context, string) (int, error) { return 3, errors.New("db down") }
+			},
+			gateFunctionProxy + " (not wired)": func(h *Handler) { h.functionGate.Proxies = nil },
+		} {
+			h := open()
+			broken(h)
+			row, _, _ := strings.Cut(name, " ")
+			herr := h.checkSandboxGoLive(ctx, doc(status, on))
+			if herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, row+": ") {
+				t.Errorf("%s without %s: %#v, want 409 naming the row", status, name, herr)
+				continue
+			}
+			// Only the row that does not hold is named.
+			for _, other := range []string{gateFunctionScheduler, gateFunctionKey, gateFunctionBilling, gateFunctionProxy, gateFunctionPrice} {
+				if other != row && strings.Contains(herr.Msg, other+": ") {
+					t.Errorf("%s without %s: the refusal also names %s: %s", status, name, other, herr.Msg)
+				}
+			}
+			// Off is never asked, whatever does not hold.
+			for name, block := range map[string]any{"off": map[string]any{"enabled": false, "maxInstances": float64(3), "projectQuota": map[string]any{"vcpus": float64(4)}}, "absent": nil, "not a switch": map[string]any{"enabled": "true"}} {
+				if herr := h.checkSandboxGoLive(ctx, doc(status, block)); herr != nil {
+					t.Errorf("%s with the functions block %s: %#v, want it stored", status, name, herr)
+				}
 			}
 		}
+		// Nothing wired: no row holds.
+		herr := (&Handler{sandboxGates: open().sandboxGates}).checkSandboxGoLive(ctx, doc(status, on))
+		if herr == nil || herr.Status != http.StatusConflict {
+			t.Errorf("%s on a handler without the gate's inputs: %#v, want 409", status, herr)
+		}
+	}
+	// The rows as the release check lists them: five, the price one a warning that is no reason to refuse.
+	rows := open().functionGates(ctx, &externalservice.ExternalService{ID: "s1"})
+	var names []string
+	for _, g := range rows {
+		names = append(names, g.Name)
+		if g.OK != (g.Name != gateFunctionPrice) || g.Detail == "" {
+			t.Errorf("row %+v: every row but the price holds here, and says why", g)
+		}
+	}
+	if want := []string{gateFunctionScheduler, gateFunctionKey, gateFunctionProxy, gateFunctionBilling, gateFunctionPrice}; !slices.Equal(names, want) {
+		t.Errorf("rows %v, want %v", names, want)
 	}
 	// Through the route: nothing is written (the handler has no repository to write to).
 	body := `{"name":"sbx","status":"DISABLED","config":{"provider":"sandbox","sandbox":{"domain":"sbx.example.org","functions":{"enabled":true},"templates":{"python":{"image":"python:3.12-slim"}}}},"secret":{"kubeconfig":"x"}}`
 	rec := httptest.NewRecorder()
+	h := open()
+	h.jobsScheduler = false
+	h.functionGate.Proxies = func(context.Context, string) (int, error) { return 1, nil } // a new provider has a new id
 	h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service", strings.NewReader(body)).WithContext(ctx))
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Functions cannot be enabled") {
-		t.Fatalf("create with functions enabled: %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Functions cannot be on") {
+		t.Fatalf("create with functions enabled and the scheduler off: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

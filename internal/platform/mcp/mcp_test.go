@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -140,4 +141,81 @@ func TestResourceMetadata(t *testing.T) {
 			t.Fatalf("metadata missing %q: %s", want, body)
 		}
 	}
+}
+
+// A tool call leaves no argument value in any log line: not when it is refused before it is sent, and not when the
+// route behind it fails. Secrets and registry passwords travel as arguments.
+func TestToolCallLogsNoArgumentValue(t *testing.T) {
+	const mark = "s3cr3t-marker-value"
+	var buf lockedLog
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	old := slog.Default()
+	slog.SetDefault(log)
+	defer slog.SetDefault(old)
+
+	h := New(log, nil, "https://auth.example.com/realms/clients", "https://auth.example.com/realms/master", "https://api.example.com")
+	root := chi.NewRouter()
+	root.HandleFunc("/*", func(w http.ResponseWriter, _ *http.Request) {
+		httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, "internal error")
+	})
+	h.SetRoot(root)
+	ctx := context.WithValue(context.Background(), credKey{}, cred{jwt: "x.y.z"})
+	tool := func(name string) toolDef {
+		for _, d := range clientTools {
+			if d.name == name {
+				return d
+			}
+		}
+		t.Fatalf("no tool %q", name)
+		return toolDef{}
+	}
+	secret := map[string]any{"TOKEN": mark}
+	registry := map[string]any{"username": "u", "password": mark}
+	calls := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"create_function", map[string]any{"id": "p1", "name": "api", "image": "nginx:1", "secrets": secret, "registryAuth": registry}},
+		{"create_function", map[string]any{"id": "p1", "secrets": secret}},                                                                 // refused: no name
+		{"update_function", map[string]any{"id": "p1", "fn": "fn-0123456789abcdef", "registryAuth": registry, "removeRegistryAuth": true}}, // refused: both
+		{"function_action", map[string]any{"id": "p1", "fn": "fn-0123456789abcdef", "action": mark}},                                       // refused: no such action
+	}
+	for _, c := range calls {
+		status, body, err := h.dispatch(ctx, tool(c.tool), c.args)
+		if err == nil && status != http.StatusInternalServerError {
+			t.Errorf("%s: status %d", c.tool, status)
+		}
+		for what, text := range map[string]string{"answer": string(body), "error": errText(err)} {
+			if strings.Contains(text, mark) {
+				t.Errorf("%s: the %s carries an argument value: %s", c.tool, what, text)
+			}
+		}
+	}
+	if strings.Contains(buf.String(), mark) {
+		t.Errorf("a log line carries an argument value:\n%s", buf.String())
+	}
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+type lockedLog struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }

@@ -347,6 +347,8 @@ func run() error {
 	if err := projectH.EnsureFunctionIndexes(context.Background()); err != nil {
 		return fmt.Errorf("function stores: %w", err)
 	}
+	// Without the scheduler nothing stops an idle function and nothing charges a running one: no function usage starts.
+	projectH.SetFunctionScheduler(cfg.Jobs.SchedulerEnabled)
 	// Custom templates and their builds (the E2B v3 template API).
 	projectH.SetSandboxTemplates(pg.C("sandbox_templates"))
 	if err := registrypins.EnsureSchema(context.Background(), pg); err != nil {
@@ -698,6 +700,10 @@ func run() error {
 	// Sandbox release gates (docs/managed-sandbox.md §3): read through the Proxmox provider that fences the workers.
 	projectH.SetSandboxGates(syncJob.SandboxReleaseGates)
 	adminH.SetSandboxGates(syncJob.SandboxReleaseGates)
+	// What lets an operator switch a sandbox provider's functions block on, beside the scheduler: a sealing key, a
+	// sandbox-proxy that reports to this portal with the provider's token, and billing that is not external.
+	adminH.SetFunctionGate(admin.FunctionGate{SealingKey: projectH.FunctionSealingKey(), ExternalBilling: cfg.Billing.Provider == billingprovider.External,
+		Proxies: projectH.FunctionProxiesReporting, ProxyWindow: project.FunctionProxyWindow})
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	if cfg.Mail.SavingsExpiredOutboxEnabled {
@@ -1334,6 +1340,14 @@ func run() error {
 				projectH.AutoPauseSandboxes(r.Context())
 				jobResult(w, map[string]any{"ran": "sandbox-autopause"}, nil)
 			},
+			"run-function-reaper": func(w http.ResponseWriter, r *http.Request) {
+				projectH.ReapFunctions(r.Context())
+				jobResult(w, map[string]any{"ran": "function-reaper"}, nil)
+			},
+			"run-function-deploy-sync": func(w http.ResponseWriter, r *http.Request) {
+				projectH.SyncFunctionDeployments(r.Context())
+				jobResult(w, map[string]any{"ran": "function-deploy-sync"}, nil)
+			},
 			"run-registry-prune": func(w http.ResponseWriter, r *http.Request) {
 				// ?grace=10m lowers the age floor (default 24h) for a drill; the scheduled run always keeps 24h.
 				grace := project.RegistryPruneGrace
@@ -1682,6 +1696,11 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 		{Name: "sandboxRotation", Spec: "0 */5 * * * *", AtMostFor: 4 * time.Minute, AtLeastFor: time.Minute, Fn: sandboxes.RunSandboxRotation},
 		// E2B autoPause: sandboxes past their end are paused (filesystem snapshot), not deleted.
 		{Name: "sandboxAutoPause", Spec: scheduler.SandboxAutoPauseSpec, AtMostFor: 30 * time.Minute, AtLeastFor: 20 * time.Second, Fn: sandboxes.AutoPauseSandboxes},
+		// Functions: idle ones down to their floor, and every function of a provider that no longer offers them to
+		// zero. The lock is held 10 s at least: under the 15 s period, so no fire is skipped behind the last one.
+		{Name: "functionReaper", Spec: scheduler.FunctionReaperSpec, AtMostFor: 5 * time.Minute, AtLeastFor: 10 * time.Second, Fn: sandboxes.ReapFunctions},
+		// Functions: rollouts whose poller died, records against rows and the cluster, starts that serve nothing.
+		{Name: "functionDeploySync", Spec: scheduler.FunctionDeploySyncSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 20 * time.Second, Fn: sandboxes.SyncFunctionDeployments},
 		// Unreferenced template images (off unless a sandbox provider sets registryPrune).
 		{Name: "sandboxRegistryPrune", Spec: scheduler.SandboxRegistryPruneSpec, AtMostFor: 30 * time.Minute, AtLeastFor: 5 * time.Minute, Fn: sandboxes.PruneSandboxRegistry},
 		{Name: "pveTaskPoll", Spec: scheduler.PVETaskPollSpec, AtMostFor: time.Minute, AtLeastFor: 10 * time.Second, Fn: func(ctx context.Context) {

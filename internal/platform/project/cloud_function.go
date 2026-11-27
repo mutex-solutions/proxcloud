@@ -29,8 +29,9 @@ package project
 // Where functions are off (the provider's block is off, or the provider is disabled) reads and DELETE stay open, so
 // what is left can be seen and removed; everything else answers 403.
 //
-// The deploy flow is in cloud_function_deploy.go; the scale, the cloud row and teardown are in
-// cloud_function_scale.go.
+// The deploy flow and the job that keeps record, row and cluster equal are in cloud_function_deploy.go; the scale,
+// the wake and activity routes of sandbox-proxy, the reaper, the cloud row and teardown are in
+// cloud_function_scale.go; what the portal knows of the proxy's replicas is in cloud_function_proxies.go.
 
 import (
 	"cmp"
@@ -68,10 +69,19 @@ func (h *Handler) SetFunctions(f func(es *externalservice.ExternalService) (*fun
 	h.functionFor, h.fns, h.fnDeps, h.fnHosts, h.fnKeys = f, fns, deployments, hosts, keys
 }
 
+// SetFunctionScheduler tells the handler whether the job scheduler runs (PROXCLOUD_JOBS_SCHEDULER_ENABLED). The
+// reaper that stops an idle function, the sync that ends a start that serves nothing and the minute charge are all
+// scheduler jobs: while it is off every start of usage is refused (functionUsageGate), a wake included. Unset = off.
+func (h *Handler) SetFunctionScheduler(on bool) { h.fnScheduler = on }
+
+// FunctionSealingKey reports whether the portal can seal function secrets (an encryption key is configured): one of
+// the rows of the gate that lets an operator switch functions on.
+func (h *Handler) FunctionSealingKey() bool { return h.fnKeys != nil }
+
 // EnsureFunctionIndexes creates the collections and their indexes (startup; idempotent). The unique ones are the
 // backstop behind the create checks: a name is unique in its project and a host is never handed to two functions.
 func (h *Handler) EnsureFunctionIndexes(ctx context.Context) error {
-	for _, s := range []*pgdoc.Store{h.fns, h.fnDeps, h.fnHosts} {
+	for _, s := range []*pgdoc.Store{h.fns, h.fnDeps, h.fnHosts, h.fnProxies()} {
 		if err := s.Ensure(ctx); err != nil {
 			return err
 		}
@@ -124,8 +134,21 @@ type functionDoc struct {
 	RunningSince  *time.Time `json:"runningSince,omitempty"`
 	StoppedAt     *time.Time `json:"stoppedAt,omitempty"`
 	Ended         []fnEnded  `json:"endedIntervals,omitempty"`
-	CreatedAt     *time.Time `json:"createdAt,omitempty"`
-	UpdatedAt     *time.Time `json:"updatedAt,omitempty"`
+	// ReadyAt is when the running interval was first seen with a ready instance (the rollout poller and the deploy
+	// sync stamp it; a start removes it). Until then nobody knows whether the start serves anything: billing holds
+	// the interval back, and one that is ended for never becoming ready is void (stopFunction). UnreadyAt is the
+	// deploy sync's first sighting of the running interval without a ready instance: the next run ends it.
+	ReadyAt   *time.Time `json:"readyAt,omitempty"`
+	UnreadyAt *time.Time `json:"unreadyAt,omitempty"`
+	// ScaledAt is the last change of the count by the load (rescaleFunction), BusyAt the last time the load asked
+	// for every instance the function has, LoadAt the last time its load was looked at, and UnplacedAt the last
+	// sighting of instances the cluster has not placed (trimUnplaced). All four belong to scaling on load.
+	ScaledAt   *time.Time `json:"scaledAt,omitempty"`
+	BusyAt     *time.Time `json:"busyAt,omitempty"`
+	LoadAt     *time.Time `json:"loadAt,omitempty"`
+	UnplacedAt *time.Time `json:"unplacedAt,omitempty"`
+	CreatedAt  *time.Time `json:"createdAt,omitempty"`
+	UpdatedAt  *time.Time `json:"updatedAt,omitempty"`
 }
 
 // fnEnded is a running interval that has ended, and the instance count and size it ran with last: what it is billed
@@ -546,9 +569,15 @@ var errFunctionBusy = errors.New("a deployment of this function is already in pr
 var errFunctionsUnavailable = httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable,
 	"Functions are not available on this location right now. Try again later or contact your platform operator.")
 
-// functionUsageGate is what everything that adds usage passes (create, a deployment, a rollback, a resume): the
-// project can be billed (sandboxBillingGate) and the location's release gates hold, as for a sandbox.
+// functionUsageGate is what everything that adds usage passes (create, a deployment, a rollback, a resume, a wake):
+// the job scheduler runs (SetFunctionScheduler), the project can be billed (sandboxBillingGate) and the location's
+// release gates hold, as for a sandbox.
 func (h *Handler) functionUsageGate(ctx context.Context, c *fnCaller) error {
+	// Without the job scheduler nothing stops an idle function and nothing charges a running one: no usage starts.
+	if !h.fnScheduler {
+		slog.Error("function: the job scheduler is off, usage refused", "service", c.es.ID, "project", c.proj.ID)
+		return errFunctionsUnavailable
+	}
 	if err := h.sandboxBillingGate(ctx, c.proj); err != nil {
 		return err
 	}

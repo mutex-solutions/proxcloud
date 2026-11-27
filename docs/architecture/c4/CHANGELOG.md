@@ -4,6 +4,60 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-27: functions scale to zero and wake, and two jobs keep record and cluster equal (v0.13.0, cannot be switched on)
+
+**What changed**
+
+- Component C3e **Functions, portal side** grows the half that acts by itself, in
+  `internal/platform/project/cloud_function_scale.go` (the wake and activity routes, scaling on load, the reaper),
+  `cloud_function_deploy.go` (the deploy sync) and the new `cloud_function_proxies.go` (what the portal knows of
+  the proxy's replicas, and the token lookup). One function, `scale`, stays the only writer of a function's
+  instance count; the reaper, the wake, the load and the sync all go through it.
+- **A new relation: `sandbox-proxy` calls the portal** on `POST /api/v1/internal/functions/{id}/wake` and
+  `POST /api/v1/internal/functions/activity`, in the main router beside the sandbox wake route and public in
+  `pkg/auth` (no user credential). The trust boundary row "sandbox-proxy to the function routes" moves from
+  Planned to Implemented on the portal's side: the bearer is the provider's `secret.functionWakeToken`
+  (`sandbox.Config.FunctionWakeToken`, now read by `ExternalService.SandboxConfig`), compared in constant time
+  against every provider before any lookup, and never `proxyWakeToken`. Nothing mints that token yet.
+- **Two scheduler jobs**: `functionReaper` (every 15 s, lock held 10 s at least) and `functionDeploySync` (every
+  minute at second 20, between the sandbox read at 10 and the charge at 30), with the debug triggers
+  `run-function-reaper` and `run-function-deploy-sync`.
+- **New data**: collection `function_proxies` (the last complete report of each proxy replica per provider, kept
+  90 seconds, and the reaper's own last run); on a function record `readyAt` and `unreadyAt` per running interval
+  and the four marks of scaling on load; `readyAt` on the `FUNCTION` cloud row. The deploy sync stamps the
+  provider's `meterState.lastOkAt` after each good list of its Deployments.
+- **The gate replaces the outright refusal** in `internal/platform/admin/sandboxprovider.go`
+  (`checkFunctionsEnabled`, `functionGates`): the functions block is accepted while the job scheduler is on, a
+  sealing key is configured, a proxy of the provider reported within 90 seconds (asked at the switch) and billing
+  is not external. The release check lists the rows where the function side exists.
+- `function.Service.Namespaces` lists a provider's function namespaces, for the sweep of the ones nothing on
+  record needs.
+- The MCP tenant toolset gains nine function tools (`internal/platform/mcp/tools_client.go`); a tool parameter
+  can now send a body field as null (`param.nulls`), which is how stored registry credentials are removed.
+- No new container, no new external system, no new network path from the portal: the proxy's calls come in on
+  the portal's existing listener.
+
+**Why**
+
+- Without a reaper a function never stops and without a wake a stopped one never starts: this is what makes a
+  function a function. It is also where the money is decided, since a function is billed for the time it is
+  recorded as running. Hence the rules that have no counterpart for a VM: a start that never had a ready instance
+  is no running interval at all; a stop is recorded even when the cluster does not take it; a reaper that was
+  away ends an interval when its idle time ran out, not when it came back; after "off" nothing runs within one
+  period.
+- The proxy holds the request and the portal decides, so the billing check, suspension and the row that is
+  billed have one writer. That needs a path from the proxy to the portal, which no platform had: the gate asks
+  for a report that arrived over that path, with the provider's token, before functions may be offered. It is
+  evidence that the wake works at this site, not an assumption about its routes.
+- A token of its own because the sandbox wake token being empty is one of the two refusals of autoResume, a
+  feature that stays held: filling it for functions would open that route to the function bearer.
+- The sync applies a missing Deployment again from the record because a sandbox cluster of its own is rebuilt on
+  a Kubernetes or image move: the functions come back from the portal's records, and nothing else would notice
+  they are gone (the proxy only knows a function by its Deployment).
+
+**Diagrams updated:** `c2-containers.md` (the trust boundary row), `c3-components.md` (C3e: the row "Functions,
+portal side"). The relation sandbox-proxy to portal exists in the diagrams since the sandbox wake route; no
+element moves.
 ## 2026-11-27: a sandbox machine's own cluster passes the cluster firewall, and the run writes the isolation rules (#515, drill of v0.12.0-rc.1)
 
 **What changed:** no new component, container, listener or route. One rule kind more in the managed rule set of the

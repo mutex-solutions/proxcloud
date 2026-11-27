@@ -418,9 +418,9 @@ Functions: `/api/v1/project/{id}/functions` (list, create), `/functions/{fn}` (g
 `/functions/{fn}/deployments`, `/functions/{fn}/rollback` (`{deploymentId, registryAuth?}`),
 `/functions/{fn}/action` (`{action: suspend|resume}`) and `/functions/{fn}/logs?tail=`; reads need
 `project:cloud_resource:read`, everything else `project:cloud_resource:manage`. **No sandbox provider can have
-functions enabled in this release**, so a read answers an empty list and every other route but `DELETE` answers
-`403 functions are not offered here` (`503 functions are not configured` in a portal without a function
-service). The bodies, the statuses, what is refused as not offered (`gpu`, `source`, `exposure: public`,
+functions switched on in this release** (the gate below cannot hold), so a read answers an empty list and every
+other route but `DELETE` answers `403 functions are not offered here` (`503 functions are not configured` in a
+portal without a function service; `503` for whatever starts usage while the job scheduler is off). The bodies, the statuses, what is refused as not offered (`gpu`, `source`, `exposure: public`,
 `publicRateLimit`, `domains`: `400`), the write-only `secrets` and `registryAuth` (`503` and nothing stored without
 the portal's encryption key), the quota (`429`) and the off states are in
 [managed-functions.md](managed-functions.md). The operator sets a project's function quota with
@@ -429,7 +429,19 @@ optional; an empty body removes it; `ADMIN_PROJECT_UPDATE`). It is a document of
 `PUT /api/v1/admin/project/{id}/quota` refuses the keys `functions`, `functionVcpus`, `functionRamMb` and
 `functionQuota` (`400`), because a key there that is not a sandbox key turns the project's quota into a Proxmox
 quota in which every absent key is unlimited. A save of a sandbox provider with
-`config.sandbox.functions.enabled: true` is refused (`409`), whatever its status.
+`config.sandbox.functions.enabled: true` is accepted only through the functions gate, whatever its status: the
+job scheduler on, a sealing key, a `sandbox-proxy` of the provider that reported to this portal in the last 90
+seconds (asked at the save that switches the block on), billing not the external provider; otherwise `409`
+naming the row. `POST /api/v1/admin/service/{id}/sandbox/release-check` lists the rows (`function-scheduler`,
+`function-sealing-key`, `function-proxy`, `function-billing`, and the warning `function-price`) after the
+provider's release gates, where the provider holds a function wake token or has the block on
+([managed-functions.md](managed-functions.md#switching-functions-on)).
+
+`sandbox-proxy` calls two routes with the provider's function wake token (`secret.functionWakeToken`, a bearer;
+no user credential): `POST /api/v1/internal/functions/{functionID}/wake` (`200 {functionID, instances}`, `401`,
+`404`, `403`, `409`, `429`, `503`) and `POST /api/v1/internal/functions/activity` (`{ids, every, replica,
+partial, load}`, `204`). They are not for tenants or operators
+([managed-functions.md](managed-functions.md#the-two-routes-sandbox-proxy-calls)).
 
 Cloud service selection: the project cloud routes (`/project/{id}/cloud`, its
 actions and deletes, `quota-usage`, `gpu-capacity`, `public-networks`, the S3

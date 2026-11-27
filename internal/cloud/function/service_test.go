@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
@@ -19,6 +20,10 @@ import (
 // It keeps every call it gets as the verbs the API server would ask of the caller (calls), which is how the tests
 // hold the service to the rights of its role.
 type fakeAPI struct {
+	// created is the creationTimestamp the cluster tells of a namespace (absent = none); deleting are the namespaces
+	// that are being deleted.
+	created    map[string]string
+	deleting   map[string]bool
 	namespaces map[string]map[string]string
 	quotas     map[string]map[string]any
 	deps       map[string]map[string]any // "ns/name"
@@ -83,7 +88,18 @@ func (f *fakeAPI) ListNamespaces(_ context.Context, sel string) ([]map[string]an
 			ok = ok && labels[k] == v
 		}
 		if ok {
-			out = append(out, map[string]any{"metadata": map[string]any{"name": name}})
+			lab := map[string]any{}
+			for k, v := range labels {
+				lab[k] = v
+			}
+			md := map[string]any{"name": name, "labels": lab}
+			if at, dated := f.created[name]; dated {
+				md["creationTimestamp"] = at
+			}
+			if f.deleting[name] {
+				md["deletionTimestamp"] = "2026-11-27T10:00:00Z"
+			}
+			out = append(out, map[string]any{"metadata": md})
 		}
 	}
 	return out, nil
@@ -231,6 +247,33 @@ var testQuota = sandbox.FunctionQuota{Functions: 20, VCPUs: 8, RAMMb: 16384}
 func testService() (*Service, *fakeAPI) {
 	f := newFake()
 	return NewWithAPI(f, testConfig(), testSvc), f
+}
+
+// Namespaces are this service's function namespaces and nothing else: not another service's, not a sandbox
+// namespace, not one whose name is not the namespace of the project it names, not one that is being deleted. The age
+// is the cluster's, and absent when the cluster tells none.
+func TestNamespaces(t *testing.T) {
+	s, f := testService()
+	labels := func(service, project string) map[string]string {
+		return map[string]string{"proxcloud.io/project": project, "proxcloud.io/service": service, "app.kubernetes.io/managed-by": "proxcloud", "proxcloud.io/tenant": "true"}
+	}
+	f.namespaces["fn-p1"] = labels(testSvc, "p1")
+	f.namespaces["fn-p2"] = labels(testSvc, "p2")
+	f.namespaces["fn-p3"] = labels("other", "p3")
+	f.namespaces["sb-p1"] = labels(testSvc, "p1")
+	f.namespaces["fn-p4"] = labels(testSvc, "p5")
+	f.namespaces["fn-p6"] = labels(testSvc, "p6")
+	f.namespaces["fn-p7"] = map[string]string{"proxcloud.io/project": "p7", "proxcloud.io/service": testSvc, "proxcloud.io/tenant": "true"}
+	f.created, f.deleting = map[string]string{"fn-p1": "2026-11-27T09:00:00Z"}, map[string]bool{"fn-p6": true}
+	got, err := s.Namespaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.SortFunc(got, func(a, b Namespace) int { return strings.Compare(a.ProjectID, b.ProjectID) })
+	want := []Namespace{{ProjectID: "p1", Created: time.Date(2026, 11, 27, 9, 0, 0, 0, time.UTC)}, {ProjectID: "p2"}}
+	if len(got) != 2 || got[0].ProjectID != "p1" || !got[0].Created.Equal(want[0].Created) || got[1] != want[1] {
+		t.Fatalf("Namespaces: %+v, want %+v", got, want)
+	}
 }
 
 func testFunction() Function {

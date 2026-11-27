@@ -128,16 +128,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Not run on a lab. Shown in real guests of both images and in unit tests (see Fixed).
 
 - **Functions: nothing to do at this upgrade, and what a rollback will mean once they can be enabled** (#513). This
-  release creates three empty collections (`functions`, `function_deployments`, `function_hosts`) and can hold a
-  `functionQuota` on a project; a portal rolled back to 0.12.x ignores all four. No function can be created, so
-  there is no `FUNCTION` row. For the release that lets an operator switch functions on, the rule is already
-  fixed by this code: **before rolling the portal back, switch the provider's functions block off and delete or
-  stop every function.** A 0.12.x portal does not bill a `FUNCTION` row, never stops a function's pods, and its
+  release creates four empty collections (`functions`, `function_deployments`, `function_hosts`,
+  `function_proxies`), runs two scheduler jobs that find nothing to do (`functionReaper`, `functionDeploySync`)
+  and can hold a `functionQuota` on a project; a portal rolled back to 0.12.x ignores all of it. No function can
+  be created, so there is no `FUNCTION` row. For the release that lets an operator switch functions on, the rule
+  is already fixed by this code: **before rolling the portal back, switch the provider's functions block off and
+  wait until no function runs** (the reaper stops them within 15 seconds; a function shows `instances: 0`), and
+  delete the functions of any project that is to be deleted meanwhile. A 0.12.x portal does not bill a `FUNCTION` row, never stops a function's pods, and its
   project deletion does not know the row: every pass reports it as left, so the deletion of a project that holds
   one never finishes, and the project's `fn-<project>` namespace keeps running. The function quota is not in the
   project's quota document, so an older portal reads that document as before.
 
 ### Added
+
+- **Serverless functions: scale to zero, wake, and the jobs that keep record and cluster equal (cannot be
+  switched on yet)** ([managed-functions.md](docs/managed-functions.md)). The part of functions that acts by
+  itself, on top of #513. **Nothing is reachable.** Functions are switched on through a gate, and one row of it
+  asks for a `sandbox-proxy` that reports to this portal with the provider's function wake token; no platform
+  this release can build has one, so the block stays off and every route answers as before.
+  - **Two routes for `sandbox-proxy`**, beside the sandbox wake route: `POST
+    /api/v1/internal/functions/{id}/wake` starts one instance for a held request, `POST
+    /api/v1/internal/functions/activity` takes which functions have traffic and how much. The bearer is the
+    provider's `secret.functionWakeToken`, a token of its own: the sandbox wake token is refused here and this
+    one there, and a provider that holds only the function token still refuses autoResume. The token is checked
+    before anything is looked up; a report reaches the functions of the token's provider only.
+  - **Scale to zero**: job `functionReaper` (every 15 s) brings an idle function to its floor and every function
+    of a provider that no longer offers functions, or of a project that cannot be billed, to zero. An idle
+    function is ended at the moment its idle time ran out, not when the reaper got to it; the first run after a
+    gap stops nothing for being idle.
+  - **Scaling on load** up to `maxInstances`, from the requests in flight the proxies report. Not run on a
+    cluster; `concurrency` is not enforced per instance.
+  - **Job `functionDeploySync`** (every minute at second 20, before the charge): settles a rollout whose API
+    process ended, rewrites a row that no longer says what its record says, scales a Deployment to the record,
+    deletes one without a record, applies one that is missing again (a rebuilt sandbox cluster gets its functions
+    back), and deletes a function namespace nothing on record needs. Debug triggers `run-function-reaper` and
+    `run-function-deploy-sync`.
+  - **A start that never serves bills nothing and stops within two minutes.** A running interval carries
+    `readyAt` once an instance was ready. One without a ready instance on two runs of the sync is ended: as void
+    (no interval on the record or the row) when it never had one, like any other when it had. So is the start of
+    a first deployment that fails.
+  - **A cluster that is gone does not keep a function running on record.** A stop is recorded whatever the
+    cluster answers and repeated by the sync; `EndFunctions` ends a provider's running intervals without a
+    cluster call, for the platform run that deletes a cluster; the sync stamps the provider's meter heartbeat
+    only after it listed the cluster.
+  - **The gate.** `config.sandbox.functions.enabled: true` is accepted only while the job scheduler is on, the
+    portal has a sealing key, a `sandbox-proxy` of the provider reported in the last 90 seconds (asked at the
+    save that switches the block on) and billing is not the external provider. `POST
+    /admin/service/{id}/sandbox/release-check` lists the rows `function-scheduler`, `function-sealing-key`,
+    `function-proxy`, `function-billing` and the warning `function-price` (no enabled price plan has a rule for
+    resource type `function`: functions would bill nothing, and a rule added later bills a running function back
+    to the start of the cycle or its start, whichever is later).
+  - **With the job scheduler off no function usage starts**: create, a deployment, a rollback, a resume and a
+    wake answer `503`.
+  - **Nine MCP tools** in the tenant toolset: `list_functions`, `get_function`, `create_function`,
+    `update_function`, `delete_function`, `list_function_deployments`, `rollback_function`, `function_action`,
+    `get_function_logs`.
+  - Not in this change: the meter and its price rule, the chart's function objects, the platform run that mints
+    the token, the operator's forms. Nothing has run on a cluster: the cluster in the tests is in memory, the
+    records are on real PostgreSQL.
 
 - **Serverless functions, the portal's API (switched off: no provider can enable them)** (#513,
   [managed-functions.md](docs/managed-functions.md)). The second part of functions on the managed platform

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
@@ -526,6 +527,33 @@ func (s *Service) ListAll(ctx context.Context) (map[string]Deployed, error) {
 		if ValidID(id) && digStr(it, "metadata", "namespace") == NamespaceFor(project) && s.owns(it, project) && dig(it, "metadata", "deletionTimestamp") == nil {
 			out[id] = Deployed{ProjectID: project, Status: statusOf(it)}
 		}
+	}
+	return out, nil
+}
+
+// Namespace is one function namespace of this service found on the cluster.
+type Namespace struct {
+	ProjectID string
+	// Created is when the cluster made it; zero when the cluster told none.
+	Created time.Time
+}
+
+// Namespaces returns the function namespaces of this service on the cluster (fn-<projectId>, owned by this service,
+// not being deleted): what the platform's records are swept against, since a namespace whose project and functions
+// are gone holds nothing ListAll would return.
+func (s *Service) Namespaces(ctx context.Context) ([]Namespace, error) {
+	items, err := s.api.ListNamespaces(ctx, sandbox.LabelTenant+"=true,"+sandbox.LabelService+"="+s.serviceID)
+	if err != nil {
+		return nil, err
+	}
+	var out []Namespace
+	for _, it := range items {
+		project := digStr(it, "metadata", "labels", sandbox.LabelProject)
+		if project == "" || digStr(it, "metadata", "name") != NamespaceFor(project) || !s.owns(it, project) || dig(it, "metadata", "deletionTimestamp") != nil {
+			continue
+		}
+		created, _ := time.Parse(time.RFC3339, digStr(it, "metadata", "creationTimestamp"))
+		out = append(out, Namespace{ProjectID: project, Created: created})
 	}
 	return out, nil
 }

@@ -190,7 +190,7 @@ flowchart LR
 lists, the RFC 9728 resource-metadata doc) and prefixes (`/openapi.json`, `/mcp`,
 `/api/v1/auth/`, `/api/v1/download/`, `/api/v1/nocloud/`, `/api/v1/console/`,
 `/api/v1/callbacks/`, `/api/v1/admin/onboarding/`, `/api/v1/internal/sandboxes/`,
-`/e2b/`). These authenticate by their own scheme rather than a bearer the gate
+`/api/v1/internal/functions/`, `/e2b/`). These authenticate by their own scheme rather than a bearer the gate
 checks: a token in the URL (download, VM seed, console), the MCP handler's own
 gate, a sandbox provider's `proxyWakeToken` (the wake call), or a project's `e2b_`
 sandbox API key. `/api/v1/admin/job/` is not public: the gate requires an admin
@@ -510,7 +510,8 @@ separate mutation safety. The catalog is registered in
 services sync, the minutely Proxmox state sample (`pveStateSync`), task poll
 (`pveTaskPoll`) and public-NIC traffic sample (`pveTrafficSample`), the sandbox
 jobs (`sandboxStateSync`, `sandboxTemplateAdopt`, `sandboxBuildSync`,
-`sandboxRegistryPrune`, `sandboxAutoPause`), savings expiry + reminders, transaction scan,
+`sandboxRegistryPrune`, `sandboxAutoPause`), the function jobs (`functionReaper`,
+`functionDeploySync`), savings expiry + reminders, transaction scan,
 auto-suspension (dunning), monthly bill finalization, monthly collect, and project
 deletion. Under the external billing provider the seven billing jobs (savings
 expiry and reminders, reminder dispatch, transaction scan, auto-suspension,
