@@ -32,7 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and port is now three: TCP on every port but 25, UDP, ICMP. The sync builds the new group and its IP sets,
     moves each worker to it (for that moment a worker holds both groups, the union of two complete sets) and
     deletes the old one; no worker is tainted for it. Between the upgrade and that sync the `fence` gate fails,
-    as for any changed rule set, and it holds again after it. What changes for traffic: a worker no longer opens
+    as for any changed rule set, and it holds again after it. While it fails a live sandbox provider starts
+    nothing new: a tenant's sandbox create, and anything else that adds usage, answers `503` ("Sandboxes are not
+    available on this location right now"); sandboxes that run keep running. The window ends with the first
+    provider sync after the upgrade, the timed one or one an operator runs right after the upgrade. What changes
+    for traffic: a worker no longer opens
     TCP 25 to the internet, and no longer sends an IP protocol other than TCP, UDP and ICMP there. Sandbox pods
     were already kept off port 25 by the sandbox chart's policy; submission (587, 465) stays open.
   - *Who writes the isolation rules now:* a provider sync and a tenant's network create, as before, and a platform

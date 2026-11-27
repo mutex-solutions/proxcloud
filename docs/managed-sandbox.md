@@ -421,10 +421,14 @@ theirs.
 
 ## 2. Layer 1: the VM firewall on the workers (SB2b)
 
-Layer 0 (§1.2) sees routed traffic only. Layer 1 sees every frame a worker sends or receives, frames switched inside
-the sandbox vnet included, and pins the worker's source address. The portal applies it, not the installer: the sync
-job's pass over each Proxmox provider (`syncjob.reconcileSandboxWorkers`, `pve.StartSandboxPass`) fences every VM of
-the provider's sandbox pool on every cycle, so a new worker, a replaced one and a hand edit all come back to it.
+Layer 0 (§1.2) sees the traffic a node routes, and on a node where `net.bridge.bridge-nf-call-iptables` is 1
+(Proxmox's legacy firewall sets it, and a node moved to nftables keeps it until its next boot) also the frames switched
+between two guests of one bridge. None of its rules has the sandbox subnet as both source and destination, so traffic
+inside the sandbox vnet is not its to decide either way. Layer 1 sees every frame a worker sends or receives, frames
+switched inside the sandbox vnet included, and pins the worker's source address. The portal applies it, not the
+installer: the sync job's pass over each Proxmox provider (`syncjob.reconcileSandboxWorkers`, `pve.StartSandboxPass`)
+fences every VM of the provider's sandbox pool on every cycle, so a new worker, a replaced one and a hand edit all come
+back to it.
 
 ### 2.1 What a worker may do
 
