@@ -1415,7 +1415,8 @@ func functionQuotaOf(c *fnCaller) sandbox.FunctionQuota {
 // holds the project's quota lock until that transaction ends: what the caller then writes (a new record, a claim, a
 // maxInstances) is what the next check counts. fn nil is a new function. A change that does not raise what fn holds
 // is never refused, so a project over a quota that was lowered can still make its functions smaller; a zero want
-// (a resume) checks the project as it is.
+// (a resume) checks the project as it is. What fn holds is read here, under the lock: want is its size and its
+// maxInstances from now on, and never a smaller size than the one it holds.
 func (h *Handler) reserveFunction(tc context.Context, c *fnCaller, fn *functionDoc, want fnHold) error {
 	if err := h.fns.DB().LockXact(tc, "function-quota:"+c.proj.ID); err != nil {
 		return err
@@ -1424,8 +1425,16 @@ func (h *Handler) reserveFunction(tc context.Context, c *fnCaller, fn *functionD
 	except := ""
 	if fn != nil && want != (fnHold{}) {
 		except = fn.ID
-		cpu, memory := h.billedSize(tc, fn)
-		if has := (fnHold{CPUMillis: cpu, MemoryMi: memory, Instances: fn.MaxInstances}); want.cpu() <= has.cpu() && want.memory() <= has.memory() {
+		// The function as it is under the lock, not the caller's copy read before it. What it holds is counted at
+		// the size it holds now, and while a rollout is in progress that is the larger of its two sizes: a cap raised
+		// at the small size that still serves would hold the large one at that cap once the rollout settles.
+		var cur functionDoc
+		if found, err := h.fns.Get(tc, fn.ID, &cur); err != nil || !found {
+			return cmp.Or(err, function.ErrNotFound)
+		}
+		cpu, memory := h.billedSize(tc, &cur)
+		want.CPUMillis, want.MemoryMi = max(want.CPUMillis, cpu), max(want.MemoryMi, memory)
+		if has := (fnHold{CPUMillis: cpu, MemoryMi: memory, Instances: cur.MaxInstances}); want.cpu() <= has.cpu() && want.memory() <= has.memory() {
 			return nil
 		}
 	}

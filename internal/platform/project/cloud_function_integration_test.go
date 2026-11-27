@@ -1810,6 +1810,50 @@ func TestFunctionQuota(t *testing.T) {
 	}
 }
 
+// A raised maxInstances is counted at the size the function holds when the quota is asked, and while a rollout is in
+// progress that is the larger of its two sizes: the cap cannot be raised at the small size that still serves while a
+// large one rolls out, and leave the project over its quota once the rollout settles.
+func TestFunctionQuotaDuringRollout(t *testing.T) {
+	e := newFnEnv(t)
+	base := "/project/p/functions"
+	e.project(pgdoc.M{"functionQuota": map[string]any{"vcpus": 2}})
+	a := e.ready(`{"name":"a","image":"nginx:1","cpuMillis":250}`)
+	// 2000m at one instance is the project's whole quota.
+	if code, body := e.raw("owner-p", "PATCH", base+"/"+a, `{"cpuMillis":2000}`); code != 200 || e.fn(a).DeployingID == "" {
+		t.Fatalf("a rollout to the size of the quota: %d %s", code, body)
+	}
+	// A second instance of it would be 4 vCPUs. The size that still serves (250m) is not what it is counted at.
+	if code, body := e.raw("owner-p", "PATCH", base+"/"+a, `{"maxInstances":2}`); code != 429 || e.fn(a).MaxInstances != 1 {
+		t.Fatalf("maxInstances raised while a larger size rolls out: %d %s (maxInstances %d)", code, body, e.fn(a).MaxInstances)
+	}
+	if !e.settle(a, false) {
+		t.Fatal("the rollout must settle")
+	}
+	_, data := e.call("owner-p", "GET", "/project/p/quota-usage?serviceId=svc", "")
+	fns, _ := data["functions"].(map[string]any)
+	if used, _ := fns["usage"].(map[string]any); used["vcpus"] != float64(2) {
+		t.Fatalf("the project holds %v vCPUs of its quota of 2", used["vcpus"])
+	}
+	// The other way round: while a smaller size rolls out the larger one still runs, and is what a second instance is
+	// counted at. Once the smaller one serves, two of it are the same 2 vCPUs.
+	if code, body := e.raw("owner-p", "PATCH", base+"/"+a, `{"cpuMillis":1000}`); code != 200 || e.fn(a).DeployingID == "" {
+		t.Fatalf("a rollout to a smaller size: %d %s", code, body)
+	}
+	if code, body := e.raw("owner-p", "PATCH", base+"/"+a, `{"maxInstances":2}`); code != 429 || e.fn(a).MaxInstances != 1 {
+		t.Fatalf("maxInstances raised while the larger size still runs: %d %s", code, body)
+	}
+	// A setting that holds nothing more is never refused, also during a rollout.
+	if code, body := e.raw("owner-p", "PATCH", base+"/"+a, `{"idleSeconds":120}`); code != 200 || e.fn(a).IdleSeconds != 120 {
+		t.Fatalf("a setting during a rollout: %d %s", code, body)
+	}
+	if !e.settle(a, false) {
+		t.Fatal("the rollout must settle")
+	}
+	if code, body := e.raw("owner-p", "PATCH", base+"/"+a, `{"maxInstances":2}`); code != 200 || e.fn(a).MaxInstances != 2 {
+		t.Fatalf("two instances of the smaller size, the same 2 vCPUs: %d %s", code, body)
+	}
+}
+
 // The usage gates every create, deployment, rollback and resume passes: the project can be billed and the location's
 // release gates hold. A read, a suspend and a delete pass without them.
 func TestFunctionUsageGates(t *testing.T) {
