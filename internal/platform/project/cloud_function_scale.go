@@ -769,12 +769,17 @@ func (h *Handler) ReapFunctions(ctx context.Context) {
 	if h.fns == nil || h.functionFor == nil {
 		return
 	}
-	heard := h.reaperRanLately(ctx, time.Now().UTC())
 	var fns []functionDoc
 	if err := h.fns.Find(ctx, pgdoc.M{"deployingId": nil}, &fns); err != nil {
 		slog.Warn("function reaper: list", "err", err)
 		return
 	}
+	if len(fns) == 0 {
+		// Nothing to decide on, so no run to keep on record: a site without functions is read, never written. The
+		// first run that finds a function then counts as one after a gap, and stops nothing for being idle.
+		return
+	}
+	heard := h.reaperRanLately(ctx, time.Now().UTC())
 	type location struct {
 		fs      *function.Service // nil = unavailable this run
 		offered bool

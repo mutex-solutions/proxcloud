@@ -543,6 +543,49 @@ func TestFunctionReaperEndsAtTheIdleTime(t *testing.T) {
 	}
 }
 
+// A site that never had a function (a sandbox provider with the block off, no record, no row): the reaper and the
+// deploy sync ask the cluster nothing and write nothing, run after run. The same provider with the block on is
+// listed, which is what tells the two apart.
+func TestFunctionJobsLeaveASiteWithoutFunctionsAlone(t *testing.T) {
+	e := newFnEnv(t)
+	off := fnBlock()
+	off["enabled"] = false
+	e.provider(externalservice.StatusPublic, off)
+	untouched := func(why string) {
+		t.Helper()
+		e.cluster.mu.Lock()
+		n, calls := len(e.cluster.calls), fmt.Sprint(e.cluster.calls)
+		e.cluster.mu.Unlock()
+		if n != 0 {
+			t.Fatalf("%s: the cluster was called: %s", why, calls)
+		}
+		if n, err := e.h.fnProxies().Count(e.ctx, nil); err != nil || n != 0 {
+			t.Fatalf("%s: %d records in function_proxies (%v), want none", why, n, err)
+		}
+		if state, err := e.h.cloud.MeterState(e.ctx, "svc"); err != nil || (state != nil && state.LastOKAt != nil) {
+			t.Fatalf("%s: the provider's meter heartbeat was stamped: %+v (%v)", why, state, err)
+		}
+	}
+	for range 2 {
+		e.h.ReapFunctions(e.ctx)
+		e.h.SyncFunctionDeployments(e.ctx)
+	}
+	untouched("block off")
+	e.provider(externalservice.StatusDisabled, fnBlock())
+	e.h.ReapFunctions(e.ctx)
+	e.h.SyncFunctionDeployments(e.ctx)
+	untouched("provider disabled")
+
+	e.provider(externalservice.StatusPublic, fnBlock())
+	e.h.SyncFunctionDeployments(e.ctx)
+	e.cluster.mu.Lock()
+	listed := len(e.cluster.calls)
+	e.cluster.mu.Unlock()
+	if listed == 0 {
+		t.Fatal("with the block on the deploy sync did not look at the cluster")
+	}
+}
+
 // Functions switched off on the provider, or the provider disabled: one run of the reaper later no function of it
 // runs and no row says one does, whatever its traffic and its floor. They come back when functions do.
 func TestFunctionOffStopsEverything(t *testing.T) {

@@ -226,6 +226,8 @@ offers functions and of a project that cannot be billed, and raises a function b
   scheduler was off or the portal down, does not make the owner pay for the time nobody looked.
 - The first run after a gap of 45 seconds or more stops nothing for being idle: the reports that keep serving
   functions awake were away as long. They arrive every 5 seconds, so the next run decides on fresh stamps.
+  A run that finds no function keeps no record of itself (a site without functions is read, never written), so
+  the first run that finds one counts as a run after a gap too.
 - A stop is recorded whatever the cluster answers; see below.
 
 **`functionDeploySync`**, every minute at second 20, before the charge at second 30:
@@ -325,7 +327,7 @@ request (method and path), never its body.
 - `functions`: one record per function (configuration, host, the sealed values, the deployment that serves and
   the one in progress, the instance count, the running intervals). `function_deployments`: one per rollout.
   `function_hosts`: every host ever issued. `function_proxies`: the last complete report of each `sandbox-proxy`
-  replica per provider (kept 90 seconds), and the reaper's own last run.
+  replica per provider (kept 90 seconds), and the reaper's own last run (written only while a function exists).
 - Each function has one cloud resource row of type `FUNCTION`, a projection of its record: `name`, `host`,
   `url`, `image`, `cpuMillis`, `memoryMi`, `instances`, `billedInstances`, `status`
   (`RUNNING`, `IDLE`, `SUSPENDED`, `DELETED`), `runningSince`, `readyAt`, `stoppedAt`, `endedIntervals
