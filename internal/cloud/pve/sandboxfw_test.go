@@ -214,6 +214,7 @@ type sandboxFake struct {
 	grpNote map[string]string
 	writes  []string
 	dcOff   bool // the datacenter firewall's master switch is off
+	netDown bool // the node does not report its networks (it is down or fenced off)
 	// cluster is the cluster firewall's rule list (cluster.fw [RULES]), top first: a new rule lands on top, as on PVE.
 	cluster []FirewallRule
 }
@@ -296,6 +297,9 @@ func (f *sandboxFake) serve(w http.ResponseWriter, r *http.Request) {
 		reply(w, nil)
 	case p == "/cluster/status":
 		reply(w, []map[string]any{{"type": "cluster", "name": "lab"}, {"type": "node", "name": "pve1", "ip": "192.0.2.11"}})
+	case p == "/nodes/pve1/network" && f.netDown:
+		w.WriteHeader(595)
+		fmt.Fprint(w, `{"errors":{"node":"no route to host"}}`)
 	case p == "/nodes/pve1/network":
 		reply(w, []map[string]any{
 			{"iface": "vmbr0", "address": "192.0.2.11", "cidr": "192.0.2.11/24", "gateway": "192.0.2.1"},

@@ -11,6 +11,7 @@ package platformlife
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -166,6 +167,45 @@ func (x *acq) sandboxSite(ctx context.Context, kubeconfig string) error {
 	return sandboxSiteErr(err)
 }
 
+// sandboxIsolation brings the provider-wide isolation rules of the installation's Proxmox provider to the config the
+// run has just written there (the sandbox range added in stage cluster, or taken away when sandboxes are switched
+// off), and reads them back: pve.WriteProviderIsolation, with no project and without the provider sync's refusals,
+// under the site's SDN apply lock, which that sync and a tenant's network change take. The provider is read again
+// for it: the one loaded when the run was claimed does not carry the write. Written already, it makes no request
+// but reads, so every apply asserts the set. A provider without a tenant pool has no isolation rules (the sync
+// writes none for it either). Nil without Runner.SandboxSite: nothing was written to a provider.
+func (x *acq) sandboxIsolation(ctx context.Context) error {
+	if x.r.SandboxSite == nil || x.r.Provider == nil {
+		return nil
+	}
+	es, err := x.r.Provider(ctx, x.in.ServiceID)
+	if err != nil {
+		return transient(CodeSandboxAccessFailed, err)
+	}
+	if es == nil {
+		return permanent(CodePreflightFailed, "The installation's Proxmox provider no longer exists.")
+	}
+	n := es.PVENetworkConfig()
+	if n.CIDRPool == "" {
+		return nil
+	}
+	ps := &pve.Service{C: x.portal, PoolPrefix: es.PVEPoolPrefix()}
+	busy, err := x.r.sdnLocked(ctx, func() error {
+		return ps.WriteProviderIsolation(ctx, n.CIDRPool, n.BlockedCIDRs, n.SandboxCIDRs, es.PVESandboxEndpoints()...)
+	})
+	var api *pve.APIError
+	switch {
+	case busy:
+		return waiting(CodeIsolationNotEnforced, "Another network change is being applied on this site; the isolation rules of the sandbox range are written after it.")
+	case errors.Is(err, pve.ErrIsolationNotInPlace):
+		return waiting(CodeIsolationNotEnforced, "The isolation rules of the sandbox range are not in the cluster firewall yet, and the run goes on when they are: %s.", clip(err.Error()))
+	case err != nil && !errors.As(err, &api) && strings.HasPrefix(err.Error(), "pve isolation:"):
+		// The provider's own networks do not make a rule set (a range inside a blocked network, a cidrPool that is no CIDR).
+		return permanent(CodeIsolationNotEnforced, "The isolation rules of the sandbox range could not be written: %s. Correct the provider's networks under Cloud providers, then Retry.", clip(err.Error()))
+	}
+	return classify(CodeSandboxAccessFailed, err)
+}
+
 func sandboxSiteErr(err error) error {
 	switch {
 	case err == nil:
@@ -311,6 +351,15 @@ func (in *Installation) ownSandboxRanges() []netip.Prefix {
 		if p, err := netip.ParsePrefix(st.NodeRange); err == nil && !slices.Contains(out, p.Masked()) {
 			out = append(out, p.Masked())
 		}
+	}
+	return out
+}
+
+// ownSandboxCIDRs is ownSandboxRanges as the provider's sandboxCidrs and the isolation rules write them.
+func (in *Installation) ownSandboxCIDRs() []string {
+	var out []string
+	for _, p := range in.ownSandboxRanges() {
+		out = append(out, p.String())
 	}
 	return out
 }

@@ -1128,9 +1128,14 @@ the Ready card, and the release gates still required.
 **What a run writes on the Proxmox provider.** In stage `cluster`, before a sandbox machine
 exists, the run writes on the installation's Proxmox provider, in one write:
 
-- `config.network.sandboxCidrs`: the one entry `nodeRange`. The next provider sync writes the
-  isolation rules for it (tenant networks to and from the range, the range to the blocked and
-  management networks).
+- `config.network.sandboxCidrs`: the one entry `nodeRange`. In the same step the run writes the
+  provider's isolation rules for it itself (tenant networks to and from the range, the range to
+  the blocked and management networks, and for `shared` the ACCEPTs of the machines' own cluster)
+  and reads them back from the cluster firewall before it makes a machine. It does not wait for a
+  provider sync, so it works with the scheduler off and on a site with no project. It takes the
+  site's SDN lock for it, the one a provider sync and a tenant's network change take; while that
+  lock is held the stage waits. Every apply asserts the set again and writes nothing when it is in
+  place.
 - `config.sandbox`: `pool` (`proxcloud-sbx`), `nodes` (`[nodeRange]`), `dns`,
   `unsecuredMinAgeMinutes` (20), and what the platform network adds: `platformInstallationId` (the
   owner), `mode`, `bridge` and `vlan` (where the machines' NIC is: no vnet is looked up), and
@@ -1277,9 +1282,20 @@ the scheduler.
 sandbox_provider_live`) while the sandbox provider is not disabled, and so is the run: every
 running sandbox would end without notice. Disable the provider, let its sandboxes end, then save
 and apply. Once the machines are gone and the pool is empty, the run takes `config.sandbox`, the
-`sandboxCidrs` entry and `secret.sandboxKubeconfig` off the Proxmox provider, deletes the pool's
-firewall groups and IP sets from the cluster firewall, then the ACL row or the token and the
-pool. The sandbox provider row stays, disabled, and is adopted when sandboxes come back; a Remove
+`sandboxCidrs` entry and `secret.sandboxKubeconfig` off the Proxmox provider, writes the
+provider's isolation rules without the range (its DROPs and ACCEPTs go, the tenant pool's stay;
+read back before anything else is recorded), deletes the pool's firewall groups and IP sets from
+the cluster firewall, then the ACL row or the token and the pool. The Check's `isolation` row is
+`ok` right after it, with no provider sync, also on a site with no project. Rules of another owner
+in the cluster firewall are never rewritten or removed; a rewrite puts this provider's rules on
+top of the list, in a fixed order, so the others move down as a block.
+
+An apply is never stopped at its first stage by an `isolation` row that differs only in what names
+the installation's own sandbox range (a run cancelled between its two writes, or rules a release
+candidate left to a provider sync): the row is then a warning that names the range, and the run
+writes the rules itself. Every other cause of that row still stops a run, the one that switches
+sandboxes off included: a blocked network the rules do not drop, a disabled rule, the datacenter
+firewall off, a sandbox network that is not the installation's. The sandbox provider row stays, disabled, and is adopted when sandboxes come back; a Remove
 disables it with the two others, and a new install does not give it its status back.
 
 **The certificate.** With `separate` the run writes `sandbox-system/sandbox-proxy-tls` inside
@@ -1370,6 +1386,10 @@ blocked and management networks, with the comment `proxcloud:isolation` (pool pr
 `proxcloud:isolation/<poolPrefix>`. They do not depend on any project, and two things write them:
 a provider sync (the scheduler's, **Run a provider sync, then check again**, or
 `POST /api/v1/admin/job/external-service/sync`), and the first tenant network before it goes live.
+A third writer exists for one case: a platform run that adds or removes its sandbox range writes
+the set for the provider's new config itself, in the form a network create has (none of the
+refusals below), because nothing else would until some sync
+([The sandbox provider](#the-sandbox-provider)).
 
 A sync writes them without a project only for a provider that has a managed-services installation,
 in any phase, the saved draft of step 1 and a `removed` installation included, and only with `PROXCLOUD_PLATFORM_ENABLED=true`.
@@ -3621,9 +3641,10 @@ Proxmox for the VM firewall (it stores rules and does not filter a packet), fake
 gates and the registration, and a model of the shared identity's RBAC for the portal's calls. A lab
 must still show, for each placement:
 
-1. After stage `cluster`: the provider row holds `config.sandbox` and the one `sandboxCidrs` entry,
-   a provider sync writes the isolation rules for the range, and a tenant network create still
-   works.
+1. After stage `cluster`, with no provider sync run: the provider row holds `config.sandbox` and
+   the one `sandboxCidrs` entry, the cluster firewall holds the isolation rules for the range
+   (for `shared` with the five ACCEPTs above the range's DROP), the Check's `isolation` row is
+   `ok`, the rules of other owners are byte-equal, and a tenant network create still works.
 2. After stage `register`: the provider "… Sandboxes" exists DISABLED, a provider sync fences each
    sandbox VM (both policies DROP, the generation's group as its only rule, the IP filter pinned to
    its address) and takes the `unsecured` taint off after 20 minutes, and **no VM outside pool
@@ -3649,8 +3670,10 @@ must still show, for each placement:
 8. With the scheduler off: "live" is refused with the message about the scheduler; one operator
    sync fences and untaints once.
 9. `placement: off` with the provider live is refused; disabled, the apply removes the machines,
-   the provider's sandbox settings, the firewall groups and IP sets (`pvesh get
-   /cluster/firewall/groups` names none of `sbx…`), the access and the pool.
+   the provider's sandbox settings, the range's isolation rules (the `isolation` row is `ok` right
+   after the run, with no provider sync, and the next apply passes stage `validate`), the firewall
+   groups and IP sets (`pvesh get /cluster/firewall/groups` names none of `sbx…` of this pool),
+   the access and the pool.
 10. The datacenter firewall off: the Check's `sandbox` row fails.
 
 **The address of the platform cluster's ArgoCD** (`spec.access.argocd`) was run once on a lab

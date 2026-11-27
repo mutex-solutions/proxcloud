@@ -2,6 +2,7 @@ package pve
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -448,5 +449,110 @@ func TestIsolationRulesOfASharedSandboxGroup(t *testing.T) {
 	// With no sandbox network nothing of the list is written.
 	if rules := isolationRules(labPool, labBlocked, nil, labOwner, allow...); len(rules) != 4 {
 		t.Fatalf("no sandbox network: %d rules", len(rules))
+	}
+}
+
+// WriteProviderIsolation against the fake PVE holding the lab's other rules: it brings the set to the config whatever
+// order the rules were in (the drill saw cluster.fw rewritten in another order by a sweep), touches no rule of another
+// owner, keeps a project's ACCEPTs on top, and a second pass makes no request but reads. With a node that does not
+// report its networks it changes nothing and says that the rules are not in place.
+func TestWriteProviderIsolation(t *testing.T) {
+	ctx := context.Background()
+	f, s := newSandboxFake(t)
+	s.PoolPrefix = "pcm-"
+	blocked := []string{"10.90.0.0/26"} // the fake's nodes add 192.0.2.0/24, 198.51.100.0/24 and 203.0.113.0/28
+	allow := SandboxClusterAllow(labAPI+":6443", []string{labPeers})
+	project := []FirewallRule{
+		{Type: "forward", Action: "ACCEPT", Source: "10.121.1.0/24", Dest: "10.121.1.0/24", Enable: 1, Comment: isolationComment + ":proj1"},
+		{Type: "in", Action: "ACCEPT", Source: "10.121.1.0/24", Dest: "10.121.1.0/24", Enable: 1, Comment: isolationComment + ":proj1"},
+	}
+	owned := func() (own, others []FirewallRule) {
+		for _, r := range f.cluster {
+			if r.Comment == labOwner {
+				own = append(own, r)
+			} else {
+				others = append(others, r)
+			}
+		}
+		return own, others
+	}
+	writes := func() int {
+		return len(slices.DeleteFunc(slices.Clone(f.writes), func(w string) bool { return !strings.Contains(w, "/cluster/firewall/rules") }))
+	}
+	want := func(sandbox []string, allow ...string) []FirewallRule {
+		w, _, _, _, _, err := s.isolationWant(ctx, labPool, blocked, sandbox, allow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+	// The set of before sandboxes, in another order than isolationRules gives, between the others' rules.
+	base := want(nil)
+	f.cluster = slices.Concat(project, []FirewallRule{base[3], base[0]}, foreignRules()[:3], []FirewallRule{base[2], base[1]}, foreignRules()[3:])
+
+	if err := s.WriteProviderIsolation(ctx, labPool, blocked, []string{labSandbox}, allow...); err != nil {
+		t.Fatal(err)
+	}
+	own, others := owned()
+	if w := want([]string{labSandbox}, allow...); !slices.EqualFunc(own, w, sameLiveRule) || len(w) != 11 {
+		t.Fatalf("the set after the write:\n%+v\nwant\n%+v", own, w)
+	}
+	if !slices.EqualFunc(others, slices.Concat(project, foreignRules()), sameLiveRule) {
+		t.Fatalf("a project's ACCEPTs or the rules of another owner were changed or moved among themselves:\n%+v", others)
+	}
+	if !isProjectIsolationRule(f.cluster[0]) || !isProjectIsolationRule(f.cluster[1]) || f.cluster[2].Comment != labOwner {
+		t.Fatalf("the project's ACCEPTs must stay above the DROPs: %+v", f.cluster[:3])
+	}
+	n := writes()
+	if err := s.WriteProviderIsolation(ctx, labPool, blocked, []string{labSandbox}, allow...); err != nil || writes() != n {
+		t.Fatalf("a pass with nothing to change: %v, %d requests that are no read", err, writes()-n)
+	}
+
+	// The range taken away again: back to the four DROPs, in the order of isolationRules.
+	if err := s.WriteProviderIsolation(ctx, labPool, blocked, nil); err != nil {
+		t.Fatal(err)
+	}
+	if own, others = owned(); !slices.EqualFunc(own, base, sameLiveRule) || !slices.EqualFunc(others, slices.Concat(project, foreignRules()), sameLiveRule) {
+		t.Fatalf("after the range went:\n%+v\n%+v", own, others)
+	}
+
+	// IsolationDiffersOnlyIn: the four DROPs against a config that names the range, and the mirror.
+	own1 := []string{labSandbox}
+	for name, c := range map[string]struct {
+		own     []string
+		sandbox []string
+		mod     func()
+		want    bool
+	}{
+		"the range's rules missing":           {own1, own1, func() {}, true},
+		"no own range":                        {nil, own1, func() {}, false},
+		"another range is the own one":        {[]string{"10.90.0.80/28"}, own1, func() {}, false},
+		"a rule of the set disabled as well":  {own1, own1, func() { f.cluster[2].Enable = 0 }, false},
+		"the datacenter firewall off as well": {own1, own1, func() { f.dcOff = true }, false},
+		"no rule at all":                      {own1, own1, func() { f.cluster = foreignRules() }, false},
+	} {
+		keep, off := slices.Clone(f.cluster), f.dcOff
+		c.mod()
+		if got, err := s.IsolationDiffersOnlyIn(ctx, c.own, labPool, blocked, c.sandbox, allow...); err != nil || got != c.want {
+			t.Errorf("%s: %v %v, want %v", name, got, err, c.want)
+		}
+		f.cluster, f.dcOff = keep, off
+	}
+	if err := s.WriteProviderIsolation(ctx, labPool, blocked, []string{labSandbox}, allow...); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.IsolationDiffersOnlyIn(ctx, own1, labPool, blocked, nil); err != nil || !got {
+		t.Fatalf("the range's rules left over: %v %v", got, err)
+	}
+	if got, _ := s.IsolationDiffersOnlyIn(ctx, own1, labPool, []string{"10.90.0.0/26", "10.77.0.0/24"}, nil); got {
+		t.Fatal("a blocked network the rules do not drop passed as a difference of the own range")
+	}
+
+	// A node that does not report its networks: the DROPs in place stay as they are, and the write says so.
+	f.netDown = true
+	n = writes()
+	err := s.WriteProviderIsolation(ctx, labPool, blocked, nil)
+	if !errors.Is(err, ErrIsolationNotInPlace) || !strings.Contains(err.Error(), "did not report its networks") || writes() != n {
+		t.Fatalf("with a node down: %v, %d requests that are no read", err, writes()-n)
 	}
 }

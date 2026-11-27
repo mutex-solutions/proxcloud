@@ -24,8 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - *A platform that built `shared` sandboxes with v0.12.0-rc.1* (a release candidate, on a lab): its provider's
     `config.sandbox` has no `controlPlane` yet, so until the next apply the rules stay as rc.1 wrote them and the
     `fence` gate fails with the reason. The next apply writes `controlPlane` and the rules with the five ACCEPTs in
-    stage `cluster`. If that apply is refused at stage `validate` (`isolation_not_enforced`), run one provider
-    sync first.
+    stage `cluster`, with no provider sync before or after it. A platform whose rules rc.1 left without the range
+    (no sync ran after the apply) reads `isolation` as a warning that names the range, and the same apply, or the
+    one that switches sandboxes off, passes stage `validate` and puts the rules right.
+  - *Who writes the isolation rules now:* a provider sync and a tenant's network create, as before, and a platform
+    run in the one step that adds or removes its sandbox range. An installation whose settings never name
+    sandboxes makes no such write. A rewrite puts this provider's rules on top of the cluster firewall's list in a
+    fixed order; rules of another owner are never rewritten or removed and keep their order among themselves.
 
 - **A project's delete is refused while the job scheduler is off, with the grace period too.** Up to 0.11.1
   `DELETE /project/{id}` answered `200` and `SCHEDULED_FOR_DELETION` on such an install; it now answers the `409`
@@ -345,6 +350,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     its control; `TestIsolationRulesOfASharedSandboxGroup` (the set line by line);
     `TestFenceGateSaysWhenTheClusterFirewallCutsTheMachineOff`; `TestForwardVerdictReadsOnlyWhatARuleSays`. The
     forward chain and the VM firewall in these tests are the tests' own model of Proxmox. Not run on a lab.
+
+- **Sandboxes: every run stopped at its first stage between a change of the sandbox range and the next provider
+  sync, the one that switches sandboxes off included (drill of v0.12.0-rc.1, findings Z3-A and Z4-A).** The run
+  wrote the range on the provider in stage `cluster`, and took it off at "off", and left the provider-wide isolation
+  rules to "the next provider sync". Until that sync the Check's `isolation` row failed and stage `validate`
+  stopped every run: on the lab the "off" was refused when it was needed (two machines running), and after a
+  successful off the next apply failed. With the scheduler off nothing healed it, and on a site with no project
+  the provider-level sync refuses to remove a DROP in place, so the operator had to delete rules by hand.
+  - *The fix:* the run brings the provider-wide rule set to the provider's new config itself, in the step that adds
+    the range (stage `cluster`, before any machine is made) and in the step that removes it (the end of the off,
+    and a Remove): `pve.WriteProviderIsolation`, the form a project's sync and a network create have, with no
+    project and none of the provider-level sync's refusals. It runs under the site's SDN lock, which that sync
+    takes; while the lock is held the stage waits. It reads the rules back from the cluster firewall, and the run
+    goes on only when they are the set, each enabled. A set already in place gets no request but reads, so every
+    apply asserts it.
+  - *The first stage:* an `isolation` row that differs from the provider's settings only in what names the
+    installation's own sandbox range is a warning, and no run is stopped by it. It is decided from the rules: with
+    the range's own DROPs and ACCEPTs left out and the range taken off the other rules' destinations, the set in
+    place must be the wanted one, rule for rule, each enabled, with the datacenter firewall on. Every other cause
+    still stops a run, an "off" included.
+  - *Other owners:* rules that are not this provider's (another stack's isolation set under its own pool prefix,
+    the platform's PVE API rule, an operator's rules) are never rewritten or removed, and another stack's firewall
+    groups and IP sets are not touched. A project's ACCEPTs stay above the DROPs.
+  - *Order:* a rewrite leaves this provider's rules in one fixed order on top of the list, whatever order they
+    were in; a pass with nothing to change writes nothing.
+  - *Not changed:* the provider-level sync still refuses to add, replace or remove rules on a set in place it did
+    not write; it does not add the ACCEPTs of a shared sandbox group to a set that lacks them. An apply does.
+  - Tests, against a fake Proxmox that keeps the rule list as Proxmox does (a new rule on top, a delete by
+    position) and holds another stack's rules, group and IP sets, with no provider sync anywhere:
+    `TestApplyTwiceWithNoSyncInBetween` (both placements), `TestOffThenApplyWithNoSyncInBetween`,
+    `TestOffOnASiteWithNoProjectLeavesIsolationOK`, `TestValidateIsNotStoppedByTheOwnSandboxRange` (with four other
+    causes that still stop the off), `TestSandboxIsolationWaitsForTheSDNLock`, `TestWriteProviderIsolation`. The
+    fake stores rules and filters no packet. Not run on a lab.
 
 - **A release that changed only the load balancer controller reached no cluster by itself.** The tenant's cluster
   page offered "Platform update available" only when the cluster's chart version differed from the provider's, and

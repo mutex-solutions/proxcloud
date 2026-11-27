@@ -7,7 +7,8 @@ and rules: [README.md](README.md#maintenance-rule).
 ## 2026-11-27: a sandbox machine's own cluster passes the cluster firewall, and the run writes the isolation rules (drill of v0.12.0-rc.1)
 
 **What changed:** no new component, container, listener or route. One rule kind more in the managed rule set of the
-cluster firewall, one key more in a provider's `config.sandbox`, and one more reading in the `fence` gate.
+cluster firewall, one key more in a provider's `config.sandbox`, one more reading in the `fence` gate, and one more
+writer of the isolation set (the platform runner).
 
 - `internal/cloud/pve/sandboxfw.go`: `clusterFlows` is the one list of what a sandbox worker opens toward its own
   cluster outside its range (a cluster of its own: TCP API and konnectivity to the control plane; a node group of a
@@ -25,13 +26,27 @@ cluster firewall, one key more in a provider's `config.sandbox`, and one more re
 - `internal/platformlife/sandbox_provider.go`: `SandboxSiteConfig` writes `controlPlane` for `shared` (the address
   and port `WorkloadServer` gives the kubeconfigs).
 
-**Why:** the drill of v0.12.0-rc.1 (2026-11-26, finding Z2-A): the DROP of the sandbox range to the blocked networks
+- `internal/cloud/pve/network.go`: `Service.WriteProviderIsolation` (the provider-wide set for a config, with no
+  project and without the refusals of `ReconcileProviderIsolation`, read back; `ErrIsolationNotInPlace`) and
+  `Service.IsolationDiffersOnlyIn` (the set in place differs from the config's only in what names given networks).
+- `internal/platformlife/sandbox_provider.go`: `acq.sandboxIsolation` reads the provider again and calls
+  `WriteProviderIsolation` under `Runner.SDNLock`; `sandbox_run.go` calls it after the write of the range in
+  `sandboxAccess` (stage `cluster`) and after its removal in `removeSandboxAccess` (off, Remove). A new relation in
+  words only: the platform runner now writes cluster firewall rules of the isolation set, which until now only the
+  sync job and the project handlers did.
+- `internal/platformlife/preflight.go`: `Preflight.isolationRow` (the row, taken out of `Run`) answers a warning
+  when `Preflight.ownSandboxOnly` holds, so stage `validate` does not stop on the installation's own range.
+
+**Why:** two findings of the drill of v0.12.0-rc.1 (2026-11-26). Z3-A and Z4-A: the run left the rules to the next
+provider sync, and until then its own Check failed and every run stopped at stage `validate`, the off included.
+Z2-A: the DROP of the sandbox range to the blocked networks
 covers the platform's API address and node range, and on a node with `net.bridge.bridge-nf-call-iptables` at 1 the
 forward chain also sees bridged frames, so a shared sandbox machine could not open a connection to its cluster while
 the gates read ok. ACCEPTs above the DROP rather than holes in it: a destination list cannot leave out a port.
 
 **Diagrams updated:** none (no element of C1 to C3 moves). [c4-code.md](c4-code.md): rule 6 of the managed rule
-set, the sentence on what the forward rules see, the `Service.CheckSandboxFence` row.
+set, the sentence on what the forward rules see, the `Service.CheckSandboxFence` row, the rows
+`Service.WriteProviderIsolation` and `acq.sandboxIsolation`.
 
 ## 2026-11-26: the load balancer gateway bounds a cluster's calls (#492, Known issues of v0.11.1)
 

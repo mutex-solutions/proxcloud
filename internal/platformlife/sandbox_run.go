@@ -114,12 +114,16 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 			return err
 		}
 	}
-	// The provider's sandbox network and pool before any sandbox machine exists: the next provider sync writes the
-	// isolation rules of the range. The fence pass itself starts once stage register has stored the identity it
-	// reads the Nodes with (the sandbox chart makes it); until then the sync writes no VM firewall and every machine
-	// keeps its unsecured taint, so no sandbox runs on one. On a later apply the identity is stored already, and a
-	// new machine is fenced by the next sync after its clone.
+	// The provider's sandbox network and pool before any sandbox machine exists, and with them the isolation rules of
+	// the range, written here and read back (sandboxIsolation): no machine is made behind rules that are not there,
+	// and the installation's own Check does not fail until some provider sync. The fence pass itself starts once
+	// stage register has stored the identity it reads the Nodes with (the sandbox chart makes it); until then the
+	// sync writes no VM firewall and every machine keeps its unsecured taint, so no sandbox runs on one. On a later
+	// apply the identity is stored already, and a new machine is fenced by the next sync after its clone.
 	if err := x.sandboxSite(ctx, ""); err != nil {
+		return err
+	}
+	if err := x.sandboxIsolation(ctx); err != nil {
 		return err
 	}
 	if want == SandboxShared {
@@ -236,11 +240,16 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 		return err
 	}
 	// The provider stops naming the pool and the range first, so no sync fences on while the rest goes; then the
-	// firewall generations of the pool, which no pass would sweep any more.
+	// isolation rules follow the provider (the range's DROPs and ACCEPTs go, read back before anything else is
+	// recorded: left to "the next provider sync" they failed the Check and stopped the next run); then the firewall
+	// generations of the pool, which no pass would sweep any more.
 	if x.r.SandboxSite != nil {
 		if err := sandboxSiteErr(x.r.SandboxSite(ctx, x.in, &SandboxSite{Range: built.NodeRange})); err != nil {
 			return err
 		}
+	}
+	if err := x.sandboxIsolation(ctx); err != nil {
+		return err
 	}
 	if err := (&pve.Service{C: x.portal}).RemoveSandboxFirewall(ctx, pve.SandboxPool); err != nil {
 		return classify(CodeSandboxAccessFailed, err)
