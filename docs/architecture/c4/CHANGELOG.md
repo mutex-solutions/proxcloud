@@ -26,6 +26,9 @@ writer of the isolation set (the platform runner).
 - `internal/platformlife/sandbox_provider.go`: `SandboxSiteConfig` writes `controlPlane` for `shared` (the address
   and port `WorkloadServer` gives the kubeconfigs).
 
+- `internal/cloud/pve/sandboxfw.go`: the workers' rule for the internet is three ACCEPTs (TCP
+  `sandboxInternetTCP` = every port but 25, UDP, ICMP) in place of one for every protocol and port (finding Z2-e:
+  TCP 25 was open from the machine itself). A changed rule set is a new generation.
 - `internal/cloud/pve/network.go`: `Service.WriteProviderIsolation` (the provider-wide set for a config, with no
   project and without the refusals of `ReconcileProviderIsolation`, read back; `ErrIsolationNotInPlace`) and
   `Service.IsolationDiffersOnlyIn` (the set in place differs from the config's only in what names given networks).

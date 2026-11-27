@@ -30,6 +30,8 @@ const (
 	// Kamaji's konnectivity server port on the tenant control plane's address.
 	// ponytail: Kamaji's default, not read from the TenantControlPlane; read it there if a site ever changes it.
 	sandboxKonnectivityPort = 8132
+	// sandboxInternetTCP are the TCP ports a sandbox worker reaches on the internet: all but 25 (direct SMTP).
+	sandboxInternetTCP = "1:24,26:65535"
 )
 
 // ErrSandboxDrift: a group or IP set of the current generation exists with other content while a worker uses it. It
@@ -416,7 +418,17 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 		}
 		rules = append(rules, rule("out", "tcp", "", a.String(), strconv.Itoa(port)))
 	}
-	rules = append(rules, rule("out", "", "", outRef, "")) // the internet, through the sandbox SNAT address
+	// The internet, through the sandbox SNAT address: TCP, UDP and ICMP, and of TCP every port but 25. A sandbox
+	// sends mail through a relay's submission port (587, or 465); direct SMTP from a tenant's code is how an
+	// address pool ends on a blocklist. The Cilium policy of the sandbox chart drops port 25 for a sandbox pod;
+	// this holds the line for whatever leaves the machine itself (a pod on the host network, the node's own
+	// processes). Three ACCEPTs and no DROP above one, so that the group stays a set of ACCEPTs in which no order
+	// matters. An IP protocol other than these three no longer leaves a sandbox machine.
+	rules = append(rules,
+		rule("out", "tcp", "", outRef, sandboxInternetTCP),
+		rule("out", "udp", "", outRef, ""),
+		rule("out", "icmp", "", outRef, ""),
+	)
 
 	content, _ := json.Marshal([]any{g.Nodes, g.Out, rules})
 	sum := sha256.Sum256(content)

@@ -490,7 +490,8 @@ registry's address and port alone (SB6a), with `config.sandbox.buildStorage` TCP
 address and port alone (SB6b), with `config.sandbox.portal` TCP out to the portal API for wakes (SB7), and the
 internet (IP set `<group>-o`: everything minus the private
 ranges, the management networks, every node address, the sandbox's SNAT address, `blockedCidrs`, `cidrPool`, the
-sandbox subnet and the control plane). With every
+sandbox subnet and the control plane) over TCP on every port but 25 (`1:24,26:65535`: no direct SMTP from a worker),
+UDP and ICMP, as three rules and no other IP protocol. With every
 rule an ACCEPT under DROP policies, no order or partial write opens anything; a changed set is a new generation that
 workers move to before the old one is deleted. `ipfilter-net0` is the worker range until its Node joins, then pinned
 to the Node's address once (read only while the worker is tainted, never followed after) plus the MetalLB range. The

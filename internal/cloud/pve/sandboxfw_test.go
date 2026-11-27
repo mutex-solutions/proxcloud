@@ -138,11 +138,15 @@ func TestSandboxGeneration(t *testing.T) {
 		{"out", "udp", "1.1.1.1", "53"}, {"out", "tcp", "1.1.1.1", "53"},
 		{"out", "udp", nodes, "8472"}, {"in", "udp", nodes, "8472"},
 		{"in", "tcp", nodes, "10250"}, {"in", "tcp", "10.20.0.201,10.20.0.202/31,10.20.0.204/30,10.20.0.208/31", "10250"},
-		{"out", "", "+dc/" + g.OutSet, ""},
+		{"out", "tcp", "+dc/" + g.OutSet, "1:24,26:65535"}, {"out", "udp", "+dc/" + g.OutSet, ""}, {"out", "icmp", "+dc/" + g.OutSet, ""},
 	} {
 		if !has(want[0], want[1], want[2], want[3]) {
 			t.Errorf("missing rule %v", want)
 		}
+	}
+	// No rule opens the internet for every protocol and port: that one let TCP 25 out of the machine.
+	if has("out", "", "+dc/"+g.OutSet, "") {
+		t.Fatal("a rule opens the internet on every port, direct SMTP included")
 	}
 	if has("in", "tcp", "10.20.0.214", "") || slices.ContainsFunc(g.Rules, func(r FirewallRule) bool { return r.Type == "in" && r.Source == "" }) {
 		t.Fatal("nothing comes in from anywhere")

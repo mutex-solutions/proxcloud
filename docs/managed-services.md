@@ -1167,7 +1167,7 @@ bridge or tag. Both policies are DROP and every rule is an ACCEPT, so a missing 
 | MetalLB memberlist (7946) | none | inside the sandbox range |
 | sandbox-proxy | none: it runs on the `system` group | TCP 443 to the proxy address, from any source |
 | DNS | UDP and TCP 53 to `dns` | the same |
-| Internet | everything outside the private, CGNAT and link-local ranges, the platform prefix, the nodes' own addresses, the management and blocked networks and the tenant pool | the same |
+| Internet | TCP on every port but 25, UDP and ICMP, to everything outside the private, CGNAT and link-local ranges, the platform prefix, the nodes' own addresses, the management and blocked networks and the tenant pool. No other IP protocol | the same |
 
 - TCP 6443 to the whole `nodeRange` in `shared`: the Cilium agent, kube-proxy and the network
   guard reach the API through the `kubernetes` Service, which kube-proxy rewrites inside the VM to
@@ -1176,6 +1176,9 @@ bridge or tag. Both policies are DROP and every rule is an ACCEPT, so a missing 
 - The proxy address takes any source in `separate`: there is no entry appliance on a managed
   platform, so a client's own address arrives. The address must not be reachable from a network
   you do not want sandboxes served to; that is your router's rule.
+- **Mail.** Outbound TCP 25 is closed at the machine, on top of the sandbox chart's policy that
+  closes it for every sandbox pod: a tenant gets submission (TCP 587, and 465) to a relay of its
+  own, and no direct SMTP to a mail exchanger. v0.12.0-rc.1 left 25 open from the machine itself.
 - The IP filter of each machine admits its own address once its Node has reported it (and in
   `separate` the proxy address, which any machine of the sandbox cluster may announce). A sandbox
   machine cannot answer for the API address, a platform machine or a MetalLB address.

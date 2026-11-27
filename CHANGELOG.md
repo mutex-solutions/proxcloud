@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     stage `cluster`, with no provider sync before or after it. A platform whose rules rc.1 left without the range
     (no sync ran after the apply) reads `isolation` as a warning that names the range, and the same apply, or the
     one that switches sandboxes off, passes stage `validate` and puts the rules right.
+  - *Every site with sandbox workers, the installer's sandbox cluster included: the workers' firewall gets a new
+    generation at the first provider sync after the upgrade.* The rule that opened the internet on every protocol
+    and port is now three: TCP on every port but 25, UDP, ICMP. The sync builds the new group and its IP sets,
+    moves each worker to it (for that moment a worker holds both groups, the union of two complete sets) and
+    deletes the old one; no worker is tainted for it. Between the upgrade and that sync the `fence` gate fails,
+    as for any changed rule set, and it holds again after it. What changes for traffic: a worker no longer opens
+    TCP 25 to the internet, and no longer sends an IP protocol other than TCP, UDP and ICMP there. Sandbox pods
+    were already kept off port 25 by the sandbox chart's policy; submission (587, 465) stays open.
   - *Who writes the isolation rules now:* a provider sync and a tenant's network create, as before, and a platform
     run in the one step that adds or removes its sandbox range. An installation whose settings never name
     sandboxes makes no such write. A rewrite puts this provider's rules on top of the cluster firewall's list in a
@@ -350,6 +358,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     its control; `TestIsolationRulesOfASharedSandboxGroup` (the set line by line);
     `TestFenceGateSaysWhenTheClusterFirewallCutsTheMachineOff`; `TestForwardVerdictReadsOnlyWhatARuleSays`. The
     forward chain and the VM firewall in these tests are the tests' own model of Proxmox. Not run on a lab.
+
+- **Outbound TCP 25 was open from a sandbox machine (drill of v0.12.0-rc.1, finding Z2-e).** The notes and the
+  plan said closed, and for a sandbox pod it was (the sandbox chart's Cilium policy). The machine's own VM firewall
+  had one rule for the internet, every protocol and port, so two probes to port 25 from the machine itself
+  answered. The rule is now three ACCEPTs where the firewall is rendered (`SandboxFirewall.generation`): TCP
+  `1:24,26:65535`, UDP and ICMP to the internet set. No DROP is added: the group stays a set of ACCEPTs under DROP
+  policies, in which no order matters. A tenant gets submission (TCP 587, and 465) to a relay of its own and no
+  direct SMTP. It holds for both placements of a managed platform and for the installer's sandbox cluster. The table
+  test of the two layers holds the line (`TestSandboxLayersOnTheDrillsPackets`: 25 dropped, 24, 26, 465, 587 and
+  65535 open, UDP open, another IP protocol dropped); before the fix its row for port 25 read `allow`. Not run on a
+  lab.
 
 - **Sandboxes: every run stopped at its first stage between a change of the sandbox range and the next provider
   sync, the one that switches sandboxes off included (drill of v0.12.0-rc.1, findings Z3-A and Z4-A).** The run
