@@ -233,11 +233,17 @@ func (x *acq) tenantsGone(ctx context.Context, seed *kamajik8s.Client, empty boo
 	return wl, nil
 }
 
+// disableProviders sets the installation's providers DISABLED, then ends every running interval of the sandbox
+// provider's functions in the portal's records (endFunctions): the cluster they ran on is about to be deleted, or is
+// lost already, and a function recorded as running would be billed without end.
 func (x *acq) disableProviders(ctx context.Context) error {
 	if err := x.check(ctx); err != nil {
 		return err
 	}
-	return x.r.Disable(ctx, x.in.ID)
+	if err := x.r.Disable(ctx, x.in.ID); err != nil {
+		return err
+	}
+	return x.endFunctions(ctx)
 }
 
 // deleteTagged is the seed-lost mode: it deletes the VMs of pool proxcloud-system that carry this installation's tag,

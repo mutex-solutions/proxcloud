@@ -295,7 +295,7 @@ func move(in *Installation, target string) (run Embedded, up *Upgrade, err error
 	case !ok || (want != cur.SHA256 && (pending == nil || want != pending.SHA256)):
 		return Embedded{}, nil, ErrBadTarget
 	}
-	u := &Upgrade{From: refOf(from), To: refOf(to), Changes: Classify(from.BOM, to.BOM), Blocking: []string{}}
+	u := &Upgrade{From: refOf(from), To: refOf(to), Changes: in.featureRows(Classify(from.BOM, to.BOM), to.BOM), Blocking: []string{}}
 	if strings.HasSuffix(to.Release, "-dev") {
 		u.Blocking = append(u.Blocking, fmt.Sprintf("release %s is a development BOM: no later build embeds it, so a platform moved to it could be applied by "+
 			"this build alone. Only the BOM of a release is a target (docs/ci-release.md, \"Upgrade drill builds\")", to.Release))

@@ -133,3 +133,84 @@ func (h *Handler) sandboxOffRefused(ctx context.Context, old, next *platformlife
 	}
 	return platformlife.SandboxOffBlocked(es)
 }
+
+// SetPlatformFunctions gives the handler the read of function records it refuses "functions off" by: exist reports
+// whether a sandbox provider holds one. Nil (the default): functions a run built are not switched off at all.
+func (h *Handler) SetPlatformFunctions(exist func(ctx context.Context, providerID string) (bool, error)) {
+	h.platformFunctionsExist = exist
+}
+
+// functionsOffRefused is why an update may not take the functions a run built away from sandboxes that stay: their
+// provider still holds a function record (a run refuses it too: the record may be made after this save), or nothing
+// here can say whether it does.
+func (h *Handler) functionsOffRefused(ctx context.Context, old, next *platformlife.Installation) string {
+	id, off := platformlife.FunctionsSwitchedOff(old, next)
+	if !off || id == "" {
+		return ""
+	}
+	if h.platformFunctionsExist == nil {
+		return "This build cannot read the function records of the sandbox provider, so it does not switch functions off."
+	}
+	if exist, err := h.platformFunctionsExist(ctx, id); err != nil {
+		return "The function records of the sandbox provider could not be read: " + err.Error()
+	} else if exist {
+		return platformlife.FunctionsOffBlocked
+	}
+	return ""
+}
+
+// PlatformFunctionWakeToken stores the wake token of functions a platform run minted as secret.functionWakeToken of
+// the installation's sandbox provider, sealed; "" takes it away. It is the bearer sandbox-proxy sends to the portal's
+// function routes. secret.proxyWakeToken, the sandbox wake token, is not this token and is never written here: it
+// staying empty is what keeps autoResume refused on a platform's sandbox provider. A row that is not the installation's
+// sandbox provider answers platformlife.ErrProviderConflict and stays as it was. Taking the token away from a row that
+// is gone, or is not the installation's, is no error: there is nothing of the installation's to take, and a Remove
+// must still end.
+func (h *Handler) PlatformFunctionWakeToken(ctx context.Context, in *platformlife.Installation, providerID, token string) error {
+	return h.repo.db.WithTx(ctx, func(ctx context.Context) error {
+		if err := h.repo.db.LockXact(ctx, "platform-run:"+in.ID); err != nil {
+			return err
+		}
+		doc, err := h.repo.FindDoc(ctx, externalServiceCollection, providerID)
+		if err != nil {
+			return err
+		}
+		switch {
+		case doc == nil && token == "":
+			return nil
+		case doc == nil:
+			return serviceNotFoundErr(providerID)
+		case !setFunctionWakeToken(doc, in.ID, token, func(secret pgdoc.M, value string) { setSecretLeaf(h, secret, "functionWakeToken", value) }):
+			if token == "" {
+				return nil
+			}
+			return fmt.Errorf("%w: provider %s is not the sandbox provider of installation %s", platformlife.ErrProviderConflict, providerID, in.ID)
+		}
+		return h.repo.ReplaceDoc(ctx, externalServiceCollection, providerID, doc)
+	})
+}
+
+// setFunctionWakeToken makes the change on the provider document; false when the row is not the installation's
+// sandbox provider, and nothing was changed.
+func setFunctionWakeToken(doc pgdoc.M, installationID, token string, seal func(secret pgdoc.M, value string)) bool {
+	cfg, _ := doc["config"].(map[string]any)
+	if cfg["provider"] != "sandbox" || cfg[platformlife.ProviderMarker] != installationID {
+		return false
+	}
+	secret := ensureMap(doc, "secret")
+	if token == "" {
+		delete(secret, "functionWakeToken")
+	} else {
+		seal(secret, token)
+	}
+	return true
+}
+
+// defaultPortalURL gives functions that name no portal URL the API's own (PROXCLOUD_SELF_API_BASE_URL). It is stored
+// with the settings, so the plan and the record name what sandbox-proxy is given; Validate refuses the block when
+// neither is set, and a URL the proxy cannot use (plain http, or a name with placement separate) as it would any other.
+func defaultPortalURL(spec *platformlife.Spec, self string) {
+	if sb := spec.Sandbox; sb != nil && sb.Functions != nil && sb.Functions.Enabled && sb.Functions.PortalURL == "" {
+		sb.Functions.PortalURL = self
+	}
+}

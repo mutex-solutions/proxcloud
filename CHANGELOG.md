@@ -124,6 +124,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `FUNCTION`. A provider gains `secret.functionWakeToken` as a field of its own, apart from `proxyWakeToken`,
     which stays empty.
   Tested against a fake cluster only: no function has run on a cluster from this code.
+- **Functions on the managed platform, the platform's side (not reachable yet)** (#512,
+  [managed-services.md](docs/managed-services.md#functions-on-the-sandbox-machines)). What a platform run builds
+  for functions beside the sandboxes it already builds, for settings that ask for it:
+  `spec.sandbox.functions {enabled, portalURL, portalCA}`. **No BOM this build embeds lets a run build it**: functions
+  need sandbox chart 0.2.0, the save refuses `enabled: true` under a BOM that pins an older one ("pins sandbox chart
+  0.1.0, which has no functions"), and a run that meets the block in a record stops with `sandbox_refused` before it
+  writes anything. An installation without the tick plans, renders and runs as before: the render files of both
+  placements are unchanged, and a run asks nothing about functions.
+  - **The wake token.** 32 random bytes, a new one at every apply. Sealed with the installation's secrets, written
+    as Secret `sandbox-system/sandbox-proxy-wake` (key `PROXCLOUD_FUNCTION_WAKE_TOKEN`) on the cluster that runs
+    the sandbox chart, and stored as `secret.functionWakeToken` of the sandbox provider in stage `register`. It is
+    in no Application, chart value, run message or route answer. The sandbox wake token (`secret.proxyWakeToken`)
+    is never written, so autoResume stays refused on a platform's sandbox provider.
+  - **The chart's values.** `functions {enabled, wakeURL, portalCA, wakeTokenVersion}` in both placements, and only
+    once the token's Secret is on the cluster: sandbox-proxy reads the token when it starts.
+    `wakeTokenVersion` is the id of the run that minted the token, so a new token replaces the proxy's replicas,
+    one at a time; a connection open through the replaced replica is cut once. The plan of an installation with
+    functions always holds the row `sandbox-functions` for that reason.
+  - **The portal's address.** `portalURL` is `https` only; left empty, the save stores the API's own base URL. With
+    `placement: separate` it names an IPv4 address, which the run adds to `config.sandbox.portal` of the Proxmox
+    provider: the one address and port the fence of the sandbox machines and the isolation rules open. With
+    `shared` nothing is opened.
+  - **Off.** `enabled: false` with sandboxes that stay is refused while the sandbox provider holds a function
+    record (`409 functions_exist` at the save, `sandbox_refused` in the run). Before a run deletes a cluster that
+    ran functions (`placement: off`, which is also how `pc-sandbox` is rebuilt, and Remove) it ends every running
+    interval of the functions in the portal's records, so none is billed while its cluster is gone; the records
+    stay. A build without a read of the function records refuses all three, and this one has none: the calls a run
+    makes for it (`FunctionsExist`, `EndFunctions`) get their implementation with the functions API.
+  - **The upgrade plan knows where the sandbox chart runs.** The move of the sandbox chart to a new version is no
+    row for an installation without sandboxes, the Application's sync with `shared`, and the add-on's upgrade
+    inside `pc-sandbox` with `separate`. Until now every installation got the Application row.
+  Run against fakes, as renders, and for the provider write against PostgreSQL. Nothing of it has run on a site.
 - **Sandboxes on the managed platform are offered** (#483, `deploy/platform/platform-bom.yaml`,
   [managed-services.md](docs/managed-services.md#sandboxes-on-the-platform)). The platform BOM names the sandbox
   chart, `proxcloud-sandbox` 0.1.0 at its published digest, as the component `sandbox` (`feature: sandbox`), and

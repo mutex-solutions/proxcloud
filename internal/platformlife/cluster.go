@@ -184,6 +184,20 @@ func (x *acq) renderInput() RenderInput {
 				rs.Groups = append(rs.Groups, RenderNodeGroup{Name: g.Name, Nodes: g.Nodes, Count: g.Count, Cores: g.Cores, MemoryMiB: g.MemoryMiB, DiskGiB: g.DiskGiB})
 			}
 		}
+		// Functions: what the settings ask for, and the version of the token a run has written into the cluster.
+		// Never under a BOM whose sandbox chart has none (sandboxAccess refuses the run there).
+		if fn := sp.functions(); fn != nil && x.full != nil && functionsChartProblem(sp, x.full) == "" {
+			if p, err := parsePortal(fn.PortalURL); err == nil {
+				rf := &RenderFunctions{WakeURL: p.wakeURL, PortalCA: fn.PortalCA}
+				if rs.Mode == SandboxSeparate && p.addr.IsValid() {
+					rf.PortalAddress, rf.PortalPort = p.addr.String(), p.port
+				}
+				if st := x.in.Status.Sandbox; st != nil && st.Functions != nil {
+					rf.TokenVersion = st.Functions.TokenVersion
+				}
+				rs.Functions = rf
+			}
+		}
 		in.Sandbox = rs
 	}
 	// A move that replaces machines renders from the recorded step, in every stage: 0 until stage 7 begins the roll
@@ -1465,6 +1479,16 @@ func (x *acq) workloadPlatform(ctx context.Context) error {
 	}
 	if err := x.sandboxCertificate(ctx, wl); err != nil {
 		return err
+	}
+	// The wake token of functions before the sandbox chart's wave, and the Applications rendered again after it: the
+	// functions block is in the chart's values only once the token's Secret is on the cluster.
+	if x.in.Spec.sandboxMode() == SandboxShared {
+		if err := x.functionWake(ctx, wl); err != nil {
+			return err
+		}
+		if apps, err = x.apps(ClusterWorkload); err != nil {
+			return err
+		}
 	}
 	err = x.waves(ctx, seed, wl, apps, waveStall, func(wave int) error {
 		if wave == first {

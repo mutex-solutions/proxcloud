@@ -1057,7 +1057,11 @@ func run() error {
 				Imports:  platformlife.TemplateUpdates{Service: tuSvc},
 				Register: adminH.PlatformRegister, Disable: adminH.PlatformDisable, Attach: adminH.PlatformAttach,
 				SandboxSite: adminH.PlatformSandboxSite,
-				SDNLock:     sdnLock,
+				// The wake token of a platform's functions on its sandbox provider. FunctionsExist and EndFunctions (and the
+				// admin handler's SetPlatformFunctions) are wired with the functions API: a run that needs one of them
+				// before that refuses, and under every BOM that pins a sandbox chart without functions none does.
+				FunctionWakeToken: adminH.PlatformFunctionWakeToken,
+				SDNLock:           sdnLock,
 				Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
 					es, err := esSvc.Get(ctx, id)
 					if errors.Is(err, externalservice.ErrNotFound) {

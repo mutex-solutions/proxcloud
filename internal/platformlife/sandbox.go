@@ -86,6 +86,9 @@ type SandboxSpec struct {
 	TLS    *SandboxTLS `json:"tls,omitempty"`
 	// System is the separate cluster's second group (sandbox-proxy, the agent-sandbox controller). Separate only.
 	System *SandboxMachines `json:"system,omitempty"`
+	// Functions is the function side of the sandboxes (sandbox_functions.go): nil or not enabled builds none of it.
+	// A PUT for an installed platform whose block names none keeps the stored one (KeepSandbox).
+	Functions *SandboxFunctions `json:"functions,omitempty"`
 }
 
 // SandboxTLS says where sandbox-proxy's wildcard certificate comes from: selfsigned (the run makes one; also what an
@@ -113,6 +116,8 @@ type SandboxStatus struct {
 	Certificate string `json:"certificate,omitempty"`
 	// BuiltAt: every sandbox machine ran once. Until then an upgrade run lets new machine templates of the group through.
 	BuiltAt *time.Time `json:"builtAt,omitempty"`
+	// Functions is what a run built of spec.sandbox.functions (sandbox_functions.go); nil = nothing.
+	Functions *FunctionsStatus `json:"functions,omitempty"`
 }
 
 var domainRE = regexp.MustCompile(`^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.)+[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
@@ -283,6 +288,7 @@ func (s Spec) validateSandbox(bad func(string, ...any), prefix netip.Prefix, poi
 	if sb.TLS != nil && sb.TLS.Mode != TLSSecret && sb.TLS.Mode != TLSSelfSigned {
 		bad("spec.sandbox.tls.mode %q is neither secret nor selfsigned", sb.TLS.Mode)
 	}
+	sb.validateFunctions(bad, r, rangeOK, lbs, rangesOK)
 }
 
 // sandboxSiteProblems checks the sandbox range against the site. The provider's isolation refuses a sandbox CIDR that
@@ -359,6 +365,9 @@ func (in *Installation) SandboxProblems() []string {
 		return []string{fmt.Sprintf("spec.sandbox: the platform's BOM (release %s) names cluster chart %s, which cannot give a node group a pool and an address range of its own: sandboxes need chart %s or newer",
 			bom.Release, chart, kamaji.GroupPoolChartVersion)}
 	}
+	if why := functionsChartProblem(in.Spec, bom); why != "" {
+		return []string{why}
+	}
 	// Refused here and not by the run: a run would have built the machines before it met the missing certificate.
 	if t := in.Spec.Sandbox.TLS; t != nil && t.Mode == TLSSecret {
 		return []string{"spec.sandbox.tls.mode secret: this release has no route that stores an operator's certificate. Set tls.mode selfsigned: the run makes a certificate for *." + in.Spec.Sandbox.Domain}
@@ -368,9 +377,17 @@ func (in *Installation) SandboxProblems() []string {
 
 // KeepSandbox makes a spec sent for an installed platform keep the stored sandbox block when it names none: a console
 // from before the block must not switch sandboxes off by leaving it out. Off is the explicit placement off.
+//
+// The same holds one level down for spec.sandbox.functions: a block that asks for sandboxes and names no functions
+// keeps the stored functions, so a console from before functions cannot switch them off by saving the sandbox settings
+// it knows. Off is the explicit functions.enabled false.
 func KeepSandbox(old, next *Spec) {
 	if next.Sandbox == nil {
 		next.Sandbox = old.Sandbox
+		return
+	}
+	if next.Sandbox.Functions == nil && old.Sandbox != nil && next.sandboxMode() != "" {
+		next.Sandbox.Functions = old.Sandbox.Functions
 	}
 }
 
@@ -455,7 +472,7 @@ func (in *Installation) sandboxChanges() []PlanChange {
 		row, impact := access(built.Placement)
 		return []PlanChange{
 			{Cluster: ClusterName, Name: "sandbox", From: built.Placement, To: SandboxOff, Class: ClassMachines, Stage: stageCluster,
-				Impact: "Sandboxes are switched off: the run deletes " + what + ". Every running sandbox ends. Disable the sandbox provider and let its sandboxes end before the apply."},
+				Impact: "Sandboxes are switched off: the run deletes " + what + ". Every running sandbox ends. Disable the sandbox provider and let its sandboxes end before the apply." + in.functionsStop()},
 			site("sandbox-access", "deleted: "+row, impact),
 			site("sandbox-pool", "deleted: pool "+pve.SandboxPool, "Deleted once it holds no VM."),
 		}
@@ -463,7 +480,7 @@ func (in *Installation) sandboxChanges() []PlanChange {
 		return []PlanChange{{Cluster: ClusterName, Name: "sandbox", From: built.Placement, To: want, Class: ClassRefused,
 			Blocking: later + "a run built placement " + built.Placement + ", and it does not become " + want + " in one apply: set placement off, apply, then set " + want}}
 	case built != nil && built.BuiltAt != nil && len(in.sandboxGrowth()) == 0:
-		return nil
+		return in.functionsChanges()
 	}
 	var machines []string
 	for _, g := range in.Spec.sandboxGroups() {
@@ -483,11 +500,11 @@ func (in *Installation) sandboxChanges() []PlanChange {
 		from = built.Placement
 	}
 	row, why := access(want)
-	return []PlanChange{
+	return append([]PlanChange{
 		{Cluster: ClusterName, Name: "sandbox", From: from, To: want + " (" + strings.Join(machines, "; ") + ")", Class: ClassMachines, Stage: stageCluster, Impact: impact},
 		site("sandbox-pool", "pool "+pve.SandboxPool, "The portal token creates the pool. The portal token holds its platform role there (through /pool), which is what lets the provider sync write the VM firewall of a sandbox machine; on "+pve.SystemPool+" it holds NoAccess."),
 		site("sandbox-access", row, why),
-	}
+	}, in.functionsChanges()...)
 }
 
 // RenderSandbox is spec.sandbox as the renderers read it (nil on RenderInput: no sandboxes).
@@ -502,6 +519,9 @@ type RenderSandbox struct {
 	// RenderCluster.NodeGroups. ChartVersion is the cluster chart the separate cluster was built with ("" = the BOM's).
 	Groups       []RenderNodeGroup
 	ChartVersion string
+	// Functions is spec.sandbox.functions as a run renders it (nil: the settings ask for none, and nothing of them is
+	// rendered anywhere).
+	Functions *RenderFunctions
 }
 
 func anyList(in []string) []any {
@@ -532,12 +552,22 @@ func sandboxGroupValues(b *BOM, in RenderInput, ng map[string]any) error {
 
 // sandboxChartValues are the sandbox chart's values the run adds in both modes: where sandbox-proxy answers and what
 // every sandbox is denied on top of the private ranges (a platform network need not be RFC 1918).
+//
+// The functions block is added only for settings that ask for functions, and only once the run has written the wake
+// token's Secret into the cluster the chart runs on (RenderFunctions.TokenVersion): the proxy reads the token when it
+// starts, so the values that make it serve functions never reach a cluster before the token does. Without the block
+// the values are the ones of before functions, key for key. It feeds both placements: the shared Application and the
+// separate cluster's addons.sandbox.values.
 func sandboxChartValues(in RenderInput) map[string]any {
-	return map[string]any{
+	v := map[string]any{
 		"proxy":     map[string]any{"address": in.Sandbox.ProxyAddress, "domain": in.Sandbox.Domain},
 		"guardrail": map[string]any{"extraDeny": []any{in.Sandbox.PlatformPrefix}},
 		"prepull":   sandboxPrepullRefs(),
 	}
+	if f := in.Sandbox.Functions; f != nil && f.TokenVersion != "" {
+		v["functions"] = map[string]any{"enabled": true, "wakeURL": f.WakeURL, "portalCA": f.PortalCA, "wakeTokenVersion": f.TokenVersion}
+	}
+	return v
 }
 
 // sandboxPrepullRefs are the images of sandboxPrepull by digest, for the chart's prepull DaemonSet. A release whose

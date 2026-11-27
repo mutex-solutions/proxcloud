@@ -120,6 +120,12 @@ func SandboxSiteConfig(in RenderInput) map[string]any {
 	} else {
 		cfg["loadBalancers"] = []any{sb.ProxyAddress}
 		cfg["proxy"] = map[string]any{"address": sb.ProxyAddress, "port": 443}
+		// With functions, sandbox-proxy calls the portal from a fenced machine: the one address and port the fence and
+		// the isolation rules open for it. Shared names none: there the proxy runs on the system group, outside the fence,
+		// and no sandbox machine may reach the portal's address.
+		if f := sb.Functions; f != nil && f.PortalAddress != "" {
+			cfg["portal"] = map[string]any{"address": f.PortalAddress, "port": f.PortalPort}
+		}
 	}
 	return cfg
 }
@@ -266,9 +272,10 @@ func (x *acq) sandboxClusterClient(ctx context.Context, wl *kamajik8s.Client) (*
 
 // registerSandbox is the sandbox part of stage register: the firewall identity's kubeconfig to the Proxmox provider,
 // so its sync fences the machines and takes their unsecured taint off, then the sandbox provider, created DISABLED
-// or adopted. An adopted row keeps everything the operator owns (status, templates, limits) and gets the kubeconfig
-// again: after a rebuild of the sandbox cluster the old one names a cluster that is gone. "" when the settings ask
-// for no sandboxes.
+// or adopted. An adopted row keeps everything the operator owns (status, templates, limits, the functions block) and
+// gets the kubeconfig again: after a rebuild of the sandbox cluster the old one names a cluster that is gone. Then
+// the wake token of functions (secret.functionWakeToken); secret.proxyWakeToken is never written. "" when the
+// settings ask for no sandboxes.
 func (x *acq) registerSandbox(ctx context.Context, wl *kamajik8s.Client) (id string, err error) {
 	if x.in.Spec.sandboxMode() == "" {
 		return "", nil
@@ -291,7 +298,15 @@ func (x *acq) registerSandbox(ctx context.Context, wl *kamajik8s.Client) (id str
 	if err != nil && strings.Contains(err.Error(), CodeProviderConflict) {
 		return "", permanent(CodeProviderConflict, "%s", clip(err.Error()))
 	}
-	return id, err
+	if err != nil {
+		return "", err
+	}
+	// The wake token of functions: the row made just now has none yet, and an adopted row must hold the token of the
+	// Secret in the cluster. Without functions nothing is written (functionWake took a stored token away).
+	if token := x.builtWakeToken(); token != "" {
+		return id, x.providerWakeToken(ctx, id, token)
+	}
+	return id, nil
 }
 
 // ownSandboxRanges are the sandbox networks of the provider that are this installation's own: the range of the

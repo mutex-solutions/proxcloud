@@ -131,6 +131,9 @@ type Handler struct {
 	// platform is the managed-services platform store (SetPlatform, PROXCLOUD_PLATFORM_ENABLED; nil → its
 	// installation routes answer 404).
 	platform *platformlife.Store
+	// platformFunctionsExist reports whether a sandbox provider holds a function record (SetPlatformFunctions; nil =
+	// no read: functions a run built are then not switched off).
+	platformFunctionsExist func(ctx context.Context, providerID string) (bool, error)
 	// platformSDNLock is the SDN apply lock the tenant path test takes (SetPlatformSDNLock; nil in tests).
 	platformSDNLock func(ctx context.Context) (release func(), acquired bool, err error)
 	// platformJobs is the durable job store runs are enqueued on (SetPlatformRuns: only when the runner runs; nil →
