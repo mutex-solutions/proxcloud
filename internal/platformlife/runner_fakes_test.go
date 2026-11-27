@@ -267,7 +267,8 @@ type fakePVE struct {
 	acl       []string
 	tokens    []string
 	refuseACL bool
-	maxMem    int64 // every node's memory in bytes (0: the nodes report none)
+	failed    []string // the requests of the above that Proxmox answered with a 500
+	maxMem    int64    // every node's memory in bytes (0: the nodes report none)
 	// The sandbox fence's generations in the cluster firewall (security groups and IP sets by name, each with the
 	// sandbox comment), and the datacenter firewall's switch.
 	fwGroups, fwSets []string
@@ -372,6 +373,34 @@ func (f *fakePVE) writeCount(prefix string) int {
 		}
 	}
 	return n
+}
+
+// pveDies answers a 500 as Proxmox does when a handler dies: the message is in the status line, where the client
+// reads it, and the body holds no data.
+func pveDies(w http.ResponseWriter, msg string) {
+	conn, buf, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer conn.Close()
+	body := `{"data":null}`
+	fmt.Fprintf(buf, "HTTP/1.1 500 %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", msg, len(body), body)
+	_ = buf.Flush()
+}
+
+// aclRows are the rows the ACL writes so far leave, each "<path> <role> <token>", in the order they were first
+// written. Called with the lock.
+func (f *fakePVE) aclRows() []string {
+	var rows []string
+	for _, w := range f.acl {
+		row, del, _ := strings.Cut(w, " delete=")
+		rows = slices.DeleteFunc(rows, func(r string) bool { return r == row })
+		if del == "0" {
+			rows = append(rows, row)
+		}
+	}
+	return rows
 }
 
 func (f *fakePVE) pooled() []int {
@@ -690,9 +719,22 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			f.iso = slices.DeleteFunc(f.iso, func(n string) bool { return n == name })
 		}
 		data(f.upid("imgdel", 0))
+	// The pool, the ACL and the tokens as Proxmox answers them: a create of a pool that exists and a delete of a token
+	// that does not are a 500 (and a line in the node's log, counted in failed), and the lists show what is there.
 	case path == "/pools" && r.Method == http.MethodPost:
+		if slices.Contains(f.pools, r.Form.Get("poolid")) {
+			f.failed = append(f.failed, "POST /pools")
+			pveDies(w, fmt.Sprintf("pool '%s' already exists", r.Form.Get("poolid")))
+			return
+		}
 		f.pools = append(f.pools, r.Form.Get("poolid"))
 		data(nil)
+	case path == "/pools":
+		list := []any{}
+		for _, p := range f.pools {
+			list = append(list, map[string]any{"poolid": p})
+		}
+		data(list)
 	case path == "/pools/"+pve.SandboxPool && r.Method == http.MethodDelete:
 		f.pools = slices.DeleteFunc(f.pools, func(p string) bool { return p == pve.SandboxPool })
 		data(nil)
@@ -712,7 +754,12 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 		f.acl = append(f.acl, r.Form.Get("path")+" "+r.Form.Get("roles")+" "+r.Form.Get("tokens")+" delete="+del)
 		data(nil)
 	case path == "/access/acl":
-		data([]any{})
+		rows := []any{}
+		for _, row := range f.aclRows() {
+			p := strings.Fields(row)
+			rows = append(rows, map[string]any{"path": p[0], "roleid": p[1], "type": "token", "ugid": p[2], "propagate": 1})
+		}
+		data(rows)
 	case strings.HasPrefix(path, "/access/users/") && strings.Contains(path, "/token"):
 		parts := strings.Split(strings.TrimPrefix(path, "/access/users/"), "/token")
 		id := parts[0] + "!" + strings.TrimPrefix(parts[1], "/")
@@ -721,10 +768,21 @@ func (f *fakePVE) serve(w http.ResponseWriter, r *http.Request) {
 			f.tokens = append(f.tokens, id)
 			data(map[string]any{"full-tokenid": id, "value": "minted-" + strings.TrimPrefix(parts[1], "/") + "-secret-0001"})
 		case http.MethodDelete:
+			if !slices.Contains(f.tokens, id) {
+				f.failed = append(f.failed, "DELETE "+path)
+				pveDies(w, fmt.Sprintf("no such token '%s' for user '%s'", strings.TrimPrefix(parts[1], "/"), parts[0]))
+				return
+			}
 			f.tokens = slices.DeleteFunc(f.tokens, func(t string) bool { return t == id })
 			data(nil)
 		default:
-			data([]any{})
+			list := []any{}
+			for _, t := range f.tokens {
+				if user, name, _ := strings.Cut(t, "!"); user == parts[0] {
+					list = append(list, map[string]any{"tokenid": name})
+				}
+			}
+			data(list)
 		}
 	default:
 		f.t.Errorf("fake PVE: no route %s %s", r.Method, path)
@@ -764,6 +822,85 @@ type fakeSeed struct {
 	ttls      []float64
 	grant     time.Duration // when set, the life every TokenRequest token gets instead of the one asked for
 	uids      int
+	// argo, when set, is ArgoCD's render of an applied Application: the objects of this cluster the chart makes of its
+	// values, by path. The fake then syncs them as ArgoCD does without prune (argoSync) and compares as ArgoCD does
+	// (argoCompare); without it an applied Application reads Synced whatever is on the cluster.
+	argo     func(app map[string]any) map[string]map[string]any
+	tracked  map[string]map[string]bool // per Application: every path a sync of it wrote
+	rendered map[string]map[string]bool // per Application: the paths of its last render
+	// refuse answers "DELETE <path>" with the denial for as long as it is listed: an admission webhook.
+	refuse map[string]denial
+}
+
+// argoSync is a sync of Application name without prune: every rendered object is written (the status a controller set
+// stays, an object in deletion is left alone), and nothing the render no longer names is deleted. Called with the lock.
+func (f *fakeSeed) argoSync(name string, objs map[string]map[string]any) {
+	if f.tracked == nil {
+		f.tracked, f.rendered = map[string]map[string]bool{}, map[string]map[string]bool{}
+	}
+	if f.tracked[name] == nil {
+		f.tracked[name] = map[string]bool{}
+	}
+	f.rendered[name] = map[string]bool{}
+	for path, o := range objs {
+		f.tracked[name][path], f.rendered[name][path] = true, true
+		cur := f.objs[path]
+		if cur != nil && str(cur, "metadata", "deletionTimestamp") != "" {
+			continue
+		}
+		if cur != nil && o["status"] == nil {
+			o["status"] = cur["status"]
+		}
+		f.objs[path] = o
+	}
+}
+
+// argoCompare is ArgoCD's comparison of Application name: OutOfSync while an object a sync of it wrote is on the
+// cluster and no longer in its render, as the lab showed for the address pool of a node group that left the settings
+// (v0120lab/y0/off1b/k8s-seed-app-resources.txt). An object with helm.sh/resource-policy keep does not count: the same
+// take lists no machine template of an earlier size, and the Application read Synced with five of them on the seed.
+// "" for an Application the fake renders nothing of. Called with the lock.
+func (f *fakeSeed) argoCompare(name string) string {
+	if f.tracked[name] == nil {
+		return ""
+	}
+	for path := range f.tracked[name] {
+		if o := f.objs[path]; o != nil && !f.rendered[name][path] && str(o, "metadata", "annotations", "helm.sh/resource-policy") != "keep" {
+			return "OutOfSync"
+		}
+	}
+	return "Synced"
+}
+
+// appSync is what a GET of the Application answers as status.sync.status.
+func (f *fakeSeed) appSync(name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s := f.argoCompare(name); s != "" {
+		return s
+	}
+	return str(f.objs[appsPath+name], "status", "sync", "status")
+}
+
+// paths are the paths of the objects under prefix, sorted.
+func (f *fakeSeed) paths(prefix string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for k := range f.objs {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// drop takes an object away as its controller does once nothing holds it (a finalizer taken off an object in deletion).
+func (f *fakeSeed) drop(path string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objs, path)
 }
 
 // denial is an error answer of the API server.
@@ -864,7 +1001,21 @@ func (f *fakeSeed) serve(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"message":"the UID in the precondition does not match the UID in record"}`)
 			return
 		}
+		if d, ok := f.refuse["DELETE "+r.URL.Path]; ok {
+			w.WriteHeader(d.status)
+			_ = json.NewEncoder(w).Encode(map[string]any{"message": d.message})
+			return
+		}
 		f.writes = append(f.writes, "DELETE "+r.URL.Path)
+		// As the API server: an object with finalizers gets a deletion timestamp and stays until they are taken off.
+		// Not an Application: ArgoCD here deletes one at once (sandboxPlatform).
+		if obj := f.objs[r.URL.Path]; obj != nil && !strings.HasPrefix(r.URL.Path, appsPath) {
+			if fins, _ := dig(obj, "metadata", "finalizers").([]any); len(fins) > 0 {
+				obj["metadata"].(map[string]any)["deletionTimestamp"] = time.Now().UTC().Format(time.RFC3339)
+				_ = json.NewEncoder(w).Encode(obj)
+				return
+			}
+		}
 		delete(f.objs, r.URL.Path)
 		fmt.Fprint(w, `{}`)
 	case kind == "sa":
@@ -1068,6 +1219,13 @@ func (f *fakeSeed) object(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		if add, ok := dig(body, "metadata", "annotations").(map[string]any); ok { // annotations are merged, as the API server does
+			m := cur["metadata"].(map[string]any)
+			if m["annotations"] == nil {
+				m["annotations"] = map[string]any{}
+			}
+			maps.Copy(m["annotations"].(map[string]any), add)
+		}
 		if body["operation"] != nil { // ArgoCD takes the operation off the Application as it starts it
 			name := path[strings.LastIndex(path, "/")+1:]
 			f.syncs = append(f.syncs, name)
@@ -1125,15 +1283,28 @@ func (f *fakeSeed) object(w http.ResponseWriter, r *http.Request) {
 			body["status"] = status
 		}
 		f.objs[path] = body
+		if body["kind"] == "Application" && f.argo != nil && !f.unsynced[name] {
+			if objs := f.argo(body); objs != nil {
+				f.argoSync(name, objs)
+			}
+		}
 		answer(body)
 	case r.Method != http.MethodGet:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	case f.objs[path] != nil:
+		if sync := f.argoCompare(path[strings.LastIndex(path, "/")+1:]); sync != "" && strings.HasPrefix(path, appsPath) {
+			f.objs[path]["status"].(map[string]any)["sync"].(map[string]any)["status"] = sync
+		}
 		answer(f.objs[path])
 	case isCollection(path):
 		var keys []string
+		all := path[:strings.LastIndex(path, "/")] + "/namespaces/" // a list over every namespace: /apis/g/v/<plural>
 		for k := range f.objs {
-			if strings.HasPrefix(k, path+"/") && !strings.Contains(k[len(path)+1:], "/") && matches(f.objs[k], r.URL.Query().Get("labelSelector")) {
+			inAll := false
+			if rest := strings.Split(strings.TrimPrefix(k, all), "/"); strings.HasPrefix(k, all) && len(rest) == 3 {
+				inAll = rest[1] == path[strings.LastIndex(path, "/")+1:]
+			}
+			if (inAll || strings.HasPrefix(k, path+"/") && !strings.Contains(k[len(path)+1:], "/")) && matches(f.objs[k], r.URL.Query().Get("labelSelector")) {
 				keys = append(keys, k)
 			}
 		}

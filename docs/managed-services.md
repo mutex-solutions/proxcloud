@@ -93,7 +93,8 @@ reading [section 3](#3-proxmox-identities): they share the pool `proxcloud-syste
 | The datacenter firewall | On, with the provider's isolation rules written by a provider sync once the installation is saved: the Check verifies that tenant traffic to the seed, the API address and the node range is dropped. Saving the settings adds those addresses to the provider's blocked networks. With the firewall on, a node drops what does not come from its own network, so the seed and the platform machines need a rule to reach the Proxmox API: the install writes it (`pve-api-rule`). The rule names the platform machines' own addresses: [a site whose router translates them](#when-a-router-translates-the-platform-network) needs a rule of its own. |
 
 The page also warns when the job scheduler is off, in three places with one text: **Before you
-start**, the Check (row `scheduler`, a warning, absent while the scheduler runs) and the ready card.
+start**, the Check (row `scheduler`: a warning while the scheduler is off, ok while it runs) and the
+ready card.
 With it off:
 
 - no project is deleted: a delete, with the grace period or "Delete now", is refused with a `409` that
@@ -950,12 +951,14 @@ first run.
    machines of a block that is switched on and never switches one on. `shared` prints what it
    gives up, in full, and is saved only with the tick under that text
    (**What `shared` gives up**, below).
-4. **Check and plan.** The Check adds the rows `sandbox` (the pool, its rights, no VM of
-   another's in it, the datacenter firewall, the proxy address free in the cluster) and
-   `scheduler`, and the `capacity` row counts the sandbox machines and one spare per node; it
-   fails for machines no run has placed yet that do not fit. The plan lists the row `sandbox`
-   (the machines per node, and how many sandboxes a machine of that size holds), `sandbox-pool`
-   and `sandbox-access` (the ACL row, or the token).
+4. **Check and plan.** The Check adds the row `sandbox` (the pool, its rights, no VM of
+   another's in it, the datacenter firewall, the proxy address free in the cluster). Its row
+   `scheduler`, which every Check has (ok while the scheduler runs), says while it is off what
+   sandboxes lose without it. The `capacity` row counts the sandbox machines and one spare per
+   node; it fails for machines no run has placed yet that do not fit. The plan lists the row
+   `sandbox` (the machines per node, how many sandboxes a machine of that size holds, and for
+   `shared` that the storage plugin's pods are replaced once, below), `sandbox-pool` and
+   `sandbox-access` (the ACL row, or the token).
 5. **Install or Apply.** The run builds the machines, syncs the sandbox chart and registers the
    provider "\<name> Sandboxes", **disabled**. No other machine of the platform cluster is
    replaced: the run's rollout check lets through the new group's templates and nothing else.
@@ -1047,7 +1050,13 @@ rights the setup scripts gave it for tenant pools
 ACL row, `capmox@pve!capi` with `ProxCloudCAPI` on `/pool/proxcloud-sbx`; the group is then built
 like the three others, with its machines in that pool, addresses from `nodeRange`, the taints
 `proxcloud.io/sandbox` and `proxcloud.io/unsecured` in place of the group taint, and the
-proxmox-csi node plugin kept off it. In stage `workload-platform` the run writes the Secret
+proxmox-csi node plugin kept off it. The plugin's DaemonSet tolerates every taint, so what keeps
+it off is a node affinity, written only while the group exists: adding the group, and switching
+it off, changes the DaemonSet, and Kubernetes replaces the plugin's pod on every other machine
+of `pc-platform` once, one machine at a time (16 seconds for four machines on the lab). A volume
+that is mounted stays mounted; a pod that mounts or unmounts one in those seconds waits. The
+plan's row `sandbox` says so. `separate` changes nothing of it. In stage `workload-platform` the
+run writes the Secret
 `sandbox-system/sandbox-proxy-tls` and then syncs the sandbox chart (Application
 `pc-platform-sandbox`), which installs runsc on the group's nodes and puts sandbox-proxy on the
 `system` group. `separate`: a token `capmox@pve!pc-sandbox`, minted as a tenant cluster's with the
@@ -1308,6 +1317,39 @@ writes the rules itself. Every other cause of that row still stops a run, the on
 sandboxes off included: a blocked network the rules do not drop, a disabled rule, the datacenter
 firewall off, a sandbox network that is not the installation's. The sandbox provider row stays, disabled, and is adopted when sandboxes come back; a Remove
 disables it with the two others, and a new install does not give it its status back.
+
+The off of `shared` also deletes what neither ArgoCD nor Cluster API takes away, in this order,
+and waits for each:
+
+1. The sandbox chart's Application, with everything it deployed. While ArgoCD deletes, the run
+   asks it to look at the Application again (`argocd.argoproj.io/refresh`), so that the deletion
+   can end when the last object is gone and not at ArgoCD's next look by itself (that wait was
+   minutes on the lab without the ask; with it, it has not been measured yet). The same holds
+   for the Application of `pc-sandbox` with `separate`.
+2. The four definitions of agent-sandbox on the platform cluster (`sandboxes.agents.x-k8s.io`
+   and `sandboxclaims`, `sandboxtemplates`, `sandboxwarmpools` of
+   `extensions.agents.x-k8s.io`), which a deleted Application leaves behind. Each one goes only
+   when no object of its kind is left in any namespace, because deleting a definition deletes
+   its objects. A definition with objects is **kept**, the run goes on, and the API log names it
+   (`a sandbox definition is kept`). To remove it afterwards, with the platform cluster's admin
+   kubeconfig (the Secret `pc-platform/pc-platform-kubeconfig` on the seed; the page's platform
+   kubeconfig only reads): `kubectl get sandboxes.agents.x-k8s.io -A`, delete what it lists,
+   then `kubectl delete crd sandboxes.agents.x-k8s.io`. The run knows the four by their names
+   and takes them for the sandbox chart's: nothing on a definition says who installed it. An
+   agent-sandbox installed by hand on the platform cluster shares them, and loses each one that
+   holds no object.
+3. The group's MachineDeployment; Cluster API deletes the machines.
+4. When no MachineDeployment, MachineSet or Machine of the group is left: the group's machine
+   template and bootstrap template on the seed (`pc-platform-sandbox-<node>-<hash>`; they carry
+   Helm's keep policy, as every group's do), then its address pool (InClusterIPPool
+   `pc-platform-sandbox`). The address provider refuses the pool's delete while an address of
+   it is claimed; the run waits that out.
+5. Then the access on Proxmox, as above.
+
+Afterwards the Application `pc-platform` reads Synced and Healthy again: the pool was the one
+object it would have had to prune, and it never prunes. Switching sandboxes on again builds
+all of it new. `separate` leaves none of this: its definitions are inside `pc-sandbox`, and its
+pool and templates are in the namespace `pc-sandbox`, which goes with the cluster.
 
 **The certificate.** With `separate` the run writes `sandbox-system/sandbox-proxy-tls` inside
 `pc-sandbox` as soon as its control plane answers. The certificate is self-signed for

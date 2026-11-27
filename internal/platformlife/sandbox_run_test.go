@@ -124,7 +124,7 @@ func TestApplyBuildsTheSharedSandbox(t *testing.T) {
 	}
 	p.leaks(t, sec.SandboxTLSKey)
 
-	// A second apply writes the row again (one deleted by hand comes back) and keeps the certificate.
+	// A second apply keeps the certificate (what it writes on Proxmox: TestSandboxAccessIsWrittenOnce).
 	cert := sec.SandboxTLSCert
 	for _, id := range []string{stageCluster, stageWorkloadPlatform} {
 		p.again(id)
@@ -132,8 +132,8 @@ func TestApplyBuildsTheSharedSandbox(t *testing.T) {
 	if end := p.until(30); end != "complete" {
 		t.Fatalf("second apply: %s", end)
 	}
-	if _, _, sec := p.state.snapshot(); sec.SandboxTLSCert != cert || len(p.pve.acl) < 2 {
-		t.Errorf("second apply: a new certificate, or the row was not written again (%v)", p.pve.acl)
+	if _, _, sec := p.state.snapshot(); sec.SandboxTLSCert != cert {
+		t.Error("second apply: a new certificate")
 	}
 	// The record holds what the last run handed to Cluster API, not the largest count ever: after an apply with fewer
 	// machines, more machines are machines nothing has placed, and the capacity row fails for them again.
@@ -149,6 +149,83 @@ func TestApplyBuildsTheSharedSandbox(t *testing.T) {
 	in.Spec.Sandbox.Count = 3
 	if got := in.sandboxGrowth(); !slices.Equal(got, []string{"pve1"}) {
 		t.Errorf("growth after a smaller group: %v", got)
+	}
+}
+
+// What a run writes on Proxmox for the access of the sandbox machines, counted. A run looks at its stage many times
+// while Cluster API builds machines (22 times on the lab), and each look used to create the pool again, which Proxmox
+// answers with a 500, and write the row again; a first mint deleted a token that did not exist, a 500 too
+// (v0120-reports/drill-D2.md Z2-c, drill-D4.md Z4-d). Now the first run writes each thing once, with no failed call,
+// an apply that changes nothing writes nothing, and a row deleted by hand is written again.
+//
+// The fake answers as Proxmox does for a pool that exists and a token that does not; what it lists is what was written
+// through it, where a real token sees only the rows it may modify.
+func TestSandboxAccessIsWrittenOnce(t *testing.T) {
+	for placement, sb := range map[string]*SandboxSpec{SandboxShared: sharedSandbox(), SandboxSeparate: separateSandbox()} {
+		t.Run(placement, func(t *testing.T) {
+			if placement == SandboxSeparate {
+				sb.System.Nodes = []string{"pve1"}
+			}
+			p := sandboxPlatform(t, RunApply, sb)
+			if placement == SandboxSeparate { // as TestApplyBuildsTheSeparateSandbox: a routed network, the cluster's machines Running
+				p.mutate(func(_ *Run, in *Installation, _ *Secrets) { routed(in) })
+				for _, name := range []string{"pc-sandbox-sandbox-pve1-x", "pc-sandbox-sandbox-system-pve1-x"} {
+					m := meta(name, map[string]any{"cluster.x-k8s.io/cluster-name": SandboxClusterName})
+					m["status"] = map[string]any{"phase": "Running"}
+					p.wl.put("/apis/cluster.x-k8s.io/v1beta2/namespaces/pc-sandbox/machines/"+name, m)
+				}
+			}
+			p.upTo(stageSeedPlatform)
+			// A machine of the platform cluster is still being built: the stage waits, look after look.
+			slow := capiNS + "machines/pc-platform-system-pve1-x"
+			p.seed.obj(slow)["status"] = map[string]any{"phase": "Provisioning"}
+			for range 8 {
+				if end := p.once(); !strings.HasPrefix(end, "defer:") {
+					t.Fatalf("with a machine not Running: %s", end)
+				}
+			}
+			if s := p.stage(stageCluster); s.State != StageWaiting {
+				t.Fatalf("the stage cluster does not wait: %+v", s)
+			}
+			p.seed.obj(slow)["status"] = map[string]any{"phase": "Running"}
+			if end := p.until(30); end != "complete" {
+				t.Fatalf("first run: %s: %+v\n%+v", end, p.stage(stageCluster), p.stage(stageWorkloadPlatform))
+			}
+			count := func() [4]int {
+				return [4]int{p.pve.writeCount("POST /pools"), p.pve.writeCount("PUT /access/acl"), p.pve.writeCount("POST /access/users/"), p.pve.writeCount("DELETE /access/users/")}
+			}
+			want := [4]int{1, 1, 0, 0} // the pool and the one row
+			if placement == SandboxSeparate {
+				want = [4]int{1, 7, 1, 0} // the pool, the token and its rows (the six of a mint and the platform's vnet)
+			}
+			if got := count(); got != want || len(p.pve.failed) != 0 {
+				t.Fatalf("first run: pool creates, ACL writes, token mints, token deletes %v, want %v; answered with a 500: %v", got, want, p.pve.failed)
+			}
+
+			// An apply that changes nothing writes nothing on Proxmox at all.
+			writes := p.pve.writeCount("")
+			for _, id := range []string{stageCluster, stageWorkloadPlatform, stageRegister} {
+				p.again(id)
+			}
+			if end := p.until(30); end != "complete" {
+				t.Fatalf("second run: %s", end)
+			}
+			if got := p.pve.writeCount(""); got != writes || len(p.pve.failed) != 0 {
+				t.Fatalf("an apply with no change wrote %d times on Proxmox: %v; answered with a 500: %v", got-writes, p.pve.writes[writes:], p.pve.failed)
+			}
+			if placement != SandboxShared {
+				return
+			}
+			// The row deleted by hand in Proxmox comes back with the next apply, in one write.
+			p.pve.acl = nil
+			p.again(stageCluster)
+			if end := p.until(30); end != "complete" {
+				t.Fatalf("third run: %s", end)
+			}
+			if !slices.Equal(p.pve.acl, []string{"/pool/proxcloud-sbx ProxCloudCAPI capmox@pve!capi delete=0"}) {
+				t.Fatalf("the row deleted by hand: ACL writes %v", p.pve.acl)
+			}
+		})
 	}
 }
 

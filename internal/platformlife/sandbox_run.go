@@ -44,6 +44,8 @@ const (
 	CodeSandboxAccessFailed = "sandbox_access_failed"
 
 	resourcesFinalizer = "resources-finalizer.argocd.argoproj.io"
+	// refreshAnnotation asks ArgoCD's controller for a comparison of the Application now ("normal": no new render).
+	refreshAnnotation = "argocd.argoproj.io/refresh"
 )
 
 // sandboxAppName is the Application of the sandbox chart on the platform cluster (shared).
@@ -93,8 +95,12 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 	if err := x.check(ctx); err != nil {
 		return err
 	}
-	if err := x.portal.CreatePool(ctx, pve.SandboxPool, "ProxCloud sandbox machines (not tenant)"); err != nil {
-		return classify(CodeSandboxAccessFailed, err)
+	// Created only when the list does not name it: the stage passes here at every look, and Proxmox answers the create
+	// of a pool that exists with a 500 in the node's log. A list that fails proves nothing: the create is sent.
+	if pools, err := x.portal.ListPools(ctx); err != nil || !slices.ContainsFunc(pools, func(p pve.PoolInfo) bool { return p.PoolID == pve.SandboxPool }) {
+		if err := x.portal.CreatePool(ctx, pve.SandboxPool, "ProxCloud sandbox machines (not tenant)"); err != nil {
+			return classify(CodeSandboxAccessFailed, err)
+		}
 	}
 	// The record first: a Remove or an off after a run that failed further on knows what to take away.
 	sb := sp.Sandbox
@@ -127,7 +133,7 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 		return err
 	}
 	if want == SandboxShared {
-		// Written at every apply, so a row deleted by hand comes back.
+		// Looked at at every apply and written when it is missing, so a row deleted by hand comes back.
 		return asAccess(x.portal.SetSandboxPoolAccess(ctx, false))
 	}
 	if x.sec.Sandbox != nil {
@@ -138,8 +144,9 @@ func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
 	if scope.Zone, scope.Vnet, err = x.platformVnet(ctx); err != nil {
 		return classify(CodeSandboxAccessFailed, err)
 	}
-	// A token an earlier attempt made and could not store has a secret nobody holds: it goes first.
-	if err := x.portal.RevokeClusterTokens(ctx, SandboxClusterName); err != nil {
+	// A token an earlier attempt made and could not store has a secret nobody holds: it goes first, when there is one
+	// (a delete of a token that does not exist is a 500 in the node's log).
+	if err := x.portal.RevokeStaleClusterTokens(ctx, SandboxClusterName); err != nil {
 		return classify(CodeSandboxAccessFailed, err)
 	}
 	t, err := x.portal.MintClusterTokens(ctx, SandboxClusterName, scope)
@@ -170,6 +177,13 @@ func asAccess(err error) error {
 // platform's Applications have none and a plain delete would leave every object) or the sandbox cluster's (separate:
 // Cluster API deletes its machines before the Application goes). Needs the platform cluster's Kamaji and Cluster API
 // alive for separate, which is why it comes before anything else of the stage.
+//
+// The access on Proxmox is taken away after this wait and not during it. Machines gone is not enough to take the
+// separate cluster's token: CAPMOX is understood to open the Proxmox API with it at every look at the ProxmoxCluster
+// and the ProxmoxMachines, their deletion included (read from its source, not tried on a lab), so a token revoked
+// before their finalizers are off could leave them, the namespace and the Application in deletion for good. And the record that drives the rest of the off (the namespace,
+// the provider's settings, the pool) is what removeSandboxAccess deletes last. So the wait itself is shortened
+// instead: ArgoCD is asked to look again (refreshAnnotation).
 func (x *acq) sandboxAppsGone(ctx context.Context, seed *kamajik8s.Client, placement string) error {
 	name, ns := x.sandboxAppName(), sandboxNamespace
 	if placement == SandboxSeparate {
@@ -191,6 +205,17 @@ func (x *acq) sandboxAppsGone(ctx context.Context, seed *kamajik8s.Client, place
 			if err := seed.DeleteApplication(ctx, argoNamespace, name); err != nil && !kamajik8s.NotFound(err) {
 				return classify(CodeSeedAPIUnreachable, err)
 			}
+		} else if str(app, "metadata", "annotations", refreshAnnotation) == "" {
+			// ArgoCD is asked to look at the Application again, once per look of its own (it takes the annotation off
+			// when it has): on the lab the Application of pc-sandbox stayed 4 min 40 s after the last object it deployed
+			// was gone, until ArgoCD's next look by itself, and the token, its rows and the pool lived that long.
+			if err := x.check(ctx); err != nil {
+				return err
+			}
+			patch := map[string]any{"metadata": map[string]any{"annotations": map[string]any{refreshAnnotation: "normal"}}}
+			if _, err := seed.MergePatchCR(ctx, argoGroup, argoVersion, "applications", argoNamespace, name, patch); err != nil && !kamajik8s.NotFound(err) {
+				return classify(CodeSeedAPIUnreachable, err)
+			}
 		}
 		return waiting(CodeMachineDeleteStuck, "Sandboxes are switched off: ArgoCD is deleting what Application %s deployed, and the run goes on when it is gone.", name)
 	}
@@ -201,6 +226,9 @@ func (x *acq) sandboxAppsGone(ctx context.Context, seed *kamajik8s.Client, place
 	// The namespace holds what the run wrote beside the chart: the proxy's certificate, the cluster's Proxmox token.
 	if err := wl.DeleteNamespace(ctx, ns); err != nil && !kamajik8s.NotFound(err) {
 		return classify(CodeWorkloadUnreachable, err)
+	}
+	if placement == SandboxShared {
+		return x.sandboxCRDsGone(ctx, wl)
 	}
 	return nil
 }

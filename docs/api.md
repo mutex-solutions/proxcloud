@@ -922,7 +922,7 @@ are several, `errors.details.problems`.
   changes nothing. No answer quotes the line.
 - `POST /installations/{id}/preflight`: read-only, not audited; `{ok, checks}`
   with rows `flags`, `scheduler` (a `warn` that says what tenants miss and the command that turns the job scheduler
-  on; absent while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `sandbox` (present while `spec.sandbox` asks for sandboxes: whether the portal token can make pool `proxcloud-sbx` and open it for the sandbox machines, and whether the pool is free; a warning when the ACL row of a built shared group is gone), `credentials`, `machines`, `nodes`, `certificates`, `capacity`,
+  on; `ok` while it runs), `spec`, `network`, `bridge`, `isolation`, `tenant-network`, `tenant-path`, `csi-vmid`, `sandbox` (present while `spec.sandbox` asks for sandboxes: whether the portal token can make pool `proxcloud-sbx` and open it for the sandbox machines, and whether the pool is free; a warning when the ACL row of a built shared group is gone), `credentials`, `machines`, `nodes`, `certificates`, `capacity`,
   `privileges:capi`, `privileges:csi`, `privileges:kubemint`, `mint-scope`, `pool-fence`,
   `token-scope`, `iso-store-visibility`, `boot-iso-grant`, `boot-iso`, `placement`, `boot-store`,
   `pve-api-rule`, `seed-backup`, `argocd-access` and `images`. `argocd-access` is present while the spec has

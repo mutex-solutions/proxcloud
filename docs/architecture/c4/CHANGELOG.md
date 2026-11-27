@@ -4,6 +4,45 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-27: an off of sandboxes leaves nothing behind (#514, drill of v0.12.0-rc.1: Z3-B, Z2-c, Z4-d, Z3-C, Z4-e, Z4-c, Z2-d, Z4-b)
+
+**What changed:** no new component, container, route or relation. One new file in the platform runs, and existing
+functions read before they write.
+
+- `internal/platformlife/sandbox_off.go` (new): `sandboxCRDsGone` deletes the four agent-sandbox definitions
+  (`sandboxCRDs`) from the platform cluster once the sandbox chart's Application is gone, each only when no object of
+  its kind is left in any namespace, and waits for them. `sandboxGroupGone` deletes the shared group's machine and
+  bootstrap templates and then its InClusterIPPool from the seed when no MachineDeployment, MachineSet or Machine of
+  the group is left, and waits for the pool. `cluster.go` calls it at the end of stage `cluster`, before
+  `sandboxSettled` takes the access on Proxmox away; `sandbox_run.go` calls the first from `sandboxAppsGone`.
+- `internal/platformlife/sandbox_run.go`: `sandboxAccess` lists the pools and creates the sandbox pool only when it is
+  missing. `sandboxAppsGone` sets `argocd.argoproj.io/refresh` on an Application that is in deletion.
+- `internal/cloud/pve/access.go`: `SetSandboxPoolAccess` reads the ACL and writes the row only when it is not there;
+  `RevokeStaleClusterTokens` (new, the sandbox mint's) lists the user's tokens before each delete (`revokeMinted`,
+  the listing `RevokeClusterCSIToken` already did). `RevokeClusterTokens`, and with it what a tenant cluster's mint
+  and release send, is unchanged.
+- `internal/cloud/kamajik8s/client.go`: `DeleteClusterScoped`.
+- `internal/platformlife/sandbox.go`: the plan row `sandbox` names the storage plugin's pods being replaced for the
+  shared group (`sandboxCSIRoll`), and the row `sandbox-access` of an off has its own text.
+- `internal/platformlife/preflight.go`: the Check's row `scheduler` is always there (`SchedulerOnNote` while it runs).
+- `internal/platformlife/sandbox_provider.go`, `cmd/api/main.go`: `SandboxWithoutMirror`; the sandbox template update
+  runner's look for mirror worker pods skips an installation's own sandbox provider without a mirror account.
+
+**Why:** the drill of v0.12.0-rc.1 on the lab. After an off of `shared` the address pool, two templates and four
+definitions stayed, and the Application `pc-platform` read OutOfSync from then on, because it never prunes. A run
+created the pool at each of its 23 looks at stage `cluster` (22 answers of 500) and wrote the row 23 times; the first
+mint deleted a token that did not exist. The API logged a WARN every ten minutes for a namespace the platform's
+sandbox chart does not make. The off of `separate` kept its token 8.5 minutes after the last machine was gone.
+
+The proxmox-csi node plugin's pods are still replaced when the shared group comes or goes: the node affinity that
+keeps the plugin off the sandbox machines is rendered with the group alone, so that an installation without
+sandboxes renders the storage component as before. It is now said in the plan and in the guide.
+
+The access is not taken away earlier in the off of `separate`: CAPMOX needs the token until the ProxmoxCluster and
+the ProxmoxMachines have lost their finalizers, and the record that drives the rest of the off is deleted last.
+
+**Diagrams updated:** none (no element of C1 to C3 moves). [c3-components.md](c3-components.md): the file list of
+the row Platform runs.
 ## 2026-11-27: a sandbox machine's own cluster passes the cluster firewall, and the run writes the isolation rules (#515, drill of v0.12.0-rc.1)
 
 **What changed:** no new component, container, listener or route. One rule kind more in the managed rule set of the
