@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-27: a sandbox machine's own cluster passes the cluster firewall, and the run writes the isolation rules (drill of v0.12.0-rc.1)
+## 2026-11-27: a sandbox machine's own cluster passes the cluster firewall, and the run writes the isolation rules (#515, drill of v0.12.0-rc.1)
 
 **What changed:** no new component, container, listener or route. One rule kind more in the managed rule set of the
 cluster firewall, one key more in a provider's `config.sandbox`, one more reading in the `fence` gate, and one more
