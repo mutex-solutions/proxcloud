@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-28: small findings of the drill of v0.12.0-rc.2 (E2-c price rule, E2-d sync log, E3-d phase, E1-a wording)
+## 2026-11-28: small findings of the drill of v0.12.0-rc.2 (#522, E2-c price rule, E2-d sync log, E3-d phase, E1-a wording)
 
 **What changed and why**, one finding of the lab drill each. No new component, container or route.
 
