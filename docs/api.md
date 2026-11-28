@@ -1053,7 +1053,11 @@ are several, `errors.details.problems`.
   `{cluster, name: "sandbox", from, to, class: "machines", stage: "cluster", impact}` with
   `{name: "sandbox-pool", class: "site"}` and `{name: "sandbox-access", class: "site"}` while `spec.sandbox` differs
   from what a run built (adding lists the machines per node, the pool and the ACL row or token; `to: "off"` lists what
-  is deleted; another placement than the built one is `class: "refused"` with `blocking`), and
+  is deleted; another placement than the built one is `class: "refused"` with `blocking`),
+  `{cluster, name: "sandbox-certificate", from, to, stage: "workload-platform", impact}` (no `class`) while the
+  certificate a run made for sandbox-proxy (`status.sandbox.certificate`) is one the next apply replaces: marked as
+  a certificate authority (made by 0.12.0-rc.1 or rc.2), for another domain than `spec.sandbox.domain`, or within 30
+  days of its end; `impact` gives the reason and says that clients must fetch the new certificate, and
   `{name: "pve-api-rule", to, class: "site", stage: "seed-vm", impact}` while the cluster firewall of
   Proxmox does not hold the rule `proxcloud:pve-api:<installation>` as the settings name it (a platform
   installed by 0.8.x, or a rule deleted or changed by hand): the run writes that one rule in stage 3.

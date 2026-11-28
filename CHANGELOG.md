@@ -471,6 +471,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Managed platform, sandboxes: the stock E2B Python SDK refused the run's certificate (drill of v0.12.0-rc.2,
+  finding E2-A).** The certificate a run makes for the sandbox domain was one self-signed certificate marked as a
+  certificate authority (CA true, key usage keyCertSign), and sandbox-proxy served that same certificate. The
+  SDK's sandbox transport is rustls since e2b 2.36.0, and rustls refuses an authority's certificate from a server:
+  with e2b 2.63.0, the version `test/e2b-compat/requirements.txt` pins, create, list and kill worked and every
+  command and file call failed with "invalid peer certificate: CaUsedAsEndEntity". e2b 2.34.0 (OpenSSL), curl and
+  Go accepted it. `selfsigned` is the only mode of a managed platform, so no managed platform could serve the
+  current SDK.
+  - *The fix:* the run makes a server certificate: not an authority, key usage digitalSignature, extended key
+    usage serverAuth, the names `*.<domain>` and `<domain>` as before, ECDSA P-256, five years. It is still one
+    self-signed certificate, served as it is and trusted by adding the same file to the client's trust store
+    (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`). In the drill both the old and the new transport accepted this shape.
+  - *Why one certificate and not an authority with a certificate signed by it:* the certificate reaches its users
+    as one file (the Ready card's download, `status.sandbox.certificate`) that tenants add to their trust store.
+    An authority would let a later certificate come without a new file, but nothing renews a certificate between
+    applies and the next one is five years away.
+  - *What the key of that file can sign* for a client that trusts the file depends on the client's library.
+    OpenSSL, Go and Node refuse a certificate for another name signed with it ("invalid CA certificate"), where
+    they accepted one signed with the key of rc.2's certificate. rustls does not read the authority mark of a
+    certificate it is told to trust, so the SDK's transport from 2.36.0 on accepts one: for that client the file
+    vouches for whatever its key signs, as rc.2's file did for every client. The key is in the Secret
+    sandbox-proxy reads. Give the file to the programs that call sandboxes, not to a system-wide trust store. An
+    authority whose key stays sealed in the record, with a certificate of its own for the proxy, would close this
+    for rustls too; this release does not make one.
+  - *A platform that built sandboxes with 0.12.0-rc.1 or rc.2* holds a certificate of the refused shape. The
+    upgrade of the portal changes nothing by itself. The plan then has a row `sandbox-certificate` that says the
+    certificate is replaced and that clients must fetch the new one, and the next apply makes it in stage
+    `workload-platform`: the record, `status.sandbox.certificate` and the Secret `sandbox-proxy-tls` get the new
+    certificate and key, sandbox-proxy reads them within a few minutes without a restart, and sandboxes that run
+    keep running. No machine, no pool, no ACL row and no token is touched. **Every client must replace the file it
+    trusts** with the one on the Ready card: until then its calls to a sandbox fail at the TLS handshake, the old
+    SDK's too. The old file must leave the trust store, not stay beside the new one: it is an authority's
+    certificate, and a client that still trusts it accepts whatever its key signed. Both are release candidates,
+    so no installation of a released version holds this certificate.
+  - *The end of the certificate:* it lives five years. A run makes a new one when an apply comes within its last
+    30 days (or after its end), or when `spec.sandbox.domain` changed; the plan carries the same row from that day
+    on. Nothing else renews it: a platform that gets no apply serves the certificate until it ends, and then every
+    client refuses it. Each new certificate is a new file for the clients.
+  - *A platform without sandboxes* gets no row and no write: the code runs only where `spec.sandbox` asks for a
+    placement.
+  - *The installer's sandbox path* (`docs/managed-sandbox.md`, stage 56) is not affected: its `selfsigned` issuer
+    is a cert-manager authority that issues the wildcard, so the proxy never served an authority's certificate
+    there.
+  - *The file name of the Ready card's download* is now `<installation>-sandbox.crt` (it was `-sandbox-ca.crt`,
+    and the file is no authority).
+  - Tests: `TestSandboxCertificateIsAServerCertificate` (a TLS server with the produced pair; the presented
+    certificate read as a strict client reads it, with the shape of rc.2 as the control; the names it covers and
+    does not), `TestCertificateProblem`, `TestApplyReplacesACertificateOfTheRefusedShape` (both placements: the
+    plan row, the apply, nothing else changed, the next apply keeps it), `TestPlanSaysWhenTheSandboxCertificateEnds`.
+    Not run on a lab, and the SDK has not run against a sandbox behind the new certificate. On a workstation, a
+    server with a certificate this code made, trusted by its own file, was reached at a sandbox name and at the
+    apex by the two transports of the pinned SDK (pyqwest 0.12.0 as e2b 2.63.0 installs it, httpx 0.29.0), by
+    OpenSSL 3.5 and 1.1.1, by Python 3.14 and by Node 22; pyqwest refused the shape of rc.2 with the drill's
+    error.
+
 - **Small findings of the drill of v0.12.0-rc.2.** None changes what a site without sandboxes of a managed platform
   does.
   - **A platform's sandbox provider is refused "live" while no price rule prices sandbox minutes (E2-c).** The

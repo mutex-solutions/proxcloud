@@ -245,7 +245,8 @@ token is missing or wrong.
 `test/e2b-compat/compat.py` runs the stock SDKs end to end against a location (commands, streaming, exit codes, files,
 preview URL, metadata, connect, egress rules, the metadata address, a second project's key, the code interpreter):
 `E2B_API_URL`, `E2B_API_KEY`, optionally `E2B_OTHER_API_KEY` (a key of another project) and `SSL_CERT_FILE` for a
-private CA. `test/e2b-compat/pause.py` records the older lifecycle acceptance drill; its historical restore-success
+private CA (on a managed platform: the run's certificate from the Ready card, which the SDK takes from e2b 2.36.0 on
+only in the shape this release makes). `test/e2b-compat/pause.py` records the older lifecycle acceptance drill; its historical restore-success
 expectations are **not** evidence that current managed pause/resume/fork or AutoPause/AutoResume can be enabled.
 Current admission tests must expect the fixed 403 and unchanged retained state, while testing named snapshot
 capture/export and ordinary CREATE separately. Do not use the debug auto-pause trigger or retries to bypass the hold;

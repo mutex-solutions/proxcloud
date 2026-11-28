@@ -311,10 +311,12 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 
 // sandboxCertificate writes, with placement shared, the Secret sandbox-proxy reads its wildcard certificate from,
 // before the wave of the sandbox chart: the chart mounts it, and its Deployment never becomes available without
-// (separate: sandboxCluster writes it inside pc-sandbox). The run makes a self-signed one (and a new one for another
-// domain or 30 days before it ends); its key is sealed, the certificate is in the status for clients to trust. An
-// operator's certificate (tls.mode secret) has no route that stores it yet: the save refuses it (SandboxProblems),
-// and a record that names it all the same stops in applySandboxTLS.
+// (separate: sandboxCluster writes it inside pc-sandbox). The run makes a self-signed one, and a new one when it does
+// not keep the stored one (certificateProblem: another domain, 30 days before it ends, or the shape 0.12.0-rc.1 and
+// rc.2 made, which strict clients refuse); its key is sealed, the certificate is in the status for clients to trust.
+// Nothing but a run renews it: a platform that is never applied keeps its certificate until it ends. An operator's
+// certificate (tls.mode secret) has no route that stores it yet: the save refuses it (SandboxProblems), and a record
+// that names it all the same stops in applySandboxTLS.
 func (x *acq) sandboxCertificate(ctx context.Context, wl *kamajik8s.Client) error {
 	if x.in.Spec.sandboxMode() != SandboxShared {
 		return nil
@@ -330,7 +332,10 @@ func (x *acq) applySandboxTLS(ctx context.Context, wl *kamajik8s.Client) error {
 		return permanent(CodeSandboxRefused, "spec.sandbox.tls.mode is secret and no certificate of the operator's is stored: this release has no route that stores one. Set tls.mode selfsigned, then apply again.")
 	}
 	cert, key := x.sec.SandboxTLSCert, x.sec.SandboxTLSKey
-	if !certificateFor(cert, sb.Domain, time.Now().AddDate(0, 0, 30)) || key == "" {
+	if why := sandboxCertificateProblem(cert, sb.Domain); why != "" || key == "" {
+		if cert != "" {
+			x.r.Log.Info("platform run: the sandbox certificate is replaced, clients must fetch the new one", "run", x.runID, "reason", why)
+		}
 		var err error
 		if cert, key, err = selfSignedWildcard(sb.Domain, time.Now().UTC()); err != nil {
 			return permanent(CodeSandboxRefused, "The certificate of sandbox-proxy could not be made: %s", clip(err.Error()))
@@ -362,8 +367,32 @@ func classifyNil(code string, err error) error {
 	return classify(code, err)
 }
 
+// sandboxCertYears is how long a certificate of selfSignedWildcard lives. sandboxCertRenewDays before its end a run
+// makes a new one, and the plan says so from that day on.
+const (
+	sandboxCertYears     = 5
+	sandboxCertRenewDays = 30
+)
+
 // selfSignedWildcard is a certificate for domain and *.domain that is its own issuer (ECDSA P-256, five years): the
-// one file a client of a lab adds to its trust store.
+// one file a client adds to its trust store, and the one sandbox-proxy serves.
+//
+// It is a server certificate and not a certificate authority (CA false, digitalSignature, serverAuth). 0.12.0-rc.1
+// and rc.2 marked it as an authority (CA true, keyCertSign): a TLS library that follows the rules to the letter
+// (rustls: the E2B Python SDK from 2.36.0 on) refuses an authority's certificate from a server
+// ("CaUsedAsEndEntity"), while OpenSSL and Go take it. Both take this shape, pinned by the same file.
+//
+// One certificate and not an authority with a certificate signed by it, because of how it reaches its users: one PEM
+// in status.sandbox.certificate, downloaded from the Ready card and handed to tenants, who add it to their trust
+// store. An authority would let a later certificate come without a new file, but nothing renews between applies and
+// the next one is five years away.
+//
+// What the key of this file can sign for a client that trusts the file depends on the client's library. OpenSSL, Go
+// and Node refuse a certificate for another name signed with it ("invalid CA certificate"), where they took one
+// signed with the key of rc.2's. rustls does not read the authority mark of a certificate it is told to trust: for
+// the SDK's transport the file vouches for whatever its key signs, as rc.2's did for every client. The key is in the
+// Secret sandbox-proxy reads. An authority whose key stays sealed in the record, with a certificate of its own for
+// the proxy, would close that for rustls too; this function does not make one.
 func selfSignedWildcard(domain string, now time.Time) (certPEM, keyPEM string, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -375,9 +404,9 @@ func selfSignedWildcard(domain string, now time.Time) (certPEM, keyPEM string, e
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial, Subject: pkix.Name{CommonName: "*." + domain}, DNSNames: []string{"*." + domain, domain},
-		NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(5, 0, 0),
-		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true, IsCA: true,
+		NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(sandboxCertYears, 0, 0),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true, IsCA: false,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
@@ -390,14 +419,31 @@ func selfSignedWildcard(domain string, now time.Time) (certPEM, keyPEM string, e
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})), nil
 }
 
-// certificateFor reports a PEM certificate that names *.domain and is still valid at until.
-func certificateFor(certPEM, domain string, until time.Time) bool {
+// certificateProblem says why a run does not keep certPEM as the certificate of *.domain, in words a plan row can
+// carry ("" = it keeps it): it is marked as a certificate authority (the shape of 0.12.0-rc.1 and rc.2, see
+// selfSignedWildcard), it names another domain, or it is no longer valid at until.
+func certificateProblem(certPEM, domain string, until time.Time) string {
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil {
-		return false
+		return "it cannot be read"
 	}
 	c, err := x509.ParseCertificate(block.Bytes)
-	return err == nil && slices.Contains(c.DNSNames, "*."+domain) && c.NotAfter.After(until)
+	switch {
+	case err != nil:
+		return "it cannot be read"
+	case c.IsCA:
+		return "it is marked as a certificate authority, which a client with a strict TLS library (the E2B Python SDK from 2.36.0 on) refuses from a server"
+	case !slices.Contains(c.DNSNames, "*."+domain):
+		return "it does not name *." + domain
+	case !c.NotAfter.After(until):
+		return "it ends on " + c.NotAfter.UTC().Format(time.DateOnly)
+	}
+	return ""
+}
+
+// sandboxCertificateProblem is certificateProblem as a run and a plan ask it now.
+func sandboxCertificateProblem(certPEM, domain string) string {
+	return certificateProblem(certPEM, domain, time.Now().AddDate(0, 0, sandboxCertRenewDays))
 }
 
 // sandboxCluster builds, with placement separate, the cluster pc-sandbox once the platform cluster's waves are done:

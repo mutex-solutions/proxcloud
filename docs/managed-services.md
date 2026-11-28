@@ -1026,7 +1026,7 @@ warns until the next apply writes it again.
 | `dns` | Up to three resolvers of the sandbox machines; none takes the platform network's. |
 | `proxyAddress` | Where sandbox-proxy answers. `shared`: an address of `metallbRange` (not ArgoCD's). `separate`: a host address of the platform network outside every range, which the sandbox cluster's own MetalLB announces. |
 | `domain` | A sandbox answers at `https://<port>-<id>.<domain>`. |
-| `tls.mode` | `selfsigned` (also what an absent block means): the run makes one certificate for `*.<domain>`, keeps its key sealed and shows the certificate in `status.sandbox.certificate`. `secret` (the operator's certificate) is refused at the save: no route stores one yet. |
+| `tls.mode` | `selfsigned` (also what an absent block means): the run makes one server certificate for `*.<domain>` (five years; replaced by an apply in its last 30 days, see "The certificate" below), keeps its key sealed and shows the certificate in `status.sandbox.certificate`. `secret` (the operator's certificate) is refused at the save: no route stores one yet. |
 | `system` | `separate` only, and required there: the machines for sandbox-proxy and the sandbox controller, which never share a machine with a sandbox. |
 
 **How many sandboxes a machine holds.** By CPU a machine of n cores holds about n-1 sandboxes of
@@ -1371,6 +1371,24 @@ pool and templates are in the namespace `pc-sandbox`, which goes with the cluste
 (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` for the JavaScript SDK). `*.<domain>` must resolve to the
 proxy address where clients are: a DNS zone, a resolver entry on a workstation, or a wildcard
 service that maps a name to the address it contains.
+
+It is one server certificate, not a certificate authority: sandbox-proxy serves it as it is, and
+the file a client trusts is that same certificate, for `*.<domain>` and `<domain>`. A client
+built on OpenSSL, Go or Node accepts nothing else that was signed with its key. A client built on
+rustls (the E2B Python SDK from 2.36.0 on) does not read that mark on a certificate it is told to
+trust and accepts whatever the key signs. The key is in the Secret
+`sandbox-system/sandbox-proxy-tls`: give the file to the programs that call sandboxes, not to a
+system-wide trust store. It lives **five years**, and **nothing renews it but an apply**:
+a run makes a new one when it finds the stored one within 30 days of its end, made for another
+domain, or of the shape 0.12.0-rc.1 and rc.2 made (marked as an authority, which the E2B Python
+SDK from 2.36.0 on refuses from a server). The plan says so beforehand with the row
+`sandbox-certificate`. A platform that gets no apply in that time serves the certificate until
+it ends, and every client refuses it from then on: look at the plan before the five years are
+over. A new certificate is a new file: sandbox-proxy reads it within a few minutes without a
+restart and sandboxes keep running, but **every client must fetch the new file** from the Ready
+card, and its calls to a sandbox fail at the TLS handshake until it has. A file of 0.12.0-rc.1 or
+rc.2 must leave the client's trust store then: it is an authority's certificate, and a client
+that still trusts it accepts whatever its key signed.
 
 **Not in this release's code:** an operator's own certificate (`tls.mode secret` is refused at the
 save); waking a paused sandbox through sandbox-proxy (no wake URL is set); a sandbox registry,

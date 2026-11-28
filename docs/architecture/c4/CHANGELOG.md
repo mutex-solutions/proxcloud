@@ -4,6 +4,34 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-28: the run's certificate for sandbox-proxy is a server certificate, and a run replaces one that is not (#523, drill of v0.12.0-rc.2: E2-A)
+
+**What changed:** no new component, container, route or relation. What a client of a managed platform's sandboxes
+trusts changes shape, not place: it is still the one PEM in `status.sandbox.certificate`.
+
+- `internal/platformlife/sandbox_run.go`: `selfSignedWildcard` makes one self-signed server certificate (CA false,
+  key usage digitalSignature, serverAuth, `*.<domain>` and `<domain>`, five years) instead of one marked as a
+  certificate authority. `certificateProblem` (it replaces `certificateFor`) says why a run does not keep a stored
+  certificate: marked as an authority, another domain, or within 30 days of its end. `applySandboxTLS` makes a new
+  one then, for both placements, and logs that it did.
+- `internal/platformlife/sandbox.go`: `sandboxCertificateChange`, the plan row `sandbox-certificate` (stage
+  `workload-platform`, no class), from the same reading.
+- `web/admin/src/pages/platform/PlatformPage.tsx`: the download is named `<installation>-sandbox.crt`.
+
+**Why:** the drill of v0.12.0-rc.2 ran the E2B Python SDK at the version the repository pins (2.63.0) against a
+managed platform, and every command and file call failed: sandbox-proxy served a certificate marked as a certificate
+authority, and the SDK's transport since 2.36.0 (rustls) refuses that from a server. One certificate was kept, rather
+than an authority and a certificate signed by it, because the certificate is handed over as one file that tenants add
+to their trust store, and nothing renews a certificate between applies. What the key of that file can sign depends on
+the client's library: OpenSSL, Go and Node accept nothing else signed with it, and rustls accepts whatever it signs (it
+does not read the authority mark of a certificate it is told to trust), as every client did with the certificate of
+rc.2. The key is in the proxy's Secret. An authority whose key stays sealed in the record would close that for rustls
+too; this change does not make one. The detection exists because platforms built by the two release candidates hold
+the refused shape, and the row because a new certificate is a new file for every client.
+
+**Diagrams:** none changed. `c3-components.md` names `sandbox_run.go` under Platform runs already; the trust
+relation (client trusts the published certificate of sandbox-proxy) is the same.
+
 ## 2026-11-28: small findings of the drill of v0.12.0-rc.2 (#522, E2-c price rule, E2-d sync log, E3-d phase, E1-a wording)
 
 **What changed and why**, one finding of the lab drill each. No new component, container or route.
