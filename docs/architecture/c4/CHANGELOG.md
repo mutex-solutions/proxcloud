@@ -30,6 +30,8 @@ and rules: [README.md](README.md#maintenance-rule).
   `StartRun`; `finish` puts it back for a run that `validate` refused this way and that is not an upgrade's. *Why:* a
   refused run that changed nothing left a ready platform's record in phase `failed`. Refusing at the first stage,
   which writes nothing, is what makes "nothing was changed" true for the whole run and not only for stage 7.
+- **E1-a, wording.** The upgrade note's "a few seconds" without a database is replaced by the lab's figures
+  (`CHANGELOG.md`, `deploy/compose/README.md`). No code.
 
 **Diagrams updated:** none (no element or relation of the model's diagrams changed; the new call stays inside the API
 container).

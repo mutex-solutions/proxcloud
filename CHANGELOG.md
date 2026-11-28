@@ -115,9 +115,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   realm import and for the rest; neither is given `--no-deps`, so the first of the two already brings PostgreSQL
   to the file's state. Compose recreates a container whose image line changed, **on every install, whether or not
   the build it runs is the pinned one**: the container is stopped, removed and started from the pinned image on the
-  same volume. That is a restart of the portal's database and of Keycloak's: for a few seconds the API and Keycloak
-  have no database, and they connect again by themselves. Both builds are PostgreSQL 17.12, so the data directory
-  is read as it is; nothing is dumped and restored.
+  same volume. That is a restart of the portal's database and of Keycloak's, and both connect again by themselves.
+  Measured on a lab at the upgrade from 0.12.0-rc.1 to 0.12.0-rc.2 (one run): the database was away for 1.8 s; the
+  API answered its readiness probe with `503` and two client calls with `500` over 1.9 s; Keycloak answered
+  sign-ins (password grants) with `500` for about 10 s. Later in the same upgrade the API's own image swap took it
+  away for 7 s, as at every upgrade. Both builds are PostgreSQL 17.12, so the data directory is read as it is;
+  nothing is dumped and restored.
   - *What the script's backup covers:* before anything is pulled, `upgrade` writes `pg_dumpall` of the running
     container (both databases, roles included) and a copy of `.env` to `backups/`, and stops if the dump fails. The
     recreate does not touch the volume `<project>_postgres-data`; the dump is for the case that the new container
@@ -509,6 +512,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       apply; only runs started by this release keep the phase. A run now carries `fromPhase`.
     - *Not changed:* an operator's cancel still leaves the record in phase `failed`. A cancelled run may have
       built machines, and the run does not record whether it changed anything; that needs its own change.
+  - **The upgrade note said "a few seconds" without a database (E1-a).** Measured at the upgrade of the lab:
+    1.9 s for the API and about 10 s of refused sign-ins at Keycloak. The note above and
+    `deploy/compose/README.md` now give the figures.
+
 - **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of
   v0.12.0-rc.1, finding Z2-A).** The provider-wide isolation rules drop the sandbox range towards every blocked
   network, and the platform's API address and node range are blocked networks (the Check's `isolation` row requires
