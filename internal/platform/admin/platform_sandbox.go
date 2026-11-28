@@ -6,12 +6,17 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -43,6 +48,92 @@ func (h *Handler) PlatformSandboxSite(ctx context.Context, in *platformlife.Inst
 		}
 		return h.repo.ReplaceDoc(ctx, externalServiceCollection, in.ServiceID, doc)
 	})
+}
+
+// PlatformSandboxOff takes the identity of an installation's sandbox provider away and marks the row as having no
+// placement since at (platformlife.SandboxProviderOff), under the installation's run lock, as PlatformRegister gives
+// both back. The run calls it when the last sandbox machine is gone. A row that says so already is not written, and an
+// installation without a sandbox provider has none. It answers the ids of the rows it wrote.
+func (h *Handler) PlatformSandboxOff(ctx context.Context, installationID string, at time.Time) (written []string, err error) {
+	err = h.repo.db.WithTx(ctx, func(ctx context.Context) error {
+		if err := h.repo.db.LockXact(ctx, "platform-run:"+installationID); err != nil {
+			return err
+		}
+		rows, err := h.repo.ListRaw(ctx, externalServiceCollection)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			cfg, _ := row["config"].(map[string]any)
+			if cfg[platformlife.ProviderMarker] != installationID || !platformlife.SandboxProviderOff(row, at) {
+				continue
+			}
+			id, _ := row["_id"].(string)
+			if err := h.repo.ReplaceDoc(ctx, externalServiceCollection, id, row); err != nil {
+				return err
+			}
+			written = append(written, id)
+		}
+		return nil
+	})
+	return written, err
+}
+
+// PlatformSandboxOffRun is PlatformSandboxOff as the run's hook (platformlife.Runner.SandboxOff).
+func (h *Handler) PlatformSandboxOffRun(ctx context.Context, installationID string, at time.Time) error {
+	_, err := h.PlatformSandboxOff(ctx, installationID, at)
+	return err
+}
+
+// PlatformSandboxOffRepair runs once when the API starts, and makes good what v0.12.0-rc.2 left: its off took the
+// sandbox machines away and kept the sandbox provider's kubeconfig, so every project attached to that provider failed
+// its teardown with 401 from then on and its rows stayed. A DISABLED sandbox provider of an installation that records
+// no built sandboxes (status.sandbox is empty: an off or a Remove ended, or the installation is gone) gets what the
+// off writes now (PlatformSandboxOff), with the time of this start: the time of that off is not recorded anywhere. The
+// next deletion sweep and the next sandbox read then end what was left, with nothing done by hand.
+//
+// A run records status.sandbox before it makes the first sandbox machine and takes it away after the last one is gone,
+// and stores a kubeconfig only in between: a provider with built sandboxes is never touched here, and neither is one
+// that is not DISABLED. Nor is a row that carries the mark already: an off of this release, or this pass, wrote it,
+// and a kubeconfig that stands beside it was set by hand since, which is a placement (SandboxOffSince). Without that
+// the pass would take such a kubeconfig away at every start and the rows of what runs on its cluster would be ended.
+// It answers the ids of the rows it wrote.
+// ponytail: once at the start; a pass that fails is logged and waits for the next start.
+func (h *Handler) PlatformSandboxOffRepair(ctx context.Context) ([]string, error) {
+	if h.platform == nil {
+		return nil, nil
+	}
+	rows, err := h.repo.ListRaw(ctx, externalServiceCollection)
+	if err != nil {
+		return nil, err
+	}
+	var written []string
+	for _, row := range rows {
+		cfg, _ := row["config"].(map[string]any)
+		installationID, _ := cfg[platformlife.ProviderMarker].(string)
+		if cfg["provider"] != "sandbox" || installationID == "" || row["status"] != externalservice.StatusDisabled {
+			continue
+		}
+		if sb, _ := cfg["sandbox"].(map[string]any); sb[externalservice.SandboxOffSinceKey] != nil {
+			continue
+		}
+		in, err := h.platform.Get(ctx, installationID)
+		if err != nil && !errors.Is(err, platformlife.ErrNotFound) {
+			return written, err
+		}
+		if in != nil && in.Status.Sandbox != nil {
+			continue
+		}
+		ids, err := h.PlatformSandboxOff(ctx, installationID, time.Now().UTC())
+		if err != nil {
+			return written, err
+		}
+		for _, id := range ids {
+			slog.Info("platform: a sandbox provider of sandboxes that are switched off kept its identity; it is taken away and the provider has no placement now", "serviceId", id, "installation", installationID)
+		}
+		written = append(written, ids...)
+	}
+	return written, nil
 }
 
 // applySandboxSite makes the change on the provider document; changed is false when the document already says it.
@@ -118,7 +209,39 @@ func (h *Handler) sandboxNeedsScheduler(doc pgdoc.M) *httpx.HTTPError {
 	return httpx.NewError(http.StatusConflict, http.StatusConflict,
 		"This sandbox provider cannot go live while the job scheduler is off: the provider sync that fences each sandbox machine and keeps watching its firewall, the minutely sandbox read "+
 			"and the abuse check all run on it. Turn the scheduler on (./proxcloud-up.sh install --scheduler, or PROXCLOUD_JOBS_SCHEDULER_ENABLED=true), then set the provider live. "+
-			"The same switch starts charging usage, and the sandbox price rule holds a placeholder rate until you set one (or 0).")
+			"The same switch starts charging usage.")
+}
+
+// sandboxUnpricedNote is what the refusal says while no price rule prices sandbox minutes.
+const sandboxUnpricedNote = "No enabled public price plan that bills this provider has a rule for sandbox minutes (resource type sandbox), so every sandbox minute would be charged nothing. " +
+	"The Platform setup defaults add no sandbox rule. Add one under System, Price plans (docs/pricing-rate-card.md lists the default plan's rates per vCPU and per GB per minute), " +
+	"or a rule at 0 to give sandbox minutes away knowingly, then set the provider live."
+
+// sandboxUnpriced is why a platform's sandbox provider may not be live for its prices: "" while a rule prices sandbox
+// minutes, sandboxUnpricedNote otherwise. The charge rates a resource that matches no rule as nothing and says
+// nothing (unpricedflavors.go), and the default price plan of the Platform setup defaults has no sandbox rule
+// (defaultRuleTypes), so without this a site would give sandbox minutes away without knowing. Like the unpriced
+// flavors guard it reads the enabled public plans that cover the provider, on any time unit; a plan scoped to single
+// billing profiles is not counted. A plan store that cannot be read counts as no rule. The installer's sandbox
+// providers are not asked: their sites went live before this check and are left as they are.
+func (h *Handler) sandboxUnpriced(ctx context.Context, doc pgdoc.M) string {
+	cfg, _ := doc["config"].(map[string]any)
+	if marker, _ := cfg[platformlife.ProviderMarker].(string); marker == "" {
+		return ""
+	}
+	if h.pricing == nil {
+		return sandboxUnpricedNote
+	}
+	id, _ := doc["_id"].(string)
+	plans := pricing.SelectPricePlansForService(h.pricing.PlanSource(ctx), nil, true, id)
+	for _, tu := range pricePlanTimeUnits {
+		if slices.ContainsFunc(pricing.ApplicableRules(plans, h.pricing.RuleSource(ctx), tu), func(r pricing.PricePlanRule) bool {
+			return strings.EqualFold(r.ResourceType, "sandbox")
+		}) {
+			return ""
+		}
+	}
+	return sandboxUnpricedNote
 }
 
 // sandboxOffRefused is why an update may not switch off the sandboxes a run built: their provider is live.

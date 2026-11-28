@@ -31,7 +31,9 @@ accepted at a current site. Read the current boundaries below before following h
 > a platform-owned cluster, both on the platform network, and a platform run registers the provider. What differs
 > from this document (the VM firewall's rule set, the gates on a shared cluster, the portal's identity) is in
 > [managed-services.md](managed-services.md#sandboxes-on-the-platform), with what an operator does and what a tenant
-> sees. Offered from v0.12.0, whose platform BOM names the sandbox chart; not run on a lab yet. Section 6 below (the
+> sees, and with what switching sandboxes off does to the projects attached to the provider (section 3.5 below has
+> the short form). Offered from v0.12.0, whose platform BOM names the sandbox chart; not run on a lab yet. Section 6
+> below (the
 > sandbox registry) does not apply there: the platform path has no registry, its machines pull the built-in templates
 > from the registries `deploy/templates/images.yaml` names (ghcr.io, and docker.io for the `python` template) at the
 > digests that file holds in the release's build, and those move with a ProxCloud release and no other way.
@@ -725,6 +727,14 @@ read that saw it pending (`seenPendingAt`, else its create, marked `runningSince
 never free and one that never started pays at most about a minute. `sandbox_snapshot` is per stored GB-hour (`size_gb`), written by pause and snapshot (section 8.4). The seed's rules for both
 are named `PLACEHOLDER ...` until a rate is signed. The worker VMs sit in the platform's pool and bill nobody.
 
+**The rules must be in the price plan, and not every setup puts them there.** `deploy/seed/seed-operator.py` adds the
+two placeholder rules. The Platform setup defaults of the operator console (the path of a Compose install) do not:
+their plan has no rule of resource type `sandbox` or `sandbox_snapshot`. A sandbox that no rule matches is charged
+nothing, with no error and no log line. Before a sandbox provider goes live, open **System**, **Price plans** and
+check that the plan has a `sandbox` rule at the rate you mean (or at 0). A managed platform's sandbox provider is
+refused "live" without one ([managed-services.md](managed-services.md#the-sandbox-provider)); a provider of this
+installer path is not checked.
+
 ### 3.3 Quota (D10)
 
 Project quota keys `sandboxes`, `sandboxVcpus`, `sandboxRamMb`, `sandboxGpus`, on the project's quota document (admin
@@ -743,7 +753,8 @@ project and ends every row (also one whose sandbox was already gone, since a DIS
 paused sandboxes and snapshots are kept and keep billing, but none can be resumed, forked or woken (section 8.5); a
 resume of the profile brings none back by itself. An operator's disable deletes them once, with
 no retry pass. A create already past the gate when the profile is suspended can survive until the next dunning pass;
-it is billed. A provider set `DISABLED` stops new usage (create, `EXEC`, `SET_TIMEOUT`) but deletes nothing.
+it is billed. A provider set `DISABLED` stops new usage (create, `EXEC`, `SET_TIMEOUT`) but deletes nothing. On a
+provider with no placement (section 3.5) the walk ends the rows and asks no cluster.
 
 ### 3.5 Project deletion
 
@@ -751,6 +762,27 @@ Teardown handles sandboxes first: every row's sandbox is deleted, the row ended 
 `sb-<project>` namespace is deleted. Each sandbox is read before it goes, so its archived row carries its start. A
 failure on either keeps the project `DELETE_IN_PROGRESS`, so the deletion job retries. A deleting project is not
 charged, so the time between the delete request and the teardown is not billed.
+
+**A provider whose cluster does not answer.** The teardown never calls a project deleted over a cluster it could not
+ask: a 401, a 403 or no answer keeps the project `DELETE_IN_PROGRESS` and the API log says why
+(`teardown: delete sandbox`, `teardown: delete sandbox namespace and templates`). The namespace may still run the
+tenant's code.
+
+**After sandboxes were switched off on a managed-services platform.** The off deletes every sandbox machine, and
+with placement `shared` the projects' `sb-<project>` namespaces before that. When the last machine is gone the run
+takes the provider's identities off its row and writes `config.sandbox.offSince`. A provider with that mark and no
+`secret.kubeconfig` has no placement: nothing of it is on a cluster. For such a provider:
+
+- the project teardown ends and archives the project's sandbox rows and asks no cluster, so an attached project is
+  deleted at the next sweep;
+- the sandbox read (every minute for an enabled project) and a suspension do the same for the rows that are left;
+- a row ends at its `shutdownTime` if that came first, else at `offSince`, and its charge ends there;
+- the provider cannot be set live, and the registry prune passes it over.
+
+A project stays attached to the disabled provider (no route detaches one in this release) and is served by the same
+row again once sandboxes are built: the next build stores a new kubeconfig and takes the mark off. Until its first
+create the project has no namespace on the new placement, and its list is empty. The rest is in
+[managed-services.md](managed-services.md#sandboxes-on-the-platform), "Switching sandboxes off".
 
 ### 3.6 Release gates: how the portal checks each
 

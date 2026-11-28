@@ -167,7 +167,7 @@ func TestBuildState(t *testing.T) {
 // Listing never deletes a terminal worker before the platform durably archives its diagnostics.
 func TestListBuildsRetainsForArchive(t *testing.T) {
 	f := newFake()
-	s := NewWithAPI(f, Config{Templates: map[string]Template{"py": {Image: "x"}}}, "svc")
+	s := NewWithAPI(f, Config{TemplateRegistry: "registry.example.org/sandbox-templates", Templates: map[string]Template{"py": {Image: "x"}}}, "svc")
 	s.now = func() time.Time { return time.Date(2026, 11, 6, 8, 0, 0, 0, time.UTC) }
 	pod := map[string]any{
 		"metadata": map[string]any{"name": "build-b1", "namespace": BuildNamespace, "labels": map[string]any{LabelBuild: "b1", LabelProject: "p1", LabelTemplateID: "t1"}},

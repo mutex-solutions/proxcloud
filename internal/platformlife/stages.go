@@ -29,8 +29,18 @@ const (
 	templateSettle  = 5 * time.Minute  // how long after an import's last write its template may still be missing from the VM list
 )
 
-// validate is stage 1: the preflight on the frozen spec, with the live isolation check.
+// validate is stage 1: the preflight on the frozen spec, with the live isolation check. Before it, what stage 7 would
+// refuse of the sandbox settings (sandboxRefusal) is refused here, where the run has written nothing: such a run ends
+// failed and leaves the installation's phase as it was (x.unchanged). A run of part seed never reaches stage 7 and is
+// not asked.
 func (x *acq) validate(ctx context.Context) error {
+	if x.run.Part != PartSeed {
+		if err := x.sandboxRefusal(ctx); err != nil {
+			var se *stageErr
+			x.unchanged = errors.As(err, &se) && se.kind == kindFail
+			return err
+		}
+	}
 	checks, err := x.r.Preflight(ctx, x.in)
 	if err != nil {
 		return classify(CodePreflightFailed, err)

@@ -20,12 +20,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 )
 
@@ -705,11 +707,40 @@ func firstInitContainer(pod map[string]any, name string) map[string]any {
 	return map[string]any{}
 }
 
+// buildPods lists pods of the build namespace: every list there goes through it. The namespace exists only on a
+// cluster that builds: the installer's registry step makes it, a managed platform's sandbox chart does not, and on a
+// shared cluster the portal's identity holds no right in a namespace it did not bind. "No pods" is a 404, or a 403
+// while a read of the namespace itself (a right the identity holds cluster-wide in both modes) says it does not exist.
+// A 403 in a build namespace that exists stays an error, and so does every other failure: the list is broken, not
+// empty. Read as empty, running builds would have their rows ended, the mirror cleanup would leave its worker pods and
+// registry pruning would delete what a build uses.
+func (s *Service) buildPods(ctx context.Context, selector string) ([]map[string]any, error) {
+	pods, err := s.api.ListPods(ctx, BuildNamespace, selector)
+	if kamajik8s.NotFound(err) {
+		return nil, nil
+	}
+	var ae *kamajik8s.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusForbidden {
+		if ns, nerr := s.api.GetNamespace(ctx, BuildNamespace); nerr == nil && ns == nil {
+			return nil, nil
+		}
+	}
+	return pods, err
+}
+
 // ListBuilds returns build pods as cache payloads, including finished builds for billing.
 // It must not delete them: only the platform, after a durable diagnostics archive (or
 // explicit capture-loss record), can safely clean up a build pod.
+//
+// A provider without a template registry builds nothing (a build, an import and a snapshot all push there), so its
+// cluster is not asked: on a managed platform that list answered 403 for every project every minute and failed the
+// whole sandbox read (v0.12.0-rc.2: no ended sandbox was archived). With a registry, buildPods says what an absent
+// build namespace is.
 func (s *Service) ListBuilds(ctx context.Context, projectID string) (map[string]map[string]any, error) {
-	pods, err := s.api.ListPods(ctx, BuildNamespace, LabelManagedBy+"="+ManagedByValue+","+LabelProject+"="+projectID)
+	if s.cfg.TemplateRegistry == "" {
+		return map[string]map[string]any{}, nil
+	}
+	pods, err := s.buildPods(ctx, LabelManagedBy+"="+ManagedByValue+","+LabelProject+"="+projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -727,7 +758,7 @@ func (s *Service) ListBuilds(ctx context.Context, projectID string) (map[string]
 // ActiveBuildWorkers is admission-only, not billing. Imports and snapshot assembly
 // count alongside Kaniko workers, including pods not yet assigned a phase.
 func (s *Service) ActiveBuildWorkers(ctx context.Context, projectID string) (map[string]bool, error) {
-	pods, err := s.api.ListPods(ctx, BuildNamespace, LabelManagedBy+"="+ManagedByValue+","+LabelProject+"="+projectID)
+	pods, err := s.buildPods(ctx, LabelManagedBy+"="+ManagedByValue+","+LabelProject+"="+projectID)
 	if err != nil {
 		return nil, err
 	}

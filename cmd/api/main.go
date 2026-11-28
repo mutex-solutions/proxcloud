@@ -1055,12 +1055,21 @@ func run() error {
 			return fmt.Errorf("platform store: %w", err)
 		}
 		adminH.SetPlatform(platformStore)
+		// What an off of v0.12.0-rc.2 left on the sandbox provider (its dead identity), before any job reads it.
+		if _, err := adminH.PlatformSandboxOffRepair(ctx); err != nil {
+			log.Error("platform: the sandbox providers of switched-off sandboxes could not be checked; the next start tries again", "err", err)
+		}
 		sdnLock := func(ctx context.Context) (func(), bool, error) {
 			return lock.New(pg).Wait(ctx, project.SDNApplyLockName, project.SDNApplyMaxFor, 30*time.Second)
 		}
 		adminH.SetPlatformSDNLock(sdnLock)
 		// The sync writes a provider's isolation rules without a project only where an installation is saved.
 		syncJob.WithPlatformInstallations(platformStore.HasInstallation)
+		// A sync that meets a provider whose sandboxes a run is still building says so quietly.
+		syncJob.WithPlatformRunActive(func(ctx context.Context, installationID string) (bool, error) {
+			run, err := platformStore.ActiveRun(ctx, installationID)
+			return run != nil, err
+		})
 		if cfg.Jobs.TemplateUpdatesVM {
 			adminH.SetPlatformRuns(jobStore)
 			prRunner := &platformlife.Runner{
@@ -1068,6 +1077,7 @@ func run() error {
 				Imports:  platformlife.TemplateUpdates{Service: tuSvc},
 				Register: adminH.PlatformRegister, Disable: adminH.PlatformDisable, Attach: adminH.PlatformAttach,
 				SandboxSite: adminH.PlatformSandboxSite,
+				SandboxOff:  adminH.PlatformSandboxOffRun,
 				SDNLock:     sdnLock,
 				Provider: func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
 					es, err := esSvc.Get(ctx, id)

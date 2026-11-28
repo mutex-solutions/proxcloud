@@ -114,7 +114,7 @@ func TestApplyBuildsTheSharedSandbox(t *testing.T) {
 		t.Fatalf("the sandbox chart's Application: %v", sbx)
 	}
 	tls := p.wl.obj(seedNS + "sandbox-system/secrets/sandbox-proxy-tls")
-	if tls == nil || tls["type"] != "kubernetes.io/tls" || !certificateFor(sec.SandboxTLSCert, "sbx.example.org", time.Now().AddDate(4, 0, 0)) || sec.SandboxTLSKey == "" {
+	if tls == nil || tls["type"] != "kubernetes.io/tls" || certificateProblem(sec.SandboxTLSCert, "sbx.example.org", time.Now().AddDate(4, 0, 0)) != "" || sec.SandboxTLSKey == "" {
 		t.Fatalf("the proxy's certificate: %v", tls)
 	}
 	st := in.Status.Sandbox
@@ -834,6 +834,10 @@ func TestRemoveWithSandboxes(t *testing.T) {
 			_, in, sec := p.state.snapshot()
 			if in.Status.Sandbox != nil || sec.Sandbox != nil || len(p.pve.pools) != 0 || len(p.pve.tokens) != 0 {
 				t.Fatalf("status %+v, pools %v, tokens %v", in.Status.Sandbox, p.pve.pools, p.pve.tokens)
+			}
+			// The sandbox provider's identity goes with the machines, or no project attached to it could be deleted.
+			if !slices.Equal(p.offs, []string{in.ID}) {
+				t.Errorf("the sandbox provider was marked as having no placement for %v", p.offs)
 			}
 			if row != "" && !slices.Equal(p.pve.acl, []string{row}) {
 				t.Errorf("acl %v", p.pve.acl)

@@ -184,7 +184,7 @@ test("ready: the sandbox provider, its release gates, the certificate, and what 
 
   const download = page.waitForEvent("download")
   await item.getByRole("button", { name: "Download the certificate" }).click()
-  expect((await download).suggestedFilename()).toBe("lab-sandbox-ca.crt")
+  expect((await download).suggestedFilename()).toBe("lab-sandbox.crt")
   await expectAccessible(page)
 
   // What a run built: the placement goes only to Off, the range and the proxy address stay.

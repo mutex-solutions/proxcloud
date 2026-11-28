@@ -22,6 +22,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/templateupdates"
 )
 
@@ -2047,6 +2048,10 @@ func AdoptProvider(rows []map[string]any, body map[string]any) (map[string]any, 
 			at = next
 		}
 		at[path[len(path)-1]] = v
+	}
+	// Sandboxes are built again: the row has a placement, and the caller stores its kubeconfig (SandboxProviderOff).
+	if sb, ok := dig(found, "config", "sandbox").(map[string]any); ok {
+		delete(sb, externalservice.SandboxOffSinceKey)
 	}
 	offered, _ := dig(body, "config", "cluster", "versions").(map[string]any)
 	for version, line := range offered {

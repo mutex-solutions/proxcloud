@@ -466,6 +466,9 @@ func (h *Handler) PruneSandboxRegistryOlderThan(ctx context.Context, grace time.
 		if !e.IsSandbox() {
 			continue
 		}
+		if _, off := e.SandboxOffSince(); off {
+			continue // no placement: no cluster of it uses an image, and there is none to read
+		}
 		ss, err := h.sandboxFor(e)
 		if err != nil {
 			slog.Error("registry prune: sandbox service", "service", e.ID, "err", err)

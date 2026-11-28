@@ -194,6 +194,20 @@ func TestSandboxProviderGoLive(t *testing.T) {
 	if herr := (&Handler{}).checkSandboxGoLive(ctx, doc("PUBLIC")); herr == nil {
 		t.Fatal("no gate checker wired: went live")
 	}
+	// Sandboxes switched off: the provider has no cluster, cannot go live with every gate holding, and the refusal
+	// says so. DISABLED it is stored like any other.
+	off := func(status string) pgdoc.M {
+		d := doc(status)
+		d["secret"] = map[string]any{}
+		d["config"].(map[string]any)["sandbox"].(map[string]any)[externalservice.SandboxOffSinceKey] = "2026-11-28T01:12:00Z"
+		return d
+	}
+	if herr := h.checkSandboxGoLive(ctx, off("PUBLIC")); herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "sandboxes are switched off") {
+		t.Fatalf("a provider with no placement set live: %#v", herr)
+	}
+	if herr := h.checkSandboxGoLive(ctx, off("DISABLED")); herr != nil {
+		t.Fatalf("a DISABLED provider with no placement refused: %#v", herr)
+	}
 }
 
 // Functions cannot be switched on: a sandbox provider whose functions block is enabled is refused at the save, live

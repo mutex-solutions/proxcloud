@@ -86,3 +86,27 @@ func MarkVanished(cr *cloud.CloudResource, now time.Time) {
 	}
 	cr.Data = out
 }
+
+// EndRowsOff ends and archives SANDBOX rows of a provider with no placement (externalservice.SandboxOffSince): the
+// machines its sandboxes ran on are gone, so there is nothing to ask and nothing to delete. Each row ends as a
+// vanished sandbox does (MarkVanished): at its shutdownTime if that came first, else at since, the moment the run saw
+// the last machine gone, and never later than now. A row already DELETED keeps its end. The charge rates an archived
+// row to that end. Rows of another type are left alone. Returns how many rows went.
+func EndRowsOff(ctx context.Context, repo *cloud.Repo, rows []cloud.CloudResource, since, now time.Time) (int, error) {
+	end := now
+	if since.Before(end) {
+		end = since
+	}
+	n := 0
+	for i := range rows {
+		if rows[i].Type != cloud.TypeSandbox {
+			continue
+		}
+		MarkVanished(&rows[i], end)
+		if err := repo.DeleteAndArchive(ctx, &rows[i], now); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}

@@ -275,7 +275,7 @@ func (s *Service) DeleteMirrorPod(ctx context.Context, name, uid string) error {
 
 // ListMirrorPods lists this job's worker pods (every epoch).
 func (s *Service) ListMirrorPods(ctx context.Context, jobShort string) ([]MirrorPod, error) {
-	pods, err := s.api.ListPods(ctx, BuildNamespace, LabelMirror+"=true,"+LabelMirrorJob+"="+jobShort)
+	pods, err := s.buildPods(ctx, LabelMirror+"=true,"+LabelMirrorJob+"="+jobShort)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +292,7 @@ func (s *Service) ListMirrorPods(ctx context.Context, jobShort string) ([]Mirror
 
 // ListAllMirrorPods lists every mirror worker pod of this provider (any job): the orphan sweep.
 func (s *Service) ListAllMirrorPods(ctx context.Context) ([]MirrorPod, error) {
-	pods, err := s.api.ListPods(ctx, BuildNamespace, LabelMirror+"=true,"+LabelService+"="+s.serviceID)
+	pods, err := s.buildPods(ctx, LabelMirror+"=true,"+LabelService+"="+s.serviceID)
 	if err != nil {
 		return nil, err
 	}

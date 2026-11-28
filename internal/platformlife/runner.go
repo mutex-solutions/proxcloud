@@ -88,6 +88,10 @@ type Runner struct {
 	// (SandboxSite), or takes it away (a nil Config). ErrProviderConflict when the provider holds a sandbox pool or a
 	// sandbox network that is not this installation's. The admin handler implements it. Nil in tests: nothing is written.
 	SandboxSite func(ctx context.Context, in *Installation, site *SandboxSite) error
+	// SandboxOff takes the identity of the installation's sandbox provider away and marks the row as having no
+	// placement (SandboxProviderOff), once the last sandbox machine is gone: an off, a Remove, and the off that cleans
+	// a failed build. The admin handler implements it. Nil in tests: no row is written.
+	SandboxOff func(ctx context.Context, installationID string, at time.Time) error
 	// Attach applies an attach choice (AttachAll, AttachNew, AttachNone) to one provider of the installation: the
 	// attach policy, and for AttachAll a bulk attach of every project. done=false with a note when it could not be
 	// applied yet (the provider is disabled); the register stage then tries again at the next apply. Nil: no choice is
@@ -261,6 +265,9 @@ type acq struct {
 	si           int // the stage being run
 	// doneNote is what the stage being run leaves as its message when it ends done (a finished stage has none otherwise).
 	doneNote string
+	// unchanged: stage validate, which writes nothing, refused the run for good. The run ends failed with the refusal;
+	// the installation keeps the phase it had before the run (finish), because its platform is what it was.
+	unchanged bool
 }
 
 var (
@@ -510,7 +517,9 @@ func (x *acq) ended(ctx context.Context, err error) end {
 }
 
 // finish ends the run and sets the installation's phase: ready or removed when it succeeded, failed otherwise (a
-// cancelled run included).
+// cancelled run included). One failed run leaves the phase the installation had when the run started: the one stage
+// validate refused before anything was written (x.unchanged). Not an upgrade's run: its start already recorded
+// status.targetBom, and a ready platform has none.
 func (x *acq) finish(ctx context.Context, state, code, msg string) end {
 	now := time.Now().UTC()
 	err := x.record(ctx, func(run *Run, in *Installation, _ *Secrets) {
@@ -525,6 +534,8 @@ func (x *acq) finish(ctx context.Context, state, code, msg string) end {
 			in.Status.Phase = PhaseRemoved
 		case state == RunSucceeded:
 			in.Status.Phase = PhaseReady
+		case state == RunFailed && x.unchanged && run.FromBOM == nil && run.FromPhase != "":
+			in.Status.Phase = run.FromPhase
 		default:
 			in.Status.Phase = PhaseFailed
 		}

@@ -4,12 +4,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
@@ -444,5 +446,157 @@ func TestSandboxOffAsksArgoCDToLookAgain(t *testing.T) {
 				t.Fatal("the pool went while ArgoCD still deletes")
 			}
 		})
+	}
+}
+
+// An off of placement shared and the projects attached to the sandbox provider (v0.12.0-rc.2, drill E3-B and E5-A:
+// the projects' namespaces stayed on the platform cluster, and the provider row kept an identity that answered 401, so
+// no attached project could be deleted any more).
+//
+// The namespaces of the provider's projects are deleted first and waited for, while the sandbox chart's Application
+// still stands, and nothing else is: not a namespace of another provider, not one whose name is not its project's,
+// not a functions namespace, not one without the product's labels. The provider is marked as having no placement only
+// when the last sandbox machine is gone, also when the group never stood (the off that cleans a failed build).
+func TestSandboxOffTakesTheProjectsNamespacesAndTheProvidersIdentity(t *testing.T) {
+	const provider = "svc-sandbox"
+	own := func(project, service, managedBy string) map[string]any {
+		return map[string]any{sandbox.LabelProject: project, sandbox.LabelService: service, sandbox.LabelManagedBy: managedBy, sandbox.LabelTenant: "true"}
+	}
+	nsPath := "/api/v1/namespaces/"
+	stood := time.Now().UTC()
+	for name, builtAt := range map[string]*time.Time{"the group stood": &stood, "the build failed before the group stood": nil} {
+		t.Run(name, func(t *testing.T) {
+			p := sandboxPlatform(t, RunApply, &SandboxSpec{Placement: SandboxOff})
+			p.mutate(func(_ *Run, in *Installation, _ *Secrets) {
+				in.Status.Sandbox = &SandboxStatus{Placement: SandboxShared, NodeRange: "10.200.200.64/28", ProxyAddress: "10.200.200.210", Count: 1, BuiltAt: builtAt}
+				in.Status.Providers = &ProviderIDs{Kubernetes: "svc-kamaji", Database: "svc-dbaas", Sandbox: provider}
+			})
+			p.pve.pools = []string{pve.SandboxPool}
+			p.pve.templates = []pve.ClusterResource{{Type: "qemu", VMID: 140, Node: "pve1", Pool: pve.SandboxPool}}
+			p.seed.put(sandboxApp, meta("pc-platform-sandbox", nil))
+			p.wl.put(nsPath+"sandbox-system", meta("sandbox-system", nil))
+			// The provider's own: sb-p1 holds an object the cluster still has to take away, sb-p2 goes at once.
+			slow := meta("sb-p1", own("p1", provider, sandbox.ManagedByValue))
+			slow["metadata"].(map[string]any)["finalizers"] = []any{"kubernetes"}
+			p.wl.put(nsPath+"sb-p1", slow)
+			p.wl.put(nsPath+"sb-p2", meta("sb-p2", own("p2", provider, sandbox.ManagedByValue)))
+			// One that has been going for longer than the off waits: named in the log, and the off goes on.
+			stuck := meta("sb-p8", own("p8", provider, sandbox.ManagedByValue))
+			stuck["metadata"].(map[string]any)["finalizers"] = []any{"kubernetes"}
+			stuck["metadata"].(map[string]any)["deletionTimestamp"] = time.Now().Add(-2 * projectNamespaceWait).UTC().Format(time.RFC3339)
+			p.wl.put(nsPath+"sb-p8", stuck)
+			foreign := map[string]map[string]any{
+				"sb-p3":  own("p3", "svc-other", sandbox.ManagedByValue), // another provider's
+				"sb-p4":  own("p5", provider, sandbox.ManagedByValue),    // not the namespace of the project it names
+				"fn-p1":  own("p1", provider, sandbox.ManagedByValue),    // a functions namespace
+				"sb-p6":  {},                                             // no label of the product
+				"sb-p7":  own("p7", provider, "helm"),                    // not managed by the product
+				"team-a": {"team": "a"},
+			}
+			for name, labels := range foreign {
+				p.wl.put(nsPath+name, meta(name, labels))
+			}
+			p.upTo(stageCluster)
+
+			if end := p.once(); !strings.HasPrefix(end, "defer:") || !strings.Contains(p.stage(stageCluster).Message, "sandbox namespaces of 2 projects (sb-p1, sb-p2)") {
+				t.Fatalf("the first look: %s %+v\n%s", end, p.stage(stageCluster), p.logs)
+			}
+			p.waits(t, "sandbox namespaces of 1 projects (sb-p1)")
+			if p.seed.obj(sandboxApp) == nil || slices.Contains(p.seed.writes, "DELETE "+sandboxApp) || p.wl.obj(nsPath+"sb-p2") != nil || len(p.offs) != 0 {
+				t.Fatalf("while a project's namespace is going: Application %v, writes %v, sb-p2 %v, marked %v", p.seed.obj(sandboxApp) != nil, p.seed.writes, p.wl.obj(nsPath+"sb-p2") != nil, p.offs)
+			}
+			p.wl.drop(nsPath + "sb-p1")
+
+			// The Application goes now. A sandbox machine is still there: the provider keeps its placement.
+			if end := p.until(6); !strings.HasPrefix(end, "defer:") || !strings.Contains(p.stage(stageCluster).Message, "VM 140") {
+				t.Fatalf("with a VM in the pool: %s %+v\n%s", end, p.stage(stageCluster), p.logs)
+			}
+			if p.seed.obj(sandboxApp) != nil || len(p.offs) != 0 {
+				t.Fatalf("with a sandbox machine left: Application %v, the provider marked %v", p.seed.obj(sandboxApp) != nil, p.offs)
+			}
+			p.pve.templates = nil
+			if end := p.until(30); end != "complete" {
+				t.Fatalf("end %s: %+v\n%s", end, p.stage(stageCluster), p.logs)
+			}
+			_, in, _ := p.state.snapshot()
+			if in.Status.Sandbox != nil || !slices.Equal(p.offs, []string{in.ID}) {
+				t.Fatalf("after the off: status %+v, the provider marked for %v", in.Status.Sandbox, p.offs)
+			}
+			for name := range foreign {
+				if p.wl.obj(nsPath+name) == nil {
+					t.Errorf("the off deleted namespace %s, which is not a project's of this sandbox provider", name)
+				}
+			}
+			for _, w := range p.wl.writes {
+				if strings.HasPrefix(w, "DELETE "+nsPath) && !slices.Contains([]string{"sb-p1", "sb-p2", "sandbox-system"}, strings.TrimPrefix(w, "DELETE "+nsPath)) {
+					t.Errorf("the off sent %s", w)
+				}
+			}
+			if p.wl.obj(nsPath+"sb-p8") == nil || !strings.Contains(p.logs.String(), "a project's sandbox namespace is still being deleted") || !strings.Contains(p.logs.String(), "sb-p8") {
+				t.Errorf("a namespace that has been going for %s is waited for, or not named:\n%s", 2*projectNamespaceWait, p.logs)
+			}
+		})
+	}
+}
+
+// The row of a sandbox provider when sandboxes are switched off, and when they are built again: the identities go and
+// the row says since when it has no placement; the next build's adoption takes the mark off and keeps everything else.
+func TestSandboxProviderOffAndAdoptedAgain(t *testing.T) {
+	at := time.Date(2026, 11, 28, 1, 12, 0, 0, time.UTC)
+	row := map[string]any{"_id": "svc-sandbox", "name": "lab Sandboxes", "status": "DISABLED",
+		"config": map[string]any{"provider": "sandbox", ProviderMarker: "pi-1", "attachToNewProjects": true,
+			"sandbox": map[string]any{"mode": SandboxShared, "domain": "sbx.lab.test", "templates": map[string]any{"mine": map[string]any{"image": "x"}}}},
+		"secret": map[string]any{"kubeconfig": "sealed-kubeconfig", "rotationKubeconfig": "sealed-rotation", "proxyWakeToken": "sealed-wake", "registryMirror": "sealed-mirror"}}
+	if !SandboxProviderOff(row, at) {
+		t.Fatal("a row with an identity is not changed")
+	}
+	es := func() *externalservice.ExternalService {
+		return &externalservice.ExternalService{Config: row["config"].(map[string]any), Secret: row["secret"]}
+	}
+	if since, off := es().SandboxOffSince(); !off || !since.Equal(at) || !reflect.DeepEqual(row["secret"], map[string]any{"registryMirror": "sealed-mirror"}) {
+		t.Fatalf("after the off: since %s (%v), secret %v", since, off, row["secret"])
+	}
+	if dig(row, "config", "sandbox", "templates") == nil || row["status"] != "DISABLED" || dig(row, "config", "attachToNewProjects") != true {
+		t.Fatalf("the off changed what is the operator's: %v", row)
+	}
+	// Again (the stage runs more than once): no write, and the time of the first off stays.
+	if SandboxProviderOff(row, at.Add(time.Hour)) {
+		t.Fatal("a row that says so already is written again")
+	}
+	if since, _ := es().SandboxOffSince(); !since.Equal(at) {
+		t.Fatalf("the time of the off moved to %s", since)
+	}
+	// A kubeconfig set by hand on such a row is an identity again: the next off takes it away, and the time is that
+	// off's, since the row had a placement until then.
+	row["secret"].(map[string]any)["kubeconfig"] = "by-hand"
+	if _, off := es().SandboxOffSince(); off {
+		t.Fatal("a row with a kubeconfig reads as having no placement")
+	}
+	if !SandboxProviderOff(row, at.Add(time.Hour)) || dig(row, "secret", "kubeconfig") != nil {
+		t.Fatalf("a kubeconfig set by hand stays: %v", row["secret"])
+	}
+	if since, off := es().SandboxOffSince(); !off || !since.Equal(at.Add(time.Hour)) {
+		t.Fatalf("the off of a row that held a kubeconfig beside the mark: no placement since %s (%v), the off was at %s", since, off, at.Add(time.Hour))
+	}
+	// Rows that are not a sandbox provider's are never touched.
+	other := map[string]any{"config": map[string]any{"provider": "kamaji", ProviderMarker: "pi-1"}, "secret": map[string]any{"kubeconfig": "sealed"}}
+	if SandboxProviderOff(other, at) || dig(other, "secret", "kubeconfig") != "sealed" {
+		t.Fatalf("a kamaji row was changed: %v", other)
+	}
+
+	// Sandboxes are built again, with the other placement: the row is adopted, the mark goes, the run's keys follow
+	// the build, and the operator's stay. The caller stores the new kubeconfig.
+	body, err := SandboxProviderBody(RenderInput{ID: "pi-1", Name: "lab", Region: "lab", RegionName: "Lab",
+		Sandbox: &RenderSandbox{Mode: SandboxSeparate, Domain: "sbx2.lab.test"}}, "svc-pve", "new-kubeconfig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted, err := AdoptProvider([]map[string]any{row}, body)
+	if err != nil || adopted == nil || str(adopted, "_id") != "svc-sandbox" {
+		t.Fatalf("adopted %v, %v", adopted, err)
+	}
+	if dig(adopted, "config", "sandbox", externalservice.SandboxOffSinceKey) != nil || dig(adopted, "config", "sandbox", "mode") != SandboxSeparate ||
+		dig(adopted, "config", "sandbox", "domain") != "sbx2.lab.test" || dig(adopted, "config", "sandbox", "templates", "mine") == nil || adopted["status"] != "DISABLED" {
+		t.Fatalf("the adopted row: %v", adopted)
 	}
 }
