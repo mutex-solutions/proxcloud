@@ -168,7 +168,7 @@ Then:
 
 1. Offer a Kubernetes version: press **Test, publish and offer Kubernetes <version>** under the Kubernetes provider on the ready card. Until then tenants cannot create a cluster.
 2. Add a backup job for the seed VM. The page prints the command: a daily snapshot, compressed, of which seven are kept. The backup holds the seed's credentials: use a backup store that is not the boot, ISO or import store of the settings, and that no API token other than your own can read. The operator guide (docs/managed-services.md, "Credentials and the seed backup") gives the checks. The page cannot see whether a job exists.
-3. Add price rules for clusters and databases: usage that matches no rule is billed as zero.
+3. Add price rules for clusters and databases, and for sandbox minutes (resource type `sandbox`) when you offer sandboxes: the default price plan has none of them, and usage that matches no rule is billed as zero. A sandbox provider cannot be set live without its rule.
 
 **Apply this release** in step 4 runs the stages again with the saved settings: it repairs what is missing, applies changed sizes and counts, and renews the seed's access to the platform cluster. A platform stays on the platform release that installed it until you upgrade it: after a ProxCloud upgrade the review lists that release's contents, and **Apply this release** runs with them. A platform installed by a development build is not kept this way: after an upgrade its run is refused with `bom_unsupported`.
 

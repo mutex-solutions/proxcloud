@@ -136,10 +136,13 @@ type Run struct {
 	Kind           string `json:"kind"`
 	BOM            BOMRef `json:"bom"` // frozen at creation
 	// FromBOM is set on an upgrade run: the installed BOM it moves the platform from. BOM is then the target.
-	FromBOM         *BOMRef `json:"fromBom,omitempty"`
-	JobID           string  `json:"jobId,omitempty"`
-	RequestedBy     string  `json:"requestedBy"`
-	CancelRequested bool    `json:"cancelRequested,omitempty"`
+	FromBOM *BOMRef `json:"fromBom,omitempty"`
+	// FromPhase is the installation's phase when the run started: a run that is refused before it changed anything
+	// puts it back (acq.unchanged, finish). Empty on a run started by a release before 0.12.0.
+	FromPhase       string `json:"fromPhase,omitempty"`
+	JobID           string `json:"jobId,omitempty"`
+	RequestedBy     string `json:"requestedBy"`
+	CancelRequested bool   `json:"cancelRequested,omitempty"`
 	// Confirmed: the operator typed "remove <name>" when starting a Remove. It lets the run go on where it cannot
 	// observe: the seed VM is gone, or the workload cluster does not answer whether tenants still run on it. On an apply
 	// it records the typed "upgrade <name> to <release>" of the run that started an upgrade.

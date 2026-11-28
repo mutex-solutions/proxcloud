@@ -115,9 +115,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   realm import and for the rest; neither is given `--no-deps`, so the first of the two already brings PostgreSQL
   to the file's state. Compose recreates a container whose image line changed, **on every install, whether or not
   the build it runs is the pinned one**: the container is stopped, removed and started from the pinned image on the
-  same volume. That is a restart of the portal's database and of Keycloak's: for a few seconds the API and Keycloak
-  have no database, and they connect again by themselves. Both builds are PostgreSQL 17.12, so the data directory
-  is read as it is; nothing is dumped and restored.
+  same volume. That is a restart of the portal's database and of Keycloak's, and both connect again by themselves.
+  Measured on a lab at the upgrade from 0.12.0-rc.1 to 0.12.0-rc.2 (one run): the database was away for 1.8 s; the
+  API answered its readiness probe with `503` and two client calls with `500` over 1.9 s; Keycloak answered
+  sign-ins (password grants) with `500` for about 10 s. Later in the same upgrade the API's own image swap took it
+  away for 7 s, as at every upgrade. Both builds are PostgreSQL 17.12, so the data directory is read as it is;
+  nothing is dumped and restored.
   - *What the script's backup covers:* before anything is pulled, `upgrade` writes `pg_dumpall` of the running
     container (both databases, roles included) and a copy of `.env` to `backups/`, and stops if the dump fails. The
     recreate does not touch the volume `<project>_postgres-data`; the dump is for the case that the new container
@@ -522,6 +525,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     apex by the two transports of the pinned SDK (pyqwest 0.12.0 as e2b 2.63.0 installs it, httpx 0.29.0), by
     OpenSSL 3.5 and 1.1.1, by Python 3.14 and by Node 22; pyqwest refused the shape of rc.2 with the drill's
     error.
+
+- **Small findings of the drill of v0.12.0-rc.2.** None changes what a site without sandboxes of a managed platform
+  does.
+  - **A platform's sandbox provider is refused "live" while no price rule prices sandbox minutes (E2-c).** The
+    Check's `scheduler` row, the `409` of "live", the install form and the notes said that "the price rule for
+    sandbox minutes holds a placeholder rate until you set one". No such rule exists on a site set up with the
+    Platform setup defaults: their price plan has rules for servers and their traffic, volumes, addresses, images,
+    snapshots and protection, and nothing adds a sandbox rule afterwards (only `deploy/seed/seed-operator.py`, the
+    script an operator runs by hand from a checkout, as the development and chart guides tell, writes the two
+    placeholder rules). The charge rates a resource that no rule
+    matches as nothing, without an error or a log line, so such a site would have given every sandbox minute away
+    without knowing. Now the texts say what is true, and the save that sets the provider live answers `409` until
+    an enabled public price plan that bills the provider has a rule of resource type `sandbox` (any time unit; a
+    rule at 0 counts: that is giving them away knowingly). The answer names the missing rule together with the
+    scheduler and the release gates. We chose the refusal over adding the placeholder rule in the setup defaults:
+    the defaults run once, so no existing site would have got the rule, and a rule added by an upgrade would
+    start charging tenants a rate nobody signed.
+    - *At the upgrade from 0.12.0-rc.2:* a sandbox provider that is DISABLED is refused "live" until the rule
+      exists. A provider that is already live stays live, and its next save (any field) is refused until the rule
+      exists; add the rule under System, Price plans first. Nothing is written by the upgrade itself.
+    - *Not covered:* the installer's sandbox providers (`docs/managed-sandbox.md`) are not asked, as with the
+      scheduler; their documentation now says to check the plan. A plan scoped to single billing profiles is not
+      counted. A rule deleted while the provider is live is noticed at the provider's next save only.
+  - **A provider sync that falls into a sandbox build no longer logs an error (E2-d).** A run writes the sandbox
+    pool on the Proxmox provider at stage `cluster` and the sandbox cluster's kubeconfig at stage `register`,
+    about a quarter of an hour later. A timed sync in between logged one ERROR, "secret.sandboxKubeconfig is
+    missing; the workers stay as they are (tainted)", for a state the run itself creates. While a run of the
+    installation that owns the sandbox settings is not finished, the sync now logs one INFO line and goes on. With
+    no run in flight, on an installer's provider, or when the run cannot be read, it is the ERROR it was. The
+    sync did not write anything in that state before and does not now.
+  - **A run that the sandbox settings refuse leaves the installation's phase as it was (E3-d).** A run refused
+    with `sandbox_refused` ("Nothing was changed.") left the record in phase `failed` until the next successful
+    apply, on a platform that was ready and untouched. The three refusals (sandboxes switched off while their
+    provider is live; another placement than the one a run built; a BOM without the sandbox chart) are now given
+    at stage 1 (`validate`), before the run has written anything, and the installation keeps the phase it had
+    when the run started; the run itself still ends `failed` with the same code and message. Stage 7 asks again,
+    so a provider set live while the run was on its way is still refused there, and that run leaves `failed`
+    like any other failed run, because the stages before it ran. An upgrade's run is left out (its start already
+    recorded the target), and so is every other failure of stage 1: a failed check still ends in `failed`.
+    - *At the upgrade:* a record that reads `failed` from such a refusal stays `failed` until the next successful
+      apply; only runs started by this release keep the phase. A run now carries `fromPhase`.
+    - *Not changed:* an operator's cancel still leaves the record in phase `failed`. A cancelled run may have
+      built machines, and the run does not record whether it changed anything; that needs its own change.
+  - **The upgrade note said "a few seconds" without a database (E1-a).** Measured at the upgrade of the lab:
+    1.9 s for the API and about 10 s of refused sign-ins at Keycloak. The note above and
+    `deploy/compose/README.md` now give the figures.
 
 - **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of
   v0.12.0-rc.1, finding Z2-A).** The provider-wide isolation rules drop the sandbox range towards every blocked
