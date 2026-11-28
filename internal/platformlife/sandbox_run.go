@@ -442,13 +442,33 @@ func (x *acq) sandboxCluster(ctx context.Context, seed, wl *kamajik8s.Client) er
 		}
 	}
 	if running != total || len(machines) != total {
+		// The machines are cloned, booted and joined on this stage's time, and what the stage had left when it came
+		// here is a wave's 20 minutes (waveStall) less the last wave: 8.5 minutes went to two machines on the lab
+		// (drill E4-C), and a slower store, a larger image or more machines take longer. They get the time stage
+		// cluster gives the platform's own machines and the shared group's, once for a run, from the first look that
+		// finds one missing.
+		if x.receipt().SandboxMachinesAt == nil {
+			now := time.Now().UTC()
+			d := now.Add(sandboxMachinesStall)
+			if err := x.save(ctx, func(run *Run, _ *Installation, _ *Secrets) {
+				s := &run.Stages[x.si]
+				if s.Receipt == nil {
+					s.Receipt = &StageReceipt{}
+				}
+				s.Receipt.SandboxMachinesAt, s.LastProgressAt, s.Deadline = &now, &now, &d
+			}); err != nil {
+				return err
+			}
+		}
 		return waiting(CodeControlPlaneTimeout, "The sandbox cluster %s: %d of %d machines are Running (%d exist).", SandboxClusterName, running, total, len(machines))
 	}
 	if st := x.in.Status.Sandbox; st != nil && st.BuiltAt == nil {
-		// The machines were cloned on this stage's time (8.5 of its 20 minutes on the lab, drill E4), and what is
-		// waited for next starts only now: Cilium on the new nodes, then the next try of the sandbox chart, which was
-		// refused while Cilium's CRDs were missing and is retried minutes apart. So that wait gets the stage's time
-		// again, once for a build: BuiltAt is set here and kept until sandboxes are switched off.
+		// What is waited for next starts only now: Cilium on the new nodes, then the next try of the sandbox chart,
+		// which was refused while Cilium's CRDs were missing. The add-on controller tries a failed release again with
+		// growing gaps, and at the latest when its cache resyncs, every 10 minutes by its default, which the platform
+		// does not change (CAAPH v0.6.4, main.go --sync-period; read, not measured). So that wait gets a wave's time,
+		// counted from here and not from the machines' own deadline, once for a build: BuiltAt is set here and kept
+		// until sandboxes are switched off.
 		now := time.Now().UTC()
 		d := now.Add(waveStall)
 		if err := x.save(ctx, func(run *Run, in *Installation, _ *Secrets) {
@@ -463,6 +483,13 @@ func (x *acq) sandboxCluster(ctx context.Context, seed, wl *kamajik8s.Client) er
 	_, _, err = x.sandboxKubeconfigs(ctx, wl)
 	return sandboxStarting(err)
 }
+
+// sandboxMachinesStall is how long stage workload-platform waits for the machines of the separate sandbox cluster to
+// be Running, from its first look that finds one missing: the deadline of stage cluster, which builds the platform's
+// own machines and the shared group's (stageDefs; TestSeparateSandboxWaitStartsAgainWhenItsMachinesRun holds the two
+// equal). With the last wave before it and the sandbox chart after it, each waveStall at most, a first build of
+// separate may keep the stage for 100 minutes before it fails; on the lab the machines took 8.5.
+const sandboxMachinesStall = 60 * time.Minute
 
 // sandboxStarting makes a failed call to the API of pc-sandbox a wait: its control plane was made minutes ago, and
 // an API that does not answer yet is no reason to spend the stage's retries. The stage's deadline still ends it.

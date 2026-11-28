@@ -501,9 +501,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     else there reads a Secret of a tenant or of the portal. An installer site without a sandbox domain has no system
     group: its operator runs on a sandbox worker, as that layout always required, and the section says what that
     puts within reach.
-  - *The stage's time.* The two machines were cloned on the time of stage `workload-platform` (8.5 of its 20 minutes
-    on the lab). The wait for the sandbox chart now gets the stage's 20 minutes again, once, at the moment every
-    machine of the cluster is Running.
+  - *The stage's time (finding E4-C).* The two machines were cloned, booted and joined on the time of stage
+    `workload-platform`, whose deadline is a wave's 20 minutes: 8.5 of them on the lab, and a slower store or more
+    machines would have ended the stage before a machine ran. The stage now has two clocks of its own for the
+    sandbox cluster, each started once. The machines get 60 minutes, the time stage `cluster` gives the platform's
+    own machines and the shared group's, from the first look that finds one missing. The wait for the sandbox chart
+    then gets a wave's 20 minutes from the moment every machine is Running: the add-on controller tries the chart
+    again at the latest when its cache resyncs, every 10 minutes by its default (Cluster API add-on provider Helm
+    v0.6.4, read in its source; the platform does not change the setting). With the last wave before them, a first
+    build of `separate` may keep the stage for up to 100 minutes before it fails, where it had 20; a build like the
+    lab's is done in the time it takes.
   - *Refused instead of built in vain.* A sandbox cluster is built with the tenant cluster chart the platform's BOM
     names (`tenantCharts.kubernetes`). Under a chart before 0.1.20, `placement: separate` is now refused at the
     save and in the Check's `spec` row, with the reason and the order that works: set placement `off` (or `shared`,
@@ -535,6 +542,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - An `off` after the failed build was run on the lab with v0.12.0-rc.2 (2 min 58 s; machines, token, its six
       rows, the pool and the Application gone, the ACL byte-equal to before). Under this change it is shown on
       fakes only, in both orders above.
+  - *Known, and not changed (finding E4-D): a build of `separate` that fails leaves its machines running without a
+    VM firewall.* The VM firewall is written by the provider sync, which needs the identity the sandbox chart makes
+    and stage `register` stores; a build that fails before that has machines in the sandbox pool and nothing to
+    fence them with. No code of a tenant runs on them: the `unsecured` taint stays until a sync has fenced the
+    machine, the sandbox provider is not registered or stays disabled, and "live" is refused. What holds meanwhile
+    is the provider-wide isolation of the sandbox range, which the run writes before a machine exists: on the lab
+    the two machines reached no Proxmox node, no tenant network, not the seed and not the metadata address. They
+    did reach their own control plane, listeners on a private network that is in no blocked network of the
+    provider (the VM firewall alone closes those, a known issue of v0.12.0-rc.2), the management host's ssh port,
+    and the internet, port 25 included. They stay until an operator acts: **Retry** once the cause is gone, or `placement: off` and an apply,
+    which deletes them with their token and the pool (2 min 58 s on the lab). The run does not fence them itself:
+    that would be a second writer of the fence, without the Node to pin an address to.
   - *Not verified:* no cluster was built with this change; the tests render the values and the chart, and the
     rendered values were given to the real Cilium 1.18.16 chart by hand (no test of the repository can: it needs the
     chart from the network), whose operator then carries its own tolerations and the two taints, and the selector

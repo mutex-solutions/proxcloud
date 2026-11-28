@@ -1064,8 +1064,9 @@ sandbox pool, the template pool, the platform's boot and ISO stores, `/nodes` an
 network's vnet in its scope; after the last wave the namespace `pc-sandbox` on the platform
 cluster, the Secret `pc-sandbox-pve` with that token, and the Application `pc-sandbox` (the tenant
 cluster chart, with the sandbox chart as its add-on). The stage waits until every machine of the
-cluster is Running, and then, with its 20 minutes started again, until the sandbox chart inside
-the cluster has made its two identities. A new sandbox machine takes sandboxes only once the
+cluster is Running, for up to 60 minutes from its first look at them (the time stage `cluster`
+gives a machine), and then for up to 20 minutes more until the sandbox chart inside the cluster
+has made its two identities. A new sandbox machine takes sandboxes only once the
 provider sync has written its VM firewall and taken the `unsecured` taint off.
 
 **How `pc-sandbox` comes up.** Its control plane is hosted, so the two node groups are all the
@@ -1088,6 +1089,18 @@ about 20 minutes after the machines joined. Until then `kubectl logs` and `exec`
 answer "No agent available". A platform whose BOM names a tenant cluster chart before 0.1.20
 (v0.12.0-rc.1 and v0.12.0-rc.2 name 0.1.19) is refused `placement: separate` at the save: under
 that chart the cluster never comes up.
+
+**A build of `separate` that fails** leaves what it made: the pool, the token, the Application
+and, if it got that far, the machines, running and joined. Until a run has registered the cluster
+and a provider sync has fenced them, **those machines have no VM firewall**. No sandbox can start
+on them (the `unsecured` taint stays, the sandbox provider is disabled or absent, and "live" is
+refused), and the isolation rules of the sandbox range, which the run writes before any machine
+exists, hold for them as for every sandbox machine: nothing from that range reaches a blocked
+network of the provider. What those rules do not cover stays open to the machines: a private
+address that is in no blocked network, which only the VM firewall would close, and the internet.
+Nothing ends that state by itself. **Retry** once the cause is gone, which
+goes on with the same machines, or set `placement: off` and apply, which deletes them with the
+token and the pool. Do not leave a failed build standing.
 
 **After a build of `separate` that failed under v0.12.0-rc.2.** The cluster keeps chart 0.1.19, so
 no apply repairs it. In this order: set `placement: off` and apply (the machines, the token, the

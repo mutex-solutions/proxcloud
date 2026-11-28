@@ -493,47 +493,91 @@ func TestApplyBuildsTheSeparateSandbox(t *testing.T) {
 	}
 }
 
-// The machines of the separate cluster are cloned on stage workload-platform's time (8.5 of its 20 minutes on the lab,
-// drill E4), and what the stage waits for next begins only when they run: Cilium on the new nodes, then the next try
-// of the sandbox chart, which is refused until Cilium's CRDs exist. That wait gets the stage's time again, once.
+// The machines of the separate cluster are cloned, booted and joined on the time of stage workload-platform, whose
+// deadline is a wave's 20 minutes: 8.5 of them went to two machines on the lab (drill E4-C), and the sandbox chart the
+// stage waits for next is tried again only once Cilium's CRDs exist. So the stage has two clocks of its own here, each
+// started once:
+//
+//   - the machines get the time stage cluster gives a machine (60 minutes), from the first look that finds one
+//     missing. A clone that takes 45 minutes does not end the stage; one that is not done at that deadline does, with
+//     the count of machines;
+//   - the wait for the sandbox chart gets a wave's 20 minutes from the moment every machine is Running, not what the
+//     machines left of theirs.
 func TestSeparateSandboxWaitStartsAgainWhenItsMachinesRun(t *testing.T) {
-	sb := separateSandbox()
-	sb.System.Nodes = []string{"pve1"}
-	p := sandboxPlatform(t, RunApply, sb)
-	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { routed(in) })
-	// The sandbox chart is not in yet: neither identity has a token.
-	for _, name := range []string{sandboxPortalToken, sandboxFirewallToken} {
-		delete(p.sbx.objs, seedNS+"sandbox-system/secrets/"+name)
+	if sandboxMachinesStall != stageDefs[stageCluster].deadline || sandboxMachinesStall <= waveStall {
+		t.Fatalf("the sandbox cluster's machines get %s, stage cluster gives a machine %s and a wave has %s", sandboxMachinesStall, stageDefs[stageCluster].deadline, waveStall)
 	}
-	p.upTo(stageSeedPlatform)
-	look := func(want string) Stage {
-		t.Helper()
-		for range 30 {
-			end := p.once()
-			if s := p.stage(stageWorkloadPlatform); strings.Contains(s.Message, want) {
-				return s
-			}
-			if !strings.HasPrefix(end, "defer:") {
-				t.Fatalf("end %s before the stage said %q: %+v\n%s", end, want, p.stage(stageWorkloadPlatform), p.logs)
-			}
+	build := func(t *testing.T) (*platform, func(want string) Stage) {
+		sb := separateSandbox()
+		sb.System.Nodes = []string{"pve1"}
+		p := sandboxPlatform(t, RunApply, sb)
+		p.mutate(func(_ *Run, in *Installation, _ *Secrets) { routed(in) })
+		// The sandbox chart is not in yet: neither identity has a token.
+		for _, name := range []string{sandboxPortalToken, sandboxFirewallToken} {
+			delete(p.sbx.objs, seedNS+"sandbox-system/secrets/"+name)
 		}
-		t.Fatalf("the stage never said %q: %+v", want, p.stage(stageWorkloadPlatform))
-		return Stage{}
+		p.upTo(stageSeedPlatform)
+		return p, func(want string) Stage {
+			t.Helper()
+			for range 30 {
+				end := p.once()
+				if s := p.stage(stageWorkloadPlatform); strings.Contains(s.Message, want) {
+					return s
+				}
+				if !strings.HasPrefix(end, "defer:") {
+					t.Fatalf("end %s before the stage said %q: %+v\n%s", end, want, p.stage(stageWorkloadPlatform), p.logs)
+				}
+			}
+			t.Fatalf("the stage never said %q: %+v", want, p.stage(stageWorkloadPlatform))
+			return Stage{}
+		}
 	}
+	// age moves the stage's clocks d into the past, as if the run had waited that long for the clones.
+	age := func(p *platform, d time.Duration) {
+		p.mutate(func(run *Run, _ *Installation, _ *Secrets) {
+			for i := range run.Stages {
+				if s := &run.Stages[i]; s.ID == stageWorkloadPlatform {
+					started, progress, deadline, seen := s.StartedAt.Add(-d), s.LastProgressAt.Add(-d), s.Deadline.Add(-d), s.Receipt.SandboxMachinesAt.Add(-d)
+					s.StartedAt, s.LastProgressAt, s.Deadline, s.Receipt.SandboxMachinesAt = &started, &progress, &deadline, &seen
+				}
+			}
+		})
+	}
+	run := func(p *platform) {
+		for _, name := range []string{"pc-sandbox-sandbox-pve1-x", "pc-sandbox-sandbox-system-pve1-x"} {
+			m := meta(name, map[string]any{"cluster.x-k8s.io/cluster-name": SandboxClusterName})
+			m["status"] = map[string]any{"phase": "Running"}
+			p.wl.put("/apis/cluster.x-k8s.io/v1beta2/namespaces/pc-sandbox/machines/"+name, m)
+		}
+	}
+
+	p, look := build(t)
 	cloning := look("0 of 2 machines are Running")
 	if _, in, _ := p.state.snapshot(); in.Status.Sandbox == nil || in.Status.Sandbox.BuiltAt != nil {
 		t.Fatalf("before a machine runs: %+v", in.Status.Sandbox)
 	}
-	for _, name := range []string{"pc-sandbox-sandbox-pve1-x", "pc-sandbox-sandbox-system-pve1-x"} {
-		m := meta(name, map[string]any{"cluster.x-k8s.io/cluster-name": SandboxClusterName})
-		m["status"] = map[string]any{"phase": "Running"}
-		p.wl.put("/apis/cluster.x-k8s.io/v1beta2/namespaces/pc-sandbox/machines/"+name, m)
+	var seen *time.Time
+	if cloning.Receipt != nil {
+		seen = cloning.Receipt.SandboxMachinesAt
 	}
+	if seen == nil || cloning.Deadline == nil || !cloning.Deadline.Equal(seen.Add(sandboxMachinesStall)) || cloning.Deadline.Sub(*cloning.StartedAt) <= waveStall {
+		t.Fatalf("while the machines are cloned the stage's deadline is %v (it started %v, saw them missing %v), want %s after that look", cloning.Deadline, cloning.StartedAt, seen, sandboxMachinesStall)
+	}
+	// Once: a stage that keeps waiting for them does not keep its deadline away.
+	if again := look("0 of 2 machines are Running"); !again.Deadline.Equal(*cloning.Deadline) || !again.Receipt.SandboxMachinesAt.Equal(*seen) {
+		t.Fatalf("the machines' deadline moved again: %v, was %v", again.Deadline, cloning.Deadline)
+	}
+	// A slow clone: 45 minutes on, well past a wave's time, the stage still waits.
+	age(p, 45*time.Minute)
+	if slow := look("0 of 2 machines are Running"); slow.State != StageWaiting || time.Since(*slow.StartedAt) < 2*waveStall || !slow.Deadline.After(time.Now()) {
+		t.Fatalf("45 minutes into the clones: %+v", slow)
+	}
+	run(p)
 	waiting := look("has not filled")
 	_, in, _ := p.state.snapshot()
 	built := in.Status.Sandbox.BuiltAt
-	if built == nil || waiting.Deadline == nil || !waiting.Deadline.Equal(built.Add(waveStall)) || !waiting.Deadline.After(*cloning.Deadline) {
-		t.Fatalf("the machines run since %v: the stage's deadline is %v (it was %v while they were cloned), want %s after they ran", built, waiting.Deadline, cloning.Deadline, waveStall)
+	if built == nil || waiting.Deadline == nil || !waiting.Deadline.Equal(built.Add(waveStall)) {
+		t.Fatalf("the machines run since %v: the stage's deadline is %v, want %s after they ran", built, waiting.Deadline, waveStall)
 	}
 	// Once: a stage that keeps waiting for the chart does not keep its deadline away.
 	p.once()
@@ -543,6 +587,14 @@ func TestSeparateSandboxWaitStartsAgainWhenItsMachinesRun(t *testing.T) {
 	p.sandboxIdentities(p.sbx)
 	if end := p.until(10); end != "complete" {
 		t.Fatalf("with the identities: %s: %+v", end, p.stage(stageWorkloadPlatform))
+	}
+
+	// Machines that are not Running at their own deadline end the stage, and the run says how many are.
+	p, look = build(t)
+	look("0 of 2 machines are Running")
+	age(p, sandboxMachinesStall+time.Minute)
+	if end := p.once(); end != "fail:"+CodeControlPlaneTimeout || !strings.Contains(p.stage(stageWorkloadPlatform).Message, "0 of 2 machines are Running") {
+		t.Fatalf("machines that never ran: %s: %+v", end, p.stage(stageWorkloadPlatform))
 	}
 }
 

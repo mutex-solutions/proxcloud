@@ -20,8 +20,9 @@ writers of a sandbox cluster set them.
   whose tenant cluster chart is older, and names the order that works (off, the upgrade, then separate). `internal/cloud/kamaji/config.go`: `OperatorTolerationsChartVersion`.
 - `installer/playbooks/templates/sandbox-cluster.yml.j2`: the same tolerations for the installer's sandbox cluster,
   and the selector when it renders the system group (`pc_sandbox_edge_on`).
-- `internal/platformlife/sandbox_run.go`: `sandboxCluster` starts the deadline of stage `workload-platform` again,
-  once, when every machine of the cluster is Running.
+- `internal/platformlife/sandbox_run.go`: `sandboxCluster` gives the machines of the cluster 60 minutes of stage
+  `workload-platform`, from its first look that finds one missing (`sandboxMachinesStall`, noted in the stage's
+  receipt as `sandboxMachinesAt`), and starts the stage's 20 minutes again, once, when every machine is Running.
 
 **Why:** the drill of v0.12.0-rc.2 could not build `separate`. The cluster's control plane is hosted, both node
 groups join tainted, and Cilium's operator tolerates neither taint, so it was never scheduled. It registers Cilium's
@@ -30,9 +31,9 @@ chart's identities, and the provider sync that takes the taint off needs the kub
 that wait. Only the operator gets the toleration: it is the one thing a node needs before it can be Ready, and
 nothing that serves tenants moves onto a machine without a VM firewall. The selector is there because the operator's
 ClusterRole reads the Secrets of every namespace: a sandbox machine carries no taint but `unsecured`, so the
-toleration alone would let the operator share a node with tenants' code, whose kubelet can ask for its token. The deadline starts again because the
-machines were cloned on the stage's time (8.5 of 20 minutes on the lab) and the chart's next try comes minutes after
-Cilium is up. The refusal at the save is there because a BOM that names an older chart builds two machines and then
+toleration alone would let the operator share a node with tenants' code, whose kubelet can ask for its token. The stage has two clocks because the
+machines were cloned on the stage's time (8.5 of 20 minutes on the lab; a slower store would have ended the stage
+before a machine ran) and the chart's next try comes minutes after Cilium is up. The refusal at the save is there because a BOM that names an older chart builds two machines and then
 waits in vain. The BOM is not moved here: chart 0.1.20 has to be published by its tag first.
 
 **Diagrams:** none changed. `c2-containers.md` names chart 0.1.20 in the row of the cluster chart.

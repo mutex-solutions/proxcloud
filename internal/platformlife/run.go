@@ -202,6 +202,9 @@ type StageReceipt struct {
 	Resynced []string `json:"resynced,omitempty"`
 	// CAPMOXWokenAt is when this run made CAPMOX look at a ProxmoxCluster an earlier run had left without a condition.
 	CAPMOXWokenAt *time.Time `json:"capmoxWokenAt,omitempty"`
+	// SandboxMachinesAt is when this run first found machines of the separate sandbox cluster that were not Running yet:
+	// from then they have sandboxMachinesStall, once for a run (sandboxCluster).
+	SandboxMachinesAt *time.Time `json:"sandboxMachinesAt,omitempty"`
 	// RolloutChecked: this upgrade run compared the cluster chart of the target BOM with the live cluster before its
 	// sync and found no machine to replace (rolloutGate).
 	RolloutChecked bool `json:"rolloutChecked,omitempty"`
