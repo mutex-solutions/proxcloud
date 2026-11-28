@@ -40,6 +40,13 @@ spec:
         ciliumOperatorTolerations:
           - {key: proxcloud.io/unsecured, operator: Exists, effect: NoSchedule}
           - {key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}
+{% if pc_sandbox_edge_on | bool %}
+        # With the system group: the operator runs there and nowhere else. Its ClusterRole reads the Secrets of every
+        # namespace, and a kubelet can ask for the token of a pod on its node, so it never shares a node with tenant code.
+        # Without a sandbox domain the cluster has no such group and no proxy: the operator then runs on a sandbox worker,
+        # the only kind of node there is (docs/managed-sandbox.md §4.5).
+        ciliumOperatorNodeSelector: {node-restriction.kubernetes.io/proxcloud-system: "true"}
+{% endif %}
         cloudCredentialsSecretName: pc-sandbox-cloud-config
         # kamajiControlPlane.admissionControllers stays the chart's list, NodeRestriction included; stage 55 checks it.
         kamajiControlPlane:

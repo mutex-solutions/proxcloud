@@ -49,6 +49,10 @@ const (
 	// here tolerates it; the RuntimeClass of the sandbox chart must not either.
 	UnsecuredTaintKey  = "proxcloud.io/unsecured"
 	sandboxSystemTaint = "proxcloud.io/sandbox-system"
+	// sandboxSystemLabel is on the nodes of the separate cluster's system group and on no other. Cluster API sets it
+	// from the Machine; under NodeRestriction no kubelet can give it to its own node, so what must never share a node
+	// with code of tenants selects it: the sandbox chart's proxy and controller, and Cilium's operator.
+	sandboxSystemLabel = "node-restriction.kubernetes.io/proxcloud-system"
 	sandboxNamespace   = "sandbox-system"
 	sandboxTLSSecret   = "sandbox-proxy-tls"
 
@@ -613,7 +617,7 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		}
 		if g.Name == SandboxSystemGroup {
 			ng["nodeLabels"] = map[string]any{SandboxTaintKey: "system"}
-			ng["machineLabels"] = map[string]any{"node-restriction.kubernetes.io/proxcloud-system": "true"}
+			ng["machineLabels"] = map[string]any{sandboxSystemLabel: "true"}
 			ng["taints"] = []any{taint(UnsecuredTaintKey), taint(sandboxSystemTaint)}
 		} else {
 			ng["nodeLabels"] = map[string]any{SandboxTaintKey: "cpu"}
@@ -636,7 +640,12 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		// Cilium's operator must start on them all the same: it registers Cilium's CRDs, the agents wait for those, and
 		// the sandbox chart, whose identities the run waits for, is refused without them. Nothing else gets a
 		// toleration: CoreDNS, MetalLB and konnectivity's agent start once the provider sync has fenced a machine.
-		"ciliumOperatorTolerations":  sandboxJoinTolerations(),
+		"ciliumOperatorTolerations": sandboxJoinTolerations(),
+		// On the system group alone, before the fence and after it: the operator's ClusterRole reads the Secrets of
+		// every namespace, and the kubelet of a sandbox machine could ask for the token of an operator on its node.
+		// The tolerations name unsecured, the one taint a sandbox machine carries, so without this selector the
+		// operator could be scheduled there.
+		"ciliumOperatorNodeSelector": map[string]any{sandboxSystemLabel: "true"},
 		"cloudCredentialsSecretName": SandboxCredentialsSecret,
 		"kamajiControlPlane":         map[string]any{"replicas": 1, "dataStoreName": defaultDatastore, "network": map[string]any{"serviceType": "LoadBalancer"}},
 		"clusterNetwork":             map[string]any{"pods": "10.244.0.0/16", "services": "10.96.0.0/12"},

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: proxmox-kamaji-cluster
-description: One tenant Kubernetes cluster on Proxmox VE. A Kamaji hosted control plane, CAPMOX worker VMs, Cilium, proxmox-csi, MetalLB and, from 0.1.17, the product load balancer's controller, from 0.1.18 a node group's own pool, address range and DNS servers and the sandbox chart for the platform's sandbox cluster, from 0.1.19 a load balancer controller that watches the cluster's Services and nodes, from 0.1.20 tolerations for Cilium's operator on a cluster whose every node joins with a taint. With controlPlane.kind kubeadm, the platform cluster of managed services instead.
+description: One tenant Kubernetes cluster on Proxmox VE. A Kamaji hosted control plane, CAPMOX worker VMs, Cilium, proxmox-csi, MetalLB and, from 0.1.17, the product load balancer's controller, from 0.1.18 a node group's own pool, address range and DNS servers and the sandbox chart for the platform's sandbox cluster, from 0.1.19 a load balancer controller that watches the cluster's Services and nodes, from 0.1.20 tolerations and a node selector for Cilium's operator on a cluster whose every node joins with a taint. With controlPlane.kind kubeadm, the platform cluster of managed services instead.
 type: application
 version: 0.1.20
 appVersion: "1.35"

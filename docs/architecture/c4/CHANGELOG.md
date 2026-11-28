@@ -6,17 +6,20 @@ and rules: [README.md](README.md#maintenance-rule).
 
 ## 2026-11-28: the separate sandbox cluster comes up on its tainted nodes (drill of v0.12.0-rc.2: E4-A)
 
-**What changed:** no new component, container, route or relation. One new value of the cluster chart, and the two
-writers of a sandbox cluster set it.
+**What changed:** no new component, container, route or relation. Two new values of the cluster chart, and the two
+writers of a sandbox cluster set them.
 
 - `deploy/charts/proxmox-kamaji-cluster` 0.1.20: `ciliumOperatorTolerations` (`templates/addons.yaml`). When set,
   Cilium's operator gets its own list of tolerations (repeated from Cilium 1.18's values, which the value would
   otherwise replace) and the taints named. Empty, the operator's values are what they were.
+  `ciliumOperatorNodeSelector`, same file: node labels the operator's node must carry, with Cilium's own
+  `kubernetes.io/os: linux`. Empty, no selector is rendered.
 - `internal/platformlife/sandbox.go`: `SandboxClusterValues` sets it to the two taints a machine of `pc-sandbox`
-  joins with (`sandboxJoinTolerations`), and refuses a cluster chart before 0.1.20, the one a cluster keeps from the
-  run that began it included. `sandboxProblems` refuses `placement: separate` at the save on a BOM whose tenant
+  joins with (`sandboxJoinTolerations`) and the selector to the system group's label (`sandboxSystemLabel`), and
+  refuses a cluster chart before 0.1.20, the one a cluster keeps from the run that began it included. `sandboxProblems` refuses `placement: separate` at the save on a BOM whose tenant
   cluster chart is older. `internal/cloud/kamaji/config.go`: `OperatorTolerationsChartVersion`.
-- `installer/playbooks/templates/sandbox-cluster.yml.j2`: the same value for the installer's sandbox cluster.
+- `installer/playbooks/templates/sandbox-cluster.yml.j2`: the same tolerations for the installer's sandbox cluster,
+  and the selector when it renders the system group (`pc_sandbox_edge_on`).
 - `internal/platformlife/sandbox_run.go`: `sandboxCluster` starts the deadline of stage `workload-platform` again,
   once, when every machine of the cluster is Running.
 
@@ -25,7 +28,9 @@ groups join tainted, and Cilium's operator tolerates neither taint, so it was ne
 CRDs: without them no agent starts, no node becomes Ready, and the sandbox chart is refused. The run waited for that
 chart's identities, and the provider sync that takes the taint off needs the kubeconfig the run stores only after
 that wait. Only the operator gets the toleration: it is the one thing a node needs before it can be Ready, and
-nothing that serves tenants moves onto a machine without a VM firewall. The deadline starts again because the
+nothing that serves tenants moves onto a machine without a VM firewall. The selector is there because the operator's
+ClusterRole reads the Secrets of every namespace: a sandbox machine carries no taint but `unsecured`, so the
+toleration alone would let the operator share a node with tenants' code, whose kubelet can ask for its token. The deadline starts again because the
 machines were cloned on the stage's time (8.5 of 20 minutes on the lab) and the chart's next try comes minutes after
 Cilium is up. The refusal at the save is there because a BOM that names an older chart builds two machines and then
 waits in vain. The BOM is not moved here: chart 0.1.20 has to be published by its tag first.

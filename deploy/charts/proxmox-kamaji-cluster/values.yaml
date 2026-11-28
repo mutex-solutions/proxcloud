@@ -211,6 +211,15 @@ sandboxBandwidth: false
 # keeps the values it had.
 ciliumOperatorTolerations: []
 
+# -- From chart 0.1.20. Node labels the node of Cilium's operator must carry, on top of Cilium's own
+# kubernetes.io/os: linux. The operator's ClusterRole reads the Secrets of every namespace, and a kubelet can ask for
+# the token of any pod on its node. So on a cluster where some nodes run code of tenants, the operator is kept on the
+# others: the platform's sandbox cluster sets node-restriction.kubernetes.io/proxcloud-system: "true", the label of its
+# system group (machineLabels: Cluster API sets it, no kubelet can claim it). Set it together with
+# ciliumOperatorTolerations whenever the cluster has such a group: a toleration alone lets the operator onto every node
+# that carries the taint. Empty for a tenant cluster, whose operator then keeps the values it had.
+ciliumOperatorNodeSelector: {}
+
 # -- Chart repos and versions of what CAAPH installs in the tenant cluster. Operator territory.
 addonCharts:
   cilium: {repoURL: "https://helm.cilium.io", chart: cilium, version: "1.18.16"}

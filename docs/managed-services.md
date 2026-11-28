@@ -1074,7 +1074,14 @@ nodes it has, and both join with a taint: `proxcloud.io/unsecured` on every mach
 taint. Cilium's operator does not by itself, and it has to run first: it registers Cilium's CRDs,
 no agent starts and no node becomes Ready without them, and the sandbox chart is refused without
 them. The run therefore sets the cluster chart's `ciliumOperatorTolerations` to the two taints
-(cluster chart 0.1.20). Everything else waits for the fence, as it should: CoreDNS, MetalLB,
+(cluster chart 0.1.20), and `ciliumOperatorNodeSelector` to the system group's label
+`node-restriction.kubernetes.io/proxcloud-system`: the operator starts on the system machine
+while it is still tainted, and is never scheduled on a sandbox machine, before the fence or
+after it. Its ClusterRole reads the Secrets of every namespace, and a kubelet can ask for the
+token of a pod on its node, so it stays off the machines that run tenants' code, as sandbox-proxy
+and the agent-sandbox controller do
+([managed-sandbox.md §4.5](managed-sandbox.md#45-what-a-compromised-worker-can-reach-here) has the
+table of what runs where). Everything else waits for the fence, as it should: CoreDNS, MetalLB,
 konnectivity's agent, sandbox-proxy and the agent-sandbox controller are scheduled once stage
 `register` has stored the kubeconfig and a provider sync has taken the `unsecured` taint off,
 about 20 minutes after the machines joined. Until then `kubectl logs` and `exec` on `pc-sandbox`

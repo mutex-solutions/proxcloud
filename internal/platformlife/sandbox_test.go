@@ -924,6 +924,23 @@ func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
 			}
 		}
 	}
+	// The operator's ClusterRole reads the Secrets of every namespace, and the kubelet of a node can ask for the token
+	// of a pod on it: the operator is held to the system group, whose label no kubelet can claim, and never shares a
+	// node with code of tenants (docs/managed-sandbox.md §4.5). The tolerations alone would let it onto the sandbox
+	// group, which carries no taint but unsecured.
+	selector, _ := values["ciliumOperatorNodeSelector"].(map[string]any)
+	if len(selector) != 1 || selector[sandboxSystemLabel] != "true" || !strings.HasPrefix(sandboxSystemLabel, "node-restriction.kubernetes.io/") {
+		t.Errorf("Cilium's operator is selected onto %v, want the system group's label %s alone", selector, sandboxSystemLabel)
+	}
+	for _, g := range groups {
+		name := g.(map[string]any)["name"]
+		if has := dig(g, "machineLabels", sandboxSystemLabel) == "true"; has != (name == SandboxSystemGroup) {
+			t.Errorf("group %v carries the system label: %v", name, has)
+		}
+		if dig(g, "nodeLabels", sandboxSystemLabel) != nil {
+			t.Errorf("group %v gets %s from its own kubelet", name, sandboxSystemLabel)
+		}
+	}
 	// Nothing else is let onto an unfenced machine by these values: MetalLB's speaker tolerates the system group's
 	// taint alone, as before.
 	if raw, _ := json.Marshal(dig(values, "proxmox", "metallb")); strings.Contains(string(raw), UnsecuredTaintKey) {
@@ -944,6 +961,14 @@ func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
 		if !strings.Contains(block, "{key: "+key+", operator: Exists, effect: NoSchedule}") {
 			t.Errorf("the installer's sandbox cluster: Cilium's operator does not tolerate %s", key)
 		}
+	}
+	// And the operator is held to the system group whenever the template renders one (pc_sandbox_edge_on); without a
+	// sandbox domain the cluster has the sandbox group alone, and the selector would leave the operator no node.
+	if !regexp.MustCompile(`(?s)^.*\{% if pc_sandbox_edge_on \| bool %\}\n(\s*#[^\n]*\n)*\s*ciliumOperatorNodeSelector: \{` + regexp.QuoteMeta(sandboxSystemLabel) + `: "true"\}\n\{% endif %\}`).MatchString(block) {
+		t.Errorf("the installer's sandbox cluster does not hold Cilium's operator to the system group when it has one:\n%s", block)
+	}
+	if !regexp.MustCompile(`(?s)\{% if pc_sandbox_edge_on \| bool %\}[^%]*- name: sandbox-system\n[^%]*machineLabels: \{` + regexp.QuoteMeta(sandboxSystemLabel) + `: "true"\}`).MatchString(string(raw)) {
+		t.Errorf("the installer's system group does not carry %s under the same condition", sandboxSystemLabel)
 	}
 	if n := strings.Count(string(raw), "taints:"); n != 2 {
 		t.Errorf("the installer's template names %d taint lists, this test knows two (sandbox, sandbox-system)", n)
@@ -970,12 +995,50 @@ func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	registered, operator := map[string]bool{}, map[string]bool{}
+	type group struct {
+		labels map[string]any // on the Node: the Machine's, which Cluster API copies, and the kubelet's own
+		taints []string       // as the kubelet registers
+	}
+	rendered, joins, operatorSelector := map[string]*group{}, map[string][2]string{}, map[string]any(nil)
+	for _, o := range yamlObjects(t, out) {
+		switch o["kind"] {
+		case "MachineDeployment":
+			g := &group{labels: map[string]any{"kubernetes.io/os": "linux"}}
+			machine, _ := dig(o, "spec", "template", "metadata", "labels").(map[string]any)
+			for k, v := range machine {
+				if strings.HasPrefix(k, "node-restriction.kubernetes.io/") {
+					g.labels[k] = v
+				}
+			}
+			name := str(o, "metadata", "labels", "proxcloud.io/node-group")
+			rendered[name] = g
+			joins[str(o, "spec", "template", "spec", "bootstrap", "configRef", "name")] = [2]string{name, ""}
+		}
+	}
 	for _, o := range yamlObjects(t, out) {
 		switch o["kind"] {
 		case "KubeadmConfigTemplate":
 			taints, _ := dig(o, "spec", "template", "spec", "joinConfiguration", "nodeRegistration", "taints").([]any)
+			g := rendered[joins[str(o, "metadata", "name")][0]]
+			if g == nil {
+				t.Fatalf("bootstrap template %s belongs to no MachineDeployment", str(o, "metadata", "name"))
+			}
 			for _, tn := range taints {
 				registered[str(tn.(map[string]any), "key")] = true
+				g.taints = append(g.taints, str(tn.(map[string]any), "key"))
+			}
+			args, _ := dig(o, "spec", "template", "spec", "joinConfiguration", "nodeRegistration", "kubeletExtraArgs").([]any)
+			for _, a := range args {
+				if str(a.(map[string]any), "name") != "node-labels" {
+					continue
+				}
+				for _, kv := range strings.Split(str(a.(map[string]any), "value"), ",") {
+					k, v, _ := strings.Cut(kv, "=")
+					if strings.HasPrefix(k, "node-restriction.kubernetes.io/") {
+						t.Errorf("a kubelet of group %s names %s itself: under NodeRestriction the node would not register", joins[str(o, "metadata", "name")][0], k)
+					}
+					g.labels[k] = v
+				}
 			}
 		case "HelmChartProxy":
 			if str(o, "spec", "chartName") != "cilium" {
@@ -989,7 +1052,42 @@ func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
 			for _, tol := range ts {
 				operator[str(tol.(map[string]any), "key")] = true
 			}
+			operatorSelector, _ = dig(v, "operator", "nodeSelector").(map[string]any)
 		}
+	}
+	// Where the scheduler may put the rendered operator: a node whose labels hold its selector and whose taints it
+	// tolerates. Before the fence a machine carries the taints it joined with; the fence takes unsecured off and
+	// nothing else, so after it the sandbox group has no taint at all. The operator fits the system group at the join,
+	// or the cluster does not come up; and it fits no other group at any time, tainted or not.
+	fits := func(g *group, taints []string) bool {
+		for k, v := range operatorSelector {
+			if g.labels[k] != v {
+				return false
+			}
+		}
+		for _, key := range taints {
+			if !operator[key] {
+				return false
+			}
+		}
+		return true
+	}
+	if len(rendered) != 2 || rendered[SandboxSystemGroup] == nil || rendered[SandboxGroup] == nil {
+		t.Fatalf("the rendered cluster's node groups: %v", rendered)
+	}
+	for name, g := range rendered {
+		atJoin, fenced := fits(g, g.taints), fits(g, slices.DeleteFunc(slices.Clone(g.taints), func(k string) bool { return k == UnsecuredTaintKey }))
+		switch {
+		case name == SandboxSystemGroup && !(atJoin && fenced):
+			t.Errorf("Cilium's operator (selector %v, tolerations %v) cannot be scheduled on group %s (labels %v, taints %v): at the join %v, once fenced %v",
+				operatorSelector, operator, name, g.labels, g.taints, atJoin, fenced)
+		case name != SandboxSystemGroup && (atJoin || fenced):
+			t.Errorf("Cilium's operator (selector %v, tolerations %v) can be scheduled on group %s (labels %v, taints %v): at the join %v, once fenced %v. "+
+				"Its ClusterRole reads every namespace's Secrets, and that group runs code of tenants", operatorSelector, operator, name, g.labels, g.taints, atJoin, fenced)
+		}
+	}
+	if operatorSelector["kubernetes.io/os"] != "linux" {
+		t.Errorf("the operator's selector %v lost Cilium's own kubernetes.io/os: linux", operatorSelector)
 	}
 	if len(registered) != 2 {
 		t.Fatalf("the kubelets of the rendered cluster register with taints %v, want the two of the sandbox cluster", registered)

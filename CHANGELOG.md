@@ -486,6 +486,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     onto a machine without a VM firewall: CoreDNS, MetalLB, konnectivity's agent, sandbox-proxy and the
     agent-sandbox controller start, as before, once the provider sync has fenced a machine and taken its taint off,
     and a sandbox never tolerates `unsecured`.
+  - *The operator stays on the system group.* A sandbox machine carries no taint but `unsecured`, so the toleration
+    alone would let the operator be scheduled there, before the fence and after it. Its ClusterRole reads the
+    Secrets of every namespace (Cilium 1.18.16 with this product's values, rendered and read), and a kubelet can ask
+    for the token of a pod on its node: code that escapes gVisor on that machine could then read the wildcard key,
+    the wake token and both of the portal's identities. Chart 0.1.20 therefore has a second value,
+    `ciliumOperatorNodeSelector`: node labels the operator's node must carry, added to Cilium's own
+    `kubernetes.io/os: linux`. The run sets it to `node-restriction.kubernetes.io/proxcloud-system: "true"`, the
+    label Cluster API puts on the system group's nodes and no kubelet can claim; the installer's template sets it
+    whenever it renders the system group (a sandbox domain is set). The label is on the system node while that node
+    is still tainted and not Ready (read in the drill's evidence), so the cluster comes up all the same. What else
+    runs on a sandbox machine, and what it can reach from there, is a table in
+    [docs/managed-sandbox.md §4.5](docs/managed-sandbox.md#45-what-a-compromised-worker-can-reach-here): nothing
+    else there reads a Secret of a tenant or of the portal. An installer site without a sandbox domain has no system
+    group: its operator runs on a sandbox worker, as that layout always required, and the section says what that
+    puts within reach.
   - *The stage's time.* The two machines were cloned on the time of stage `workload-platform` (8.5 of its 20 minutes
     on the lab). The wait for the sandbox chart now gets the stage's 20 minutes again, once, at the moment every
     machine of the cluster is Running.
@@ -493,9 +508,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     names (`tenantCharts.kubernetes`). Under a chart before 0.1.20, `placement: separate` is now refused at the
     save and in the Check's `spec` row, with the reason and the two ways on: the platform upgrade, or `shared`. The
     BOMs of v0.12.0-rc.1 and v0.12.0-rc.2 name chart 0.1.19.
-  - *A site without sandboxes:* nothing changes. A tenant cluster sets no `ciliumOperatorTolerations`, and chart
-    0.1.20 then renders the objects chart 0.1.19 renders, byte for byte (compared); the installer's ordinary
-    clusters are not touched. This change does not move a pin of the BOM: the release that follows must publish
+  - *A site without sandboxes:* nothing changes. A tenant cluster sets neither value, and chart 0.1.20 then renders
+    the objects chart 0.1.19 renders, byte for byte: a test holds the render to the sha256 of what the published
+    0.1.19 renders with default values. The installer's ordinary clusters are not touched. This change does not move a pin of the BOM: the release that follows must publish
     chart 0.1.20 (tag `proxmox-kamaji-cluster-v0.1.20`) and name it in `tenantCharts.kubernetes`. Until it does,
     `separate` is refused at the save on this build's own BOM too, and a test stops a release that forgets the pin.
   - *A site that runs v0.12.0-rc.2 with `shared` sandboxes:* nothing changes; `shared` is built with the platform's
@@ -507,8 +522,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `separate` again. An off that starts from a failed build of `separate` had not been run on a lab when this was
     written.
   - *Not verified:* no cluster was built with this change; the tests render the values and the chart, and the
-    rendered values were given to the real Cilium 1.18.16 chart, whose operator then carries its own tolerations
-    and the two taints. One real build of `separate` on a lab is owed before a release offers it. The installer's
+    rendered values were given to the real Cilium 1.18.16 chart by hand (no test of the repository can: it needs the
+    chart from the network), whose operator then carries its own tolerations and the two taints, and the selector
+    `kubernetes.io/os: linux` with the system group's label. One real build of `separate` on a lab is owed before a release offers it. The installer's
     path was read, not run: its stage 55 waits for Cilium's agents and for Ready nodes, so it had the same fault.
 
 - **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of

@@ -45,6 +45,8 @@ application:
                 proxy:
                   address: 192.0.2.150
                   domain: sbx.example.org
+          ciliumOperatorNodeSelector:
+            node-restriction.kubernetes.io/proxcloud-system: "true"
           ciliumOperatorTolerations:
             - effect: NoSchedule
               key: proxcloud.io/unsecured

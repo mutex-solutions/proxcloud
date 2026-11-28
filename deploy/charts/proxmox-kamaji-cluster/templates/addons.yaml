@@ -30,6 +30,15 @@ were, and its Deployment does not change. */ -}}
 {{- end }}
 {{- $_ := set $operator "tolerations" (concat $own .) }}
 {{- end }}
+{{- /* ciliumOperatorNodeSelector (from chart 0.1.20): node labels the operator's node must carry, on top of Cilium's own
+kubernetes.io/os: linux, which is repeated here so that the selector does not rest on Helm merging the two maps. The
+operator's ClusterRole reads Secrets in every namespace, and a kubelet can ask for the token of a pod on its node: on
+a cluster that runs code of tenants on some of its nodes, the toleration above alone would let the operator land there.
+Name a label under node-restriction.kubernetes.io/ (a node group's machineLabels), which no kubelet can give itself.
+Empty, as for every tenant cluster: no selector is rendered. */ -}}
+{{- with .Values.ciliumOperatorNodeSelector }}
+{{- $_ := set $operator "nodeSelector" (merge (dict "kubernetes.io/os" "linux") .) }}
+{{- end }}
 {{- $proxies = append $proxies (dict "key" "cilium" "ns" "kube-system" "values" (dict "kubeProxyReplacement" false "bandwidthManager" (dict "enabled" (.Values.sandboxBandwidth | default false)) "cni" (dict "customConf" (.Values.sandboxBandwidth | default false)) "ipam" (dict "mode" "kubernetes") "routingMode" "tunnel" "tunnelProtocol" "vxlan" "operator" $operator "hubble" (dict "enabled" false))) }}
 {{- $classes := list }}
 {{- range $i, $c := .Values.proxmox.csi.storageClasses }}
