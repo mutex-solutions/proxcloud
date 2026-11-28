@@ -231,6 +231,12 @@ func TestPlatformSandboxProviderRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	offAt := time.Date(2026, 11, 28, 1, 12, 0, 0, time.UTC)
+	if other, err := h.PlatformSandboxOff(ctx, "pi-2", offAt); err != nil || len(other) != 0 {
+		t.Fatalf("the off of another installation wrote %v, %v", other, err)
+	}
+	if sbx, _ = esSvc.Get(ctx, id); sbx.SandboxConfig().Kubeconfig != "portal-kubeconfig-three-0123456789" {
+		t.Fatalf("the off of another installation took this one's kubeconfig: %q", sbx.SandboxConfig().Kubeconfig)
+	}
 	written, err := h.PlatformSandboxOff(ctx, "pi-1", offAt)
 	if err != nil || !slices.Equal(written, []string{id}) {
 		t.Fatalf("the off wrote %v, %v", written, err)
@@ -241,9 +247,6 @@ func TestPlatformSandboxProviderRows(t *testing.T) {
 	}
 	if again, err := h.PlatformSandboxOff(ctx, "pi-1", offAt.Add(time.Hour)); err != nil || len(again) != 0 {
 		t.Fatalf("the off again wrote %v, %v", again, err)
-	}
-	if other, err := h.PlatformSandboxOff(ctx, "pi-2", offAt); err != nil || len(other) != 0 {
-		t.Fatalf("the off of another installation wrote %v, %v", other, err)
 	}
 	all, err := esSvc.ListByType(ctx, externalservice.TypeCloud)
 	if err != nil {
