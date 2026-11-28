@@ -539,6 +539,10 @@ func TestRemoveWithSandboxes(t *testing.T) {
 			if in.Status.Sandbox != nil || sec.Sandbox != nil || len(p.pve.pools) != 0 || len(p.pve.tokens) != 0 {
 				t.Fatalf("status %+v, pools %v, tokens %v", in.Status.Sandbox, p.pve.pools, p.pve.tokens)
 			}
+			// The sandbox provider's identity goes with the machines, or no project attached to it could be deleted.
+			if !slices.Equal(p.offs, []string{in.ID}) {
+				t.Errorf("the sandbox provider was marked as having no placement for %v", p.offs)
+			}
 			if row != "" && !slices.Equal(p.pve.acl, []string{row}) {
 				t.Errorf("acl %v", p.pve.acl)
 			}

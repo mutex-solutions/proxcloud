@@ -6,12 +6,16 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -43,6 +47,86 @@ func (h *Handler) PlatformSandboxSite(ctx context.Context, in *platformlife.Inst
 		}
 		return h.repo.ReplaceDoc(ctx, externalServiceCollection, in.ServiceID, doc)
 	})
+}
+
+// PlatformSandboxOff takes the identity of an installation's sandbox provider away and marks the row as having no
+// placement since at (platformlife.SandboxProviderOff), under the installation's run lock, as PlatformRegister gives
+// both back. The run calls it when the last sandbox machine is gone. A row that says so already is not written, and an
+// installation without a sandbox provider has none. It answers the ids of the rows it wrote.
+func (h *Handler) PlatformSandboxOff(ctx context.Context, installationID string, at time.Time) (written []string, err error) {
+	err = h.repo.db.WithTx(ctx, func(ctx context.Context) error {
+		if err := h.repo.db.LockXact(ctx, "platform-run:"+installationID); err != nil {
+			return err
+		}
+		rows, err := h.repo.ListRaw(ctx, externalServiceCollection)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			cfg, _ := row["config"].(map[string]any)
+			if cfg[platformlife.ProviderMarker] != installationID || !platformlife.SandboxProviderOff(row, at) {
+				continue
+			}
+			id, _ := row["_id"].(string)
+			if err := h.repo.ReplaceDoc(ctx, externalServiceCollection, id, row); err != nil {
+				return err
+			}
+			written = append(written, id)
+		}
+		return nil
+	})
+	return written, err
+}
+
+// PlatformSandboxOffRun is PlatformSandboxOff as the run's hook (platformlife.Runner.SandboxOff).
+func (h *Handler) PlatformSandboxOffRun(ctx context.Context, installationID string, at time.Time) error {
+	_, err := h.PlatformSandboxOff(ctx, installationID, at)
+	return err
+}
+
+// PlatformSandboxOffRepair runs once when the API starts, and makes good what v0.12.0-rc.2 left: its off took the
+// sandbox machines away and kept the sandbox provider's kubeconfig, so every project attached to that provider failed
+// its teardown with 401 from then on and its rows stayed. A DISABLED sandbox provider of an installation that records
+// no built sandboxes (status.sandbox is empty: an off or a Remove ended, or the installation is gone) gets what the
+// off writes now (PlatformSandboxOff), with the time of this start: the time of that off is not recorded anywhere. The
+// next deletion sweep and the next sandbox read then end what was left, with nothing done by hand.
+//
+// A run records status.sandbox before it makes the first sandbox machine and takes it away after the last one is gone,
+// and stores a kubeconfig only in between: a provider with built sandboxes is never touched here, and neither is one
+// that is not DISABLED. It answers the ids of the rows it wrote.
+// ponytail: once at the start; a pass that fails is logged and waits for the next start.
+func (h *Handler) PlatformSandboxOffRepair(ctx context.Context) ([]string, error) {
+	if h.platform == nil {
+		return nil, nil
+	}
+	rows, err := h.repo.ListRaw(ctx, externalServiceCollection)
+	if err != nil {
+		return nil, err
+	}
+	var written []string
+	for _, row := range rows {
+		cfg, _ := row["config"].(map[string]any)
+		installationID, _ := cfg[platformlife.ProviderMarker].(string)
+		if cfg["provider"] != "sandbox" || installationID == "" || row["status"] != externalservice.StatusDisabled {
+			continue
+		}
+		in, err := h.platform.Get(ctx, installationID)
+		if err != nil && !errors.Is(err, platformlife.ErrNotFound) {
+			return written, err
+		}
+		if in != nil && in.Status.Sandbox != nil {
+			continue
+		}
+		ids, err := h.PlatformSandboxOff(ctx, installationID, time.Now().UTC())
+		if err != nil {
+			return written, err
+		}
+		for _, id := range ids {
+			slog.Info("platform: a sandbox provider of sandboxes that are switched off kept its identity; it is taken away and the provider has no placement now", "serviceId", id, "installation", installationID)
+		}
+		written = append(written, ids...)
+	}
+	return written, nil
 }
 
 // applySandboxSite makes the change on the provider document; changed is false when the document already says it.

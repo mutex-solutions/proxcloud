@@ -189,6 +189,19 @@ func (x *acq) sandboxAppsGone(ctx context.Context, seed *kamajik8s.Client, place
 	if placement == SandboxSeparate {
 		name, ns = SandboxClusterName, SandboxClusterName
 	}
+	if placement == SandboxShared {
+		// The projects' namespaces first, while the sandbox chart still runs (sandboxProjectNamespacesGone). A platform
+		// cluster that is not there holds none.
+		wl, err := x.workload(ctx, seed)
+		if err != nil {
+			return err
+		}
+		if wl != nil {
+			if err := x.sandboxProjectNamespacesGone(ctx, wl); err != nil {
+				return err
+			}
+		}
+	}
 	app, err := seed.GetApplication(ctx, argoNamespace, name)
 	if err != nil && !kamajik8s.NotFound(err) {
 		return classify(CodeSeedAPIUnreachable, err)
@@ -266,6 +279,14 @@ func (x *acq) removeSandboxAccess(ctx context.Context) error {
 	}
 	if err := x.check(ctx); err != nil {
 		return err
+	}
+	// No sandbox machine is left, so nothing of a tenant's runs any more: the sandbox provider loses its identity and
+	// is marked as having no placement (SandboxProviderOff). Not earlier: until here its cluster may still run a
+	// sandbox, and a project's teardown must keep failing on a cluster it cannot ask.
+	if x.r.SandboxOff != nil {
+		if err := x.r.SandboxOff(ctx, x.in.ID, time.Now().UTC()); err != nil {
+			return classify(CodeSandboxAccessFailed, err)
+		}
 	}
 	// The provider stops naming the pool and the range first, so no sync fences on while the rest goes; then the
 	// isolation rules follow the provider (the range's DROPs and ACCEPTs go, read back before anything else is

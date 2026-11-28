@@ -88,6 +88,10 @@ type Runner struct {
 	// (SandboxSite), or takes it away (a nil Config). ErrProviderConflict when the provider holds a sandbox pool or a
 	// sandbox network that is not this installation's. The admin handler implements it. Nil in tests: nothing is written.
 	SandboxSite func(ctx context.Context, in *Installation, site *SandboxSite) error
+	// SandboxOff takes the identity of the installation's sandbox provider away and marks the row as having no
+	// placement (SandboxProviderOff), once the last sandbox machine is gone: an off, a Remove, and the off that cleans
+	// a failed build. The admin handler implements it. Nil in tests: no row is written.
+	SandboxOff func(ctx context.Context, installationID string, at time.Time) error
 	// Attach applies an attach choice (AttachAll, AttachNew, AttachNone) to one provider of the installation: the
 	// attach policy, and for AttachAll a bulk attach of every project. done=false with a note when it could not be
 	// applied yet (the provider is disabled); the register stage then tries again at the next apply. Nil: no choice is
