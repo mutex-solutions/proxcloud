@@ -575,6 +575,11 @@ func TestPlatformRunStartCancelAndReplay(t *testing.T) {
 	// Cancel on a run whose job died: the run ends failed/job_dead and the installation failed, as after any other run
 	// that did not succeed, not left removing with no run.
 	second, _ := store.Run(ctx, list[0].(map[string]any)["id"].(string))
+	// The run that follows a dead one found the record at applying with no run behind it: the phase it would put back
+	// is failed, never applying (a refused run would otherwise leave the installation applying with no run).
+	if second.FromPhase != platformlife.PhaseFailed {
+		t.Fatalf("the phase a run after a dead one would put back: %q", second.FromPhase)
+	}
 	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),owner=NULL,lease_until=NULL WHERE id=$1`, second.JobID); err != nil {
 		t.Fatal(err)
 	}
