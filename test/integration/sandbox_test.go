@@ -599,6 +599,16 @@ func TestSandboxReadOnAManagedPlatform(t *testing.T) {
 		if strings.Count(out, "level=") != 1 || !strings.Contains(out, "level="+c.level) || !strings.Contains(out, "projectsFailed=2") || !strings.Contains(out, "the cluster is gone") {
 			t.Fatalf("a %s provider whose cluster is gone, two projects: one %s line, got\n%s", c.status, c.level, out)
 		}
+		// The 15-minute sync and the operator's "sync project" read the same provider. For a DISABLED one they leave
+		// the report to the minutely line above; for a live one the project's failing read is an ERROR.
+		logs.Reset()
+		if err := job.SyncOne(ctx, "pa", "sbx"); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]int{"WARN": 0, "ERROR": 1}[c.level]
+		if out := logs.String(); strings.Count(out, "level=") != want || strings.Count(out, "level=ERROR") != want || (want == 1 && !strings.Contains(out, "project=pa")) {
+			t.Fatalf("a sync of one project on a %s provider whose cluster is gone: %d ERROR line(s), got\n%s", c.status, want, out)
+		}
 	}
 }
 
