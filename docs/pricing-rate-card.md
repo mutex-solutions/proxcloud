@@ -123,8 +123,9 @@ For that shape the rule is 0.2% above Lambda, 1.9% above Cloud Run and 1.1% belo
 **It is the rate that is alike, not the bill of a short run.** The meter bills whole minutes, at least one, from the
 moment a sandbox is Ready to its end (`internal/cloud/billingresource/sandbox.go`); Lambda bills by the millisecond
 and nothing between two calls. A sandbox that lives 20 seconds pays one whole minute, 0.00160 for the smallest shape,
-where a per-second meter at the same rate would charge 0.00053. For use that lasts the figures meet: one hour of one
-vCPU with 1.7275 GiB is 0.1039 here and 0.1037 on Lambda.
+where a per-second meter at the same rate would charge 0.00053. For use that lasts the rates meet: one hour of one
+vCPU with 1.7275 GiB is 0.1039 at this rule's rates and 0.1037 on Lambda. A sandbox cannot have that shape (memory is
+whole GiB); the nearest, 1 vCPU with 2 GiB, is 0.1068 an hour.
 
 What else a reader needs:
 
@@ -144,8 +145,9 @@ What else a reader needs:
   first run, and the Platform setup defaults add no sandbox rule at all. Set the two values under **System**,
   **Price plans** (Edit on the rule), or with `PUT /api/v1/admin/price-plan/rule/{id}`. Where no sandbox rule
   exists, add this one with `POST /api/v1/admin/price-plan/rule`: the console's Add rule dialog takes one priced
-  attribute per rule. A rule added where none was bills the running billing cycle back, from each sandbox's start:
-  add it before sandboxes go live. Change the existing rule and do not add a second one: every matching rule adds up.
+  attribute per rule. A rule added where none was bills the running billing cycle back, from each sandbox's start
+  (from the cycle's start for a sandbox that began before it): add it before sandboxes go live. Change the existing
+  rule and do not add a second one: every matching rule adds up.
 
 `internal/platform/pricing/seed_sandbox_test.go` holds the seed to the two values and to the base minute of 0.00160.
 

@@ -360,8 +360,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     not apply it by running `seed-operator.py` again: it writes the seed's values over every rule that kept its
     seed name, an operator's own prices included.
   - *Set it before go-live:* a rule added where none was, or raised from 0, bills back. The first charge counts the
-    minutes since each sandbox's start, for the running ones and for those that ended in the current billing cycle
-    (read from the charge code, `internal/platform/pricing/bill_build.go`; not run on a lab).
+    minutes since each sandbox's start (since the cycle's start for one that began before it), for the running ones
+    and for those that ended in the current billing cycle (read from the charge code,
+    `internal/platform/pricing/bill_build.go`; not run on a lab).
 
 - **The built-in sandbox template images are those of the Actions build of 2026-11-23** (`deploy/templates/images.yaml`,
   run 45167180286 of `sandbox-templates` on commit `57e85c5`; the commit of #443, carried here so that the checks run
