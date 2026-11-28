@@ -25,15 +25,29 @@ import (
 // ("CaUsedAsEndEntity").
 func rc2Certificate(t *testing.T, domain string, now time.Time) (certPEM, keyPEM string) {
 	t.Helper()
+	return certEnding(t, domain, now, now.AddDate(5, 0, 0), true)
+}
+
+// certEnding is a certificate for domain that is its own issuer and ends at notAfter: the shape the run makes, or
+// with ca the shape of rc.2. It serves the cases that turn on the day a certificate ends. selfSignedWildcard takes
+// a start and adds five years, and a start five years before the wanted end does not lead back to it across a
+// 29 February: on 9 February 2028 a certificate made that way for "20 days left" has 21, and on 30 January 2029
+// one made for 31 has 30.
+func certEnding(t *testing.T, domain string, now, notAfter time.Time, ca bool) (certPEM, keyPEM string) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
+	usage := x509.KeyUsageDigitalSignature
+	if ca {
+		usage |= x509.KeyUsageCertSign
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(7), Subject: pkix.Name{CommonName: "*." + domain}, DNSNames: []string{"*." + domain, domain},
-		NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(5, 0, 0),
-		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true, IsCA: true,
+		NotBefore: now.Add(-time.Hour), NotAfter: notAfter,
+		KeyUsage: usage, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true, IsCA: ca,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
@@ -170,7 +184,7 @@ func TestCertificateProblem(t *testing.T) {
 		t.Fatal(err)
 	}
 	old, _ := rc2Certificate(t, domain, now)
-	ending, _, _ := selfSignedWildcard(domain, now.AddDate(-5, 0, 20)) // ends in 20 days
+	ending, _ := certEnding(t, domain, now, now.AddDate(0, 0, 20), false)
 	for _, c := range []struct{ name, cert, domain, want string }{
 		{"the run's own", leaf, domain, ""},
 		{"the shape of rc.2", old, domain, "marked as a certificate authority"},
@@ -327,11 +341,11 @@ func TestPlanSaysWhenTheSandboxCertificateEnds(t *testing.T) {
 	if got := names(); len(got) != 0 {
 		t.Fatalf("no certificate yet: %v", got)
 	}
-	in.Status.Sandbox.Certificate, _, _ = selfSignedWildcard(domain, now.AddDate(-5, 0, 31))
+	in.Status.Sandbox.Certificate, _ = certEnding(t, domain, now, now.AddDate(0, 0, 31), false)
 	if got := names(); len(got) != 0 {
 		t.Fatalf("31 days left: %v", got)
 	}
-	in.Status.Sandbox.Certificate, _, _ = selfSignedWildcard(domain, now.AddDate(-5, 0, 29))
+	in.Status.Sandbox.Certificate, _ = certEnding(t, domain, now, now.AddDate(0, 0, 29), false)
 	if got := names(); !slices.Equal(got, []string{"sandbox-certificate"}) {
 		t.Fatalf("29 days left: %v", got)
 	}
