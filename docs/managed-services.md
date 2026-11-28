@@ -1302,10 +1302,9 @@ the scheduler.
 sandbox_provider_live`) while the sandbox provider is not disabled, and so is the run: every
 running sandbox would end without notice. Disable the provider, let its sandboxes end, then save
 and apply. A disabled provider is still read every minute for the projects that have a sandbox on
-it, so each one is ended and archived when it ends. A sandbox that still ran when the machines
-went keeps its row: the charge ended at its timeout, the row stays in the tenant's list until
-sandboxes are built again, and the API log has one WARN per minute that names the provider
-(`syncjob: reconcile sandboxes`). Once the machines are gone and the pool is empty, the run takes `config.sandbox`, the
+it, so each one is ended and archived when it ends. Once the machines are gone and the pool is
+empty, the run takes the sandbox provider's placement away (below, "What an off does to the
+projects attached to the sandbox provider"), then takes `config.sandbox`, the
 `sandboxCidrs` entry and `secret.sandboxKubeconfig` off the Proxmox provider, writes the
 provider's isolation rules without the range (its DROPs and ACCEPTs go, the tenant pool's stay;
 read back before anything else is recorded), deletes the pool's firewall groups and IP sets from
@@ -1319,18 +1318,65 @@ the installation's own sandbox range (a run cancelled between its two writes, or
 candidate left to a provider sync): the row is then a warning that names the range, and the run
 writes the rules itself. Every other cause of that row still stops a run, the one that switches
 sandboxes off included: a blocked network the rules do not drop, a disabled rule, the datacenter
-firewall off, a sandbox network that is not the installation's. The sandbox provider row stays, disabled, and is adopted when sandboxes come back; a Remove
-disables it with the two others, and a new install does not give it its status back.
+firewall off, a sandbox network that is not the installation's. The sandbox provider row stays, disabled and
+without its identities, and is adopted when sandboxes come back; a Remove disables it with the two
+others, and a new install does not give it its status back.
+
+**What an off does to the projects attached to the sandbox provider.** Nothing detaches a project:
+it stays attached to the disabled provider row, and is attached to the same row again when
+sandboxes come back. No route detaches a project from a provider in this release.
+
+- *While the off runs* (from the apply until the last sandbox machine is gone) the provider still
+  has a placement. A sandbox that still runs is ended when the read sees it gone. A project
+  delete that comes in this window waits: its teardown asks the cluster, and a cluster that
+  refuses or does not answer keeps the project `DELETE_IN_PROGRESS` with the error in the API log
+  (`teardown: delete sandbox namespace and templates`), until the off is over.
+- *When the pool is empty* the run takes the provider's identities off the row
+  (`secret.kubeconfig`, `secret.rotationKubeconfig`, `secret.proxyWakeToken`) and writes
+  `config.sandbox.offSince` with the time. From then on the provider has **no placement**: it
+  holds nothing on any cluster. A Remove does the same, and so does the off that cleans a build
+  that failed.
+- *A provider with no placement* is never asked. The sandbox read, a suspension and the project
+  teardown end and archive the sandbox rows that are left on it, each at its timeout if that came
+  first, else at `offSince`, and the charge ends there. A project attached to it is deleted like
+  any other, at the next deletion sweep. Setting the provider live is refused: it has no cluster.
+- *What "no placement" is, exactly:* the mark `config.sandbox.offSince` and no
+  `secret.kubeconfig`, both. A provider with a kubeconfig is asked, whatever its cluster answers:
+  401, 403 or no answer fails the read, the suspension and the teardown with that error, because
+  the namespace may still run a tenant's code. Do not clear a kubeconfig by hand to get a project
+  deleted while sandbox machines exist; switch sandboxes off.
+- *When sandboxes are built again* stage `register` adopts the row: the mark goes, a new
+  kubeconfig is stored, the mode and the domain follow the build, and the operator's name,
+  templates, limits and attach policy stay. A project attached before has no namespace on the new
+  placement until its first sandbox create; its read answers "no sandboxes" until then.
+- *A site that ran the off of v0.12.0-rc.2* (a release candidate) has the row with a kubeconfig
+  that answers 401 and no mark. The API repairs it when it starts: a DISABLED sandbox provider of
+  an installation whose `status.sandbox` is empty, or that is gone, gets the write above with the
+  time of that start, and the API log says so once per provider. The next deletion sweep finishes
+  every project that was stuck. A provider whose installation records built sandboxes is never
+  touched by this.
 
 The off of `shared` also deletes what neither ArgoCD nor Cluster API takes away, in this order,
 and waits for each:
 
-1. The sandbox chart's Application, with everything it deployed. While ArgoCD deletes, the run
+1. The namespaces `sb-<project>` of the sandbox provider's projects on the platform cluster, while
+   the sandbox chart still runs (its controller takes its objects away, and the portal's identity
+   goes with the chart). A namespace is deleted only when it carries the product's labels for
+   that provider (`app.kubernetes.io/managed-by: proxcloud`, `proxcloud.io/tenant: "true"`,
+   `proxcloud.io/service: <the provider's id>`) and its name is `sb-` plus the project its
+   `proxcloud.io/project` label names. A functions namespace (`fn-<project>`), a namespace of
+   another provider and any namespace without those labels are never deleted. The stage waits
+   with "deleting the sandbox namespaces of N projects". A namespace that is still being deleted
+   after five minutes is named in the API log (`a project's sandbox namespace is still being
+   deleted`) and the run goes on: a namespace ends when its last pod is confirmed gone, and a pod
+   on a machine that no longer answers is confirmed only when that machine is deleted, which
+   step 4 does.
+2. The sandbox chart's Application, with everything it deployed. While ArgoCD deletes, the run
    asks it to look at the Application again (`argocd.argoproj.io/refresh`), so that the deletion
    can end when the last object is gone and not at ArgoCD's next look by itself (that wait was
    minutes on the lab without the ask; with it, it has not been measured yet). The same holds
    for the Application of `pc-sandbox` with `separate`.
-2. The four definitions of agent-sandbox on the platform cluster (`sandboxes.agents.x-k8s.io`
+3. The four definitions of agent-sandbox on the platform cluster (`sandboxes.agents.x-k8s.io`
    and `sandboxclaims`, `sandboxtemplates`, `sandboxwarmpools` of
    `extensions.agents.x-k8s.io`), which a deleted Application leaves behind. Each one goes only
    when no object of its kind is left in any namespace, because deleting a definition deletes
@@ -1342,18 +1388,19 @@ and waits for each:
    and takes them for the sandbox chart's: nothing on a definition says who installed it. An
    agent-sandbox installed by hand on the platform cluster shares them, and loses each one that
    holds no object.
-3. The group's MachineDeployment; Cluster API deletes the machines.
-4. When no MachineDeployment, MachineSet or Machine of the group is left: the group's machine
+4. The group's MachineDeployment; Cluster API deletes the machines.
+5. When no MachineDeployment, MachineSet or Machine of the group is left: the group's machine
    template and bootstrap template on the seed (`pc-platform-sandbox-<node>-<hash>`; they carry
    Helm's keep policy, as every group's do), then its address pool (InClusterIPPool
    `pc-platform-sandbox`). The address provider refuses the pool's delete while an address of
    it is claimed; the run waits that out.
-5. Then the access on Proxmox, as above.
+6. Then the sandbox provider's placement and the access on Proxmox, as above.
 
 Afterwards the Application `pc-platform` reads Synced and Healthy again: the pool was the one
 object it would have had to prune, and it never prunes. Switching sandboxes on again builds
 all of it new. `separate` leaves none of this: its definitions are inside `pc-sandbox`, and its
-pool and templates are in the namespace `pc-sandbox`, which goes with the cluster.
+pool and templates are in the namespace `pc-sandbox`, which goes with the cluster, and so do the
+projects' namespaces, which are inside `pc-sandbox`.
 
 **The certificate.** With `separate` the run writes `sandbox-system/sandbox-proxy-tls` inside
 `pc-sandbox` as soon as its control plane answers. The certificate is self-signed for

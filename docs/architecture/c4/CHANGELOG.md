@@ -4,6 +4,38 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-28: a sandbox provider with no placement (drill of v0.12.0-rc.2: E5-A, E3-B)
+
+**What changed:** no new component, container or route. One new relation inside the API: the platform run tells the
+admin handler when the sandbox provider's placement ends, and the API makes one pass over the sandbox providers when
+it starts.
+
+- `internal/platform/externalservice/sandbox.go`: `SandboxOffSince` (new) reads a sandbox provider with no placement:
+  `config.sandbox.offSince` and no `secret.kubeconfig`, both.
+- `internal/platformlife`: `SandboxProviderOff` (new, `sandbox_off.go`) takes the identities off a sandbox provider
+  row and writes the mark; `Runner.SandboxOff` (new hook) is called by `removeSandboxAccess` when the sandbox pool is
+  empty (an off, a Remove, the off after a failed build); `AdoptProvider` takes the mark off at the next build.
+  `sandboxProjectNamespacesGone` (new) deletes the provider's `sb-<project>` namespaces on the platform cluster at the
+  start of an off of `shared`, before the sandbox chart's Application.
+- `internal/platform/admin/platform_sandbox.go`: `PlatformSandboxOff` (new) is the hook's write, under the
+  installation's run lock; `PlatformSandboxOffRepair` (new) runs once from `cmd/api` at the start and gives the same
+  write to a DISABLED sandbox provider of an installation that records no built sandboxes.
+- `internal/cloud/sandbox`: `EndRowsOff` (new, `syncprovider.go`) ends and archives SANDBOX rows without a cluster;
+  `Service.live` reads a 403 in a project namespace that a read of the namespace says is absent as no sandboxes.
+- `internal/platform/project/cloud_sandbox.go` (`teardownSandboxes`, `DeleteProjectSandboxes`),
+  `internal/cloud/syncjob/sandboxgate.go` (`syncSandboxService`) and `e2b_registry.go` (the prune) ask no cluster for
+  a provider with no placement. `admin/sandboxprovider.go`: the release check names the reason.
+
+**Why:** the off took the cluster's identity away and left the provider row its kubeconfig, so the teardown of
+every attached project answered 401 for good and no such project could be deleted; with `shared` the projects'
+namespaces stayed on the platform cluster. The state is written by the one actor that knows it (the run, when the
+pool is empty) and read by the three callers that would otherwise ask a cluster that is gone. It is not inferred
+from an error: a provider with a kubeconfig whose cluster refuses or does not answer keeps failing, since its
+namespace may still run a tenant's code. The pass at the start exists because v0.12.0-rc.2 left rows that no run
+will visit again. No route detaches a project from a provider; that stays out of this release.
+
+**Diagrams updated:** none.
+
 ## 2026-11-28: the sandbox read no longer rests on a build namespace (drill of v0.12.0-rc.2: E2-B, E3-e)
 
 **What changed:** no new component, container, route or relation. Two functions of the sandbox service and the
