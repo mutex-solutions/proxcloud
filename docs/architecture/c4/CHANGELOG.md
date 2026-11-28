@@ -18,6 +18,12 @@ and rules: [README.md](README.md#maintenance-rule).
   resource as nothing without a word, and three texts said a placeholder rule existed. Saying the truth and refusing
   "live" is the smallest change that leaves no managed site charging nothing unknowingly: the defaults run once, so a
   rule added there reaches no existing site, and a rule added at an upgrade would charge a rate nobody signed.
+- **E2-d, the sync during a sandbox build.** `internal/cloud/syncjob/sandboxfw.go`, `job.go`, `cmd/api/main.go`:
+  `logSandboxWorkers` logs the sandbox pass's missing kubeconfig (`errSandboxKubeconfigMissing`) as INFO while a run of
+  the owning installation is not finished, and as the ERROR it was otherwise. One new relation inside the API process:
+  the provider sync asks the platform runs (`Job.WithPlatformRunActive`, wired to `platformlife.Store.ActiveRun`).
+  *Why:* a run writes the sandbox pool at stage `cluster` and the kubeconfig at stage `register`, so every build passes
+  through that state, and a timed sync logged an ERROR for it.
 
 **Diagrams updated:** none (no element or relation of the model's diagrams changed; the new call stays inside the API
 container).

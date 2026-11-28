@@ -22,6 +22,25 @@ type SandboxNodes interface {
 	Server() string
 }
 
+// errSandboxKubeconfigMissing: the provider names a sandbox pool and holds no kubeconfig of its sandbox cluster.
+var errSandboxKubeconfigMissing = errors.New("sandbox: secret.sandboxKubeconfig is missing; the workers stay as they are (tainted)")
+
+// logSandboxWorkers logs why the sandbox pass did not finish. One state is expected: a platform run writes
+// config.sandbox at stage cluster and the kubeconfig at stage register, about a quarter of an hour later, and a timed
+// sync falls in between (lab, v0.12.0-rc.2: one ERROR per sync for it). While a run of the installation that owns the
+// block is not finished, the missing kubeconfig is that run's own business: one INFO line. With no run in flight, on an
+// installer's provider (no owner), or when the run could not be read, it is the error it was.
+func (j *Job) logSandboxWorkers(ctx context.Context, es *externalservice.ExternalService, err error) {
+	if cfg, _ := es.PVESandboxConfig(); errors.Is(err, errSandboxKubeconfigMissing) && cfg.Owner != "" && j.runActive != nil {
+		if active, rerr := j.runActive(ctx, cfg.Owner); rerr == nil && active {
+			j.log.Info("syncjob: sandbox workers: a platform run is building this provider's sandboxes and has not registered them yet, skipped until it has",
+				"serviceId", es.ID, "installationId", cfg.Owner)
+			return
+		}
+	}
+	j.log.Error("syncjob: sandbox workers", "serviceId", es.ID, "err", err)
+}
+
 // reconcileSandboxWorkers is layer 1 of the sandbox network (docs/managed-sandbox.md §2): the VM firewall of every
 // worker in the provider's sandbox pool, then the unsecured taint off each worker that is fenced, pinned to its own
 // address and older than the join token on its disk. A worker that fails any step keeps its taint, and one already
@@ -34,7 +53,7 @@ func (j *Job) reconcileSandboxWorkers(ctx context.Context, ps *pve.Service, es *
 		return nil
 	}
 	if cfg.Kubeconfig == "" {
-		return errors.New("sandbox: secret.sandboxKubeconfig is missing; the workers stay as they are (tainted)")
+		return errSandboxKubeconfigMissing
 	}
 	kc, err := kamajik8s.New(cfg.Kubeconfig)
 	if err != nil {

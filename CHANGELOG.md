@@ -489,6 +489,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - *Not covered:* the installer's sandbox providers (`docs/managed-sandbox.md`) are not asked, as with the
       scheduler; their documentation now says to check the plan. A plan scoped to single billing profiles is not
       counted. A rule deleted while the provider is live is noticed at the provider's next save only.
+  - **A provider sync that falls into a sandbox build no longer logs an error (E2-d).** A run writes the sandbox
+    pool on the Proxmox provider at stage `cluster` and the sandbox cluster's kubeconfig at stage `register`,
+    about a quarter of an hour later. A timed sync in between logged one ERROR, "secret.sandboxKubeconfig is
+    missing; the workers stay as they are (tainted)", for a state the run itself creates. While a run of the
+    installation that owns the sandbox settings is not finished, the sync now logs one INFO line and goes on. With
+    no run in flight, on an installer's provider, or when the run cannot be read, it is the ERROR it was. The
+    sync did not write anything in that state before and does not now.
 - **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of
   v0.12.0-rc.1, finding Z2-A).** The provider-wide isolation rules drop the sandbox range towards every blocked
   network, and the platform's API address and node range are blocked networks (the Check's `isolation` row requires
