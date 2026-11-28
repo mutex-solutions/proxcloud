@@ -19,7 +19,7 @@ it starts.
   start of an off of `shared`, before the sandbox chart's Application.
 - `internal/platform/admin/platform_sandbox.go`: `PlatformSandboxOff` (new) is the hook's write, under the
   installation's run lock; `PlatformSandboxOffRepair` (new) runs once from `cmd/api` at the start and gives the same
-  write to a DISABLED sandbox provider of an installation that records no built sandboxes.
+  write to a DISABLED sandbox provider without the mark, of an installation that records no built sandboxes.
 - `internal/cloud/sandbox`: `EndRowsOff` (new, `syncprovider.go`) ends and archives SANDBOX rows without a cluster;
   `Service.live` reads a 403 in a project namespace that a read of the namespace says is absent as no sandboxes.
 - `internal/platform/project/cloud_sandbox.go` (`teardownSandboxes`, `DeleteProjectSandboxes`),

@@ -631,7 +631,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the sandbox provider's identities away (`secret.kubeconfig`, `secret.rotationKubeconfig`,
     `secret.proxyWakeToken`) and writes `config.sandbox.offSince` with the time. Such a provider has **no
     placement**. Not earlier: until the pool is empty its cluster may still run a sandbox. The next build adopts
-    the row as before, takes the mark off and stores a kubeconfig again; the operator's settings on the row
+    the row as before, takes the mark off and stores a kubeconfig again (a rotation kubeconfig or a wake token set
+    by hand is not given back: set it again); the operator's settings on the row
     (name, templates, limits, attach policy) are kept through both.
   - *A provider with no placement holds nothing on a cluster.* The project teardown, the sandbox read (every
     minute, and the 15-minute sync) and a suspension end and archive the project's sandbox rows on it and ask no
@@ -641,7 +642,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - *Where the line is.* Both halves are needed: the mark, and no kubeconfig. Every other sandbox provider is
     asked as before, and one whose cluster answers 401, 403 or not at all keeps failing the teardown, the read and
     the suspension with that error: its namespace may still run a tenant's code, and no project is called deleted
-    over it. A kubeconfig set by hand on a row that carries the mark makes it a provider with a placement again.
+    over it. A kubeconfig set by hand on a row that carries the mark makes it a provider with a placement again,
+    also across a restart of the API; the next off takes it away and writes its own time.
   - *The off of `shared`* now deletes the namespaces `sb-<project>` of that sandbox provider on the platform
     cluster first, while the sandbox chart still runs, and waits for them (stage `cluster`: "deleting the sandbox
     namespaces of N projects"). Only a namespace that carries the product's labels for that provider
@@ -655,12 +657,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     On a shared cluster its read then answered 403; it is now "no sandboxes" when a read of the namespace itself
     says it does not exist, and still an error in a namespace that exists.
   - *What a site that ran the off of v0.12.0-rc.2 gets at the upgrade:* nothing to do by hand. When the API
-    starts it gives every DISABLED sandbox provider of an installation that records no built sandboxes
-    (`status.sandbox` is empty, or the installation is gone) the same write, with the time of that start (the time
-    of the off is recorded nowhere), and logs one INFO line per provider. The first deletion sweep after it
-    finishes a project left in `DELETE_IN_PROGRESS`, and the rows that were left RUNNING are archived at their
-    timeout. A provider whose installation records built sandboxes, and one that is not DISABLED, is not touched.
-    The two namespaces such an off left on a shared platform cluster stay until the next off, or are deleted by
+    starts it gives every DISABLED sandbox provider that carries no mark yet, of an installation that records no
+    built sandboxes (`status.sandbox` is empty, or the installation is gone), the same write, with the time of that
+    start (the time of the off is recorded nowhere), and logs one INFO line per provider. The first deletion sweep
+    after it finishes a project left in `DELETE_IN_PROGRESS`, and the rows that were left RUNNING are archived at
+    their timeout, or at that start for one whose timeout had not come yet. A provider whose installation records
+    built sandboxes, one that is not DISABLED, and one that carries the mark already is not touched. The
+    namespaces such an off left on a shared platform cluster stay until the next off, or are deleted by
     hand (`kubectl delete namespace sb-<project>`); no pod runs in them, the sandbox machines are gone.
   - *Still not in this release:* no route detaches a project from a provider. A project stays attached to the
     disabled sandbox provider after an off, and is attached again to the same row when sandboxes come back.

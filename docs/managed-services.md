@@ -1327,7 +1327,10 @@ it stays attached to the disabled provider row, and is attached to the same row 
 sandboxes come back. No route detaches a project from a provider in this release.
 
 - *While the off runs* (from the apply until the last sandbox machine is gone) the provider still
-  has a placement. A sandbox that still runs is ended when the read sees it gone. A project
+  has a placement. A sandbox that still runs is ended when the read sees it gone; one the read
+  could no longer ask about (the identity goes with the sandbox chart) is ended once the pool is
+  empty, at its timeout or at `offSince`, whichever came first, so its charge can run on for the
+  minutes the off takes. A project
   delete that comes in this window waits: its teardown asks the cluster, and a cluster that
   refuses or does not answer keeps the project `DELETE_IN_PROGRESS` with the error in the API log
   (`teardown: delete sandbox namespace and templates`), until the off is over.
@@ -1335,7 +1338,8 @@ sandboxes come back. No route detaches a project from a provider in this release
   (`secret.kubeconfig`, `secret.rotationKubeconfig`, `secret.proxyWakeToken`) and writes
   `config.sandbox.offSince` with the time. From then on the provider has **no placement**: it
   holds nothing on any cluster. A Remove does the same, and so does the off that cleans a build
-  that failed.
+  that failed. A rotation kubeconfig or a wake token that was set on the row by hand is not given
+  back by the next build: set it again.
 - *A provider with no placement* is never asked. The sandbox read, a suspension and the project
   teardown end and archive the sandbox rows that are left on it, each at its timeout if that came
   first, else at `offSince`, and the charge ends there. A project attached to it is deleted like
@@ -1344,17 +1348,22 @@ sandboxes come back. No route detaches a project from a provider in this release
   `secret.kubeconfig`, both. A provider with a kubeconfig is asked, whatever its cluster answers:
   401, 403 or no answer fails the read, the suspension and the teardown with that error, because
   the namespace may still run a tenant's code. Do not clear a kubeconfig by hand to get a project
-  deleted while sandbox machines exist; switch sandboxes off.
+  deleted while sandbox machines exist; switch sandboxes off. A kubeconfig stored by hand on a
+  row that carries the mark is a placement again, across a restart of the API too, until the next
+  off takes it away. A save of the provider from the admin console writes back the
+  `config.sandbox` block the page loaded, the mark included. A save from a page that was loaded
+  before the off writes the block without the mark: the row then has neither half, its calls
+  fail with `secret.kubeconfig is required`, and the next start of the API writes the mark again.
 - *When sandboxes are built again* stage `register` adopts the row: the mark goes, a new
   kubeconfig is stored, the mode and the domain follow the build, and the operator's name,
   templates, limits and attach policy stay. A project attached before has no namespace on the new
   placement until its first sandbox create; its read answers "no sandboxes" until then.
 - *A site that ran the off of v0.12.0-rc.2* (a release candidate) has the row with a kubeconfig
-  that answers 401 and no mark. The API repairs it when it starts: a DISABLED sandbox provider of
-  an installation whose `status.sandbox` is empty, or that is gone, gets the write above with the
-  time of that start, and the API log says so once per provider. The next deletion sweep finishes
-  every project that was stuck. A provider whose installation records built sandboxes is never
-  touched by this.
+  that answers 401 and no mark. The API repairs it when it starts: a DISABLED sandbox provider
+  without the mark, of an installation whose `status.sandbox` is empty or that is gone, gets the
+  write above with the time of that start, and the API log says so once per provider. The next
+  deletion sweep finishes every project that was stuck. A provider whose installation records
+  built sandboxes is never touched by this, and neither is a row that carries the mark already.
 
 The off of `shared` also deletes what neither ArgoCD nor Cluster API takes away, in this order,
 and waits for each:
