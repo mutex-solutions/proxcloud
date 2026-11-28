@@ -1061,6 +1061,11 @@ func run() error {
 		adminH.SetPlatformSDNLock(sdnLock)
 		// The sync writes a provider's isolation rules without a project only where an installation is saved.
 		syncJob.WithPlatformInstallations(platformStore.HasInstallation)
+		// A sync that meets a provider whose sandboxes a run is still building says so quietly.
+		syncJob.WithPlatformRunActive(func(ctx context.Context, installationID string) (bool, error) {
+			run, err := platformStore.ActiveRun(ctx, installationID)
+			return run != nil, err
+		})
 		if cfg.Jobs.TemplateUpdatesVM {
 			adminH.SetPlatformRuns(jobStore)
 			prRunner := &platformlife.Runner{

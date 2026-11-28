@@ -138,6 +138,10 @@ func (s *Store) StartRun(ctx context.Context, jobs *durablejobs.Store, installat
 				return err
 			}
 		}
+		// The phase a refused run puts back. A dead run's phase (settleDead wrote failed on its own copy) reads failed.
+		if run.FromPhase = in.Status.Phase; run.FromPhase == PhaseApplying || run.FromPhase == PhaseRemoving {
+			run.FromPhase = PhaseFailed
+		}
 		raw, _ := json.Marshal(Payload{Version: 1, RunID: run.ID, InstallationID: installationID})
 		if run.JobID, err = jobs.EnqueueTx(tc, durablejobs.PlatformRun, "platform-run-"+run.ID, raw, JobAttempts); err != nil {
 			return err

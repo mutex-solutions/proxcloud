@@ -575,6 +575,11 @@ func TestPlatformRunStartCancelAndReplay(t *testing.T) {
 	// Cancel on a run whose job died: the run ends failed/job_dead and the installation failed, as after any other run
 	// that did not succeed, not left removing with no run.
 	second, _ := store.Run(ctx, list[0].(map[string]any)["id"].(string))
+	// The run that follows a dead one found the record at applying with no run behind it: the phase it would put back
+	// is failed, never applying (a refused run would otherwise leave the installation applying with no run).
+	if second.FromPhase != platformlife.PhaseFailed {
+		t.Fatalf("the phase a run after a dead one would put back: %q", second.FromPhase)
+	}
 	if _, err := db.Pool.Exec(ctx, `UPDATE durable_job SET state='dead',finished_at=clock_timestamp(),owner=NULL,lease_until=NULL WHERE id=$1`, second.JobID); err != nil {
 		t.Fatal(err)
 	}
@@ -844,6 +849,10 @@ func TestPlatformRunMutate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The run keeps the phase it found: one that is refused before it changed anything puts it back.
+	if started, _ := store.Get(ctx, in.ID); run.FromPhase != platformlife.PhaseDraft || started.Status.Phase != platformlife.PhaseApplying {
+		t.Fatalf("the run's starting phase %q, the installation %+v", run.FromPhase, started)
+	}
 	if err := store.Mutate(ctx, run.ID, func(r *platformlife.Run, in *platformlife.Installation, sec *platformlife.Secrets) error {
 		r.State, sec.BootstrapToken = platformlife.RunRunning, "abcdef.0123456789abcdef"
 		in.Status.Seed = &platformlife.SeedStatus{VMID: 120}
@@ -856,7 +865,7 @@ func TestPlatformRunMutate(t *testing.T) {
 		t.Fatalf("secrets %v %v", raw, err)
 	}
 	r, got, sec, err := store.Load(ctx, run.ID)
-	if err != nil || r.State != platformlife.RunRunning || got.Status.Seed.VMID != 120 || sec.BootstrapToken != "abcdef.0123456789abcdef" {
+	if err != nil || r.State != platformlife.RunRunning || r.FromPhase != platformlife.PhaseDraft || got.Status.Seed.VMID != 120 || sec.BootstrapToken != "abcdef.0123456789abcdef" {
 		t.Fatalf("load %+v %+v %+v %v", r, got, sec, err)
 	}
 	if err := store.Mutate(ctx, run.ID, func(_ *platformlife.Run, _ *platformlife.Installation, sec *platformlife.Secrets) error {

@@ -75,22 +75,33 @@ func (x *acq) platformVnet(ctx context.Context) (zone, vnet string, err error) {
 	return "", "", nil
 }
 
-// sandboxAccess runs at the start of stage 7.
-func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
-	sp, built := x.in.Spec, x.in.Status.Sandbox
-	want := sp.sandboxMode()
+// sandboxRefusal is why a run does not go on with what the settings say of sandboxes (nil: it does). It only reads.
+// Stage validate asks it before anything is written, and stage 7 again (sandboxAccess): a provider set live while the
+// run was on its way is still refused there.
+func (x *acq) sandboxRefusal(ctx context.Context) error {
+	built, want := x.in.Status.Sandbox, x.in.Spec.sandboxMode()
 	switch {
 	case want == "" && built == nil:
 		return nil
 	case want == "":
-		if err := x.sandboxOffAllowed(ctx); err != nil {
-			return err
-		}
-		return x.sandboxAppsGone(ctx, seed, built.Placement)
+		return x.sandboxOffAllowed(ctx)
 	case built != nil && built.Placement != want:
 		return permanent(CodeSandboxRefused, "A run built sandboxes with placement %s and the settings say %s. Nothing was changed. Set spec.sandbox.placement off and apply, then set %s.", built.Placement, want, want)
 	case x.full.Feature(FeatureSandbox) == nil:
 		return permanent(CodeSandboxRefused, "The BOM of release %s has no sandbox chart, so this run builds no sandboxes. Nothing was changed: leave spec.sandbox out or set placement off.", x.full.Release)
+	}
+	return nil
+}
+
+// sandboxAccess runs at the start of stage 7.
+func (x *acq) sandboxAccess(ctx context.Context, seed *kamajik8s.Client) error {
+	sp, built := x.in.Spec, x.in.Status.Sandbox
+	want := sp.sandboxMode()
+	if err := x.sandboxRefusal(ctx); err != nil || want == "" && built == nil {
+		return err
+	}
+	if want == "" {
+		return x.sandboxAppsGone(ctx, seed, built.Placement)
 	}
 	if err := x.check(ctx); err != nil {
 		return err

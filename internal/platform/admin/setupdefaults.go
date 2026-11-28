@@ -156,7 +156,9 @@ var loadSeed = sync.OnceValues(func() (*seedDefaults, error) {
 })
 
 // defaultRuleTypes are the resource types every Proxmox install bills. The file also prices managed Kubernetes,
-// databases and sandboxes; those rules come with the services, not with this apply.
+// databases and sandboxes; this apply adds none of those rules and nothing else does: the operator adds them to the
+// plan when the service is offered. A resource no rule matches is charged nothing, so a platform's sandbox provider
+// is refused live until a sandbox rule exists (sandboxUnpriced).
 var defaultRuleTypes = map[string]bool{
 	"instance": true, "instance_traffic": true, "volume": true, "floating_ip": true, "image": true,
 	"server_snapshot": true, "server_protection": true,

@@ -1199,9 +1199,12 @@ are several, `errors.details.problems`.
   Stage 9 fails with `argocd_address_unavailable` when the spec names an ArgoCD address and MetalLB did not give it
   to the platform cluster's `argocd-server` Service before the wave's deadline; the message names the Service that
   holds it when one does.
-  Stage 7 fails with `sandbox_refused` when the settings ask for another placement than the one a run built or the
-  run's BOM has no sandbox chart, and with `sandbox_access_failed` when Proxmox refuses the pool, the ACL row or the
-  token of the sandbox machines; nothing of the cluster was changed in either case.
+  A run fails with `sandbox_refused` when the settings ask for another placement than the one a run built, the
+  run's BOM has no sandbox chart, or the settings switch sandboxes off while their provider is live. It is refused
+  at stage 1, before anything is written, and the installation keeps the phase it had (`ready` stays `ready`); a
+  provider set live while the run was on its way is refused at stage 7, and the installation reads `failed` like
+  after any other failed run. Stage 7 fails with `sandbox_access_failed` when Proxmox refuses the pool, the ACL row
+  or the token of the sandbox machines; nothing of the cluster was changed in either case.
   An upgrade run has `fromBom`; its codes `unexpected_rollout`, `capacity_short` and `rollout_stalled` (stage 7) and
   `tenants_unhealthy` (stage 9, and stage 7 between two units of a replacement of machines) are in
   [managed-services.md](managed-services.md#upgrade-between-boms).
