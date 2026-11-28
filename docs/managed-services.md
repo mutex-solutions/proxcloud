@@ -1313,8 +1313,9 @@ not asked: check their price plan yourself ([managed-sandbox.md](managed-sandbox
 
 **Switching sandboxes off.** The save of `placement: off` is refused (`409
 sandbox_provider_live`) while the sandbox provider is not disabled, and so is the run: every
-running sandbox would end without notice. Disable the provider, let its sandboxes end, then save
-and apply. Once the machines are gone and the pool is empty, the run takes `config.sandbox`, the
+running sandbox would end without notice. Such a run ends `failed` with `sandbox_refused` at its
+first stage, has changed nothing, and leaves the installation in the phase it had. Disable the
+provider, let its sandboxes end, then save and apply. Once the machines are gone and the pool is empty, the run takes `config.sandbox`, the
 `sandboxCidrs` entry and `secret.sandboxKubeconfig` off the Proxmox provider, writes the
 provider's isolation rules without the range (its DROPs and ACCEPTs go, the tenant pool's stay;
 read back before anything else is recorded), deletes the pool's firewall groups and IP sets from
@@ -1924,7 +1925,7 @@ stage is still trying.
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
 | `stage_unavailable` | any | A run recorded by another release names a stage this one does not have | No action in this release |
 | `tenants_exist` | Remove | Tenant clusters or databases still run on the platform (the message names up to five) | Delete them, **Remove again** |
-| `sandbox_refused` | 7 | The settings ask for another sandbox placement than the one a run built, or the run's BOM has no sandbox chart (a platform an earlier release installed, before its upgrade). Nothing was changed | Set `placement: off`, apply, then the other placement; or leave `spec.sandbox` out |
+| `sandbox_refused` | 1, 7 | The settings ask for another sandbox placement than the one a run built, the run's BOM has no sandbox chart (a platform an earlier release installed, before its upgrade), or they switch sandboxes off while the sandbox provider is live. Refused at stage 1, before anything is written: nothing was changed, and the installation keeps the phase it had. At stage 7 only when the provider was set live while the run was on its way, or its Proxmox provider fences another sandbox pool; the installation then reads `failed` | Set `placement: off`, apply, then the other placement; or leave `spec.sandbox` out; or disable the provider first |
 | `sandbox_access_failed` | 7 | Proxmox refused pool `proxcloud-sbx`, the ACL row of the sandbox group or the token of the sandbox cluster. The portal token writes them with the rights the setup scripts gave it. Nothing of the cluster was changed | The Check's `sandbox` row names what is missing: run the managed-services script again as root on a node, then **Retry** |
 | `machine_delete_stuck` | Remove | Cluster API is still deleting machines after 45 minutes, or (missing seed) a tagged VM could not be stopped or deleted | Delete the VM the message names in Proxmox, **Remove again** |
 | `volume_delete_failed` | Remove | A recorded volume could not be deleted with the CSI token | Check `csi@pve!csi` and the storage the message names, **Remove again** |

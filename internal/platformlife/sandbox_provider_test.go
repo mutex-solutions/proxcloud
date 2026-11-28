@@ -369,6 +369,87 @@ func TestSandboxOffNeedsADisabledProviderAndClearsTheSite(t *testing.T) {
 	}
 }
 
+// A run that the sandbox settings refuse is refused at stage validate, before anything is written, and leaves the
+// installation's phase as it was: its platform is what it was (lab, v0.12.0-rc.2: the record read failed after
+// "Nothing was changed." until the next successful apply). The same refusal at stage 7 (the provider set live while the
+// run was on its way), an upgrade's run and any other failure of validate end failed as before.
+func TestSandboxRefusalAtValidateLeavesThePhase(t *testing.T) {
+	live := func(t *testing.T) *platform {
+		p := sandboxPlatform(t, RunApply, &SandboxSpec{Placement: SandboxOff})
+		p.mutate(func(run *Run, in *Installation, _ *Secrets) {
+			run.FromPhase = PhaseReady // what StartRun records
+			in.Status.Sandbox = &SandboxStatus{Placement: SandboxShared, NodeRange: "10.200.200.64/28", ProxyAddress: "10.200.200.210", Count: 1}
+			in.Status.Providers = &ProviderIDs{Kubernetes: "svc-kamaji", Database: "svc-dbaas", Sandbox: "svc-sandbox"}
+		})
+		pveES := p.r.Provider
+		p.r.Provider = func(ctx context.Context, id string) (*externalservice.ExternalService, error) {
+			if id == "svc-sandbox" {
+				return &externalservice.ExternalService{ID: id, Name: "Lab Sandboxes", Status: "PUBLIC", Config: map[string]any{"provider": "sandbox"}}, nil
+			}
+			return pveES(ctx, id)
+		}
+		return p
+	}
+	phase := func(p *platform) string {
+		run, in, _ := p.state.snapshot()
+		if run.State != RunFailed || run.Code != CodeSandboxRefused && run.Code != CodePreflightFailed {
+			t.Fatalf("the run: %s %s %s", run.State, run.Code, run.Message)
+		}
+		return in.Status.Phase
+	}
+
+	p := live(t)
+	if end := p.until(5); end != "fail:"+CodeSandboxRefused || len(p.pve.writes) != 0 {
+		t.Fatalf("off with a live provider: %s, Proxmox writes %v", end, p.pve.writes)
+	}
+	if s := p.stage(StageValidate); s.State != StageFailed || !strings.Contains(s.Message, "Lab Sandboxes") || !strings.Contains(s.Message, "Nothing was changed.") {
+		t.Fatalf("the refusal is stage validate's: %+v", s)
+	}
+	if s := p.stage(StageImages); s.StartedAt != nil {
+		t.Fatalf("a stage after validate started: %+v", s)
+	}
+	if got := phase(p); got != PhaseReady {
+		t.Fatalf("a refusal that changed nothing left phase %s, the installation was ready", got)
+	}
+
+	// A placement the run would have to turn into the other one: the same.
+	p = sandboxPlatform(t, RunApply, separateSandbox())
+	p.mutate(func(run *Run, in *Installation, _ *Secrets) {
+		run.FromPhase, in.Status.Sandbox = PhaseReady, &SandboxStatus{Placement: SandboxShared}
+	})
+	if end := p.until(5); end != "fail:"+CodeSandboxRefused || phase(p) != PhaseReady || p.stage(StageValidate).State != StageFailed {
+		t.Fatalf("a switch of placement: %s, phase %s", end, phase(p))
+	}
+
+	// Refused at stage 7: the stages before it ran, so the record says failed.
+	p = live(t)
+	p.upTo(stageCluster)
+	if end := p.until(5); end != "fail:"+CodeSandboxRefused || phase(p) != PhaseFailed {
+		t.Fatalf("refused at stage cluster: %s, phase %s", end, phase(p))
+	}
+	// An upgrade's run recorded its target when it started: failed.
+	p = live(t)
+	p.mutate(func(run *Run, _ *Installation, _ *Secrets) { from := run.BOM; run.FromBOM = &from })
+	if end := p.until(5); end != "fail:"+CodeSandboxRefused || phase(p) != PhaseFailed {
+		t.Fatalf("an upgrade's run: %s, phase %s", end, phase(p))
+	}
+	// A run started before this release recorded no phase: failed.
+	p = live(t)
+	p.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.FromPhase = "" })
+	if end := p.until(5); end != "fail:"+CodeSandboxRefused || phase(p) != PhaseFailed {
+		t.Fatalf("a run without its starting phase: %s, phase %s", end, phase(p))
+	}
+	// Any other failure of validate, on a site without sandboxes: failed, as before.
+	q := newPlatform(t, RunApply)
+	q.mutate(func(run *Run, _ *Installation, _ *Secrets) { run.FromPhase = PhaseReady })
+	q.r.Preflight = func(context.Context, *Installation) ([]Check, error) {
+		return []Check{{ID: "capacity", Status: CheckFail, Message: "no room"}}, nil
+	}
+	if end := q.until(5); end != "fail:"+CodePreflightFailed || phase(q) != PhaseFailed {
+		t.Fatalf("a failed check: %s, phase %s", end, phase(q))
+	}
+}
+
 // Once a run wrote the range into the provider's sandboxCidrs, a spec that switches sandboxes off must still save: the
 // range is this installation's until the apply has taken it away.
 func TestSiteProblemsKnowTheBuiltSandboxRange(t *testing.T) {

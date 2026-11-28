@@ -496,6 +496,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     installation that owns the sandbox settings is not finished, the sync now logs one INFO line and goes on. With
     no run in flight, on an installer's provider, or when the run cannot be read, it is the ERROR it was. The
     sync did not write anything in that state before and does not now.
+  - **A run that the sandbox settings refuse leaves the installation's phase as it was (E3-d).** A run refused
+    with `sandbox_refused` ("Nothing was changed.") left the record in phase `failed` until the next successful
+    apply, on a platform that was ready and untouched. The three refusals (sandboxes switched off while their
+    provider is live; another placement than the one a run built; a BOM without the sandbox chart) are now given
+    at stage 1 (`validate`), before the run has written anything, and the installation keeps the phase it had
+    when the run started; the run itself still ends `failed` with the same code and message. Stage 7 asks again,
+    so a provider set live while the run was on its way is still refused there, and that run leaves `failed`
+    like any other failed run, because the stages before it ran. An upgrade's run is left out (its start already
+    recorded the target), and so is every other failure of stage 1: a failed check still ends in `failed`.
+    - *At the upgrade:* a record that reads `failed` from such a refusal stays `failed` until the next successful
+      apply; only runs started by this release keep the phase. A run now carries `fromPhase`.
+    - *Not changed:* an operator's cancel still leaves the record in phase `failed`. A cancelled run may have
+      built machines, and the run does not record whether it changed anything; that needs its own change.
 - **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of
   v0.12.0-rc.1, finding Z2-A).** The provider-wide isolation rules drop the sandbox range towards every blocked
   network, and the platform's API address and node range are blocked networks (the Check's `isolation` row requires

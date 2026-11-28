@@ -24,6 +24,12 @@ and rules: [README.md](README.md#maintenance-rule).
   the provider sync asks the platform runs (`Job.WithPlatformRunActive`, wired to `platformlife.Store.ActiveRun`).
   *Why:* a run writes the sandbox pool at stage `cluster` and the kubeconfig at stage `register`, so every build passes
   through that state, and a timed sync logged an ERROR for it.
+- **E3-d, the phase after a refused run.** `internal/platformlife/sandbox_run.go`, `stages.go`, `runner.go`, `run.go`,
+  `job.go`: `sandboxRefusal` holds the three refusals of the sandbox settings; stage `validate` asks it before the
+  preflight and stage `cluster` asks it again (`sandboxAccess`). `Run.FromPhase` records the installation's phase at
+  `StartRun`; `finish` puts it back for a run that `validate` refused this way and that is not an upgrade's. *Why:* a
+  refused run that changed nothing left a ready platform's record in phase `failed`. Refusing at the first stage,
+  which writes nothing, is what makes "nothing was changed" true for the whole run and not only for stage 7.
 
 **Diagrams updated:** none (no element or relation of the model's diagrams changed; the new call stays inside the API
 container).
