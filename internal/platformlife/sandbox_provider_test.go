@@ -455,7 +455,7 @@ func TestSandboxCheckReadsTheSite(t *testing.T) {
 		}
 		return ""
 	}
-	if m := row(); !strings.Contains(m, "the sandbox provider cannot be set live") || !strings.Contains(m, "placeholder rate") {
+	if m := row(); !strings.Contains(m, "the sandbox provider cannot be set live") || !strings.Contains(m, "add no price rule") || strings.Contains(m, "placeholder") {
 		t.Errorf("scheduler row with sandboxes: %q", m)
 	}
 	in.Spec.Sandbox = nil

@@ -718,6 +718,14 @@ read that saw it pending (`seenPendingAt`, else its create, marked `runningSince
 never free and one that never started pays at most about a minute. `sandbox_snapshot` is per stored GB-hour (`size_gb`), written by pause and snapshot (section 8.4). The seed's rules for both
 are named `PLACEHOLDER ...` until a rate is signed. The worker VMs sit in the platform's pool and bill nobody.
 
+**The rules must be in the price plan, and not every setup puts them there.** `deploy/seed/seed-operator.py` adds the
+two placeholder rules. The Platform setup defaults of the operator console (the path of a Compose install) do not:
+their plan has no rule of resource type `sandbox` or `sandbox_snapshot`. A sandbox that no rule matches is charged
+nothing, with no error and no log line. Before a sandbox provider goes live, open **System**, **Price plans** and
+check that the plan has a `sandbox` rule at the rate you mean (or at 0). A managed platform's sandbox provider is
+refused "live" without one ([managed-services.md](managed-services.md#the-sandbox-provider)); a provider of this
+installer path is not checked.
+
 ### 3.3 Quota (D10)
 
 Project quota keys `sandboxes`, `sandboxVcpus`, `sandboxRamMb`, `sandboxGpus`, on the project's quota document (admin

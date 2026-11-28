@@ -468,6 +468,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Small findings of the drill of v0.12.0-rc.2.** None changes what a site without sandboxes of a managed platform
+  does.
+  - **A platform's sandbox provider is refused "live" while no price rule prices sandbox minutes (E2-c).** The
+    Check's `scheduler` row, the `409` of "live", the install form and the notes said that "the price rule for
+    sandbox minutes holds a placeholder rate until you set one". No such rule exists on a site set up with the
+    Platform setup defaults: their price plan has rules for servers and their traffic, volumes, addresses, images,
+    snapshots and protection, and nothing adds a sandbox rule afterwards (only `deploy/seed/seed-operator.py`, the
+    script of a development checkout, writes the two placeholder rules). The charge rates a resource that no rule
+    matches as nothing, without an error or a log line, so such a site would have given every sandbox minute away
+    without knowing. Now the texts say what is true, and the save that sets the provider live answers `409` until
+    an enabled public price plan that bills the provider has a rule of resource type `sandbox` (any time unit; a
+    rule at 0 counts: that is giving them away knowingly). The answer names the missing rule together with the
+    scheduler and the release gates. We chose the refusal over adding the placeholder rule in the setup defaults:
+    the defaults run once, so no existing site would have got the rule, and a rule added by an upgrade would
+    start charging tenants a rate nobody signed.
+    - *At the upgrade from 0.12.0-rc.2:* a sandbox provider that is DISABLED is refused "live" until the rule
+      exists. A provider that is already live stays live, and its next save (any field) is refused until the rule
+      exists; add the rule under System, Price plans first. Nothing is written by the upgrade itself.
+    - *Not covered:* the installer's sandbox providers (`docs/managed-sandbox.md`) are not asked, as with the
+      scheduler; their documentation now says to check the plan. A plan scoped to single billing profiles is not
+      counted. A rule deleted while the provider is live is noticed at the provider's next save only.
 - **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of
   v0.12.0-rc.1, finding Z2-A).** The provider-wide isolation rules drop the sandbox range towards every blocked
   network, and the platform's API address and node range are blocked networks (the Check's `isolation` row requires

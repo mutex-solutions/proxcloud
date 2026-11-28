@@ -180,7 +180,7 @@ function SandboxSettings({ value, onChange, nodes, problems, canManage, built, s
           </p>
           <p className="text-sm text-muted-foreground" aria-label="Sandboxes and the job scheduler">
             Sandboxes need the job scheduler: it fences each sandbox machine, keeps watching its firewall and ends sandboxes that are gone, and the provider cannot be set live without it.
-            Switching the scheduler on also starts charging usage, and the price rule for sandbox minutes holds a placeholder rate until you set one (or 0).
+            Switching the scheduler on also starts charging usage. The Platform setup defaults add no price rule for sandbox minutes: add one to the price plan (or one at 0), the provider is refused live without it.
             {schedulerOff ? " The scheduler is off on this ProxCloud now." : ""}
           </p>
         </>

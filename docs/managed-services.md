@@ -966,9 +966,11 @@ first run.
    written its VM firewall and taken its `unsecured` taint off. **Check the release gates** on
    the Ready card reads the four gates without changing anything
    ([The sandbox provider](#the-sandbox-provider)).
-7. **Go live.** On the provider's page under **Cloud providers**, set a price for sandbox
-   minutes, choose a status other than Disabled and save: the save is refused while a gate does
-   not hold, or while the scheduler is off. Attach the provider to projects as the two others.
+7. **Go live.** Add a price rule for sandbox minutes to the price plan (**System**, **Price
+   plans**, resource type `sandbox`; the Platform setup defaults add none, see below). Then, on
+   the provider's page under **Cloud providers**, choose a status other than Disabled and save:
+   the save is refused while a gate does not hold, while the scheduler is off, or while no rule
+   prices sandbox minutes. Attach the provider to projects as the two others.
    The self-signed certificate of `*.<domain>` is on the Ready card for clients to trust.
 
 **What a tenant sees.** Nothing until the provider is live and attached to the tenant's project.
@@ -1294,9 +1296,20 @@ afterwards. So a platform's sandbox provider is refused "live" while the schedul
 (`409`), the Check's `scheduler` row says so while the settings ask for sandboxes, and the Ready
 card repeats it. That `409` names the scheduler and, in the same answer, every release gate that
 does not hold with its reason (or says that none fails), so turning the scheduler on is not
-followed by a second refusal you could not see coming. The same switch starts charging usage: the price rule for sandbox minutes holds a
-placeholder rate until you set one (or 0). The installer's sandbox providers are not asked for
-the scheduler.
+followed by a second refusal you could not see coming. The same switch starts charging usage. The
+installer's sandbox providers are not asked for the scheduler.
+
+**The price of a sandbox minute.** The price plan that the Platform setup defaults create has no
+rule for sandboxes: it prices servers and their traffic, volumes, addresses, images, snapshots
+and protection, and nothing adds a sandbox rule later. A resource that no rule matches is charged nothing, and no log
+line or bill says so. So a platform's sandbox provider is refused "live" (`409`, in the same
+answer as the scheduler and the gates) until an enabled public price plan that bills the provider
+has a rule of resource type `sandbox`. Add it under **System**, **Price plans**:
+[pricing-rate-card.md](pricing-rate-card.md) lists the default plan's rates per vCPU and per GB
+per minute, which are placeholders and not signed prices; a rule at 0 gives sandbox minutes away
+knowingly. A plan that is scoped to single billing profiles is not counted, and a rule deleted
+later is noticed at the provider's next save, not before. The installer's sandbox providers are
+not asked: check their price plan yourself ([managed-sandbox.md](managed-sandbox.md), Billing).
 
 **Switching sandboxes off.** The save of `placement: off` is refused (`409
 sandbox_provider_live`) while the sandbox provider is not disabled, and so is the run: every

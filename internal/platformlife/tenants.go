@@ -134,4 +134,5 @@ const SchedulerOnNote = "The job scheduler runs: providers are synced, tenants' 
 // nothing watches afterwards, so a sandbox provider of a managed platform is refused "live" while the scheduler is off.
 const SchedulerOffSandboxNote = " Sandboxes need it: the provider sync fences each sandbox machine and keeps watching its firewall, and the minutely " +
 	"read ends sandboxes that are gone. While the scheduler is off the sandbox provider cannot be set live. The same switch starts charging " +
-	"sandbox minutes, and the price rule for sandboxes holds a placeholder rate until you set one (or 0)."
+	"sandbox minutes, and the Platform setup defaults add no price rule for them: add one to the price plan first (or one at 0). " +
+	"The sandbox provider is refused live without one."

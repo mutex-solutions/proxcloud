@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -118,7 +119,39 @@ func (h *Handler) sandboxNeedsScheduler(doc pgdoc.M) *httpx.HTTPError {
 	return httpx.NewError(http.StatusConflict, http.StatusConflict,
 		"This sandbox provider cannot go live while the job scheduler is off: the provider sync that fences each sandbox machine and keeps watching its firewall, the minutely sandbox read "+
 			"and the abuse check all run on it. Turn the scheduler on (./proxcloud-up.sh install --scheduler, or PROXCLOUD_JOBS_SCHEDULER_ENABLED=true), then set the provider live. "+
-			"The same switch starts charging usage, and the sandbox price rule holds a placeholder rate until you set one (or 0).")
+			"The same switch starts charging usage.")
+}
+
+// sandboxUnpricedNote is what the refusal says while no price rule prices sandbox minutes.
+const sandboxUnpricedNote = "No enabled public price plan that bills this provider has a rule for sandbox minutes (resource type sandbox), so every sandbox minute would be charged nothing. " +
+	"The Platform setup defaults add no sandbox rule. Add one under System, Price plans (docs/pricing-rate-card.md lists the default plan's rates per vCPU and per GB per minute), " +
+	"or a rule at 0 to give sandbox minutes away knowingly, then set the provider live."
+
+// sandboxUnpriced is why a platform's sandbox provider may not be live for its prices: "" while a rule prices sandbox
+// minutes, sandboxUnpricedNote otherwise. The charge rates a resource that matches no rule as nothing and says
+// nothing (unpricedflavors.go), and the default price plan of the Platform setup defaults has no sandbox rule
+// (defaultRuleTypes), so without this a site would give sandbox minutes away without knowing. Like the unpriced
+// flavors guard it reads the enabled public plans that cover the provider, on any time unit; a plan scoped to single
+// billing profiles is not counted. A plan store that cannot be read counts as no rule. The installer's sandbox
+// providers are not asked: their sites went live before this check and are left as they are.
+func (h *Handler) sandboxUnpriced(ctx context.Context, doc pgdoc.M) string {
+	cfg, _ := doc["config"].(map[string]any)
+	if marker, _ := cfg[platformlife.ProviderMarker].(string); marker == "" {
+		return ""
+	}
+	if h.pricing == nil {
+		return sandboxUnpricedNote
+	}
+	id, _ := doc["_id"].(string)
+	plans := pricing.SelectPricePlansForService(h.pricing.PlanSource(ctx), nil, true, id)
+	for _, tu := range pricePlanTimeUnits {
+		if slices.ContainsFunc(pricing.ApplicableRules(plans, h.pricing.RuleSource(ctx), tu), func(r pricing.PricePlanRule) bool {
+			return strings.EqualFold(r.ResourceType, "sandbox")
+		}) {
+			return ""
+		}
+	}
+	return sandboxUnpricedNote
 }
 
 // sandboxOffRefused is why an update may not switch off the sandboxes a run built: their provider is live.
