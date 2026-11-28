@@ -12,7 +12,8 @@ import (
 
 // The sandbox cluster's system node group (installer stage 55): its trusted label goes on the Machines, where CAPI
 // copies it to the Node, never into the kubelet's own --node-labels; and MetalLB's speaker tolerates its taint, so
-// sandbox-proxy's address is announced from there. A tenant cluster (no speakerTolerations) renders as before.
+// sandbox-proxy's address is announced from there. MetalLB's controller gets the selector and the tolerations named
+// for it (chart 0.1.20), under the keys MetalLB's chart reads. A tenant cluster (none of the three) renders as before.
 func TestChartRendersMachineLabelsAndSpeakerTolerations(t *testing.T) {
 	helm, err := exec.LookPath("helm")
 	if err != nil {
@@ -37,6 +38,8 @@ sandboxBandwidth: true
 proxmox:
   metallb:
     speakerTolerations: [{key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}]
+    controllerNodeSelector: {node-restriction.kubernetes.io/proxcloud-system: "true"}
+    controllerTolerations: [{key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}]
 nodeGroups:
   - name: sandbox-system
     machineFlavor: s
@@ -68,12 +71,16 @@ nodeGroups:
 	if !strings.Contains(kt, "proxcloud.io/sandbox-system") {
 		t.Errorf("the system group's taint is missing\n%s", kt)
 	}
-	if !strings.Contains(out, `\"tolerations\":[{\"effect\":\"NoSchedule\",\"key\":\"proxcloud.io/sandbox-system\",\"operator\":\"Exists\"}]`) {
+	const tolerations = `\"tolerations\":[{\"effect\":\"NoSchedule\",\"key\":\"proxcloud.io/sandbox-system\",\"operator\":\"Exists\"}]`
+	if !strings.Contains(out, `\"speaker\":{\"frr\":{\"enabled\":false},`+tolerations+`}`) {
 		t.Errorf("MetalLB's speaker does not tolerate the system taint\n%s", out)
 	}
+	if !strings.Contains(out, `valuesTemplate: "{\"controller\":{\"nodeSelector\":{\"node-restriction.kubernetes.io/proxcloud-system\":\"true\"},`+tolerations+`},\"frrk8s\"`) {
+		t.Errorf("MetalLB's controller is not held to the labels named, with the tolerations named\n%s", out)
+	}
 
-	if tenant := render("{}\n"); !strings.Contains(tenant, `\"speaker\":{\"frr\":{\"enabled\":false}}`) {
-		t.Errorf("a tenant cluster's speaker values must stay as they were (no roll of every tenant's MetalLB)\n%s", tenant)
+	if tenant := render("{}\n"); !strings.Contains(tenant, `valuesTemplate: "{\"frrk8s\":{\"enabled\":false},\"speaker\":{\"frr\":{\"enabled\":false}}}"`) {
+		t.Errorf("a tenant cluster's MetalLB values must stay as they were (no roll of every tenant's MetalLB)\n%s", tenant)
 	}
 }
 
@@ -135,7 +142,8 @@ ciliumOperatorTolerations:
 // 0.12.0-rc.2 pins by digest and from the tree at tag proxmox-kamaji-cluster-v0.1.19, which agree).
 const chart0119TenantRender = "1e999008762bb6fbff4c511ff70b9633e981a7f02509f261d660c2f72e565cfa"
 
-// A tenant cluster, which sets neither ciliumOperatorTolerations nor ciliumOperatorNodeSelector, is rendered by this
+// A tenant cluster, which sets none of the values chart 0.1.20 adds (ciliumOperatorTolerations,
+// ciliumOperatorNodeSelector, proxmox.metallb.controllerNodeSelector and controllerTolerations), is rendered by this
 // chart byte for byte as chart 0.1.19 rendered it: a cluster that moves to the new chart has no add-on value changed,
 // so the add-on controller upgrades no release and no pod of Cilium or MetalLB is replaced. A chart change that is
 // meant to move a tenant cluster's render moves this constant with it, and its notes then say what rolls.

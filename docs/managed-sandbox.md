@@ -515,7 +515,8 @@ operator tolerates only a short list of its own, and without the value it is nev
 sandbox cluster, v0.12.0-rc.2; this path was read, not run again). With a system group the template also holds the
 operator to it (`ciliumOperatorNodeSelector`, §4.5), so it starts on a system worker that is still tainted and never
 on a sandbox worker. CoreDNS, the agent-sandbox controller, konnectivity's agent and MetalLB's speaker schedule
-after, which is why stage 55 no longer waits for the controller.
+after, which is why stage 55 no longer waits for the controller. MetalLB's controller schedules after too, and with a
+system group on that group alone (`proxmox.metallb.controllerNodeSelector`, §4.5).
 
 ### 2.3 Its own egress address (D14)
 
@@ -958,24 +959,37 @@ that reach it, and ask the portal to wake sandboxes. So the proxy never shares a
   key, the wake token and both of the portal's identities with the operator's token. It has to tolerate
   `proxcloud.io/unsecured` to start at all (§2.2), which is the only taint a sandbox worker carries, so the
   toleration alone would let it land there; the selector is what keeps it off, before the fence and after it.
+- MetalLB's controller runs on the system group too, and nowhere else (cluster chart 0.1.20,
+  `proxmox.metallb.controllerNodeSelector`: that label, which MetalLB's chart adds to its own
+  `kubernetes.io/os: linux`, and `controllerTolerations`: the system group's taint alone). It reads no Secret of a
+  tenant or of the portal, but its ClusterRole may patch the ValidatingWebhookConfiguration
+  `metallb-webhook-configuration`, the Service of that webhook points at the controller's own pod, and the controller
+  reads the webhook's serving key. With the controller on a sandbox worker, code that escapes gVisor there could
+  add a rule for `secrets` in every namespace to that configuration: the API server would then send it every Secret
+  that is written (the wildcard key at each apply, each project's pull Secret, a tenant's registry credentials at a
+  build), and it could refuse every write. Kubernetes sets no limit on the rules a holder of that right may write.
+  The controller does not tolerate `proxcloud.io/unsecured`: it starts on a system worker once the sync has fenced
+  it, as the proxy does, and the proxy's address is assigned after that. This path was read from MetalLB 0.16.2's
+  rendered roles and Kubernetes' rules for webhook configurations, not run on a cluster.
 
-What else runs on a sandbox worker, and what it can reach there (Cilium 1.18.16 and MetalLB 0.16.2 as the cluster
+What runs on which worker, and what it can reach there (Cilium 1.18.16 and MetalLB 0.16.2 as the cluster
 chart installs them, rendered and read; Kamaji's add-ons by their kubeadm defaults):
 
 | Workload | Tolerates | Runs on | Secrets and rights within reach of that node |
 |---|---|---|---|
 | Cilium agent, `cilium-envoy`, kube-proxy (DaemonSets) | every taint | every node, from the join | No Secret outside `cilium-secrets`, which this product leaves empty (no TLS interception, no Gateway). Reads pods, services, nodes and Cilium's policies; writes its own `CiliumNode`, endpoints and identities. A CNI agent has to run where the pods are. |
-| `node-setup`, `sandbox-telemetry`, `template-prepull` (DaemonSets of the sandbox chart) | every taint | every node, from the join | `sandbox-netguard`: `get` on pods, nodes and `nodes/stats`, Cilium's config, and the ConfigMaps of `sandbox-telemetry`, which it writes. No Secret. The prepull pods mount no token. |
-| MetalLB's speaker (DaemonSet) | `sandbox-system` | every node once it is fenced | Mounts the memberlist key. Any worker may answer for the MetalLB range (§2.1), so the key adds nothing a worker does not have. |
+| `node-setup`, `sandbox-telemetry`, `template-prepull` (DaemonSets of the sandbox chart) | every taint | every node, from the join | `sandbox-netguard`: `get` on pods, nodes and `nodes/stats`; in `kube-system`, `get` on the ConfigMap `cilium-config` and read of Cilium's node configs; the ConfigMaps of `sandbox-telemetry`, which it writes. No Secret. The prepull pods mount no token. |
+| MetalLB's speaker (DaemonSet) | `sandbox-system` | every node once it is fenced | Mounts the memberlist key, and its token reads the Secrets of `metallb-system`: that key and the certificate of the controller's webhook. Any worker may answer for the MetalLB range (§2.1), so the key adds nothing a worker does not have. The certificate without the right to change the webhook's configuration brings no Secret: that configuration names MetalLB's own definitions alone, and the speaker cannot write it. |
 | CoreDNS, konnectivity's agent (Kamaji's add-ons) | neither taint | sandbox workers once fenced | No Secret. CoreDNS lists services, endpoints, pods and namespaces; the agent's token only opens its tunnel to the control plane (§2.1 has why exec may leave through another worker's agent). Kamaji's control plane provider v0.22.0 offers no toleration for CoreDNS, so it cannot be moved to the system group. |
-| MetalLB's controller (Deployment) | neither taint | a sandbox worker once fenced | Secrets of `metallb-system` only (the memberlist key the speaker already mounts there, and its own webhook certificate), status of Services, MetalLB's own definitions. With its token an escaped worker can take the proxy's address away, which it can also do by answering for it; it reads nothing of a tenant or of the portal. |
 | sandbox-proxy, agent-sandbox controller | `sandbox-system` | system group only | The wildcard key and the wake token; create and patch on pods everywhere. Never on a sandbox worker (above). |
 | Cilium's operator | its own list, `unsecured`, `sandbox-system` | system group only, from the join | Reads every namespace's Secrets. Never on a sandbox worker (above). |
+| MetalLB's controller (Deployment) | `sandbox-system` | system group only, once it is fenced | Secrets of `metallb-system` (create, change and delete), status of Services, MetalLB's own definitions, and `patch` on its own ValidatingWebhookConfiguration: through that, every Secret that is written. Never on a sandbox worker (above). |
 
-Without a sandbox domain the installer builds no system group and no proxy. Cilium's operator then runs on a sandbox
-worker, the only kind of node that cluster has, with the same ClusterRole: the Secrets of that cluster (each project's
-pull Secret, the build namespace's) are then within reach of code that escapes gVisor. Set a sandbox domain, which
-brings the system group, before tenants of more than one project share such a cluster.
+Without a sandbox domain the installer builds no system group and no proxy. Cilium's operator and MetalLB's
+controller then run on a sandbox worker, the only kind of node that cluster has, with the same roles: the Secrets of
+that cluster (each project's pull Secret, the build namespace's) are then within reach of code that escapes gVisor,
+at will with the operator's token and as they are written with the controller's. Set a sandbox domain, which brings
+the system group, before tenants of more than one project share such a cluster.
 
 Rotating means a new certificate (`kubectl -n pc-sandbox delete secret sandbox-wildcard-tls` on the services cluster)
 and a new wake token in both places.

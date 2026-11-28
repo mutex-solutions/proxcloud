@@ -947,6 +947,16 @@ func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
 	if raw, _ := json.Marshal(dig(values, "proxmox", "metallb")); strings.Contains(string(raw), UnsecuredTaintKey) {
 		t.Errorf("MetalLB tolerates %s: %s", UnsecuredTaintKey, raw)
 	}
+	// MetalLB's controller is held to the system group as the operator is, and tolerates that group's taint alone: it
+	// may rewrite its own ValidatingWebhookConfiguration, whose Service points at its pod, so from its node the API
+	// server can be made to send every Secret that is written (docs/managed-sandbox.md §4.5).
+	systemToleration := []any{map[string]any{"key": sandboxSystemTaint, "operator": "Exists", "effect": "NoSchedule"}}
+	if got := dig(values, "proxmox", "metallb", "controllerNodeSelector"); !reflect.DeepEqual(got, map[string]any{sandboxSystemLabel: "true"}) {
+		t.Errorf("MetalLB's controller is selected onto %v, want the system group's label %s alone", got, sandboxSystemLabel)
+	}
+	if got := dig(values, "proxmox", "metallb", "controllerTolerations"); !reflect.DeepEqual(got, systemToleration) {
+		t.Errorf("MetalLB's controller tolerates %v, want %s alone", got, sandboxSystemTaint)
+	}
 
 	// The installer writes the same cluster: every taint its template names is tolerated there too.
 	raw, err := os.ReadFile("../../installer/playbooks/templates/sandbox-cluster.yml.j2")
@@ -970,6 +980,11 @@ func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
 	}
 	if !regexp.MustCompile(`(?s)\{% if pc_sandbox_edge_on \| bool %\}[^%]*- name: sandbox-system\n[^%]*machineLabels: \{` + regexp.QuoteMeta(sandboxSystemLabel) + `: "true"\}`).MatchString(string(raw)) {
 		t.Errorf("the installer's system group does not carry %s under the same condition", sandboxSystemLabel)
+	}
+	// MetalLB's controller the same, under the same condition, with the system group's taint alone to tolerate.
+	if !regexp.MustCompile(`(?m)^ *speakerTolerations: [^\n]*\n\{% if pc_sandbox_edge_on \| bool %\}\n( *#[^\n]*\n)* *controllerNodeSelector: \{` + regexp.QuoteMeta(sandboxSystemLabel) +
+		`: "true"\}\n *controllerTolerations: \[\{key: ` + regexp.QuoteMeta(sandboxSystemTaint) + `, operator: Exists, effect: NoSchedule\}\]\n\{% endif %\}`).MatchString(string(raw)) {
+		t.Errorf("the installer's sandbox cluster does not hold MetalLB's controller to the system group when it has one")
 	}
 	if n := strings.Count(string(raw), "taints:"); n != 2 {
 		t.Errorf("the installer's template names %d taint lists, this test knows two (sandbox, sandbox-system)", n)
@@ -996,6 +1011,7 @@ func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
 		t.Fatalf("helm template: %v\n%s", err, out)
 	}
 	registered, operator := map[string]bool{}, map[string]bool{}
+	var metallb map[string]any // the values of MetalLB's release, as the chart renders them
 	type group struct {
 		labels map[string]any // on the Node: the Machine's, which Cluster API copies, and the kubelet's own
 		taints []string       // as the kubelet registers
@@ -1042,12 +1058,15 @@ func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
 				}
 			}
 		case "HelmChartProxy":
-			if str(o, "spec", "chartName") != "cilium" {
-				continue
-			}
 			var v map[string]any
 			if err := json.Unmarshal([]byte(str(o, "spec", "valuesTemplate")), &v); err != nil {
 				t.Fatal(err)
+			}
+			if str(o, "spec", "chartName") == "metallb" {
+				metallb = v
+			}
+			if str(o, "spec", "chartName") != "cilium" {
+				continue
 			}
 			ts, _ := dig(v, "operator", "tolerations").([]any)
 			for _, tol := range ts {
@@ -1060,19 +1079,20 @@ func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
 	// tolerates. Before the fence a machine carries the taints it joined with; the fence takes unsecured off and
 	// nothing else, so after it the sandbox group has no taint at all. The operator fits the system group at the join,
 	// or the cluster does not come up; and it fits no other group at any time, tainted or not.
-	fits := func(g *group, taints []string) bool {
-		for k, v := range operatorSelector {
+	fitsPod := func(selector map[string]any, tolerated map[string]bool, g *group, taints []string) bool {
+		for k, v := range selector {
 			if g.labels[k] != v {
 				return false
 			}
 		}
 		for _, key := range taints {
-			if !operator[key] {
+			if !tolerated[key] {
 				return false
 			}
 		}
 		return true
 	}
+	fits := func(g *group, taints []string) bool { return fitsPod(operatorSelector, operator, g, taints) }
 	if len(rendered) != 2 || rendered[SandboxSystemGroup] == nil || rendered[SandboxGroup] == nil {
 		t.Fatalf("the rendered cluster's node groups: %v", rendered)
 	}
@@ -1090,6 +1110,74 @@ func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
 	if operatorSelector["kubernetes.io/os"] != "linux" {
 		t.Errorf("the operator's selector %v lost Cilium's own kubernetes.io/os: linux", operatorSelector)
 	}
+	// MetalLB's controller, placed the same way: on no group while a machine is unfenced (it does not tolerate
+	// unsecured; nothing of the cluster's start waits for it), and once fenced on the system group alone. First by the
+	// values the cluster chart hands MetalLB's chart, then by the Deployment MetalLB's own chart renders from them.
+	placeController := func(what string, selector map[string]any, tolerations []any) {
+		t.Helper()
+		tolerated := map[string]bool{}
+		for _, tol := range tolerations {
+			tolerated[str(tol.(map[string]any), "key")] = true
+		}
+		if len(selector) == 0 {
+			t.Errorf("%s has no node selector: it may run on a sandbox machine, whose kubelet can ask for its token", what)
+		}
+		for name, g := range rendered {
+			atJoin, fenced := fitsPod(selector, tolerated, g, g.taints), fitsPod(selector, tolerated, g, slices.DeleteFunc(slices.Clone(g.taints), func(k string) bool { return k == UnsecuredTaintKey }))
+			if want := name == SandboxSystemGroup; atJoin || fenced != want {
+				t.Errorf("%s (selector %v, tolerations %v) on group %s (labels %v, taints %v): fits at the join %v, want false; once fenced %v, want %v. "+
+					"It may rewrite its webhook's configuration and so be sent every Secret that is written; group %s runs code of tenants",
+					what, selector, tolerated, name, g.labels, g.taints, atJoin, fenced, want, SandboxGroup)
+			}
+		}
+	}
+	controllerSelector, _ := dig(metallb, "controller", "nodeSelector").(map[string]any)
+	controllerTolerations, _ := dig(metallb, "controller", "tolerations").([]any)
+	placeController("MetalLB's controller, by the cluster chart's values", controllerSelector, controllerTolerations)
+	t.Run("MetalLB's own chart", func(t *testing.T) {
+		// The chart the sandbox cluster installs is the cluster chart's addonCharts.metallb; the archive rendered here
+		// is the BOM's copy of that version from the chart mirror, pinned by digest (pinnedChart).
+		chartValues, err := os.ReadFile("../../deploy/charts/proxmox-kamaji-cluster/values.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		installed := str(yamlObjects(t, chartValues)[0], "addonCharts", "metallb", "version")
+		var pin Chart
+		for _, c := range b.Components {
+			if c.Name == "metallb" {
+				pin = c.Chart
+			}
+		}
+		if installed == "" || pin.Version != installed {
+			t.Fatalf("the cluster chart installs MetalLB %q and the BOM pins %q: this test has no archive of the version a sandbox cluster gets. "+
+				"Move the two together, or give this test that version's archive: the controller's placement rests on that chart reading controller.nodeSelector and controller.tolerations",
+				installed, pin.Version)
+		}
+		f := filepath.Join(t.TempDir(), "metallb.yaml")
+		if err := os.WriteFile(f, yamlDoc(t, metallb), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(helm, "template", "metallb", pinnedChart(t, pin), "-n", "metallb-system", "-f", f).Output()
+		if err != nil {
+			t.Fatalf("helm template of MetalLB %s: %v", pin.Version, err)
+		}
+		found := false
+		for _, o := range yamlObjects(t, out) {
+			if o["kind"] != "Deployment" || str(o, "metadata", "labels", "app.kubernetes.io/component") != "controller" {
+				continue
+			}
+			found = true
+			selector, _ := dig(o, "spec", "template", "spec", "nodeSelector").(map[string]any)
+			tolerations, _ := dig(o, "spec", "template", "spec", "tolerations").([]any)
+			if dig(o, "spec", "template", "spec", "affinity") != nil {
+				t.Errorf("the controller's Deployment has an affinity this test does not place by: %v", dig(o, "spec", "template", "spec", "affinity"))
+			}
+			placeController("MetalLB's controller, as its chart renders it", selector, tolerations)
+		}
+		if !found {
+			t.Fatalf("MetalLB %s renders no controller Deployment", pin.Version)
+		}
+	})
 	if len(registered) != 2 {
 		t.Fatalf("the kubelets of the rendered cluster register with taints %v, want the two of the sandbox cluster", registered)
 	}

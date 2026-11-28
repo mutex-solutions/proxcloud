@@ -115,6 +115,12 @@ application:
             metallb:
               addresses:
                 - 192.0.2.150-192.0.2.150
+              controllerNodeSelector:
+                node-restriction.kubernetes.io/proxcloud-system: "true"
+              controllerTolerations:
+                - effect: NoSchedule
+                  key: proxcloud.io/sandbox-system
+                  operator: Exists
               speakerTolerations:
                 - effect: NoSchedule
                   key: proxcloud.io/sandbox-system

@@ -55,6 +55,16 @@ replicas (the chart's top-level replicaCount; it has no controller.replicaCount)
 {{- $speaker := dict "frr" (dict "enabled" false) }}
 {{- with .Values.proxmox.metallb.speakerTolerations }}{{- $_ := set $speaker "tolerations" . }}{{- end }}
 {{- $metallb := dict "speaker" $speaker "frrk8s" (dict "enabled" false) }}
+{{- /* controllerNodeSelector and controllerTolerations (from chart 0.1.20): where MetalLB's controller may run. Its
+ClusterRole may rewrite the ValidatingWebhookConfiguration metallb-webhook-configuration, whose Service points at the
+controller's own pod, and it reads the webhook's serving key: with its token, the API server can be made to send every
+Secret that is written to that pod. So on a cluster that runs code of tenants on some of its nodes the controller is
+held to the others, as Cilium's operator is. MetalLB's chart adds the selector to its own kubernetes.io/os: linux. Both
+empty, as for every tenant cluster: MetalLB's values carry no controller key and are what they were. */ -}}
+{{- $controller := dict }}
+{{- with .Values.proxmox.metallb.controllerNodeSelector }}{{- $_ := set $controller "nodeSelector" . }}{{- end }}
+{{- with .Values.proxmox.metallb.controllerTolerations }}{{- $_ := set $controller "tolerations" . }}{{- end }}
+{{- if $controller }}{{- $_ := set $metallb "controller" $controller }}{{- end }}
 {{- /* With the product load balancer as the default (lb-controller.yaml, loadBalancer.default, new clusters only), MetalLB
 serves only class proxcloud.io/internal: a private address of the tenant network on request. A Service's class cannot
 change, so this is never turned on for an existing cluster: its MetalLB Services keep their addresses (class-only mode).

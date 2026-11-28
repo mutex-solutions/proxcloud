@@ -495,12 +495,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `kubernetes.io/os: linux`. The run sets it to `node-restriction.kubernetes.io/proxcloud-system: "true"`, the
     label Cluster API puts on the system group's nodes and no kubelet can claim; the installer's template sets it
     whenever it renders the system group (a sandbox domain is set). The label is on the system node while that node
-    is still tainted and not Ready (read in the drill's evidence), so the cluster comes up all the same. What else
-    runs on a sandbox machine, and what it can reach from there, is a table in
-    [docs/managed-sandbox.md §4.5](docs/managed-sandbox.md#45-what-a-compromised-worker-can-reach-here): nothing
-    else there reads a Secret of a tenant or of the portal. An installer site without a sandbox domain has no system
-    group: its operator runs on a sandbox worker, as that layout always required, and the section says what that
-    puts within reach.
+    is still tainted and not Ready (read in the drill's evidence), so the cluster comes up all the same.
+  - *MetalLB's controller moves to the system group.* It ran on a sandbox machine once that machine was fenced: it
+    has no toleration, and the system group keeps its taint for good. It reads no Secret of a tenant or of the
+    portal, but its ClusterRole may rewrite the ValidatingWebhookConfiguration `metallb-webhook-configuration`,
+    whose Service points at the controller's own pod, and it reads that webhook's serving key (MetalLB 0.16.2 with
+    this product's values, rendered and read). Code that escapes gVisor on the controller's machine could add a
+    rule for `secrets` to that configuration, and the API server would then send it every Secret that is written:
+    the wildcard key at each apply, each project's pull Secret, a tenant's own registry credentials at a build. It
+    could also refuse every write. Chart 0.1.20 therefore has `proxmox.metallb.controllerNodeSelector` and
+    `proxmox.metallb.controllerTolerations`. The run sets the selector to the system group's label and the
+    tolerations to that group's taint alone, `proxcloud.io/sandbox-system`; the installer's template does the same
+    whenever it renders the system group. The controller still waits for the fence, now the system machine's, and
+    the proxy's address is assigned after it; the run does not wait for the controller. An installer site whose
+    sandbox cluster already runs with a system group takes the values at its next stage 55 with this chart:
+    MetalLB's release is upgraded and its controller starts again on a system worker (read, not run). This was not
+    seen on a cluster in either direction: no build of `separate` came up before this change, and the path is read
+    from the rendered roles and Kubernetes' rules for webhook configurations.
+  - *What still runs on a sandbox machine,* and what it can reach from there, is a table in
+    [docs/managed-sandbox.md §4.5](docs/managed-sandbox.md#45-what-a-compromised-worker-can-reach-here): Cilium's
+    agent and envoy, kube-proxy, the sandbox chart's node-side pods, MetalLB's speaker, CoreDNS and konnectivity's
+    agent. None of them reads a Secret of a tenant or of the portal, and none may change a webhook's
+    configuration. MetalLB's speaker reads the Secrets of `metallb-system`, the certificate of the controller's
+    webhook among them; without the right to change that webhook's configuration it brings no other Secret. An
+    installer site without a sandbox domain has no system group: its operator and its MetalLB controller run on a
+    sandbox worker, as that layout always required, and the section says what that puts within reach.
   - *The stage's time (finding E4-C).* The two machines were cloned, booted and joined on the time of stage
     `workload-platform`, whose deadline is a wave's 20 minutes: 8.5 of them on the lab, and a slower store or more
     machines would have ended the stage before a machine ran. The stage now has two clocks of its own for the
@@ -519,8 +538,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on: while `separate` is stored the upgrade stops there with `preflight_failed`. And once a run has begun the
     cluster, `shared` is refused at the save (`409 fixed_fields`), as every change of a begun placement but `off`.
     The BOMs of v0.12.0-rc.1 and v0.12.0-rc.2 name chart 0.1.19.
-  - *A site without sandboxes:* nothing changes. A tenant cluster sets neither value, and chart 0.1.20 then renders
-    the objects chart 0.1.19 renders, byte for byte: a test holds the render to the sha256 of what the published
+  - *A site without sandboxes:* nothing changes. A tenant cluster sets none of the new values, and chart 0.1.20
+    then renders the objects chart 0.1.19 renders, byte for byte: a test holds the render to the sha256 of what the published
     0.1.19 renders with default values. The installer's ordinary clusters are not touched. This change does not move a pin of the BOM: the release that follows must publish
     chart 0.1.20 (tag `proxmox-kamaji-cluster-v0.1.20`) and name it in `tenantCharts.kubernetes`. Until it does,
     `separate` is refused at the save on this build's own BOM too, and a test stops a release that forgets the pin.

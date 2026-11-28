@@ -51,7 +51,8 @@ const (
 	sandboxSystemTaint = "proxcloud.io/sandbox-system"
 	// sandboxSystemLabel is on the nodes of the separate cluster's system group and on no other. Cluster API sets it
 	// from the Machine; under NodeRestriction no kubelet can give it to its own node, so what must never share a node
-	// with code of tenants selects it: the sandbox chart's proxy and controller, and Cilium's operator.
+	// with code of tenants selects it: the sandbox chart's proxy and controller, Cilium's operator and MetalLB's
+	// controller.
 	sandboxSystemLabel = "node-restriction.kubernetes.io/proxcloud-system"
 	sandboxNamespace   = "sandbox-system"
 	sandboxTLSSecret   = "sandbox-proxy-tls"
@@ -647,7 +648,8 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		// Every node of this cluster joins with a taint, and its control plane is hosted, so there is no other node.
 		// Cilium's operator must start on them all the same: it registers Cilium's CRDs, the agents wait for those, and
 		// the sandbox chart, whose identities the run waits for, is refused without them. Nothing else gets a
-		// toleration: CoreDNS, MetalLB and konnectivity's agent start once the provider sync has fenced a machine.
+		// toleration of unsecured: CoreDNS, MetalLB and konnectivity's agent start once the provider sync has fenced a
+		// machine.
 		"ciliumOperatorTolerations": sandboxJoinTolerations(),
 		// On the system group alone, before the fence and after it: the operator's ClusterRole reads the Secrets of
 		// every namespace, and the kubelet of a sandbox machine could ask for the token of an operator on its node.
@@ -660,8 +662,14 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		"proxmox": map[string]any{
 			"region": in.Region, "pool": pve.SandboxPool, "storage": in.BootStorage, "network": network,
 			"csi": map[string]any{"configSecretName": "", "storageClasses": []any{}},
+			// MetalLB's controller on the system group alone, once that group is fenced (it does not tolerate unsecured,
+			// and the run does not wait for it). It may rewrite its own ValidatingWebhookConfiguration, whose Service
+			// points at its pod: with its token, a sandbox machine could have the API server send it every Secret
+			// that is written, the wildcard key at each apply among them.
 			"metallb": map[string]any{"addresses": []any{sb.ProxyAddress + "-" + sb.ProxyAddress},
-				"speakerTolerations": []any{map[string]any{"key": sandboxSystemTaint, "operator": "Exists", "effect": "NoSchedule"}}},
+				"speakerTolerations":     []any{map[string]any{"key": sandboxSystemTaint, "operator": "Exists", "effect": "NoSchedule"}},
+				"controllerNodeSelector": map[string]any{sandboxSystemLabel: "true"},
+				"controllerTolerations":  []any{map[string]any{"key": sandboxSystemTaint, "operator": "Exists", "effect": "NoSchedule"}}},
 		},
 		"nodeGroups":  groups,
 		"addonCharts": map[string]any{"sandbox": map[string]any{"repoURL": "oci://" + chart.Chart.Repo, "chart": chart.Chart.Name, "version": chart.Chart.Version}},

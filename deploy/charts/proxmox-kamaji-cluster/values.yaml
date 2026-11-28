@@ -128,6 +128,17 @@ proxmox:
     # -- Taints MetalLB's speaker tolerates on top of its defaults: a node group whose taint keeps other pods off but
     # that runs a LoadBalancer's endpoints (externalTrafficPolicy Local) needs its speaker there. Empty for tenants.
     speakerTolerations: []
+    # -- From chart 0.1.20. Node labels the node of MetalLB's controller must carry, on top of MetalLB's own
+    # kubernetes.io/os: linux, and the taints it tolerates (it has none of its own). The controller may rewrite its
+    # ValidatingWebhookConfiguration, whose Service points at its own pod, and a kubelet can ask for the token of any
+    # pod on its node: from the controller's node the API server can be made to hand over every Secret that is
+    # written. So on a cluster where some nodes run code of tenants it is kept on the others: the platform's sandbox
+    # cluster sets the label of its system group, node-restriction.kubernetes.io/proxcloud-system: "true"
+    # (machineLabels: Cluster API sets it, no kubelet can claim it), and that group's taint. Set the two together: a
+    # selector alone leaves the controller Pending on a tainted group, a toleration alone keeps it off no node. Empty
+    # for a tenant cluster, whose controller then keeps the values it had.
+    controllerNodeSelector: {}
+    controllerTolerations: []
 
 # -- From chart 0.1.17. The cluster's load balancer controller (templates/lb-controller.yaml): a Deployment next to the
 # control plane on this (services) cluster that PUTs the cluster's Services of type LoadBalancer to the portal's gateway

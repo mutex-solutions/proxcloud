@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Offline check of the sandbox cluster stage 55 writes (templates/sandbox-cluster.yml.j2): where the scheduler may put
-Cilium's operator. Its ClusterRole reads the Secrets of every namespace, so with a system group (a sandbox domain is
-set) it runs there and nowhere else; it must still start on that group while every worker is tainted. No cluster.
+Cilium's operator and MetalLB's controller. The operator's ClusterRole reads the Secrets of every namespace, so with a
+system group (a sandbox domain is set) it runs there and nowhere else; it must still start on that group while every
+worker is tainted. The controller may rewrite its own webhook's configuration and so be sent every Secret that is
+written: it runs on the system group alone too, once that group is fenced. No cluster.
 
 Run with the installer venv: python installer/tests/test_sandbox_cluster.py
 """
@@ -35,12 +37,20 @@ def values(edge):
     return app["spec"]["source"]["helm"]["valuesObject"]
 
 
-def fits(v, group, fenced):
-    """Whether the operator, as the cluster chart renders it from these values, may be scheduled on a node of group."""
+def fits(v, group, fenced, selector=None, tolerations=None):
+    """Whether a pod with selector and tolerations may be scheduled on a node of group: by default the operator, as the
+    cluster chart renders it from these values."""
+    selector = v.get("ciliumOperatorNodeSelector", {}) if selector is None else selector
+    tolerations = v.get("ciliumOperatorTolerations", []) if tolerations is None else tolerations
     labels = dict(group.get("machineLabels", {}))  # Cluster API copies them to the Node; a kubelet cannot claim them
     taints = {t["key"] for t in group["taints"]} - ({"proxcloud.io/unsecured"} if fenced else set())
-    tolerated = {t["key"] for t in v.get("ciliumOperatorTolerations", [])}
-    return all(labels.get(k) == want for k, want in v.get("ciliumOperatorNodeSelector", {}).items()) and taints <= tolerated
+    return all(labels.get(k) == want for k, want in selector.items()) and taints <= {t["key"] for t in tolerations}
+
+
+def controller_fits(v, group, fenced):
+    """The same for MetalLB's controller, which has no toleration of its own."""
+    metallb = v["proxmox"]["metallb"]
+    return fits(v, group, fenced, metallb.get("controllerNodeSelector", {}), metallb.get("controllerTolerations", []))
 
 
 class SandboxClusterTests(unittest.TestCase):
@@ -53,11 +63,26 @@ class SandboxClusterTests(unittest.TestCase):
             self.assertTrue(fits(v, groups["sandbox-system"], fenced), "the cluster does not come up: no node for the operator")
             self.assertFalse(fits(v, groups["sandbox"], fenced), "the operator may land beside tenant code")
 
+    def test_metallb_controller_runs_on_the_system_group_alone(self):
+        v = values(True)
+        groups = {g["name"]: g for g in v["nodeGroups"]}
+        self.assertEqual(v["proxmox"]["metallb"].get("controllerNodeSelector"), {SYSTEM: "true"})
+        self.assertEqual([t["key"] for t in v["proxmox"]["metallb"].get("controllerTolerations", [])], ["proxcloud.io/sandbox-system"])
+        for name, group in groups.items():
+            self.assertFalse(controller_fits(v, group, False), f"the controller may start on an unfenced {name} machine")
+        self.assertTrue(controller_fits(v, groups["sandbox-system"], True), "the proxy gets no address: no node for the controller")
+        self.assertFalse(controller_fits(v, groups["sandbox"], True), "the controller may land beside tenant code")
+
     def test_without_a_system_group_the_operator_still_has_a_node(self):
         v = values(False)
         self.assertEqual([g["name"] for g in v["nodeGroups"]], ["sandbox"])
         self.assertNotIn("ciliumOperatorNodeSelector", v)
         self.assertTrue(fits(v, v["nodeGroups"][0], False))
+        # MetalLB's controller too: neither value, and a node once the worker is fenced, as before.
+        self.assertNotIn("controllerNodeSelector", v["proxmox"]["metallb"])
+        self.assertNotIn("controllerTolerations", v["proxmox"]["metallb"])
+        self.assertFalse(controller_fits(v, v["nodeGroups"][0], False))
+        self.assertTrue(controller_fits(v, v["nodeGroups"][0], True))
 
 
 if __name__ == "__main__":

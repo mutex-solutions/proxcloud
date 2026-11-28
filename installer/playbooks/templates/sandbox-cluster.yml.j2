@@ -70,6 +70,14 @@ spec:
           metallb:
             addresses: {{ [net.metallb] | to_json }}
             speakerTolerations: [{key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}]
+{% if pc_sandbox_edge_on | bool %}
+            # With the system group: MetalLB's controller runs there and nowhere else, once that group is fenced. It may
+            # rewrite its own ValidatingWebhookConfiguration, whose Service points at its pod: from its node the API
+            # server can be made to hand over every Secret that is written. Without a sandbox domain the cluster has no
+            # such group: the controller then runs on a sandbox worker (docs/managed-sandbox.md §4.5).
+            controllerNodeSelector: {node-restriction.kubernetes.io/proxcloud-system: "true"}
+            controllerTolerations: [{key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}]
+{% endif %}
         nodeGroups:
           - name: sandbox
             machineFlavor: sandbox

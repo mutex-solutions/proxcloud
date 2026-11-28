@@ -1082,7 +1082,10 @@ after it. Its ClusterRole reads the Secrets of every namespace, and a kubelet ca
 token of a pod on its node, so it stays off the machines that run tenants' code, as sandbox-proxy
 and the agent-sandbox controller do
 ([managed-sandbox.md §4.5](managed-sandbox.md#45-what-a-compromised-worker-can-reach-here) has the
-table of what runs where). Everything else waits for the fence, as it should: CoreDNS, MetalLB,
+table of what runs where). MetalLB's controller is held to the system group by the same label
+(`proxmox.metallb.controllerNodeSelector`, with that group's taint to tolerate): it may rewrite
+its own webhook's configuration, and from a sandbox machine that would bring every Secret that
+is written. Everything else waits for the fence, as it should: CoreDNS, MetalLB,
 konnectivity's agent, sandbox-proxy and the agent-sandbox controller are scheduled once stage
 `register` has stored the kubeconfig and a provider sync has taken the `unsecured` taint off,
 about 20 minutes after the machines joined. Until then `kubectl logs` and `exec` on `pc-sandbox`
