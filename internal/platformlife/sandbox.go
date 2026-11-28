@@ -49,6 +49,11 @@ const (
 	// here tolerates it; the RuntimeClass of the sandbox chart must not either.
 	UnsecuredTaintKey  = "proxcloud.io/unsecured"
 	sandboxSystemTaint = "proxcloud.io/sandbox-system"
+	// sandboxSystemLabel is on the nodes of the separate cluster's system group and on no other. Cluster API sets it
+	// from the Machine; under NodeRestriction no kubelet can give it to its own node, so what must never share a node
+	// with code of tenants selects it: the sandbox chart's proxy and controller, Cilium's operator and MetalLB's
+	// controller.
+	sandboxSystemLabel = "node-restriction.kubernetes.io/proxcloud-system"
 	sandboxNamespace   = "sandbox-system"
 	sandboxTLSSecret   = "sandbox-proxy-tls"
 
@@ -359,6 +364,20 @@ func (in *Installation) SandboxProblems() []string {
 		return []string{fmt.Sprintf("spec.sandbox: the platform's BOM (release %s) names cluster chart %s, which cannot give a node group a pool and an address range of its own: sandboxes need chart %s or newer",
 			bom.Release, chart, kamaji.GroupPoolChartVersion)}
 	}
+	// Refused here and not by the run: the run would build the machines and then wait in vain for a cluster that
+	// cannot come up. The sentence names the one order that works. The upgrade is an apply, and stage 1 of every apply
+	// fails on this row while separate is stored, so off comes first; and once a run has begun the cluster (a build of
+	// 0.12.0-rc.2 that failed), shared is no way on either: the save refuses a change of a begun placement
+	// (sandboxFixed), and only off removes what that run made.
+	if in.Spec.sandboxMode() == SandboxSeparate && !kamaji.ChartHasOperatorTolerations(chart) {
+		first := "Set placement off, or shared, which is built with the platform's own chart"
+		if in.Status.Sandbox != nil {
+			first = "A run has begun one, and it keeps that chart. Set placement off and apply, which deletes its machines, its token and the pool (shared is refused once a run has begun a cluster)"
+		}
+		return []string{fmt.Sprintf("spec.sandbox.placement separate: the platform's BOM (release %s) names cluster chart %s, under which a sandbox cluster never comes up (%s). "+
+			"%s; then upgrade the platform to a release whose BOM names chart %s or newer; then set placement separate. In that order: the upgrade is an apply, and every apply stops at this row while separate is stored",
+			bom.Release, chart, noOperatorTolerations, first, kamaji.OperatorTolerationsChartVersion)}
+	}
 	// Refused here and not by the run: a run would have built the machines before it met the missing certificate.
 	if t := in.Spec.Sandbox.TLS; t != nil && t.Mode == TLSSecret {
 		return []string{"spec.sandbox.tls.mode secret: this release has no route that stores an operator's certificate. Set tls.mode selfsigned: the run makes a certificate for *." + in.Spec.Sandbox.Domain}
@@ -604,6 +623,10 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 	}
 	if v := sb.chartVersion(b); !kamaji.ChartHasGroupPool(v) {
 		return nil, fmt.Errorf("platform: cluster chart %s cannot install the sandbox chart: the sandbox cluster needs chart %s or newer", v, kamaji.GroupPoolChartVersion)
+	} else if !kamaji.ChartHasOperatorTolerations(v) {
+		// Also the chart a cluster keeps from the build that began it (SandboxStatus.ChartVersion).
+		return nil, fmt.Errorf("platform: under cluster chart %s the sandbox cluster never comes up (%s): it needs chart %s or newer. A cluster that a run began under an older chart keeps that chart: set placement off, apply, then set separate again",
+			v, noOperatorTolerations, kamaji.OperatorTolerationsChartVersion)
 	}
 	groups := []any{}
 	for _, g := range sb.Groups {
@@ -622,7 +645,7 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		}
 		if g.Name == SandboxSystemGroup {
 			ng["nodeLabels"] = map[string]any{SandboxTaintKey: "system"}
-			ng["machineLabels"] = map[string]any{"node-restriction.kubernetes.io/proxcloud-system": "true"}
+			ng["machineLabels"] = map[string]any{sandboxSystemLabel: "true"}
 			ng["taints"] = []any{taint(UnsecuredTaintKey), taint(sandboxSystemTaint)}
 		} else {
 			ng["nodeLabels"] = map[string]any{SandboxTaintKey: "cpu"}
@@ -639,16 +662,33 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		network["vlan"] = in.Network.VLAN
 	}
 	return map[string]any{
-		"kubernetesVersion":          b.Kubernetes.Version,
-		"sandboxBandwidth":           true,
+		"kubernetesVersion": b.Kubernetes.Version,
+		"sandboxBandwidth":  true,
+		// Every node of this cluster joins with a taint, and its control plane is hosted, so there is no other node.
+		// Cilium's operator must start on them all the same: it registers Cilium's CRDs, the agents wait for those, and
+		// the sandbox chart, whose identities the run waits for, is refused without them. Nothing else gets a
+		// toleration of unsecured: CoreDNS, MetalLB and konnectivity's agent start once the provider sync has fenced a
+		// machine.
+		"ciliumOperatorTolerations": sandboxJoinTolerations(),
+		// On the system group alone, before the fence and after it: the operator's ClusterRole reads the Secrets of
+		// every namespace, and the kubelet of a sandbox machine could ask for the token of an operator on its node.
+		// The tolerations name unsecured, the one taint a sandbox machine carries, so without this selector the
+		// operator could be scheduled there.
+		"ciliumOperatorNodeSelector": map[string]any{sandboxSystemLabel: "true"},
 		"cloudCredentialsSecretName": SandboxCredentialsSecret,
 		"kamajiControlPlane":         map[string]any{"replicas": 1, "dataStoreName": defaultDatastore, "network": map[string]any{"serviceType": "LoadBalancer"}},
 		"clusterNetwork":             map[string]any{"pods": "10.244.0.0/16", "services": "10.96.0.0/12"},
 		"proxmox": map[string]any{
 			"region": in.Region, "pool": pve.SandboxPool, "storage": in.BootStorage, "network": network,
 			"csi": map[string]any{"configSecretName": "", "storageClasses": []any{}},
+			// MetalLB's controller on the system group alone, once that group is fenced (it does not tolerate unsecured,
+			// and the run does not wait for it). It may rewrite its own ValidatingWebhookConfiguration, whose Service
+			// points at its pod: with its token, a sandbox machine could have the API server send it every Secret
+			// that is written, the wildcard key at each apply among them.
 			"metallb": map[string]any{"addresses": []any{sb.ProxyAddress + "-" + sb.ProxyAddress},
-				"speakerTolerations": []any{map[string]any{"key": sandboxSystemTaint, "operator": "Exists", "effect": "NoSchedule"}}},
+				"speakerTolerations":     []any{map[string]any{"key": sandboxSystemTaint, "operator": "Exists", "effect": "NoSchedule"}},
+				"controllerNodeSelector": map[string]any{sandboxSystemLabel: "true"},
+				"controllerTolerations":  []any{map[string]any{"key": sandboxSystemTaint, "operator": "Exists", "effect": "NoSchedule"}}},
 		},
 		"nodeGroups":  groups,
 		"addonCharts": map[string]any{"sandbox": map[string]any{"repoURL": "oci://" + chart.Chart.Repo, "chart": chart.Chart.Name, "version": chart.Chart.Version}},
@@ -657,6 +697,20 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 			"sandbox": map[string]any{"enabled": true, "values": sandboxChartValues(in)},
 		},
 	}, nil
+}
+
+// noOperatorTolerations is why a cluster chart before kamaji.OperatorTolerationsChartVersion builds no sandbox
+// cluster, for the two places that refuse it.
+const noOperatorTolerations = "every node of it joins with a taint, Cilium's operator does not tolerate one, and no node becomes Ready"
+
+// sandboxJoinTolerations tolerate the taints a machine of the separate sandbox cluster joins with: one per key
+// SandboxClusterValues gives a node group (TestSandboxClusterComesUpOnTaintedNodes holds the two together).
+func sandboxJoinTolerations() []any {
+	out := []any{}
+	for _, key := range []string{UnsecuredTaintKey, sandboxSystemTaint} {
+		out = append(out, map[string]any{"key": key, "operator": "Exists", "effect": "NoSchedule"})
+	}
+	return out
 }
 
 func (sb *RenderSandbox) chartVersion(b *BOM) string {

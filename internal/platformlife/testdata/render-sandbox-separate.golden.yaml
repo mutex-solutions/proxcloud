@@ -45,6 +45,15 @@ application:
                 proxy:
                   address: 192.0.2.150
                   domain: sbx.example.org
+          ciliumOperatorNodeSelector:
+            node-restriction.kubernetes.io/proxcloud-system: "true"
+          ciliumOperatorTolerations:
+            - effect: NoSchedule
+              key: proxcloud.io/unsecured
+              operator: Exists
+            - effect: NoSchedule
+              key: proxcloud.io/sandbox-system
+              operator: Exists
           cloudCredentialsSecretName: pc-sandbox-pve
           clusterNetwork:
             pods: 10.244.0.0/16
@@ -106,6 +115,12 @@ application:
             metallb:
               addresses:
                 - 192.0.2.150-192.0.2.150
+              controllerNodeSelector:
+                node-restriction.kubernetes.io/proxcloud-system: "true"
+              controllerTolerations:
+                - effect: NoSchedule
+                  key: proxcloud.io/sandbox-system
+                  operator: Exists
               speakerTolerations:
                 - effect: NoSchedule
                   key: proxcloud.io/sandbox-system
@@ -124,7 +139,7 @@ application:
             storage: local-zfs
           sandboxBandwidth: true
       repoURL: ghcr.io/mutex-solutions/charts
-      targetRevision: 0.1.18
+      targetRevision: 0.1.20
     syncPolicy:
       automated:
         prune: true

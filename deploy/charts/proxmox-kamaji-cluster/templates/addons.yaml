@@ -16,7 +16,30 @@ components as ArgoCD Applications.
 {{- fail "NGINX Gateway Fabric requires Kubernetes >=1.32 in the supported 1.x series" }}
 {{- end }}
 {{- $proxies := list }}
-{{- $proxies = append $proxies (dict "key" "cilium" "ns" "kube-system" "values" (dict "kubeProxyReplacement" false "bandwidthManager" (dict "enabled" (.Values.sandboxBandwidth | default false)) "cni" (dict "customConf" (.Values.sandboxBandwidth | default false)) "ipam" (dict "mode" "kubernetes") "routingMode" "tunnel" "tunnelProtocol" "vxlan" "operator" (dict "replicas" 1) "hubble" (dict "enabled" false))) }}
+{{- /* ciliumOperatorTolerations (from chart 0.1.20): Cilium's operator registers Cilium's CRDs, and no agent starts and
+no node becomes Ready before it has. On a cluster whose every node joins with a taint it must tolerate them, or the
+cluster never comes up (the platform's sandbox cluster did not, v0.12.0-rc.2). The chart value replaces the operator's
+own list, so that list is repeated here as Cilium 1.18 ships it (values.yaml, operator.tolerations; Cilium's template
+adds node.cilium.io/agent-not-ready by itself). Empty, as for every tenant cluster: the operator's values are what they
+were, and its Deployment does not change. */ -}}
+{{- $operator := dict "replicas" 1 }}
+{{- with .Values.ciliumOperatorTolerations }}
+{{- $own := list }}
+{{- range $key := list "node-role.kubernetes.io/control-plane" "node-role.kubernetes.io/master" "node.kubernetes.io/not-ready" "node.cloudprovider.kubernetes.io/uninitialized" }}
+{{- $own = append $own (dict "key" $key "operator" "Exists") }}
+{{- end }}
+{{- $_ := set $operator "tolerations" (concat $own .) }}
+{{- end }}
+{{- /* ciliumOperatorNodeSelector (from chart 0.1.20): node labels the operator's node must carry, on top of Cilium's own
+kubernetes.io/os: linux, which is repeated here so that the selector does not rest on Helm merging the two maps. The
+operator's ClusterRole reads Secrets in every namespace, and a kubelet can ask for the token of a pod on its node: on
+a cluster that runs code of tenants on some of its nodes, the toleration above alone would let the operator land there.
+Name a label under node-restriction.kubernetes.io/ (a node group's machineLabels), which no kubelet can give itself.
+Empty, as for every tenant cluster: no selector is rendered. */ -}}
+{{- with .Values.ciliumOperatorNodeSelector }}
+{{- $_ := set $operator "nodeSelector" (merge (dict "kubernetes.io/os" "linux") .) }}
+{{- end }}
+{{- $proxies = append $proxies (dict "key" "cilium" "ns" "kube-system" "values" (dict "kubeProxyReplacement" false "bandwidthManager" (dict "enabled" (.Values.sandboxBandwidth | default false)) "cni" (dict "customConf" (.Values.sandboxBandwidth | default false)) "ipam" (dict "mode" "kubernetes") "routingMode" "tunnel" "tunnelProtocol" "vxlan" "operator" $operator "hubble" (dict "enabled" false))) }}
 {{- $classes := list }}
 {{- range $i, $c := .Values.proxmox.csi.storageClasses }}
 {{- $class := dict "name" $c.name "storage" $c.storage "fstype" "ext4" "reclaimPolicy" "Delete" }}
@@ -32,6 +55,16 @@ replicas (the chart's top-level replicaCount; it has no controller.replicaCount)
 {{- $speaker := dict "frr" (dict "enabled" false) }}
 {{- with .Values.proxmox.metallb.speakerTolerations }}{{- $_ := set $speaker "tolerations" . }}{{- end }}
 {{- $metallb := dict "speaker" $speaker "frrk8s" (dict "enabled" false) }}
+{{- /* controllerNodeSelector and controllerTolerations (from chart 0.1.20): where MetalLB's controller may run. Its
+ClusterRole may rewrite the ValidatingWebhookConfiguration metallb-webhook-configuration, whose Service points at the
+controller's own pod, and it reads the webhook's serving key: with its token, the API server can be made to send every
+Secret that is written to that pod. So on a cluster that runs code of tenants on some of its nodes the controller is
+held to the others, as Cilium's operator is. MetalLB's chart adds the selector to its own kubernetes.io/os: linux. Both
+empty, as for every tenant cluster: MetalLB's values carry no controller key and are what they were. */ -}}
+{{- $controller := dict }}
+{{- with .Values.proxmox.metallb.controllerNodeSelector }}{{- $_ := set $controller "nodeSelector" . }}{{- end }}
+{{- with .Values.proxmox.metallb.controllerTolerations }}{{- $_ := set $controller "tolerations" . }}{{- end }}
+{{- if $controller }}{{- $_ := set $metallb "controller" $controller }}{{- end }}
 {{- /* With the product load balancer as the default (lb-controller.yaml, loadBalancer.default, new clusters only), MetalLB
 serves only class proxcloud.io/internal: a private address of the tenant network on request. A Service's class cannot
 change, so this is never turned on for an existing cluster: its MetalLB Services keep their addresses (class-only mode).

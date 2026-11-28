@@ -471,6 +471,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Placement `separate` could not be built: the sandbox cluster never came up (drill of v0.12.0-rc.2, finding
+  E4-A).** The run made the pool, the token and both machines, the machines joined, and then stage
+  `workload-platform` waited its 20 minutes and failed with `component_unhealthy`, "the sandbox chart has not filled
+  `sandbox-system/proxcloud-sandbox-token`". Nine hours later the cluster stood where it stood then.
+  - *The cause.* The control plane of `pc-sandbox` is hosted, so its two node groups are all the nodes it has, and
+    both join with a taint: `proxcloud.io/unsecured` on every machine until its VM firewall is written, and
+    `proxcloud.io/sandbox-system` on the system group for good. Cilium's operator tolerates neither (Cilium 1.18
+    tolerates a short list of its own), so it was never scheduled. The operator is what registers Cilium's CRDs:
+    without them no Cilium agent starts, no node becomes Ready, and the sandbox chart, which holds Cilium policies,
+    is refused. The run waited for that chart's two identities. The provider sync, which takes the `unsecured`
+    taint off, starts only with the kubeconfig that stage `register` stores, and `register` comes after the stage
+    that waited. A cycle, with no way out but by hand.
+  - *The fix.* Cluster chart `proxmox-kamaji-cluster` 0.1.20 has a new value, `ciliumOperatorTolerations`: taints
+    Cilium's operator tolerates on top of its own list. The run sets it for the sandbox cluster to its two taints,
+    and so does the installer's template for its sandbox cluster, which has the same nodes. Nothing else is let
+    onto a machine without a VM firewall: CoreDNS, MetalLB, konnectivity's agent, sandbox-proxy and the
+    agent-sandbox controller start, as before, once the provider sync has fenced a machine and taken its taint off,
+    and a sandbox never tolerates `unsecured`.
+  - *The operator stays on the system group.* A sandbox machine carries no taint but `unsecured`, so the toleration
+    alone would let the operator be scheduled there, before the fence and after it. Its ClusterRole reads the
+    Secrets of every namespace (Cilium 1.18.16 with this product's values, rendered and read), and a kubelet can ask
+    for the token of a pod on its node: code that escapes gVisor on that machine could then read the wildcard key,
+    the wake token and both of the portal's identities. Chart 0.1.20 therefore has a second value,
+    `ciliumOperatorNodeSelector`: node labels the operator's node must carry, added to Cilium's own
+    `kubernetes.io/os: linux`. The run sets it to `node-restriction.kubernetes.io/proxcloud-system: "true"`, the
+    label Cluster API puts on the system group's nodes and no kubelet can claim; the installer's template sets it
+    whenever it renders the system group (a sandbox domain is set). The label is on the system node while that node
+    is still tainted and not Ready (read in the drill's evidence), so the cluster comes up all the same.
+  - *MetalLB's controller moves to the system group.* It ran on a sandbox machine once that machine was fenced: it
+    has no toleration, and the system group keeps its taint for good. It reads no Secret of a tenant or of the
+    portal, but its ClusterRole may rewrite the ValidatingWebhookConfiguration `metallb-webhook-configuration`,
+    whose Service points at the controller's own pod, and it reads that webhook's serving key (MetalLB 0.16.2 with
+    this product's values, rendered and read). Code that escapes gVisor on the controller's machine could add a
+    rule for `secrets` to that configuration, and the API server would then send it every Secret that is written:
+    the wildcard key at each apply, each project's pull Secret, a tenant's own registry credentials at a build. It
+    could also refuse every write. Chart 0.1.20 therefore has `proxmox.metallb.controllerNodeSelector` and
+    `proxmox.metallb.controllerTolerations`. The run sets the selector to the system group's label and the
+    tolerations to that group's taint alone, `proxcloud.io/sandbox-system`; the installer's template does the same
+    whenever it renders the system group. The controller still waits for the fence, now the system machine's, and
+    the proxy's address is assigned after it; the run does not wait for the controller. An installer site whose
+    sandbox cluster already runs with a system group takes the values at its next stage 55 with this chart:
+    MetalLB's release is upgraded and its controller starts again on a system worker (read, not run). This was not
+    seen on a cluster in either direction: no build of `separate` came up before this change, and the path is read
+    from the rendered roles and Kubernetes' rules for webhook configurations.
+  - *What still runs on a sandbox machine,* and what it can reach from there, is a table in
+    [docs/managed-sandbox.md §4.5](docs/managed-sandbox.md#45-what-a-compromised-worker-can-reach-here): Cilium's
+    agent and envoy, kube-proxy, the sandbox chart's node-side pods, MetalLB's speaker, CoreDNS and konnectivity's
+    agent. None of them reads a Secret of a tenant or of the portal, and none may change a webhook's
+    configuration. MetalLB's speaker reads the Secrets of `metallb-system`, the certificate of the controller's
+    webhook among them; without the right to change that webhook's configuration it brings no other Secret. An
+    installer site without a sandbox domain has no system group: its operator and its MetalLB controller run on a
+    sandbox worker, as that layout always required, and the section says what that puts within reach.
+  - *The stage's time (finding E4-C).* The two machines were cloned, booted and joined on the time of stage
+    `workload-platform`, whose deadline is a wave's 20 minutes: 8.5 of them on the lab, and a slower store or more
+    machines would have ended the stage before a machine ran. The stage now has two clocks of its own for the
+    sandbox cluster, each started once. The machines get 60 minutes, the time stage `cluster` gives the platform's
+    own machines and the shared group's, from the first look that finds one missing. The wait for the sandbox chart
+    then gets a wave's 20 minutes from the moment every machine is Running: the add-on controller tries the chart
+    again at the latest when its cache resyncs, every 10 minutes by its default (Cluster API add-on provider Helm
+    v0.6.4, read in its source; the platform does not change the setting). With the last wave before them, a first
+    build of `separate` may keep the stage for up to 100 minutes before it fails, where it had 20; a build like the
+    lab's is done in the time it takes.
+  - *Refused instead of built in vain.* A sandbox cluster is built with the tenant cluster chart the platform's BOM
+    names (`tenantCharts.kubernetes`). Under a chart before 0.1.20, `placement: separate` is now refused at the
+    save and in the Check's `spec` row, with the reason and the order that works: set placement `off` (or `shared`,
+    while no run has begun a sandbox cluster), upgrade the platform, then set `separate`. The order matters. The
+    upgrade is an apply, and stage 1 of every apply runs the Check, whose `spec` row reads the BOM the platform is
+    on: while `separate` is stored the upgrade stops there with `preflight_failed`. And once a run has begun the
+    cluster, `shared` is refused at the save (`409 fixed_fields`), as every change of a begun placement but `off`.
+    The BOMs of v0.12.0-rc.1 and v0.12.0-rc.2 name chart 0.1.19.
+  - *A site without sandboxes:* nothing changes. A tenant cluster sets none of the new values, and chart 0.1.20
+    then renders the objects chart 0.1.19 renders, byte for byte: a test holds the render to the sha256 of what the published
+    0.1.19 renders with default values. The installer's ordinary clusters are not touched. This change does not move a pin of the BOM: the release that follows must publish
+    chart 0.1.20 (tag `proxmox-kamaji-cluster-v0.1.20`) and name it in `tenantCharts.kubernetes`. Until it does,
+    `separate` is refused at the save on this build's own BOM too, and a test stops a release that forgets the pin.
+  - *A site that runs v0.12.0-rc.2 with `shared` sandboxes:* nothing changes; `shared` is built with the platform's
+    own cluster chart and was not affected.
+  - *A site that tried `separate` with v0.12.0-rc.2* has a failed run, two machines that are not Ready and the
+    cluster's Application at chart 0.1.19. A sandbox cluster keeps the chart it was begun with, so no apply repairs
+    it, and no apply builds in vain any more:
+    - *On a platform that rc.2 installed,* every apply stops at stage 1 (`validate`, `preflight_failed`) on the
+      Check's `spec` row, the apply that would upgrade the platform included. Nothing is asked of Proxmox. The row
+      names chart 0.1.19 and the order: set `placement: off` and apply, which removes the machines, the token, the
+      pool and the Application; upgrade the platform; then set `separate` again. An upgrade that was tried first
+      and stopped at stage 1 has begun all the same: the apply that follows the `off` then goes on to its target,
+      removes the cluster and moves the BOM in one run, and `separate` can be set after it.
+    - *On a platform whose first install failed in that build* no BOM is on record, so the Retry runs under this
+      release's BOM and passes stage 1. It stops at stage `workload-platform` with `component_unhealthy`, before it
+      applies anything of the sandbox cluster, and its message is the render's: "under cluster chart 0.1.19 the
+      sandbox cluster never comes up (...): set placement off, apply, then set separate again".
+    - An `off` after the failed build was run on the lab with v0.12.0-rc.2 (2 min 58 s; machines, token, its six
+      rows, the pool and the Application gone, the ACL byte-equal to before). Under this change it is shown on
+      fakes only, in both orders above.
+  - *Known, and not changed (finding E4-D): a build of `separate` that fails leaves its machines running without a
+    VM firewall.* The VM firewall is written by the provider sync, which needs the identity the sandbox chart makes
+    and stage `register` stores; a build that fails before that has machines in the sandbox pool and nothing to
+    fence them with. No code of a tenant runs on them: the `unsecured` taint stays until a sync has fenced the
+    machine, the sandbox provider is not registered or stays disabled, and "live" is refused. What holds meanwhile
+    is the provider-wide isolation of the sandbox range, which the run writes before a machine exists: on the lab
+    the two machines reached no Proxmox node, no tenant network, not the seed and not the metadata address. They
+    did reach their own control plane, listeners on a private network that is in no blocked network of the
+    provider (the VM firewall alone closes those, a known issue of v0.12.0-rc.2), the management host's ssh port,
+    and the internet, port 25 included. They stay until an operator acts: **Retry** once the cause is gone, or `placement: off` and an apply,
+    which deletes them with their token and the pool (2 min 58 s on the lab). The run does not fence them itself:
+    that would be a second writer of the fence, without the Node to pin an address to.
+  - *Not verified:* no cluster was built with this change; the tests render the values and the chart, and the
+    rendered values were given to the real Cilium 1.18.16 chart by hand (no test of the repository can: it needs the
+    chart from the network), whose operator then carries its own tolerations and the two taints, and the selector
+    `kubernetes.io/os: linux` with the system group's label. One real build of `separate` on a lab is owed before a release offers it. The installer's
+    path was read, not run: its stage 55 waits for Cilium's agents and for Ready nodes, so it had the same fault.
+
 - **Managed platform, sandboxes: the stock E2B Python SDK refused the run's certificate (drill of v0.12.0-rc.2,
   finding E2-A).** The certificate a run makes for the sandbox domain was one self-signed certificate marked as a
   certificate authority (CA true, key usage keyCertSign), and sandbox-proxy served that same certificate. The

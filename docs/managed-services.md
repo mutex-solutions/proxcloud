@@ -1065,9 +1065,56 @@ run writes the Secret
 sandbox pool, the template pool, the platform's boot and ISO stores, `/nodes` and the platform
 network's vnet in its scope; after the last wave the namespace `pc-sandbox` on the platform
 cluster, the Secret `pc-sandbox-pve` with that token, and the Application `pc-sandbox` (the tenant
-cluster chart, with the sandbox chart as its add-on). The stage is done when every machine of the
-cluster is Running. A new sandbox machine takes sandboxes only once the provider sync has written
-its VM firewall and taken the `unsecured` taint off.
+cluster chart, with the sandbox chart as its add-on). The stage waits until every machine of the
+cluster is Running, for up to 60 minutes from its first look at them (the time stage `cluster`
+gives a machine), and then for up to 20 minutes more until the sandbox chart inside the cluster
+has made its two identities. A new sandbox machine takes sandboxes only once the
+provider sync has written its VM firewall and taken the `unsecured` taint off.
+
+**How `pc-sandbox` comes up.** Its control plane is hosted, so the two node groups are all the
+nodes it has, and both join with a taint: `proxcloud.io/unsecured` on every machine, and
+`proxcloud.io/sandbox-system` on the system group. Cilium's agents and `node-setup` tolerate every
+taint. Cilium's operator does not by itself, and it has to run first: it registers Cilium's CRDs,
+no agent starts and no node becomes Ready without them, and the sandbox chart is refused without
+them. The run therefore sets the cluster chart's `ciliumOperatorTolerations` to the two taints
+(cluster chart 0.1.20), and `ciliumOperatorNodeSelector` to the system group's label
+`node-restriction.kubernetes.io/proxcloud-system`: the operator starts on the system machine
+while it is still tainted, and is never scheduled on a sandbox machine, before the fence or
+after it. Its ClusterRole reads the Secrets of every namespace, and a kubelet can ask for the
+token of a pod on its node, so it stays off the machines that run tenants' code, as sandbox-proxy
+and the agent-sandbox controller do
+([managed-sandbox.md §4.5](managed-sandbox.md#45-what-a-compromised-worker-can-reach-here) has the
+table of what runs where). MetalLB's controller is held to the system group by the same label
+(`proxmox.metallb.controllerNodeSelector`, with that group's taint to tolerate): it may rewrite
+its own webhook's configuration, and from a sandbox machine that would bring every Secret that
+is written. Everything else waits for the fence, as it should: CoreDNS, MetalLB,
+konnectivity's agent, sandbox-proxy and the agent-sandbox controller are scheduled once stage
+`register` has stored the kubeconfig and a provider sync has taken the `unsecured` taint off,
+about 20 minutes after the machines joined. Until then `kubectl logs` and `exec` on `pc-sandbox`
+answer "No agent available". A platform whose BOM names a tenant cluster chart before 0.1.20
+(v0.12.0-rc.1 and v0.12.0-rc.2 name 0.1.19) is refused `placement: separate` at the save: under
+that chart the cluster never comes up.
+
+**A build of `separate` that fails** leaves what it made: the pool, the token, the Application
+and, if it got that far, the machines, running and joined. Until a run has registered the cluster
+and a provider sync has fenced them, **those machines have no VM firewall**. No sandbox can start
+on them (the `unsecured` taint stays, the sandbox provider is disabled or absent, and "live" is
+refused), and the isolation rules of the sandbox range, which the run writes before any machine
+exists, hold for them as for every sandbox machine: nothing from that range reaches a blocked
+network of the provider. What those rules do not cover stays open to the machines: a private
+address that is in no blocked network, which only the VM firewall would close, and the internet.
+Nothing ends that state by itself. **Retry** once the cause is gone, which
+goes on with the same machines, or set `placement: off` and apply, which deletes them with the
+token and the pool. Do not leave a failed build standing.
+
+**After a build of `separate` that failed under v0.12.0-rc.2.** The cluster keeps chart 0.1.19, so
+no apply repairs it. In this order: set `placement: off` and apply (the machines, the token, the
+pool and the Application go); upgrade the platform to a release whose BOM names chart 0.1.20;
+then set `separate` again. The upgrade alone does not work: it is an apply, and stage 1 of every
+apply stops on the Check's `spec` row while `separate` is stored. `shared` does not work either:
+the placement of a cluster a run has begun only goes to `off` (`409 fixed_fields`). If the upgrade
+was tried first, it has begun: the apply after the `off` then finishes it and removes the cluster
+in the same run.
 
 **Changing it.** Nodes, count, sizes, `dns` and `domain` change with an apply. Fixed once a run
 built it (`409 fixed_fields`): `placement`, which goes only to `off`, `nodeRange` and
