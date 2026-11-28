@@ -478,7 +478,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     sandbox minutes holds a placeholder rate until you set one". No such rule exists on a site set up with the
     Platform setup defaults: their price plan has rules for servers and their traffic, volumes, addresses, images,
     snapshots and protection, and nothing adds a sandbox rule afterwards (only `deploy/seed/seed-operator.py`, the
-    script of a development checkout, writes the two placeholder rules). The charge rates a resource that no rule
+    script an operator runs by hand from a checkout, as the development and chart guides tell, writes the two
+    placeholder rules). The charge rates a resource that no rule
     matches as nothing, without an error or a log line, so such a site would have given every sandbox minute away
     without knowing. Now the texts say what is true, and the save that sets the provider live answers `409` until
     an enabled public price plan that bills the provider has a rule of resource type `sandbox` (any time unit; a
