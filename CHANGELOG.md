@@ -695,6 +695,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     object with a finalizer that stays at a delete, a delete a webhook refuses, an Application that reads OutOfSync
     for an object its render no longer names.
 
+- **Managed platform: the sandbox read failed every minute for every project, so no ended sandbox was archived
+  (drill of v0.12.0-rc.2, findings E2-B and E3-e).** Each read of a project's sandboxes also lists its template
+  builds, in the namespace `sbx-build`. A managed platform has no sandbox registry and its sandbox chart makes no
+  such namespace, and on a shared cluster the portal's identity may do nothing in a namespace it did not bind: the
+  list answered 403, and that failed the whole read. On the lab the API log had one ERROR per attached project per
+  minute (`syncjob: reconcile sandboxes ... pods is forbidden ... in the namespace "sbx-build"`), a sandbox that had
+  ended by its timeout still read RUNNING, no sandbox row was archived, and the tenant's list grew by one row per
+  sandbox ever started. A sandbox lost before its timeout would have been charged until its timeout (up to 24
+  hours); the drill did not have that case. An installer's sandbox cluster was not affected.
+  - *The fix:* a provider without a template registry is not asked for builds at all: it has none (a build, an
+    import and a snapshot all push to that registry). With a registry, a build namespace that is not there yet
+    reads as "no builds": a 404, or a 403 when a read of the namespace itself says it does not exist. A 403 in a
+    build namespace that exists is still an error, and so is a refusal in any other namespace: a list that broke
+    never reads as empty. The same rule holds for every list in that namespace (active build workers, the mirror
+    workers of a template update, the images the registry prune keeps); those three still ask a provider that lost
+    its registry.
+  - *What a site that ran v0.12.0-rc.2 gets at the upgrade:* nothing to do by hand. The first read after the
+    upgrade, within a minute, archives every row the failing reads left. A sandbox that ended by its timeout is
+    archived with that time as its end and its charge ends there, not at the time of the upgrade; a deleted one
+    keeps the end of its delete. A sandbox that was lost before its timeout while the reads failed has no recorded
+    end: it ends at its timeout if that has passed, else at the first read.
+  - *A disabled sandbox provider* is still read, so what runs on it is ended when it ends; a project with no
+    sandbox row left on it is no longer read, and neither is its cluster asked. A read that fails is logged once
+    per provider and run with the number of projects, not once per project: an ERROR for a live provider, a WARN
+    for a disabled one. A row left on a provider whose sandboxes were switched off is ended by the next entry.
+  - Shown in unit tests on a fake of the shared cluster's permissions and in an integration test whose cluster
+    refuses the build namespace as the lab's did. Not run on a lab.
+- **Managed platform: after sandboxes were switched off, a project attached to the sandbox provider could never be
+  deleted (drill of v0.12.0-rc.2, findings E5-A and E3-B).** The project teardown asks the sandbox provider's
+  cluster to delete the project's namespace. The off took the sandbox machines and the sandbox chart away and
+  left the provider row the kubeconfig the run had stored, whose identity was gone with the chart: every teardown
+  answered `401: Unauthorized`, the project stayed `DELETE_IN_PROGRESS`, and the deletion sweep failed again every
+  minute with two ERROR lines (`teardown: delete sandbox namespace and templates`, `cascade cloud delete failed`).
+  With `attachToNewProjects`, every project made while sandboxes were on is attached. The only way out was to
+  build sandboxes again. With placement `shared` the off also left each project's namespace `sb-<project>` on the
+  platform cluster.
+  - *The off, a Remove, and the off that cleans a failed build:* when the last sandbox machine is gone the run takes
+    the sandbox provider's identities away (`secret.kubeconfig`, `secret.rotationKubeconfig`,
+    `secret.proxyWakeToken`) and writes `config.sandbox.offSince` with the time. Such a provider has **no
+    placement**. Not earlier: until the pool is empty its cluster may still run a sandbox. The next build adopts
+    the row as before, takes the mark off and stores a kubeconfig again (a rotation kubeconfig or a wake token set
+    by hand is not given back: set it again); the operator's settings on the row
+    (name, templates, limits, attach policy) are kept through both.
+  - *A provider with no placement holds nothing on a cluster.* The project teardown, the sandbox read (every
+    minute, and the 15-minute sync) and a suspension end and archive the project's sandbox rows on it and ask no
+    cluster: a project attached to it is deleted at the next sweep. A row ends at its timeout if that came
+    first, else at the time in `offSince`, and its charge ends there. The registry prune passes such a provider
+    over, and setting it live is refused with the reason (`sandboxes are switched off on this platform`).
+  - *Where the line is.* Both halves are needed: the mark, and no kubeconfig. Every other sandbox provider is
+    asked as before, and one whose cluster answers 401, 403 or not at all keeps failing the teardown, the read and
+    the suspension with that error: its namespace may still run a tenant's code, and no project is called deleted
+    over it. A kubeconfig set by hand on a row that carries the mark makes it a provider with a placement again,
+    also across a restart of the API; the next off takes it away and writes its own time.
+  - *The off of `shared`* now deletes the namespaces `sb-<project>` of that sandbox provider on the platform
+    cluster first, while the sandbox chart still runs, and waits for them (stage `cluster`: "deleting the sandbox
+    namespaces of N projects"). Only a namespace that carries the product's labels for that provider
+    (`app.kubernetes.io/managed-by: proxcloud`, `proxcloud.io/tenant`, `proxcloud.io/service`) and is named
+    `sb-` plus the project its `proxcloud.io/project` label names is deleted; a functions namespace, another
+    provider's and any namespace without those labels are never touched. One that is still being deleted after
+    five minutes is named in the API log (`a project's sandbox namespace is still being deleted`) and the off goes
+    on: it ends when its last pod is confirmed gone, which for a machine that no longer answers is when the off
+    has deleted that machine. With `separate` the namespaces go with the cluster, as before.
+  - *After sandboxes are built again* a project attached before has no namespace until its first sandbox create.
+    On a shared cluster its read then answered 403; it is now "no sandboxes" when a read of the namespace itself
+    says it does not exist, and still an error in a namespace that exists.
+  - *What a site that ran the off of v0.12.0-rc.2 gets at the upgrade:* nothing to do by hand. When the API
+    starts it gives every DISABLED sandbox provider that carries no mark yet, of an installation that records no
+    built sandboxes (`status.sandbox` is empty, or the installation is gone), the same write, with the time of that
+    start (the time of the off is recorded nowhere), and logs one INFO line per provider. The first deletion sweep
+    after it finishes a project left in `DELETE_IN_PROGRESS`, and the rows that were left RUNNING are archived at
+    their timeout, or at that start for one whose timeout had not come yet. A provider whose installation records
+    built sandboxes, one that is not DISABLED, and one that carries the mark already is not touched. The
+    namespaces such an off left on a shared platform cluster stay until the next off, or are deleted by
+    hand (`kubectl delete namespace sb-<project>`); no pod runs in them, the sandbox machines are gone.
+  - *Still not in this release:* no route detaches a project from a provider. A project stays attached to the
+    disabled sandbox provider after an off, and is attached again to the same row when sandboxes come back.
+  - Shown in unit tests of the run on fakes of the seed and the platform cluster, and in an integration test that
+    builds the state the lab was left in (a project in `DELETE_IN_PROGRESS`, a row still RUNNING, a kubeconfig
+    that answers 401) with the production sandbox service on PostgreSQL. Not run on a lab.
 - **A release that changed only the load balancer controller reached no cluster by itself.** The tenant's cluster
   page offered "Platform update available" only when the cluster's chart version differed from the provider's, and
   the operator's **Bump all** skipped every cluster whose chart was the provider's. The controller's image is pinned

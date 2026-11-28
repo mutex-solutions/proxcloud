@@ -345,7 +345,12 @@ func (j *Job) syncService(ctx context.Context, p *project.Project, es *externals
 		return j.syncPowerDNSService(ctx, p, es)
 	}
 	if es.IsSandbox() {
-		return j.syncSandboxService(ctx, p, es)
+		n, err := j.syncSandboxService(ctx, p, es)
+		// A DISABLED provider's failing read is reported by the minutely read, once per run (RunSandboxState).
+		if err != nil && !es.IsDisabled() {
+			j.log.Error("syncjob: reconcile sandboxes", "project", p.ID, "serviceId", es.ID, "err", err)
+		}
+		return n
 	}
 	// No other provider kinds exist.
 	return 0

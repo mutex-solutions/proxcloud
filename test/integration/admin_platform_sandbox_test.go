@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -223,6 +224,49 @@ func TestPlatformSandboxProviderRows(t *testing.T) {
 	es, _ = esSvc.Get(ctx, "svc-pve")
 	if _, ok := es.PVESandboxConfig(); ok || len(es.PVENetworkConfig().SandboxCIDRs) != 0 || es.PVENetworkConfig().CIDRPool != "10.100.0.0/16" || es.PVEConfig().Secret != "portal-token" {
 		t.Fatalf("after the removal: %+v", es.Config)
+	}
+
+	// And the sandbox provider, when the last machine is gone: its kubeconfig goes and the row says since when it has
+	// no placement; nothing else on it changes, and no other row of the installation is touched. Written once.
+	if _, err := h.PlatformRegister(ctx, map[string]any{"name": "lab Kubernetes", "type": "CLOUD", "status": "PUBLIC",
+		"config": map[string]any{"provider": "kamaji", "region": "lab", platformlife.ProviderMarker: "pi-1"}, "secret": map[string]any{"kubeconfig": "kamaji-kubeconfig-0123456789"}}); err != nil {
+		t.Fatal(err)
+	}
+	offAt := time.Date(2026, 11, 28, 1, 12, 0, 0, time.UTC)
+	if other, err := h.PlatformSandboxOff(ctx, "pi-2", offAt); err != nil || len(other) != 0 {
+		t.Fatalf("the off of another installation wrote %v, %v", other, err)
+	}
+	if sbx, _ = esSvc.Get(ctx, id); sbx.SandboxConfig().Kubeconfig != "portal-kubeconfig-three-0123456789" {
+		t.Fatalf("the off of another installation took this one's kubeconfig: %q", sbx.SandboxConfig().Kubeconfig)
+	}
+	written, err := h.PlatformSandboxOff(ctx, "pi-1", offAt)
+	if err != nil || !slices.Equal(written, []string{id}) {
+		t.Fatalf("the off wrote %v, %v", written, err)
+	}
+	sbx, _ = esSvc.Get(ctx, id)
+	if since, off := sbx.SandboxOffSince(); !off || !since.Equal(offAt) || sbx.SandboxConfig().Kubeconfig != "" || sbx.Name != "Sandboxes (renamed)" || len(sbx.SandboxConfig().Templates) != 1 || !sbx.IsDisabled() {
+		t.Fatalf("the sandbox provider after the off: since %s (%v), %+v", since, off, sbx)
+	}
+	if again, err := h.PlatformSandboxOff(ctx, "pi-1", offAt.Add(time.Hour)); err != nil || len(again) != 0 {
+		t.Fatalf("the off again wrote %v, %v", again, err)
+	}
+	all, err := esSvc.ListByType(ctx, externalservice.TypeCloud)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range all {
+		if all[i].Provider() == "kamaji" && all[i].Secret.(map[string]any)["kubeconfig"] != "kamaji-kubeconfig-0123456789" {
+			t.Fatalf("the off took the kubeconfig of the Kubernetes provider: %v", all[i].Secret)
+		}
+	}
+	// Sandboxes are built again: the same row, a kubeconfig again, no mark, the operator's templates kept.
+	back, err := h.PlatformRegister(ctx, body("portal-kubeconfig-four-0123456789"))
+	sbx, _ = esSvc.Get(ctx, id)
+	if _, off := sbx.SandboxOffSince(); err != nil || back != id || off || sbx.SandboxConfig().Kubeconfig != "portal-kubeconfig-four-0123456789" || len(sbx.SandboxConfig().Templates) != 1 || !sbx.IsDisabled() {
+		t.Fatalf("adopted after an off: %q %v off=%v %+v", back, err, off, sbx)
+	}
+	if raw, _ := repo.FindDoc(ctx, "externalService", id); raw["config"].(map[string]any)["sandbox"].(map[string]any)[externalservice.SandboxOffSinceKey] != nil {
+		t.Fatalf("the adopted row still carries the mark: %v", raw["config"])
 	}
 }
 

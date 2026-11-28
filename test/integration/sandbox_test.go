@@ -3,8 +3,10 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -44,6 +46,9 @@ type sbxCluster struct {
 	crs map[string]map[string]any // "ns/name"
 	// autoReady makes every new sandbox's pod Ready at once (the E2B create waits for it).
 	autoReady bool
+	// noBuildNamespace makes a list of pods in the build namespace answer as a managed platform's cluster does: its
+	// sandbox chart makes no such namespace, and the portal's identity holds no right outside the namespaces it bound.
+	noBuildNamespace bool
 }
 
 func newSbxCluster() *sbxCluster {
@@ -80,7 +85,12 @@ func (c *sbxCluster) ApplyResourceQuota(context.Context, map[string]any) error {
 func (c *sbxCluster) GetSecretData(context.Context, string, string) (map[string][]byte, error) {
 	return nil, nil
 }
-func (c *sbxCluster) ListPods(context.Context, string, string) ([]map[string]any, error) {
+func (c *sbxCluster) ListPods(_ context.Context, ns, _ string) ([]map[string]any, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.noBuildNamespace && ns == sandbox.BuildNamespace {
+		return nil, &kamajik8s.APIError{Status: http.StatusForbidden, Message: `pods is forbidden: User "system:serviceaccount:sandbox-system:proxcloud-sandbox" cannot list resource "pods" in API group "" in the namespace "sbx-build"`}
+	}
 	return nil, nil
 }
 func (c *sbxCluster) ApplyCR(_ context.Context, _, _, plural string, obj map[string]any) error {
@@ -456,6 +466,149 @@ func TestSandboxRunsAreBilled(t *testing.T) {
 	}
 	if r := f.row(execd.ID); r == nil || r.Data["status"] != sandbox.StatusDeleted || r.Data["endedAt"] == nil {
 		t.Fatalf("deleted row: %+v", r)
+	}
+}
+
+// The minutely read on a managed platform, whose cluster has no build namespace (v0.12.0-rc.2, drill E2-B: the read
+// failed for every project, so a sandbox that had ended stayed RUNNING and no row was archived).
+func TestSandboxReadOnAManagedPlatform(t *testing.T) {
+	ctx := context.Background()
+	f := newSbxFixture(t, gatesHold)
+	f.cluster.noBuildNamespace = true
+	ns := sandbox.NamespaceFor("pa")
+	var logs bytes.Buffer
+	asked, gone := 0, false
+	job := syncjob.New(f.projs, f.es, f.rows, slog.New(slog.NewTextHandler(&logs, nil))).
+		WithSandboxFactory(func(es *externalservice.ExternalService) (*sandbox.Service, error) {
+			if asked++; gone {
+				return nil, errors.New("the cluster is gone")
+			}
+			return sandbox.NewWithAPI(f.cluster, es.SandboxConfig(), es.ID), nil
+		})
+	read := func() {
+		t.Helper()
+		if _, err := job.RunSandboxState(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lose := func(externalID string) {
+		t.Helper()
+		if err := f.cluster.DeleteCR(ctx, "", "", "", ns, externalID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live := func() []*billingapi.BillingResource {
+		t.Helper()
+		brs, err := billingresource.GetBillingResources(ctx, f.rows,
+			map[string]billingresource.Provider{cloud.TypeSandbox: billingresource.NewSandboxProvider()}, "pa", "sbx", billingapi.BillingContext{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return brs
+	}
+	archivedEnd := func(id string) time.Time {
+		t.Helper()
+		for _, b := range f.archivedBill() {
+			if b.ResourceID == id && b.DeletedAt != nil {
+				return *b.DeletedAt
+			}
+		}
+		t.Fatalf("sandbox %s is not billed to an end", id)
+		return time.Time{}
+	}
+
+	// A sandbox lost before its timeout is ended and no longer charged after ONE read.
+	lost := f.create()
+	read()
+	if r := f.row(lost.ID); r == nil || r.Data["status"] != sandbox.StatusRunning || len(live()) != 1 {
+		t.Fatalf("a running sandbox is read as running and charged: %+v", r)
+	}
+	lose(lost.ExternalID)
+	read()
+	if r := f.row(lost.ID); r != nil {
+		t.Fatalf("a lost sandbox stays %v after a read: it is charged until its shutdownTime\n%s", r.Data["status"], logs.String())
+	}
+	if n := len(live()); n != 0 {
+		t.Fatalf("%d sandbox(es) still charged as running", n)
+	}
+	if end := archivedEnd(lost.ID); end.After(time.Now().Add(time.Minute)) {
+		t.Fatalf("the lost sandbox is charged to %s", end)
+	}
+
+	// What the broken reads left: a row still RUNNING two hours after its sandbox ended by its timeout. The first
+	// read archives it with its true end, and its charge ends there, not at the time of the repair.
+	stale := f.create()
+	started := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
+	timeout := started.Add(time.Hour)
+	row := f.row(stale.ID)
+	row.Data["status"], row.Data["runningSince"], row.Data["shutdownTime"] = sandbox.StatusRunning, started.Format(time.RFC3339), timeout.Format(time.RFC3339)
+	if _, err := f.rows.Update(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	lose(stale.ExternalID)
+	read()
+	if r := f.row(stale.ID); r != nil {
+		t.Fatalf("the stale row stays %v", r.Data["status"])
+	}
+	history, err := f.rows.FindArchivedSince(ctx, "pa", "sbx", time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, h := range history {
+		if h.CloudResourceID == stale.ID {
+			found = h.Data["status"] == sandbox.StatusDeleted && h.Data["endedAt"] == timeout.Format(time.RFC3339)
+		}
+	}
+	if !found {
+		t.Fatalf("the stale row is archived DELETED with endedAt %s: %+v", timeout.Format(time.RFC3339), history)
+	}
+	if end := archivedEnd(stale.ID); !end.Equal(timeout) {
+		t.Fatalf("the stale sandbox is charged to %s, its true end is %s (two hours before this read)", end, timeout)
+	}
+
+	// A DISABLED provider: what still runs is read and ended; with no row left its cluster is not asked.
+	last := f.create()
+	if code, body := f.do(sbxB, http.MethodPost, "/project/pb/cloud", `{"type":"SANDBOX","data":{"template":"python","timeoutSeconds":600}}`); code != http.StatusOK {
+		t.Fatalf("create in pb: %d %s", code, body)
+	}
+	f.setProvider(externalservice.StatusDisabled)
+	lose(last.ExternalID)
+	read()
+	if r := f.row(last.ID); r != nil {
+		t.Fatalf("a DISABLED provider's lost sandbox stays %v", r.Data["status"])
+	}
+	asked = 0
+	read()
+	if asked != 1 {
+		t.Fatalf("the cluster of a DISABLED provider was asked %d times: once for pb, which has a sandbox, and not for pa, which has none", asked)
+	}
+
+	// A provider whose cluster is gone while rows are left in two projects: one line per run. A WARN when the
+	// provider is DISABLED (an "off" took the cluster away), an ERROR while it is live.
+	if _, err := f.rows.Insert(ctx, &cloud.CloudResource{Type: cloud.TypeSandbox, ExternalID: "sbx-left", ServiceID: "sbx", ProjectID: "pa", Region: "az1",
+		Data: map[string]any{"status": sandbox.StatusRunning}}); err != nil {
+		t.Fatal(err)
+	}
+	gone = true
+	for _, c := range []struct{ status, level string }{{externalservice.StatusDisabled, "WARN"}, {externalservice.StatusPublic, "ERROR"}} {
+		f.setProvider(c.status)
+		logs.Reset()
+		read()
+		out := logs.String()
+		if strings.Count(out, "level=") != 1 || !strings.Contains(out, "level="+c.level) || !strings.Contains(out, "projectsFailed=2") || !strings.Contains(out, "the cluster is gone") {
+			t.Fatalf("a %s provider whose cluster is gone, two projects: one %s line, got\n%s", c.status, c.level, out)
+		}
+		// The 15-minute sync and the operator's "sync project" read the same provider. For a DISABLED one they leave
+		// the report to the minutely line above; for a live one the project's failing read is an ERROR.
+		logs.Reset()
+		if err := job.SyncOne(ctx, "pa", "sbx"); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]int{"WARN": 0, "ERROR": 1}[c.level]
+		if out := logs.String(); strings.Count(out, "level=") != want || strings.Count(out, "level=ERROR") != want || (want == 1 && !strings.Contains(out, "project=pa")) {
+			t.Fatalf("a sync of one project on a %s provider whose cluster is gone: %d ERROR line(s), got\n%s", c.status, want, out)
+		}
 	}
 }
 

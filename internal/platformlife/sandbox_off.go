@@ -13,15 +13,25 @@ package platformlife
 //     machine. They go once no MachineDeployment, MachineSet or Machine of the group is left, the templates first: the
 //     pool is what they name.
 //
-// Separate has neither: its definitions are inside pc-sandbox and its pool and templates in the namespace pc-sandbox
-// on the platform cluster, and both go with the cluster.
+//   - On the platform cluster the projects' namespaces sb-<project> of the sandbox provider, before the sandbox chart's
+//     Application goes (sandboxProjectNamespacesGone).
+//
+// Separate has none of the three: its definitions and the projects' namespaces are inside pc-sandbox and its pool and
+// templates in the namespace pc-sandbox on the platform cluster, and all go with the cluster.
+//
+// And for both placements, when the last sandbox machine is gone: the sandbox provider's identity is taken away and
+// the row marked as having no placement (SandboxProviderOff).
 
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
 const (
@@ -162,4 +172,96 @@ func (x *acq) sandboxGroupGone(ctx context.Context, seed *kamajik8s.Client) erro
 		}
 	}
 	return waiting(CodeMachineDeleteStuck, "Sandboxes are switched off: the seed is deleting the address pool %s of group %s, and the run goes on when it is gone.", name, SandboxGroup)
+}
+
+// sandboxIdentityKeys are the leaves of a sandbox provider's secret that are an identity on, or of, its cluster: the
+// portal's kubeconfig, the worker rotation's, and the bearer its sandbox-proxy shows the portal.
+var sandboxIdentityKeys = []string{"kubeconfig", "rotationKubeconfig", "proxyWakeToken"}
+
+// SandboxProviderOff makes a sandbox provider row one with no placement: it takes the identities away (they name a
+// cluster, or a node group, that is gone) and writes config.sandbox.offSince, which externalservice.SandboxOffSince
+// reads. From then on the provider's rows are ended without a call and a project attached to it can be deleted
+// (v0.12.0-rc.2, drill E5-A: the off left the row its dead kubeconfig, every teardown answered 401 and no attached
+// project could be deleted). false = the row is not a sandbox provider's, or says so already: the time of that off
+// stays. A row that holds an identity beside the mark (a kubeconfig set by hand since) had a placement until now, so
+// the time is this off's: with the older one, the rows of what ran on that cluster would end before they began. The
+// next build adopts the row and gives it a kubeconfig again (AdoptProvider takes the mark off).
+func SandboxProviderOff(row map[string]any, at time.Time) bool {
+	cfg, _ := row["config"].(map[string]any)
+	if str(cfg, "provider") != "sandbox" {
+		return false
+	}
+	secret, _ := row["secret"].(map[string]any)
+	held := slices.ContainsFunc(sandboxIdentityKeys, func(k string) bool { _, ok := secret[k]; return ok })
+	sb, _ := cfg["sandbox"].(map[string]any)
+	if !held && str(sb, externalservice.SandboxOffSinceKey) != "" {
+		return false
+	}
+	for _, k := range sandboxIdentityKeys {
+		delete(secret, k)
+	}
+	if sb == nil {
+		sb = map[string]any{}
+		cfg["sandbox"] = sb
+	}
+	if held || str(sb, externalservice.SandboxOffSinceKey) == "" {
+		sb[externalservice.SandboxOffSinceKey] = at.UTC().Format(time.RFC3339)
+	}
+	return true
+}
+
+// projectNamespaceWait is how long an off of placement shared waits for one project's namespace to go before it goes
+// on without it. A namespace ends when its last pod is confirmed gone, and a pod on a sandbox machine that no longer
+// answers is confirmed only once that machine is deleted, which this very off does further on.
+const projectNamespaceWait = 5 * time.Minute
+
+// sandboxProjectNamespacesGone deletes, in an off of placement shared, the namespaces sb-<project> of the sandbox
+// provider on the platform cluster, and waits for them, before the sandbox chart's Application is deleted: its
+// controller still takes its objects away, and the portal's identity, which could have deleted them at a project's
+// teardown, goes with that chart (drill E3-B: both namespaces of the lab stayed). With separate they go with
+// pc-sandbox.
+//
+// Only a namespace that is the product's own for that provider goes: managed by the product, labelled as a tenant's,
+// with the provider's id, and named sb-<the project its label names>. Any other namespace is never deleted, whatever
+// its name.
+func (x *acq) sandboxProjectNamespacesGone(ctx context.Context, wl *kamajik8s.Client) error {
+	var providerID string
+	if p := x.in.Status.Providers; p != nil {
+		providerID = p.Sandbox
+	}
+	if providerID == "" { // never registered: no project was ever attached
+		return nil
+	}
+	items, err := wl.ListNamespaces(ctx, sandbox.LabelManagedBy+"="+sandbox.ManagedByValue+","+sandbox.LabelTenant+"=true,"+sandbox.LabelService+"="+providerID)
+	if err != nil {
+		return classify(CodeWorkloadUnreachable, err)
+	}
+	var going []string
+	for _, ns := range items {
+		name := str(ns, "metadata", "name")
+		labels, _ := dig(ns, "metadata", "labels").(map[string]any)
+		if project := str(labels, sandbox.LabelProject); project == "" || name != sandbox.NamespaceFor(project) || str(labels, sandbox.LabelService) != providerID ||
+			str(labels, sandbox.LabelManagedBy) != sandbox.ManagedByValue || str(labels, sandbox.LabelTenant) != "true" {
+			continue
+		}
+		if since := str(ns, "metadata", "deletionTimestamp"); since != "" {
+			if t, err := time.Parse(time.RFC3339, since); err == nil && time.Since(t) > projectNamespaceWait {
+				x.r.Log.Warn("platform run: a project's sandbox namespace is still being deleted, the off goes on", "run", x.runID, "namespace", name, "since", since)
+				continue
+			}
+			going = append(going, name)
+			continue
+		}
+		if err := x.check(ctx); err != nil {
+			return err
+		}
+		if err := wl.DeleteNamespace(ctx, name); err != nil && !kamajik8s.NotFound(err) {
+			return classify(CodeWorkloadUnreachable, err)
+		}
+		going = append(going, name)
+	}
+	if len(going) > 0 {
+		return waiting(CodeMachineDeleteStuck, "Sandboxes are switched off: the platform cluster is deleting the sandbox namespaces of %d projects (%s), and the run goes on when they are gone.", len(going), clip(strings.Join(going, ", ")))
+	}
+	return nil
 }

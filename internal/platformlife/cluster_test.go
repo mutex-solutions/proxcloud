@@ -41,6 +41,7 @@ type platform struct {
 	part      string   // the part the next start names
 	first     []string // the units the next start's plan replaces by deleting the machine first
 	registers []map[string]any
+	offs      []string // the installations whose sandbox provider a run marked as having no placement
 	disabled  int
 	conflict  error
 	// sbx is the API of the separate sandbox cluster pc-sandbox (sandboxPlatform); sites are the writes of the run to
@@ -71,6 +72,7 @@ func newPlatform(t *testing.T, kind string) *platform {
 		return "svc-" + str(body, "config", "provider"), nil
 	}
 	p.r.Disable = func(context.Context, string) error { p.disabled++; return nil }
+	p.r.SandboxOff = func(_ context.Context, id string, _ time.Time) error { p.offs = append(p.offs, id); return nil }
 	p.r.SandboxSite = func(_ context.Context, _ *Installation, s *SandboxSite) error {
 		if p.siteErr != nil {
 			return p.siteErr

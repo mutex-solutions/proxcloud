@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
@@ -195,27 +196,44 @@ func checkSandboxClass(rc map[string]any) error {
 
 // syncSandboxService reconciles the project's SANDBOX rows off the sandbox cluster. A sandbox the controller removed at
 // its shutdownTime vanishes from the list; its row is ended (sandbox.MarkVanished) and archived, and the charge rates it to its end.
-func (j *Job) syncSandboxService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
+// The error is the caller's to report: the minutely read says it once per provider, not once per project.
+//
+// A DISABLED provider takes no new sandbox and no new build, so a project with no SANDBOX row left on it has nothing
+// to end and its cluster is not asked. A provider with no placement (externalservice.SandboxOffSince: the run that
+// switched sandboxes off saw the last machine gone) has no cluster to ask: the rows left on it are ended and archived
+// here. A provider WITH a placement whose cluster does not answer is not read that way: its error is returned.
+func (j *Job) syncSandboxService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) (int, error) {
 	if j.sandboxFor == nil {
-		return 0
+		return 0, nil
 	}
-	region := es.SandboxRegion()
+	if since, off := es.SandboxOffSince(); off {
+		// No placement (sandboxes switched off): the rows that are left end without a call to any cluster.
+		rows, err := j.cloud.FindByServiceProjectAndType(ctx, es.ID, p.ID, cloud.TypeSandbox)
+		if err != nil || len(rows) == 0 {
+			return 0, err
+		}
+		return sandbox.EndRowsOff(ctx, j.cloud, rows, since, j.now())
+	}
+	if es.IsDisabled() {
+		if rows, err := j.cloud.FindByServiceProjectAndType(ctx, es.ID, p.ID, cloud.TypeSandbox); err == nil && len(rows) == 0 {
+			return 0, nil
+		}
+	}
 	ss, err := j.sandboxFor(es)
 	if err != nil {
-		j.log.Error("syncjob: build sandbox service", "project", p.ID, "serviceId", es.ID, "err", err)
-		return 0
+		return 0, fmt.Errorf("build sandbox service: %w", err)
 	}
-	st, err := providers.Reconcile(ctx, ss.SyncProvider(region, p.ID), j.cloud, es.ID, j.now())
-	if err != nil {
-		j.log.Error("syncjob: reconcile sandboxes", "project", p.ID, "serviceId", es.ID, "err", err)
-	}
-	return st.Created + st.Updated
+	st, err := providers.Reconcile(ctx, ss.SyncProvider(es.SandboxRegion(), p.ID), j.cloud, es.ID, j.now())
+	return st.Created + st.Updated, err
 }
 
 // RunSandboxState is the minutely sandbox read, ahead of the minutely charge: every enabled project on every sandbox
-// provider (a DISABLED provider's sandboxes still run until they end). A sandbox lives for seconds to hours, so the
-// 15-minute sync alone would see many start and end unread: this pins each start (runningSince) within a minute and
-// ends each vanished row (sandbox.MarkVanished). Returns the rows changed.
+// provider (a DISABLED provider's sandboxes still run until they end, so its rows are read until none is left). A
+// sandbox lives for seconds to hours, so the 15-minute sync alone would see many start and end unread: this pins each
+// start (runningSince) within a minute and ends each vanished row (sandbox.MarkVanished). Returns the rows changed.
+//
+// A read that fails is logged once per provider and run, with the first project's error and the count: an ERROR for a
+// live provider, a WARN for a DISABLED one, whose cluster an "off" may have taken away while rows were left.
 // ponytail: one list per project per minute; one cluster-wide list per provider if the project count grows.
 func (j *Job) RunSandboxState(ctx context.Context) (int, error) {
 	services, err := j.services.ListByType(ctx, externalservice.TypeCloud)
@@ -232,10 +250,25 @@ func (j *Job) RunSandboxState(ctx context.Context) (int, error) {
 		if !es.IsSandbox() {
 			continue
 		}
+		failed, firstProject, first := 0, "", error(nil)
 		for k := range projects {
-			if projects[k].HasService(es.ID) {
-				total += j.syncSandboxService(ctx, &projects[k], es)
+			if !projects[k].HasService(es.ID) {
+				continue
 			}
+			n, err := j.syncSandboxService(ctx, &projects[k], es)
+			total += n
+			if err != nil {
+				if failed++; first == nil {
+					firstProject, first = projects[k].ID, err
+				}
+			}
+		}
+		if failed > 0 {
+			logf := j.log.Error
+			if es.IsDisabled() {
+				logf = j.log.Warn
+			}
+			logf("syncjob: reconcile sandboxes", "serviceId", es.ID, "status", es.Status, "projectsFailed", failed, "project", firstProject, "err", first)
 		}
 	}
 	return total, nil

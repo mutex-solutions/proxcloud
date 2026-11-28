@@ -50,6 +50,9 @@ func (h *Handler) sandboxGatesFor(ctx context.Context, es *externalservice.Exter
 	if h.sandboxGates == nil {
 		return []sandbox.Gate{{Name: "checker", Detail: "no release-gate checker is wired in this API"}}
 	}
+	if _, off := es.SandboxOffSince(); off {
+		return []sandbox.Gate{{Name: "config", Detail: "sandboxes are switched off on this platform, so the provider has no cluster: set spec.sandbox.placement and apply, then check again"}}
+	}
 	if err := es.SandboxConfig().Validate(); err != nil {
 		return []sandbox.Gate{{Name: "config", Detail: err.Error()}}
 	}
