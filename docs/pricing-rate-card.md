@@ -26,7 +26,7 @@ One PUBLIC plan, rules keyed `(resourceType, timeUnit)`: every rule is per `hour
 | File share | share | — | `size_gb` | $0.00007 / GB / hr |
 | Object storage | bucket | — | `size_gb` | $0.00007 / GB / hr |
 | Managed databases | database_cluster | `engine eq <engine>` (8 rules: PostgreSQL, MySQL, MariaDB, Valkey, FerretDB, Kafka, OpenSearch, plus an autoscale surcharge on `autoscale_enabled`) | `vcpus_total`, `ram_gb_total`, `storage_gb_total` | DigitalOcean parity, per engine: see the seed |
-| Sandbox CPU + RAM | sandbox (`minute`) | — | `vcpus`, `ram_gb` | $0.000134 / vCPU / min, $0.000067 / GB / min. **Placeholder** |
+| Sandbox CPU + RAM | sandbox (`minute`) | — | `vcpus`, `ram_gb` | $0.00142 / vCPU / min, $0.00018 / GiB / min; the smallest sandbox (1 vCPU, 1 GiB) is $0.00160 / min. The owner's decision of 2026-11-28, modelled on AWS Lambda: see [below](#sandbox-cpu--ram-modelled-on-aws-lambda) |
 | Sandbox GPU | sandbox (`minute`) | — | `gpu_count` | $0.0083 / GPU / min. **Placeholder** |
 | Sandbox snapshot | sandbox_snapshot | — | `size_gb` | $0.00007 / GB / hr. **Placeholder** |
 
@@ -93,6 +93,61 @@ volumes, spaces, bandwidth docs) · aws.amazon.com (ec2 on-demand, ebs, vpc,
 elasticloadbalancing, s3) · us.ovhcloud.com/public-cloud/prices.
 OVH LB / additional-IP rows are JS-rendered and were secondary-sourced — reverify before
 quoting them externally.
+
+## Sandbox CPU + RAM: modelled on AWS Lambda
+
+Decided by the owner on 2026-11-28: a sandbox minute is priced like AWS Lambda and its peers. The rule
+`PLACEHOLDER sandbox: CPU + RAM per minute` of the seed holds `vcpus` **0.00142** and `ram_gb` **0.00018** per minute.
+Its name keeps the word PLACEHOLDER on purpose (`deploy/seed/seed-operator.py` matches rules by name: a renamed rule
+would be added beside the old one on a seeded site, and both would be charged); its values are no placeholders any
+more. The sandbox GPU rule and the sandbox snapshot rule are still placeholders. "Lambda" here is AWS Lambda, the
+function service; the Lambda of the GPU tables above is a GPU cloud of that name, another company.
+
+**Derivation.** AWS Lambda's list price for x86 in us-east-1 is $0.0000166667 per GB-second of memory with the CPU
+tied to the memory, which at the size that gives one vCPU (1,769 MB = 1.7275 GiB) is $0.00172754 per minute. That
+amount is split between vCPU and memory at the ratio 8 (`vcpus` = 8 x `ram_gb`), the round middle of what the vendors
+that price both publish, and rounded to five decimal places.
+
+**What it is modelled on:** the vendors' public list prices as fetched on 2026-11-28 (USD, on demand, x86, each
+vendor's lowest-priced US region, per minute, before any free tier).
+
+| Vendor product | vCPU / min | GiB / min | vCPU : GiB | One vCPU with 1.7275 GiB / min |
+|---|---|---|---|---|
+| AWS Lambda | one price, on memory | | | 0.00172754 |
+| Google Cloud Run, request-based | 0.00144 | 0.00015 | 9.6 | 0.00169913 |
+| Azure Container Apps, active | 0.00144 | 0.00018 | 8.0 | 0.00175096 |
+| **This rule** | **0.00142** | **0.00018** | 7.9 | **0.00173096** |
+
+For that shape the rule is 0.2% above Lambda, 1.9% above Cloud Run and 1.1% below Container Apps.
+
+**It is the rate that is alike, not the bill of a short run.** The meter bills whole minutes, at least one, from the
+moment a sandbox is Ready to its end (`internal/cloud/billingresource/sandbox.go`); Lambda bills by the millisecond
+and nothing between two calls. A sandbox that lives 20 seconds pays one whole minute, 0.00160 for the smallest shape,
+where a per-second meter at the same rate would charge 0.00053. For use that lasts the figures meet: one hour of one
+vCPU with 1.7275 GiB is 0.1039 here and 0.1037 on Lambda.
+
+What else a reader needs:
+
+- **Memory is whole GiB.** A sandbox has whole vCPUs and whole GiB, at least 1 of each: there is no 512 MiB sandbox.
+  Per minute: 1 vCPU / 1 GiB **0.00160** (the base minute), 2 vCPU / 1 GiB 0.00302, 2 vCPU / 4 GiB 0.00356.
+- **On the invoice a base minute is 0.00.** A sent bill shows two decimal places and rounds every item by itself. The
+  sandbox items below 0.005 are summed per project into one line, `Sandbox runs below 0.005 each (<n>)`: four base
+  runs of one minute make 0.01, one to three are invoiced nothing. A base sandbox shows 0.01 by itself from 4 minutes.
+- **No free tier.** The three vendors above give a monthly allowance, so a small workload that costs 0.00 there is
+  billed here from its first minute.
+- **No per-request price.** Lambda adds $0.20 per million requests. A rule prices an attribute of a resource per time
+  unit and nothing counts requests, so there is no such price here, and the time price was not raised to make up for
+  it.
+- **The values are in the site's base currency.** A rule has no currency of its own: 0.00142 is 0.00142 of the base
+  currency (the seed's is USD), and nothing converts it on a site with another one.
+- **An existing site keeps its price.** The seed reaches a site once: the installer runs `seed-operator.py` at its
+  first run, and the Platform setup defaults add no sandbox rule at all. Set the two values under **System**,
+  **Price plans** (Edit on the rule), or with `PUT /api/v1/admin/price-plan/rule/{id}`. Where no sandbox rule
+  exists, add this one with `POST /api/v1/admin/price-plan/rule`: the console's Add rule dialog takes one priced
+  attribute per rule. A rule added where none was bills the running billing cycle back, from each sandbox's start:
+  add it before sandboxes go live. Change the existing rule and do not add a second one: every matching rule adds up.
+
+`internal/platform/pricing/seed_sandbox_test.go` holds the seed to the two values and to the base minute of 0.00160.
 
 ## Seeding
 

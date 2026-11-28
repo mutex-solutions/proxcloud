@@ -17,7 +17,7 @@
     "kubernetes_cluster: EKS-style flat control-plane fee via the generic `existence` attribute (0.10/h ~= $73/mo); worker VMs/volumes/LBs bill through the existing rules. bucket: object storage priced per stored GB-hour (size_gb, ceil'd), or swap attributeName to `existence` for a flat per-bucket fee.",
     "database_cluster is the managed-database FULL price (unlike kubernetes_cluster): the DB pods and volumes run on ops-owned nodes, so nothing else bills them. Attributes are pre-multiplied totals (vcpus_total/ram_gb_total/storage_gb_total = per-instance x replicas — see internal/cloud/billingresource/databasecluster.go). The endpoint gate DEFERS the charge while the LB ingress IP is absent and back-bills the current cycle's elapsed hours once it appears (the engine freezes the watermark at createdAt; it does not waive them). Keep in sync with the database_cluster entries in price-plan-seed.sql.",
     "database_cluster rates are DIGITALOCEAN-PARITY (managed-databases price list, read 2026-08-03; monthly/730h): PG+MySQL fit exactly at the small tiers with $2/vCPU-mo + $11/GB-RAM-mo + $0.215/GB-disk-mo -> 0.002740/0.015068/0.000295 per hour (mariadb=MySQL rates, ferretdb=Mongo rates which are within 1% of PG so PG rates reused); Valkey $2.15/$10.70/$0.215 -> 0.002945/0.014658/0.000295; OpenSearch $2/$4.50/$0.215 -> 0.002740/0.006164/0.000295 (exact on all three DO tiers); Kafka is RAM-rated only ($21/GB-RAM-mo + storage; DO prices the 3-broker cluster, vCPU does not move price across DO's two plans) -> 0.028767 ram + 0.000295 storage. One rule per engine (filter engine eq ...) because rule filters have no OR. Re-derive when DO reprices.",
-    "sandbox and sandbox_snapshot rules are PLACEHOLDERS (names start with PLACEHOLDER) until the owner signs a sandbox rate: sandbox is priced PER MINUTE (timeUnit minute, the only rules here that are not per hour) on vcpus/ram_gb at the instance CPU/RAM hourly rates / 60 and gpu_count at 0.50/h / 60; billing runs from the moment the sandbox is Ready, rounded up to whole minutes, at least one (internal/cloud/billingresource/sandbox.go). sandbox_snapshot is per stored GB-hour like file shares; nothing writes one before phase SB7. The sandbox worker VMs sit in the platform's pool and bill nobody: the per-minute rate carries them. No SQL twin: price-plan-seed.sql does not carry the newer product rules either."
+    "sandbox is priced PER MINUTE (timeUnit minute, the only rules here that are not per hour) on vcpus/ram_gb and on gpu_count; billing runs from the moment the sandbox is Ready, rounded up to whole minutes, at least one (internal/cloud/billingresource/sandbox.go). The CPU + RAM rule (vcpus 0.00142, ram_gb 0.00018) is the owner's decision of 2026-11-28 and no placeholder any more. It is AWS Lambda's list price for x86 in us-east-1 (0.0000166667 USD per GB-second, read 2026-11-28) at the memory size that gives one vCPU, 1,769 MB = 1.7275 GiB: 0.00172754 per minute. That amount is split between vCPU and memory at the ratio 8, the round middle of what the vendors that price both publish (vcpus = 8 x ram_gb and vcpus + 1.7275 x ram_gb = 0.00172754), and rounded to five decimal places. No per-request price, no free tier; a sandbox has whole vCPUs and whole GiB, so the smallest one (1 vCPU, 1 GiB) is 0.00160 a minute (docs/pricing-rate-card.md; internal/platform/pricing/seed_sandbox_test.go holds the two values). The rule KEEPS ITS NAME, the word PLACEHOLDER included: seed-operator.py matches rules by name, so on a seeded site a renamed rule would be added beside the old one and both would be charged. The sandbox GPU rule (gpu_count at 0.50/h / 60) and the sandbox_snapshot rule are still PLACEHOLDERS until the owner signs a rate for them. sandbox_snapshot is per stored GB-hour like file shares; nothing writes one before phase SB7. The sandbox worker VMs sit in the platform's pool and bill nobody: the per-minute rate carries them. No SQL twin: price-plan-seed.sql does not carry the newer product rules either."
   ],
   "plan": {
     "name": "Public rate card",
@@ -525,7 +525,7 @@
           "attributeName": "vcpus",
           "tiers": [
             {
-              "value": "0.000134"
+              "value": "0.00142"
             }
           ]
         },
@@ -533,7 +533,7 @@
           "attributeName": "ram_gb",
           "tiers": [
             {
-              "value": "0.000067"
+              "value": "0.00018"
             }
           ]
         }

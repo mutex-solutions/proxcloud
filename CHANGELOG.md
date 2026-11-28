@@ -329,6 +329,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The default price of a sandbox minute is the one the owner decided on 2026-11-28: `0.00142` per vCPU and
+  `0.00018` per GiB of memory, per minute** (`deploy/seed/price-plan-seed.json`, rule
+  `PLACEHOLDER sandbox: CPU + RAM per minute`; before: the placeholders `0.000134` and `0.000067`, the server rates
+  divided by 60). It is modelled on AWS Lambda and its peers: Lambda's x86 list price in us-east-1 at the memory
+  size that gives one vCPU, split between vCPU and memory at the ratio 8. For that shape the result is 0.2% above
+  Lambda, 1.9% above Google Cloud Run and 1.1% below Azure Container Apps (list prices fetched on 2026-11-28;
+  [pricing-rate-card.md](docs/pricing-rate-card.md#sandbox-cpu--ram-modelled-on-aws-lambda) has the derivation and
+  the table). The smallest sandbox, 1 vCPU with 1 GiB, costs `0.00160` a minute, about 8 times the placeholder. The
+  values are amounts in the site's base currency (the seed's is USD). Only the two values change. The rule keeps its
+  name, the word PLACEHOLDER included: `deploy/seed/seed-operator.py` matches rules by name, so a renamed rule would
+  be added beside the old one on a seeded site and both would be charged. The sandbox GPU rule (`0.0083`) and the
+  sandbox snapshot rule (`0.00007`) are not touched and stay placeholders.
+  `internal/platform/pricing/seed_sandbox_test.go` holds the seed to the two values, to the shape the charge reads
+  and to the base minute.
+  - *What it does not give:* the bill of Lambda for a short run. The meter bills whole minutes, at least one, so a
+    sandbox that lives 20 seconds pays one minute (`0.00160` for the smallest shape). There is no price per request
+    and no free tier. Memory is whole GiB, at least 1. On a sent bill an item below 0.005 shows 0.00, and those
+    sandbox items are summed per project into the line `Sandbox runs below 0.005 each (<n>)`: four runs of one base
+    minute make 0.01, one to three are invoiced nothing.
+  - *An existing site:* nothing changes by itself. The seed reaches a site once: the installer runs
+    `seed-operator.py` at its first run only, and the Platform setup defaults add no sandbox rule. A seeded site
+    keeps the placeholder values until its operator changes them; a site set up with the Platform setup defaults
+    has no sandbox rule, as before.
+  - *To set the price:* **System**, **Price plans**, the public plan, Edit on the sandbox rule, the two values. Or
+    `PUT /api/v1/admin/price-plan/rule/{id}` with the whole rule (omitted keys are dropped), or the MCP tool
+    `update_price_plan_rule`. Where the plan has no sandbox rule, add this one with
+    `POST /api/v1/admin/price-plan/rule` or `create_price_plan_rule`: the console's Add rule dialog takes one priced
+    attribute per rule. New values apply from the next minute's charge, and what an item already accrued stays. Do
+    not apply it by running `seed-operator.py` again: it writes the seed's values over every rule that kept its
+    seed name, an operator's own prices included.
+  - *Set it before go-live:* a rule added where none was, or raised from 0, bills back. The first charge counts the
+    minutes since each sandbox's start, for the running ones and for those that ended in the current billing cycle
+    (read from the charge code, `internal/platform/pricing/bill_build.go`; not run on a lab).
+
 - **The built-in sandbox template images are those of the Actions build of 2026-11-23** (`deploy/templates/images.yaml`,
   run 45167180286 of `sandbox-templates` on commit `57e85c5`; the commit of #443, carried here so that the checks run
   on it). No file under `deploy/templates` or `cmd/mcp-gateway` changed between that commit and this one. On the

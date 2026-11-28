@@ -18,8 +18,10 @@ API = os.environ.get("PROXCLOUD_API", f"http://{HOST}:8080/api/v1")
 TOKEN_URL = os.environ.get(
     "PROXCLOUD_TOKEN_URL", f"http://{HOST}:8090/realms/proxcloud/protocol/openid-connect/token"
 )
-# Resource types the platform bills today; the seed file also prices managed services. The sandbox rules are
-# placeholders (their names say so) until a sandbox rate is signed.
+# Resource types the platform bills today; the seed file also prices managed services. The sandbox CPU + RAM rule
+# holds the default price decided on 2026-11-28; the sandbox GPU and snapshot rules are placeholders until a rate is
+# signed. All three keep their PLACEHOLDER names: the rules are matched by name below, so a renamed rule would be
+# added beside the old one on a seeded site and both would be charged.
 RULE_TYPES = {"instance", "instance_traffic", "volume", "floating_ip", "image", "bucket", "share", "server_protection",
               "server_snapshot", "sandbox", "sandbox_snapshot"}
 DEFAULT_QUOTA = {"servers": 20, "vcpus": 80, "ramMb": 102400, "diskGb": 2000, "networks": 10, "floatingIps": 5}

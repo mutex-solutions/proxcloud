@@ -716,7 +716,7 @@ ended row is `DELETED` with its end and archived; the charge rates archived rows
 sandbox can start and end between two reads: a row that ends without ever being read Ready is billed from the last
 read that saw it pending (`seenPendingAt`, else its create, marked `runningSinceAssumed`), so a short sandbox is
 never free and one that never started pays at most about a minute. `sandbox_snapshot` is per stored GB-hour (`size_gb`), written by pause and snapshot (section 8.4). The seed's rules for both
-are named `PLACEHOLDER ...` until a rate is signed. The worker VMs sit in the platform's pool and bill nobody.
+are named `PLACEHOLDER ...`: the CPU + RAM rule holds the default price decided on 2026-11-28 all the same ([pricing-rate-card.md](pricing-rate-card.md#sandbox-cpu--ram-modelled-on-aws-lambda)), the GPU and snapshot rules hold placeholders until a rate is signed. The worker VMs sit in the platform's pool and bill nobody.
 
 ### 3.3 Quota (D10)
 

@@ -4,6 +4,30 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-28: the default price of a sandbox minute (seed values and a test, no code)
+
+**What changed:** no component, container, route or relation, and no code of the product.
+
+- `deploy/seed/price-plan-seed.json`: the two values of the rule `PLACEHOLDER sandbox: CPU + RAM per minute` are
+  `0.00142` (`vcpus`) and `0.00018` (`ram_gb`), before `0.000134` and `0.000067`. Name, time unit, resource type and
+  apply method are as they were; the GPU rule and the snapshot rule are not touched. The `_readme` gives the
+  derivation.
+- `internal/platform/pricing/seed_sandbox_test.go` (new, package `pricing_test`): reads the embedded seed, holds the
+  rule to the two decimal strings, its name and its shape, and rates one minute of a sandbox as
+  `billingresource.SandboxProvider` hands it over with `pricing.Engine` and every rule of the seed: `0.00160` for
+  1 vCPU with 1 GiB. It is an external test package, as billing's cloud-type parity test: the pricing package itself
+  still imports nothing of `internal/cloud`.
+- `docs/pricing-rate-card.md`, `docs/managed-sandbox.md`, the comment in `deploy/seed/seed-operator.py`: the CPU + RAM
+  rule is no placeholder any more; the rate card says what the price is modelled on and what it is not.
+
+**Why:** the owner decided on 2026-11-28 that sandboxes are priced like AWS Lambda and its peers; the seed held
+placeholders (the server rates divided by 60) until then. The rule's name keeps the word PLACEHOLDER because
+`seed-operator.py` matches rules by name: a renamed rule would be added beside the old one on a seeded site, and
+every matching rule adds up in the charge. The test is there because nothing held the numbers before, and a seed
+value that drifts is a price that changes without a decision.
+
+**Diagrams updated:** none (no element or relation of the model changed).
+
 ## 2026-11-27: an off of sandboxes leaves nothing behind (#514, drill of v0.12.0-rc.1: Z3-B, Z2-c, Z4-d, Z3-C, Z4-e, Z4-c, Z2-d, Z4-b)
 
 **What changed:** no new component, container, route or relation. One new file in the platform runs, and existing
