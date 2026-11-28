@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -34,6 +35,24 @@ func sandboxBOM(t *testing.T) Embedded {
 	cur.Components = slices.Clone(cur.Components) // a test may edit a pin
 	if cur.Feature(FeatureSandbox) == nil || !kamaji.ChartHasGroupPool(ClusterChartVersion(cur.BOM)) || !kamaji.ChartHasGroupPool(cur.TenantCharts.Kubernetes.Version) {
 		t.Fatalf("release %s offers no sandboxes: its BOM needs the sandbox chart and cluster charts %s or newer", cur.Release, kamaji.GroupPoolChartVersion)
+	}
+	// Placement separate needs a tenant cluster chart under which Cilium's operator starts on the sandbox cluster's
+	// tainted nodes (kamaji.OperatorTolerationsChartVersion). main's BOM cannot name that chart before its tag has
+	// published it; a release must name it, or it ships a placement that is refused at the save.
+	if v := cur.TenantCharts.Kubernetes.Version; !kamaji.ChartHasOperatorTolerations(v) && !strings.HasSuffix(cur.Release, "-dev") {
+		t.Fatalf("release %s names tenant cluster chart %s, under which placement separate is refused: publish chart %s (tag proxmox-kamaji-cluster-v%s) and pin it in tenantCharts.kubernetes",
+			cur.Release, v, kamaji.OperatorTolerationsChartVersion, kamaji.OperatorTolerationsChartVersion)
+	}
+	return cur
+}
+
+// separateChart is sandboxBOM for a test of placement separate: until main's BOM names the tenant cluster chart that
+// placement needs (see sandboxBOM), the test runs against that version. Nothing once the pin has moved.
+func separateChart(t *testing.T) Embedded {
+	t.Helper()
+	cur := sandboxBOM(t)
+	if !kamaji.ChartHasOperatorTolerations(cur.TenantCharts.Kubernetes.Version) {
+		cur.TenantCharts.Kubernetes.Version, cur.TenantCharts.Kubernetes.Digest = kamaji.OperatorTolerationsChartVersion, "sha256:"+strings.Repeat("a", 64)
 	}
 	return cur
 }
@@ -66,7 +85,7 @@ func addSandbox(b *BOM) {
 			wave = max(wave, c.Wave)
 		}
 	}
-	b.TenantCharts.Kubernetes.Version, b.TenantCharts.Kubernetes.Digest = kamaji.GroupPoolChartVersion, "sha256:"+strings.Repeat("a", 64)
+	b.TenantCharts.Kubernetes.Version, b.TenantCharts.Kubernetes.Digest = kamaji.OperatorTolerationsChartVersion, "sha256:"+strings.Repeat("a", 64)
 	chart := Chart{Repo: "ghcr.io/mutex-solutions/charts", Name: "proxcloud-sandbox", Version: "0.1.0", Digest: "sha256:" + strings.Repeat("b", 64)}
 	if c := b.Feature(FeatureSandbox); c != nil {
 		c.Chart = chart
@@ -96,8 +115,13 @@ func separateSandbox() *SandboxSpec {
 // them installed is refused the block at the save and in the Check's spec row until an upgrade has moved it to this
 // one, and the sentence names that upgrade. A build whose BOM takes the offer away fails here: its release notes must
 // then say so.
+//
+// Placement separate is taken only on a BOM whose tenant cluster chart lets Cilium's operator start on the sandbox
+// cluster's tainted nodes (0.1.20): a platform that 0.12.0-rc.1 or 0.12.0-rc.2 installed (chart 0.1.19) is refused it
+// at the save, with the upgrade and placement shared as the two ways on, where a run of rc.2 built the machines and
+// then waited for a cluster that could not come up (drill E4-A).
 func TestSandboxIsOffered(t *testing.T) {
-	cur := sandboxBOM(t)
+	cur := separateChart(t)
 	c := cur.Feature(FeatureSandbox)
 	if c.Name != "sandbox" || c.Chart.Name != "proxcloud-sandbox" || c.Chart.Version != "0.1.0" || !strings.HasPrefix(c.Chart.Digest, "sha256:") || c.Namespace != sandboxNamespace || len(c.UpgradeFrom) != 0 {
 		t.Fatalf("the sandbox component: %+v", c)
@@ -116,6 +140,7 @@ func TestSandboxIsOffered(t *testing.T) {
 	}
 	// A new installation, one this build's BOM installed, and one a kept BOM from 0.12.0-rc.1 on installed.
 	offering, before := []*BOMRef{nil, {Release: cur.Release, SHA256: cur.SHA256}}, []Embedded(nil)
+	tenantChart := map[string]string{cur.Release: cur.TenantCharts.Kubernetes.Version}
 	for _, b := range prev {
 		old := slices.ContainsFunc([]string{"0.8.", "0.9.", "0.10.", "0.11."}, func(p string) bool { return strings.HasPrefix(b.Release, p) })
 		if offers := b.Feature(FeatureSandbox) != nil; offers == old {
@@ -125,15 +150,30 @@ func TestSandboxIsOffered(t *testing.T) {
 			before = append(before, b)
 		} else {
 			offering = append(offering, &BOMRef{Release: b.Release, SHA256: b.SHA256})
+			tenantChart[b.Release] = b.TenantCharts.Kubernetes.Version
 		}
 	}
 	if len(offering) < 3 || len(before) == 0 {
 		t.Fatalf("%d kept BOMs from before sandboxes, %d references that offer them: want 0.12.0-rc.1 among the kept", len(before), len(offering))
 	}
+	refusedSeparate := 0
 	for _, sb := range []*SandboxSpec{sharedSandbox(), separateSandbox()} {
 		for _, ref := range offering {
 			in := validInstallation(t)
 			in.Spec.Sandbox, in.Status.BOM = sb, ref
+			chart := cur.TenantCharts.Kubernetes.Version
+			if ref != nil {
+				chart = tenantChart[ref.Release]
+			}
+			if sb.Placement == SandboxSeparate && !kamaji.ChartHasOperatorTolerations(chart) {
+				p := in.SandboxProblems()
+				if len(p) != 1 || !strings.Contains(p[0], "spec.sandbox.placement separate") || !strings.Contains(p[0], "(release "+ref.Release+") names cluster chart "+chart) ||
+					!strings.Contains(p[0], "chart "+kamaji.OperatorTolerationsChartVersion+" or newer") || !strings.Contains(p[0], "set placement shared") {
+					t.Errorf("placement separate on %+v (tenant chart %s): %v", ref, chart, p)
+				}
+				refusedSeparate++
+				continue
+			}
 			if err := in.Validate(); err != nil || in.SandboxProblems() != nil {
 				t.Errorf("placement %s on %+v: %v %v", sb.Placement, ref, err, in.SandboxProblems())
 			}
@@ -145,6 +185,10 @@ func TestSandboxIsOffered(t *testing.T) {
 				t.Errorf("installed by %s, placement %s: %v", b.Release, sb.Placement, p)
 			}
 		}
+	}
+	// 0.12.0-rc.1 and 0.12.0-rc.2 are kept and pin chart 0.1.19: both were refused separate above.
+	if refusedSeparate < 2 {
+		t.Errorf("placement separate was refused on %d kept BOMs, want the two candidates that pin tenant chart 0.1.19", refusedSeparate)
 	}
 	// Off and no block are never refused: an installation on any BOM says "no sandboxes".
 	for _, b := range append(prev, cur) {
@@ -178,6 +222,17 @@ func TestSandboxIsOffered(t *testing.T) {
 	cur.TenantCharts.Kubernetes.Version = "0.1.17"
 	if p := in.SandboxProblems(); len(p) != 1 || !strings.Contains(p[0], "cluster chart 0.1.17") {
 		t.Errorf("an older tenant chart: %v", p)
+	}
+	// The chart of rc.2: it gives a group its pool, and still no sandbox cluster comes up under it. Shared, which is
+	// built with the platform's own chart, is not held back by the tenant chart.
+	cur.TenantCharts.Kubernetes.Version = "0.1.19"
+	if p := in.SandboxProblems(); len(p) != 1 || !strings.Contains(p[0], "cluster chart 0.1.19") || !strings.Contains(p[0], "never comes up") {
+		t.Errorf("the tenant chart of 0.12.0-rc.2: %v", p)
+	}
+	comp(t, cur.BOM, ClusterSeed, ClusterName).Chart.Version = "0.1.19"
+	in.Spec.Sandbox = sharedSandbox()
+	if p := in.SandboxProblems(); p != nil {
+		t.Errorf("shared under tenant chart 0.1.19: %v", p)
 	}
 }
 
@@ -680,10 +735,16 @@ func TestSandboxRenderGolden(t *testing.T) {
 		t.Errorf("the sandbox cluster's Secret must not look like a tenant cluster's: %v", l)
 	}
 	// Built with one chart version, the cluster keeps it whatever the BOM names later.
-	in.Sandbox.ChartVersion = "0.1.18"
-	b.TenantCharts.Kubernetes.Version = "0.1.19"
-	if sapp, _ = SandboxApplication(b, in); str(sapp, "spec", "source", "targetRevision") != "0.1.18" {
+	in.Sandbox.ChartVersion = "0.1.20"
+	b.TenantCharts.Kubernetes.Version = "0.1.21"
+	if sapp, _ = SandboxApplication(b, in); str(sapp, "spec", "source", "targetRevision") != "0.1.20" {
 		t.Errorf("chart version %s", str(sapp, "spec", "source", "targetRevision"))
+	}
+	// A cluster that a run of 0.12.0-rc.2 began keeps chart 0.1.19, under which it never comes up: the render is
+	// refused and says the way out, where the run would wait its 20 minutes again.
+	in.Sandbox.ChartVersion = "0.1.19"
+	if _, err := SandboxApplication(b, in); err == nil || !strings.Contains(err.Error(), "under cluster chart 0.1.19") || !strings.Contains(err.Error(), "set placement off, apply, then set separate again") {
+		t.Errorf("a sandbox cluster kept on chart 0.1.19: %v", err)
 	}
 	// An older cluster chart ignores a group's pool and would put sandbox machines into proxcloud-system: refused.
 	old := embedded(t)
@@ -823,6 +884,124 @@ func TestSandboxChartsTakeTheValues(t *testing.T) {
 	}
 	if !found {
 		t.Error("the separate cluster does not install the sandbox chart in mode separate at the BOM's version with the proxy address")
+	}
+}
+
+// The separate sandbox cluster comes up on nodes that all join tainted (drill E4-A: under v0.12.0-rc.2 it never did).
+// Its control plane is hosted, so its two node groups are all the nodes it has, and both join with a taint. Cilium's
+// operator registers Cilium's CRDs: no agent starts and no node becomes Ready before it has, and the sandbox chart,
+// whose identities the run waits for, is refused without them. So the operator tolerates every taint a group of the
+// cluster registers with, in the values the run writes and in what the cluster chart renders from them. The same holds
+// for the installer's template, which writes the same cluster.
+func TestSandboxClusterComesUpOnTaintedNodes(t *testing.T) {
+	b := embedded(t)
+	addSandbox(b)
+	values, err := SandboxClusterValues(b, sandboxRender(separateSandbox()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tolerated := map[string]bool{}
+	tols, _ := values["ciliumOperatorTolerations"].([]any)
+	for _, tol := range tols {
+		m := tol.(map[string]any)
+		if m["operator"] != "Exists" || m["effect"] != "NoSchedule" {
+			t.Errorf("toleration %v", m)
+		}
+		tolerated[m["key"].(string)] = true
+	}
+	groups, _ := values["nodeGroups"].([]any)
+	if len(groups) != 2 {
+		t.Fatalf("%d node groups", len(groups))
+	}
+	for _, g := range groups {
+		taints, _ := g.(map[string]any)["taints"].([]any)
+		if len(taints) == 0 {
+			t.Errorf("group %v joins without a taint: a sandbox could start on a machine with no VM firewall", g.(map[string]any)["name"])
+		}
+		for _, tn := range taints {
+			if key := str(tn.(map[string]any), "key"); !tolerated[key] {
+				t.Errorf("group %v joins with taint %s, which Cilium's operator does not tolerate (%v): no node of the cluster becomes Ready", g.(map[string]any)["name"], key, tols)
+			}
+		}
+	}
+	// Nothing else is let onto an unfenced machine by these values: MetalLB's speaker tolerates the system group's
+	// taint alone, as before.
+	if raw, _ := json.Marshal(dig(values, "proxmox", "metallb")); strings.Contains(string(raw), UnsecuredTaintKey) {
+		t.Errorf("MetalLB tolerates %s: %s", UnsecuredTaintKey, raw)
+	}
+
+	// The installer writes the same cluster: every taint its template names is tolerated there too.
+	raw, err := os.ReadFile("../../installer/playbooks/templates/sandbox-cluster.yml.j2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, block, ok := strings.Cut(string(raw), "ciliumOperatorTolerations:")
+	if !ok {
+		t.Fatal("the installer's sandbox cluster gives Cilium's operator no toleration")
+	}
+	block, _, _ = strings.Cut(block, "kamajiControlPlane:")
+	for key := range tolerated {
+		if !strings.Contains(block, "{key: "+key+", operator: Exists, effect: NoSchedule}") {
+			t.Errorf("the installer's sandbox cluster: Cilium's operator does not tolerate %s", key)
+		}
+	}
+	if n := strings.Count(string(raw), "taints:"); n != 2 {
+		t.Errorf("the installer's template names %d taint lists, this test knows two (sandbox, sandbox-system)", n)
+	}
+	for _, m := range regexp.MustCompile(`\{key: (proxcloud\.io/[a-z-]+), value: "true", effect: NoSchedule\}`).FindAllStringSubmatch(string(raw), -1) {
+		if !tolerated[m[1]] {
+			t.Errorf("the installer's template taints a group with %s, which Cilium's operator does not tolerate", m[1])
+		}
+	}
+
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("helm is required in CI: the chart's side of this is not shown without it")
+		}
+		t.Skip("helm is not installed: the values were checked, the chart's render was not")
+	}
+	f := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(f, yamlDoc(t, values), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(helm, "template", SandboxClusterName, "../../deploy/charts/proxmox-kamaji-cluster", "-n", SandboxClusterName, "-f", f).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template: %v\n%s", err, out)
+	}
+	registered, operator := map[string]bool{}, map[string]bool{}
+	for _, o := range yamlObjects(t, out) {
+		switch o["kind"] {
+		case "KubeadmConfigTemplate":
+			taints, _ := dig(o, "spec", "template", "spec", "joinConfiguration", "nodeRegistration", "taints").([]any)
+			for _, tn := range taints {
+				registered[str(tn.(map[string]any), "key")] = true
+			}
+		case "HelmChartProxy":
+			if str(o, "spec", "chartName") != "cilium" {
+				continue
+			}
+			var v map[string]any
+			if err := json.Unmarshal([]byte(str(o, "spec", "valuesTemplate")), &v); err != nil {
+				t.Fatal(err)
+			}
+			ts, _ := dig(v, "operator", "tolerations").([]any)
+			for _, tol := range ts {
+				operator[str(tol.(map[string]any), "key")] = true
+			}
+		}
+	}
+	if len(registered) != 2 {
+		t.Fatalf("the kubelets of the rendered cluster register with taints %v, want the two of the sandbox cluster", registered)
+	}
+	for key := range registered {
+		if !operator[key] {
+			t.Errorf("a node registers with %s and Cilium's operator tolerates only %v", key, operator)
+		}
+	}
+	// A node that is not Ready yet carries this taint too: the operator's own list must survive the addition.
+	if !operator["node.kubernetes.io/not-ready"] {
+		t.Errorf("Cilium's operator lost its own tolerations: %v", operator)
 	}
 }
 

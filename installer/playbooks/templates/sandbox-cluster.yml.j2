@@ -35,6 +35,11 @@ spec:
       valuesObject:
         kubernetesVersion: "{{ pc.services.k8s_version }}"
         sandboxBandwidth: true
+        # Every worker joins with a taint and the control plane is hosted: Cilium's operator must tolerate them, or it
+        # never starts, Cilium's CRDs never exist and no worker becomes Ready (chart 0.1.20).
+        ciliumOperatorTolerations:
+          - {key: proxcloud.io/unsecured, operator: Exists, effect: NoSchedule}
+          - {key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}
         cloudCredentialsSecretName: pc-sandbox-cloud-config
         # kamajiControlPlane.admissionControllers stays the chart's list, NodeRestriction included; stage 55 checks it.
         kamajiControlPlane:

@@ -86,6 +86,16 @@ const GroupPoolChartVersion = "0.1.18"
 // ChartHasGroupPool reports a cluster chart that gives one node group a pool, an address range and DNS servers.
 func ChartHasGroupPool(v string) bool { return chartAtLeast(v, GroupPoolChartVersion) }
 
+// OperatorTolerationsChartVersion is the first cluster chart that lets Cilium's operator tolerate a cluster's own
+// taints (ciliumOperatorTolerations). The platform's separate sandbox cluster needs it: every node of it joins tainted,
+// and under an older chart the operator never starts, so no node becomes Ready (v0.12.0-rc.2, drill E4-A).
+const OperatorTolerationsChartVersion = "0.1.20"
+
+// ChartHasOperatorTolerations reports a cluster chart that renders ciliumOperatorTolerations.
+func ChartHasOperatorTolerations(v string) bool {
+	return chartAtLeast(v, OperatorTolerationsChartVersion)
+}
+
 // LBControllerChartVersion is the first cluster chart that renders the load balancer controller (loadBalancer,
 // templates/lb-controller.yaml) and MetalLB's class proxcloud.io/internal in default mode. An older chart ignores the
 // block: a cluster on it gets no controller, so none is minted for it.

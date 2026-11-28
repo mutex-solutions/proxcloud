@@ -204,6 +204,13 @@ machineHealthCheck:
 # Leave false for ordinary tenant Kubernetes clusters.
 sandboxBandwidth: false
 
+# -- From chart 0.1.20. Taints Cilium's operator tolerates on top of its own list. The operator registers Cilium's
+# CRDs; until it has, no Cilium agent starts and no node becomes Ready. Set it on a cluster whose every node joins with
+# a taint: the platform's sandbox cluster, where each machine carries proxcloud.io/unsecured until its VM firewall is
+# written, and the system group proxcloud.io/sandbox-system for good. Empty for a tenant cluster, whose operator then
+# keeps the values it had.
+ciliumOperatorTolerations: []
+
 # -- Chart repos and versions of what CAAPH installs in the tenant cluster. Operator territory.
 addonCharts:
   cilium: {repoURL: "https://helm.cilium.io", chart: cilium, version: "1.18.16"}

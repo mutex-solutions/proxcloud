@@ -27,6 +27,7 @@ func sandboxPlatform(t *testing.T, kind string, sb *SandboxSpec) *platform {
 		p.sandboxIdentities(p.wl)
 	}
 	if sb != nil && sb.Placement == SandboxSeparate {
+		separateChart(t)
 		// pc-sandbox answers at an API of its own; Kamaji keeps its admin kubeconfig beside the control plane.
 		p.sbx = newFakeSeed(t, staticCA(t), func() string { return "" })
 		p.sbx.sa = "sbx-admin-0123456789"
@@ -487,6 +488,59 @@ func TestApplyBuildsTheSeparateSandbox(t *testing.T) {
 	}
 	if end := p.until(30); end != "complete" || len(p.pve.acl) != len(want) || len(p.pve.tokens) != 1 {
 		t.Fatalf("second apply: %s, %d rows, tokens %v", end, len(p.pve.acl), p.pve.tokens)
+	}
+}
+
+// The machines of the separate cluster are cloned on stage workload-platform's time (8.5 of its 20 minutes on the lab,
+// drill E4), and what the stage waits for next begins only when they run: Cilium on the new nodes, then the next try
+// of the sandbox chart, which is refused until Cilium's CRDs exist. That wait gets the stage's time again, once.
+func TestSeparateSandboxWaitStartsAgainWhenItsMachinesRun(t *testing.T) {
+	sb := separateSandbox()
+	sb.System.Nodes = []string{"pve1"}
+	p := sandboxPlatform(t, RunApply, sb)
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) { routed(in) })
+	// The sandbox chart is not in yet: neither identity has a token.
+	for _, name := range []string{sandboxPortalToken, sandboxFirewallToken} {
+		delete(p.sbx.objs, seedNS+"sandbox-system/secrets/"+name)
+	}
+	p.upTo(stageSeedPlatform)
+	look := func(want string) Stage {
+		t.Helper()
+		for range 30 {
+			end := p.once()
+			if s := p.stage(stageWorkloadPlatform); strings.Contains(s.Message, want) {
+				return s
+			}
+			if !strings.HasPrefix(end, "defer:") {
+				t.Fatalf("end %s before the stage said %q: %+v\n%s", end, want, p.stage(stageWorkloadPlatform), p.logs)
+			}
+		}
+		t.Fatalf("the stage never said %q: %+v", want, p.stage(stageWorkloadPlatform))
+		return Stage{}
+	}
+	cloning := look("0 of 2 machines are Running")
+	if _, in, _ := p.state.snapshot(); in.Status.Sandbox == nil || in.Status.Sandbox.BuiltAt != nil {
+		t.Fatalf("before a machine runs: %+v", in.Status.Sandbox)
+	}
+	for _, name := range []string{"pc-sandbox-sandbox-pve1-x", "pc-sandbox-sandbox-system-pve1-x"} {
+		m := meta(name, map[string]any{"cluster.x-k8s.io/cluster-name": SandboxClusterName})
+		m["status"] = map[string]any{"phase": "Running"}
+		p.wl.put("/apis/cluster.x-k8s.io/v1beta2/namespaces/pc-sandbox/machines/"+name, m)
+	}
+	waiting := look("has not filled")
+	_, in, _ := p.state.snapshot()
+	built := in.Status.Sandbox.BuiltAt
+	if built == nil || waiting.Deadline == nil || !waiting.Deadline.Equal(built.Add(waveStall)) || !waiting.Deadline.After(*cloning.Deadline) {
+		t.Fatalf("the machines run since %v: the stage's deadline is %v (it was %v while they were cloned), want %s after they ran", built, waiting.Deadline, cloning.Deadline, waveStall)
+	}
+	// Once: a stage that keeps waiting for the chart does not keep its deadline away.
+	p.once()
+	if again := p.stage(stageWorkloadPlatform); !again.Deadline.Equal(*waiting.Deadline) {
+		t.Fatalf("the deadline moved again: %v, was %v", again.Deadline, waiting.Deadline)
+	}
+	p.sandboxIdentities(p.sbx)
+	if end := p.until(10); end != "complete" {
+		t.Fatalf("with the identities: %s: %+v", end, p.stage(stageWorkloadPlatform))
 	}
 }
 

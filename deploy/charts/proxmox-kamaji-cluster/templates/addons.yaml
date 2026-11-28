@@ -16,7 +16,21 @@ components as ArgoCD Applications.
 {{- fail "NGINX Gateway Fabric requires Kubernetes >=1.32 in the supported 1.x series" }}
 {{- end }}
 {{- $proxies := list }}
-{{- $proxies = append $proxies (dict "key" "cilium" "ns" "kube-system" "values" (dict "kubeProxyReplacement" false "bandwidthManager" (dict "enabled" (.Values.sandboxBandwidth | default false)) "cni" (dict "customConf" (.Values.sandboxBandwidth | default false)) "ipam" (dict "mode" "kubernetes") "routingMode" "tunnel" "tunnelProtocol" "vxlan" "operator" (dict "replicas" 1) "hubble" (dict "enabled" false))) }}
+{{- /* ciliumOperatorTolerations (from chart 0.1.20): Cilium's operator registers Cilium's CRDs, and no agent starts and
+no node becomes Ready before it has. On a cluster whose every node joins with a taint it must tolerate them, or the
+cluster never comes up (the platform's sandbox cluster did not, v0.12.0-rc.2). The chart value replaces the operator's
+own list, so that list is repeated here as Cilium 1.18 ships it (values.yaml, operator.tolerations; Cilium's template
+adds node.cilium.io/agent-not-ready by itself). Empty, as for every tenant cluster: the operator's values are what they
+were, and its Deployment does not change. */ -}}
+{{- $operator := dict "replicas" 1 }}
+{{- with .Values.ciliumOperatorTolerations }}
+{{- $own := list }}
+{{- range $key := list "node-role.kubernetes.io/control-plane" "node-role.kubernetes.io/master" "node.kubernetes.io/not-ready" "node.cloudprovider.kubernetes.io/uninitialized" }}
+{{- $own = append $own (dict "key" $key "operator" "Exists") }}
+{{- end }}
+{{- $_ := set $operator "tolerations" (concat $own .) }}
+{{- end }}
+{{- $proxies = append $proxies (dict "key" "cilium" "ns" "kube-system" "values" (dict "kubeProxyReplacement" false "bandwidthManager" (dict "enabled" (.Values.sandboxBandwidth | default false)) "cni" (dict "customConf" (.Values.sandboxBandwidth | default false)) "ipam" (dict "mode" "kubernetes") "routingMode" "tunnel" "tunnelProtocol" "vxlan" "operator" $operator "hubble" (dict "enabled" false))) }}
 {{- $classes := list }}
 {{- range $i, $c := .Values.proxmox.csi.storageClasses }}
 {{- $class := dict "name" $c.name "storage" $c.storage "fstype" "ext4" "reclaimPolicy" "Delete" }}

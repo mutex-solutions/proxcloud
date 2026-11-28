@@ -359,6 +359,12 @@ func (in *Installation) SandboxProblems() []string {
 		return []string{fmt.Sprintf("spec.sandbox: the platform's BOM (release %s) names cluster chart %s, which cannot give a node group a pool and an address range of its own: sandboxes need chart %s or newer",
 			bom.Release, chart, kamaji.GroupPoolChartVersion)}
 	}
+	// Refused here and not by the run: the run would build the machines and then wait in vain for a cluster that
+	// cannot come up.
+	if in.Spec.sandboxMode() == SandboxSeparate && !kamaji.ChartHasOperatorTolerations(chart) {
+		return []string{fmt.Sprintf("spec.sandbox.placement separate: the platform's BOM (release %s) names cluster chart %s, under which a sandbox cluster never comes up (%s). "+
+			"Upgrade the platform to a release whose BOM names chart %s or newer, or set placement shared", bom.Release, chart, noOperatorTolerations, kamaji.OperatorTolerationsChartVersion)}
+	}
 	// Refused here and not by the run: a run would have built the machines before it met the missing certificate.
 	if t := in.Spec.Sandbox.TLS; t != nil && t.Mode == TLSSecret {
 		return []string{"spec.sandbox.tls.mode secret: this release has no route that stores an operator's certificate. Set tls.mode selfsigned: the run makes a certificate for *." + in.Spec.Sandbox.Domain}
@@ -585,6 +591,10 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 	}
 	if v := sb.chartVersion(b); !kamaji.ChartHasGroupPool(v) {
 		return nil, fmt.Errorf("platform: cluster chart %s cannot install the sandbox chart: the sandbox cluster needs chart %s or newer", v, kamaji.GroupPoolChartVersion)
+	} else if !kamaji.ChartHasOperatorTolerations(v) {
+		// Also the chart a cluster keeps from the build that began it (SandboxStatus.ChartVersion).
+		return nil, fmt.Errorf("platform: under cluster chart %s the sandbox cluster never comes up (%s): it needs chart %s or newer. A cluster that a run began under an older chart keeps that chart: set placement off, apply, then set separate again",
+			v, noOperatorTolerations, kamaji.OperatorTolerationsChartVersion)
 	}
 	groups := []any{}
 	for _, g := range sb.Groups {
@@ -620,8 +630,13 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 		network["vlan"] = in.Network.VLAN
 	}
 	return map[string]any{
-		"kubernetesVersion":          b.Kubernetes.Version,
-		"sandboxBandwidth":           true,
+		"kubernetesVersion": b.Kubernetes.Version,
+		"sandboxBandwidth":  true,
+		// Every node of this cluster joins with a taint, and its control plane is hosted, so there is no other node.
+		// Cilium's operator must start on them all the same: it registers Cilium's CRDs, the agents wait for those, and
+		// the sandbox chart, whose identities the run waits for, is refused without them. Nothing else gets a
+		// toleration: CoreDNS, MetalLB and konnectivity's agent start once the provider sync has fenced a machine.
+		"ciliumOperatorTolerations":  sandboxJoinTolerations(),
 		"cloudCredentialsSecretName": SandboxCredentialsSecret,
 		"kamajiControlPlane":         map[string]any{"replicas": 1, "dataStoreName": defaultDatastore, "network": map[string]any{"serviceType": "LoadBalancer"}},
 		"clusterNetwork":             map[string]any{"pods": "10.244.0.0/16", "services": "10.96.0.0/12"},
@@ -638,6 +653,20 @@ func SandboxClusterValues(b *BOM, in RenderInput) (map[string]any, error) {
 			"sandbox": map[string]any{"enabled": true, "values": sandboxChartValues(in)},
 		},
 	}, nil
+}
+
+// noOperatorTolerations is why a cluster chart before kamaji.OperatorTolerationsChartVersion builds no sandbox
+// cluster, for the two places that refuse it.
+const noOperatorTolerations = "every node of it joins with a taint, Cilium's operator does not tolerate one, and no node becomes Ready"
+
+// sandboxJoinTolerations tolerate the taints a machine of the separate sandbox cluster joins with: one per key
+// SandboxClusterValues gives a node group (TestSandboxClusterComesUpOnTaintedNodes holds the two together).
+func sandboxJoinTolerations() []any {
+	out := []any{}
+	for _, key := range []string{UnsecuredTaintKey, sandboxSystemTaint} {
+		out = append(out, map[string]any{"key": key, "operator": "Exists", "effect": "NoSchedule"})
+	}
+	return out
 }
 
 func (sb *RenderSandbox) chartVersion(b *BOM) string {

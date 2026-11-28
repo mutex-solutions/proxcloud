@@ -445,8 +445,16 @@ func (x *acq) sandboxCluster(ctx context.Context, seed, wl *kamajik8s.Client) er
 		return waiting(CodeControlPlaneTimeout, "The sandbox cluster %s: %d of %d machines are Running (%d exist).", SandboxClusterName, running, total, len(machines))
 	}
 	if st := x.in.Status.Sandbox; st != nil && st.BuiltAt == nil {
+		// The machines were cloned on this stage's time (8.5 of its 20 minutes on the lab, drill E4), and what is
+		// waited for next starts only now: Cilium on the new nodes, then the next try of the sandbox chart, which was
+		// refused while Cilium's CRDs were missing and is retried minutes apart. So that wait gets the stage's time
+		// again, once for a build: BuiltAt is set here and kept until sandboxes are switched off.
 		now := time.Now().UTC()
-		if err := x.save(ctx, func(_ *Run, in *Installation, _ *Secrets) { in.Status.Sandbox.BuiltAt = &now }); err != nil {
+		d := now.Add(waveStall)
+		if err := x.save(ctx, func(run *Run, in *Installation, _ *Secrets) {
+			in.Status.Sandbox.BuiltAt = &now
+			run.Stages[x.si].LastProgressAt, run.Stages[x.si].Deadline = &now, &d
+		}); err != nil {
 			return err
 		}
 	}

@@ -508,8 +508,12 @@ The taint also comes back. A worker already cleared that a later pass fails on, 
 firewall off included), or whose filter no longer admits exactly its Node's address (the pin lost, or the Node now
 naming another address) gets `proxcloud.io/unsecured:NoSchedule` again, and the next pass treats it as new. The effect
 is `NoSchedule`: pods already there keep running. DaemonSets that tolerate every
-taint (Cilium, `node-setup`) run before; CoreDNS, the agent-sandbox controller, konnectivity's agent and MetalLB's
-speaker schedule after, which is why stage 55 no longer waits for the controller.
+taint (Cilium, `node-setup`) run before, and so does Cilium's operator: the template gives it the cluster's two taints
+to tolerate (`ciliumOperatorTolerations`, cluster chart 0.1.20). It has to: every worker joins tainted, the operator
+registers Cilium's CRDs, and stage 55 waits for Cilium's agents and for Ready workers, which need them. Cilium 1.18's
+operator tolerates only a short list of its own, and without the value it is never scheduled (found on the platform's
+sandbox cluster, v0.12.0-rc.2; this path was read, not run again). CoreDNS, the agent-sandbox controller,
+konnectivity's agent and MetalLB's speaker schedule after, which is why stage 55 no longer waits for the controller.
 
 ### 2.3 Its own egress address (D14)
 

@@ -1063,9 +1063,24 @@ run writes the Secret
 sandbox pool, the template pool, the platform's boot and ISO stores, `/nodes` and the platform
 network's vnet in its scope; after the last wave the namespace `pc-sandbox` on the platform
 cluster, the Secret `pc-sandbox-pve` with that token, and the Application `pc-sandbox` (the tenant
-cluster chart, with the sandbox chart as its add-on). The stage is done when every machine of the
-cluster is Running. A new sandbox machine takes sandboxes only once the provider sync has written
-its VM firewall and taken the `unsecured` taint off.
+cluster chart, with the sandbox chart as its add-on). The stage waits until every machine of the
+cluster is Running, and then, with its 20 minutes started again, until the sandbox chart inside
+the cluster has made its two identities. A new sandbox machine takes sandboxes only once the
+provider sync has written its VM firewall and taken the `unsecured` taint off.
+
+**How `pc-sandbox` comes up.** Its control plane is hosted, so the two node groups are all the
+nodes it has, and both join with a taint: `proxcloud.io/unsecured` on every machine, and
+`proxcloud.io/sandbox-system` on the system group. Cilium's agents and `node-setup` tolerate every
+taint. Cilium's operator does not by itself, and it has to run first: it registers Cilium's CRDs,
+no agent starts and no node becomes Ready without them, and the sandbox chart is refused without
+them. The run therefore sets the cluster chart's `ciliumOperatorTolerations` to the two taints
+(cluster chart 0.1.20). Everything else waits for the fence, as it should: CoreDNS, MetalLB,
+konnectivity's agent, sandbox-proxy and the agent-sandbox controller are scheduled once stage
+`register` has stored the kubeconfig and a provider sync has taken the `unsecured` taint off,
+about 20 minutes after the machines joined. Until then `kubectl logs` and `exec` on `pc-sandbox`
+answer "No agent available". A platform whose BOM names a tenant cluster chart before 0.1.20
+(v0.12.0-rc.1 and v0.12.0-rc.2 name 0.1.19) is refused `placement: separate` at the save: under
+that chart the cluster never comes up.
 
 **Changing it.** Nodes, count, sizes, `dns` and `domain` change with an apply. Fixed once a run
 built it (`409 fixed_fields`): `placement`, which goes only to `off`, `nodeRange` and

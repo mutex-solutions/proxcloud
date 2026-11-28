@@ -468,6 +468,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Placement `separate` could not be built: the sandbox cluster never came up (drill of v0.12.0-rc.2, finding
+  E4-A).** The run made the pool, the token and both machines, the machines joined, and then stage
+  `workload-platform` waited its 20 minutes and failed with `component_unhealthy`, "the sandbox chart has not filled
+  `sandbox-system/proxcloud-sandbox-token`". Nine hours later the cluster stood where it stood then.
+  - *The cause.* The control plane of `pc-sandbox` is hosted, so its two node groups are all the nodes it has, and
+    both join with a taint: `proxcloud.io/unsecured` on every machine until its VM firewall is written, and
+    `proxcloud.io/sandbox-system` on the system group for good. Cilium's operator tolerates neither (Cilium 1.18
+    tolerates a short list of its own), so it was never scheduled. The operator is what registers Cilium's CRDs:
+    without them no Cilium agent starts, no node becomes Ready, and the sandbox chart, which holds Cilium policies,
+    is refused. The run waited for that chart's two identities. The provider sync, which takes the `unsecured`
+    taint off, starts only with the kubeconfig that stage `register` stores, and `register` comes after the stage
+    that waited. A cycle, with no way out but by hand.
+  - *The fix.* Cluster chart `proxmox-kamaji-cluster` 0.1.20 has a new value, `ciliumOperatorTolerations`: taints
+    Cilium's operator tolerates on top of its own list. The run sets it for the sandbox cluster to its two taints,
+    and so does the installer's template for its sandbox cluster, which has the same nodes. Nothing else is let
+    onto a machine without a VM firewall: CoreDNS, MetalLB, konnectivity's agent, sandbox-proxy and the
+    agent-sandbox controller start, as before, once the provider sync has fenced a machine and taken its taint off,
+    and a sandbox never tolerates `unsecured`.
+  - *The stage's time.* The two machines were cloned on the time of stage `workload-platform` (8.5 of its 20 minutes
+    on the lab). The wait for the sandbox chart now gets the stage's 20 minutes again, once, at the moment every
+    machine of the cluster is Running.
+  - *Refused instead of built in vain.* A sandbox cluster is built with the tenant cluster chart the platform's BOM
+    names (`tenantCharts.kubernetes`). Under a chart before 0.1.20, `placement: separate` is now refused at the
+    save and in the Check's `spec` row, with the reason and the two ways on: the platform upgrade, or `shared`. The
+    BOMs of v0.12.0-rc.1 and v0.12.0-rc.2 name chart 0.1.19.
+  - *A site without sandboxes:* nothing changes. A tenant cluster sets no `ciliumOperatorTolerations`, and chart
+    0.1.20 then renders the objects chart 0.1.19 renders, byte for byte (compared); the installer's ordinary
+    clusters are not touched. This change does not move a pin of the BOM: the release that follows must publish
+    chart 0.1.20 (tag `proxmox-kamaji-cluster-v0.1.20`) and name it in `tenantCharts.kubernetes`. Until it does,
+    `separate` is refused at the save on this build's own BOM too, and a test stops a release that forgets the pin.
+  - *A site that runs v0.12.0-rc.2 with `shared` sandboxes:* nothing changes; `shared` is built with the platform's
+    own cluster chart and was not affected.
+  - *A site that tried `separate` with v0.12.0-rc.2* has a failed run, two machines that are not Ready and the
+    cluster's Application at chart 0.1.19. A sandbox cluster keeps the chart it was begun with, so an apply after
+    the upgrade does not repair it: the run now stops at once and says so. Set `placement: off` and apply, which
+    is what removes the machines, the token, the pool and the Application; then upgrade the platform and set
+    `separate` again. An off that starts from a failed build of `separate` had not been run on a lab when this was
+    written.
+  - *Not verified:* no cluster was built with this change; the tests render the values and the chart, and the
+    rendered values were given to the real Cilium 1.18.16 chart, whose operator then carries its own tolerations
+    and the two taints. One real build of `separate` on a lab is owed before a release offers it. The installer's
+    path was read, not run: its stage 55 waits for Cilium's agents and for Ready nodes, so it had the same fault.
+
 - **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of
   v0.12.0-rc.1, finding Z2-A).** The provider-wide isolation rules drop the sandbox range towards every blocked
   network, and the platform's API address and node range are blocked networks (the Check's `isolation` row requires

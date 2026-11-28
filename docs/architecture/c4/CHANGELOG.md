@@ -4,6 +4,34 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-28: the separate sandbox cluster comes up on its tainted nodes (drill of v0.12.0-rc.2: E4-A)
+
+**What changed:** no new component, container, route or relation. One new value of the cluster chart, and the two
+writers of a sandbox cluster set it.
+
+- `deploy/charts/proxmox-kamaji-cluster` 0.1.20: `ciliumOperatorTolerations` (`templates/addons.yaml`). When set,
+  Cilium's operator gets its own list of tolerations (repeated from Cilium 1.18's values, which the value would
+  otherwise replace) and the taints named. Empty, the operator's values are what they were.
+- `internal/platformlife/sandbox.go`: `SandboxClusterValues` sets it to the two taints a machine of `pc-sandbox`
+  joins with (`sandboxJoinTolerations`), and refuses a cluster chart before 0.1.20, the one a cluster keeps from the
+  run that began it included. `sandboxProblems` refuses `placement: separate` at the save on a BOM whose tenant
+  cluster chart is older. `internal/cloud/kamaji/config.go`: `OperatorTolerationsChartVersion`.
+- `installer/playbooks/templates/sandbox-cluster.yml.j2`: the same value for the installer's sandbox cluster.
+- `internal/platformlife/sandbox_run.go`: `sandboxCluster` starts the deadline of stage `workload-platform` again,
+  once, when every machine of the cluster is Running.
+
+**Why:** the drill of v0.12.0-rc.2 could not build `separate`. The cluster's control plane is hosted, both node
+groups join tainted, and Cilium's operator tolerates neither taint, so it was never scheduled. It registers Cilium's
+CRDs: without them no agent starts, no node becomes Ready, and the sandbox chart is refused. The run waited for that
+chart's identities, and the provider sync that takes the taint off needs the kubeconfig the run stores only after
+that wait. Only the operator gets the toleration: it is the one thing a node needs before it can be Ready, and
+nothing that serves tenants moves onto a machine without a VM firewall. The deadline starts again because the
+machines were cloned on the stage's time (8.5 of 20 minutes on the lab) and the chart's next try comes minutes after
+Cilium is up. The refusal at the save is there because a BOM that names an older chart builds two machines and then
+waits in vain. The BOM is not moved here: chart 0.1.20 has to be published by its tag first.
+
+**Diagrams:** none changed. `c2-containers.md` names chart 0.1.20 in the row of the cluster chart.
+
 ## 2026-11-27: an off of sandboxes leaves nothing behind (#514, drill of v0.12.0-rc.1: Z3-B, Z2-c, Z4-d, Z3-C, Z4-e, Z4-c, Z2-d, Z4-b)
 
 **What changed:** no new component, container, route or relation. One new file in the platform runs, and existing

@@ -45,6 +45,13 @@ application:
                 proxy:
                   address: 192.0.2.150
                   domain: sbx.example.org
+          ciliumOperatorTolerations:
+            - effect: NoSchedule
+              key: proxcloud.io/unsecured
+              operator: Exists
+            - effect: NoSchedule
+              key: proxcloud.io/sandbox-system
+              operator: Exists
           cloudCredentialsSecretName: pc-sandbox-pve
           clusterNetwork:
             pods: 10.244.0.0/16
@@ -124,7 +131,7 @@ application:
             storage: local-zfs
           sandboxBandwidth: true
       repoURL: ghcr.io/mutex-solutions/charts
-      targetRevision: 0.1.18
+      targetRevision: 0.1.20
     syncPolicy:
       automated:
         prune: true
