@@ -438,7 +438,8 @@ const sandboxCSIRoll = "its DaemonSet changes for that, so Kubernetes replaces t
 
 // sandboxChanges are the plan rows of spec.sandbox on an installed platform, against what a run built: adding lists
 // the machines, the pool and the access a run writes on Proxmox, and what is deployed; off lists what is deleted. A
-// placement that differs from the built one is refused (the save refuses it too: sandboxFixed).
+// placement that differs from the built one is refused (the save refuses it too: sandboxFixed). Built sandboxes that
+// stay have one row of their own when the next apply replaces the proxy's certificate (sandboxCertificateChange).
 func (in *Installation) sandboxChanges() []PlanChange {
 	want, built, sb := in.Spec.sandboxMode(), in.Status.Sandbox, in.Spec.Sandbox
 	site := func(name, to, impact string) PlanChange {
@@ -481,7 +482,7 @@ func (in *Installation) sandboxChanges() []PlanChange {
 		return []PlanChange{{Cluster: ClusterName, Name: "sandbox", From: built.Placement, To: want, Class: ClassRefused,
 			Blocking: later + "a run built placement " + built.Placement + ", and it does not become " + want + " in one apply: set placement off, apply, then set " + want}}
 	case built != nil && built.BuiltAt != nil && len(in.sandboxGrowth()) == 0:
-		return nil
+		return in.sandboxCertificateChange()
 	}
 	var machines []string
 	for _, g := range in.Spec.sandboxGroups() {
@@ -501,11 +502,29 @@ func (in *Installation) sandboxChanges() []PlanChange {
 		from = built.Placement
 	}
 	row, why, _ := access(want)
-	return []PlanChange{
+	return append([]PlanChange{
 		{Cluster: ClusterName, Name: "sandbox", From: from, To: want + " (" + strings.Join(machines, "; ") + ")", Class: ClassMachines, Stage: stageCluster, Impact: impact},
 		site("sandbox-pool", "pool "+pve.SandboxPool, "The portal token creates the pool. The portal token holds its platform role there (through /pool), which is what lets the provider sync write the VM firewall of a sandbox machine; on "+pve.SystemPool+" it holds NoAccess."),
 		site("sandbox-access", row, why),
+	}, in.sandboxCertificateChange()...)
+}
+
+// sandboxCertificateChange is the plan row sandbox-certificate: the next apply makes a new certificate for
+// sandbox-proxy in place of the one a run made (status.sandbox.certificate), for the reason applySandboxTLS will find
+// (certificateProblem). None before a run made one: a first certificate changes nothing a client holds.
+func (in *Installation) sandboxCertificateChange() []PlanChange {
+	built, sb := in.Status.Sandbox, in.Spec.Sandbox
+	if built == nil || built.Certificate == "" || in.Spec.sandboxMode() != built.Placement {
+		return nil
 	}
+	why := sandboxCertificateProblem(built.Certificate, sb.Domain)
+	if why == "" {
+		return nil
+	}
+	return []PlanChange{{Cluster: ClusterName, Name: "sandbox-certificate", From: "the certificate a run made", To: "a new self-signed certificate for *." + sb.Domain, Stage: stageWorkloadPlatform,
+		Impact: "The apply replaces the certificate of sandbox-proxy: " + why + ". Clients must fetch the new one: every client that trusts the old certificate " +
+			"(SSL_CERT_FILE, NODE_EXTRA_CA_CERTS) fails at the TLS handshake with a sandbox until it holds the new file, which is on the Ready card and in status.sandbox.certificate " +
+			"after the run. sandbox-proxy reads the new certificate within a few minutes, without a restart, and sandboxes that run keep running. Nothing else of the sandboxes changes."}}
 }
 
 // RenderSandbox is spec.sandbox as the renderers read it (nil on RenderInput: no sandboxes).

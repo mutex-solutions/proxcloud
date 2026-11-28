@@ -111,7 +111,7 @@ func TestApplyBuildsTheSharedSandbox(t *testing.T) {
 		t.Fatalf("the sandbox chart's Application: %v", sbx)
 	}
 	tls := p.wl.obj(seedNS + "sandbox-system/secrets/sandbox-proxy-tls")
-	if tls == nil || tls["type"] != "kubernetes.io/tls" || !certificateFor(sec.SandboxTLSCert, "sbx.example.org", time.Now().AddDate(4, 0, 0)) || sec.SandboxTLSKey == "" {
+	if tls == nil || tls["type"] != "kubernetes.io/tls" || certificateProblem(sec.SandboxTLSCert, "sbx.example.org", time.Now().AddDate(4, 0, 0)) != "" || sec.SandboxTLSKey == "" {
 		t.Fatalf("the proxy's certificate: %v", tls)
 	}
 	st := in.Status.Sandbox
