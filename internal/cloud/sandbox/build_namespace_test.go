@@ -151,3 +151,32 @@ func TestSandboxReadWithoutAProjectNamespace(t *testing.T) {
 		t.Fatalf("a refused list in a namespace that exists read as %d rows, err %v", len(got), err)
 	}
 }
+
+// nsReadFails is a cluster whose reads of a namespace fail: an API server that is unwell, or an identity that lost its
+// cluster-wide right.
+type nsReadFails struct{ *sharedRBAC }
+
+func (nsReadFails) GetNamespace(context.Context, string) (map[string]any, error) {
+	return nil, &kamajik8s.APIError{Status: 500, Message: "etcdserver: request timed out"}
+}
+
+// A refused list is "nothing" only on the word of a namespace read that answered "not there". When that read fails
+// too, nothing is proved and the refusal stays, for a project's sandboxes and for the build namespace alike: read the
+// other way round, every sandbox of the project would be ended and its charge stopped while it may still run.
+func TestSandboxReadKeepsARefusalItCannotProveEmpty(t *testing.T) {
+	ctx := context.Background()
+	s, api := sharedRead(t, readRegistry)
+	blind := NewWithAPI(nsReadFails{api}, s.cfg, "svc")
+	if got, err := blind.SyncProvider("az1", "p2").List(ctx); !forbidden(err) {
+		t.Fatalf("a refused list of sandboxes with no answer about the namespace read as %d rows, err %v", len(got), err)
+	}
+	if list, err := blind.ListSandboxes(ctx, "p2"); !forbidden(err) {
+		t.Fatalf("the tenant's list with no answer about the namespace: %v, err %v", list, err)
+	}
+	if got, err := blind.ListBuilds(ctx, "p1"); !forbidden(err) {
+		t.Fatalf("a refused list of builds with no answer about the build namespace read as %d rows, err %v", len(got), err)
+	}
+	if got, err := blind.SyncProvider("az1", "p1").List(ctx); !forbidden(err) {
+		t.Fatalf("the read of a project whose list of builds cannot be proved empty: %d rows, err %v", len(got), err)
+	}
+}
