@@ -577,6 +577,11 @@ func (h *Handler) DeleteProjectSandboxes(ctx context.Context, p *Project) (int, 
 		if err != nil || es == nil || !es.IsSandbox() {
 			continue
 		}
+		if since, off := es.SandboxOffSince(); off {
+			// No placement: nothing runs and nothing is asked. The rows still end here, for the reason below.
+			keep(h.endSandboxRowsOff(ctx, es.ID, p.ID, since))
+			continue
+		}
 		ss, err := h.sandboxFor(es)
 		if err != nil {
 			keep(err)
@@ -617,9 +622,26 @@ func (h *Handler) DeleteProjectSandboxes(ctx context.Context, p *Project) (int, 
 	return n, first
 }
 
+// endSandboxRowsOff ends and archives the project's SANDBOX rows on a sandbox provider with no placement
+// (externalservice.SandboxOffSince), without a call to any cluster.
+func (h *Handler) endSandboxRowsOff(ctx context.Context, serviceID, projectID string, since time.Time) error {
+	rows, err := h.cloud.FindByServiceProjectAndType(ctx, serviceID, projectID, cloud.TypeSandbox)
+	if err != nil {
+		return err
+	}
+	_, err = sandbox.EndRowsOff(ctx, h.cloud, rows, since, time.Now().UTC())
+	return err
+}
+
 // teardownSandboxes is the project-deletion leg for sandboxes: every SANDBOX row's sandbox is deleted and its row ended
 // and archived, then each sandbox provider's project namespace goes (it cascades anything the rows missed). It returns
 // the rows of other kinds, and whether anything is left to retry.
+//
+// A provider with no placement (sandboxes switched off: externalservice.SandboxOffSince) holds nothing on a cluster:
+// its rows are ended and archived and no cluster is asked, so the project can be deleted. Any other provider is
+// asked, and one whose cluster answers 401, 403 or not at all keeps the leg failing with that error: the namespace
+// may still run the tenant's code, and a project is not called deleted over it (v0.12.0-rc.2, drill E5-A: the off left
+// the provider its dead identity, and no project attached to it could be deleted any more).
 func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []cloud.CloudResource) ([]cloud.CloudResource, bool) {
 	var left []cloud.CloudResource
 	failed := false
@@ -640,6 +662,13 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 		es, err := h.esSvc.Get(ctx, res.ServiceID)
 		if err != nil || es == nil || !es.IsSandbox() || h.sandboxFor == nil {
 			left = append(left, *res)
+			continue
+		}
+		if since, off := es.SandboxOffSince(); off {
+			if _, err := sandbox.EndRowsOff(ctx, h.cloud, rows[i:i+1], since, now); err != nil {
+				slog.Error("teardown: archive sandbox row", "project", p.ID, "sandbox", res.ExternalID, "err", err)
+				left, failed = append(left, *res), true
+			}
 			continue
 		}
 		ss, err := h.sandboxFor(es)
@@ -667,6 +696,14 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 	for _, svcID := range p.ServiceIDs() {
 		es, err := h.esSvc.Get(ctx, svcID)
 		if err != nil || es == nil || !es.IsSandbox() {
+			continue
+		}
+		if _, off := es.SandboxOffSince(); off {
+			// No cluster holds a namespace of this provider. Paused sandboxes are records of the portal's alone.
+			if err := h.deleteProjectPaused(ctx, p.ID, svcID); err != nil {
+				slog.Error("teardown: delete paused sandbox records", "project", p.ID, "serviceId", svcID, "err", err)
+				failed = true
+			}
 			continue
 		}
 		if h.sandboxFor == nil {

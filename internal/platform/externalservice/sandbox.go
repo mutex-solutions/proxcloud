@@ -41,11 +41,37 @@ package externalservice
 
 import (
 	"encoding/json"
+	"strings"
+	"time"
+
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 )
 
 // IsSandbox reports whether this is a sandbox provider (config.provider == "sandbox").
 func (e *ExternalService) IsSandbox() bool { return e.Provider() == "sandbox" }
+
+// SandboxOffSinceKey is the key of config.sandbox a platform run writes on its sandbox provider when it has switched
+// sandboxes off, with the time (RFC 3339), and takes away when it builds them again (SandboxOffSince).
+const SandboxOffSinceKey = "offSince"
+
+// SandboxOffSince reports a sandbox provider with no placement, and since when: the run that switched sandboxes off
+// has seen the last sandbox machine gone, taken the provider's identity away and written config.sandbox.offSince.
+// Nothing of this provider is on a cluster, so its rows are ended without a call (sandbox.EndRowsOff) and a project
+// attached to it can be deleted.
+//
+// Both halves are needed, and anything else is a provider WITH a placement: its cluster is asked, and one that
+// answers 401, 403 or not at all fails the read or the delete with that error. A stored kubeconfig beside the mark
+// (an operator pointed the row at a cluster by hand) is asked; a row without a kubeconfig and without the mark says
+// nothing about a cluster and fails as an incomplete provider. Read the other way round, a cluster that stopped
+// answering would have its rows ended and its namespaces left with a tenant's code running in them.
+func (e *ExternalService) SandboxOffSince() (time.Time, bool) {
+	if e == nil || !e.IsSandbox() || strings.TrimSpace(str(e.secretMap()["kubeconfig"])) != "" {
+		return time.Time{}, false
+	}
+	sb, _ := e.Config["sandbox"].(map[string]any)
+	since, err := time.Parse(time.RFC3339, str(sb[SandboxOffSinceKey]))
+	return since, err == nil
+}
 
 // SandboxProxmoxServiceID is config.sandbox.proxmoxServiceId: the Proxmox provider whose config.sandbox pool holds this
 // provider's workers. Its sync fences them (SB2b) and the release gates read them through it.

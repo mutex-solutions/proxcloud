@@ -129,3 +129,25 @@ func TestSandboxReadWithoutABuildNamespace(t *testing.T) {
 		}
 	})
 }
+
+// A project attached to a shared cluster that holds no namespace of it: an off of placement shared deletes the
+// projects' namespaces, and after the next build a project has none until its first create. Its read is "no
+// sandboxes", for the tenant's list too. In a namespace that exists and is not bound the refusal stays an error.
+func TestSandboxReadWithoutAProjectNamespace(t *testing.T) {
+	ctx := context.Background()
+	s, api := sharedRead(t, "")
+	got, err := s.SyncProvider("az1", "p2").List(ctx)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("the read of a project without a namespace: %d rows, err %v, refused %v", len(got), err, api.refused)
+	}
+	if list, err := s.ListSandboxes(ctx, "p2"); err != nil || len(list) != 0 {
+		t.Fatalf("the list of a project without a namespace: %v, err %v", list, err)
+	}
+	if got, err := s.SyncProvider("az1", "p1").List(ctx); err != nil || len(got) != 1 {
+		t.Fatalf("the read of the project beside it: %d rows, err %v", len(got), err)
+	}
+	api.namespaces["sb-p2"] = map[string]string{LabelTenant: "true", LabelService: "svc"}
+	if got, err := s.SyncProvider("az1", "p2").List(ctx); !forbidden(err) {
+		t.Fatalf("a refused list in a namespace that exists read as %d rows, err %v", len(got), err)
+	}
+}

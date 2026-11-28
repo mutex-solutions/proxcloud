@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -292,8 +293,20 @@ func (s *Service) DeleteProjectNamespace(ctx context.Context, projectID string) 
 }
 
 // live lists the project's sandboxes on the cluster, skipping terminating ones.
+//
+// On a shared cluster the identity holds its rights in sb-<projectId> through the RoleBinding made with the namespace,
+// so a list in a namespace that is not there answers 403. That is "no sandboxes" when a read of the namespace itself
+// (a right the identity holds cluster-wide) says it does not exist: a project attached before sandboxes were switched
+// off and built again has none until its first create, and its read must not fail every minute until then. A 403 in a
+// namespace that exists stays an error (buildPods has the same rule and the reason).
 func (s *Service) live(ctx context.Context, projectID string) ([]map[string]any, error) {
 	items, err := s.api.ListCRs(ctx, CRGroup, CRVersion, CRPlural, NamespaceFor(projectID), s.ownerSelector(projectID))
+	var ae *kamajik8s.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusForbidden {
+		if ns, nerr := s.api.GetNamespace(ctx, NamespaceFor(projectID)); nerr == nil && ns == nil {
+			return nil, nil
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

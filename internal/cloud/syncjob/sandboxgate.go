@@ -199,10 +199,20 @@ func checkSandboxClass(rc map[string]any) error {
 // The error is the caller's to report: the minutely read says it once per provider, not once per project.
 //
 // A DISABLED provider takes no new sandbox and no new build, so a project with no SANDBOX row left on it has nothing
-// to end and its cluster is not asked: after an "off" that cluster is gone for good.
+// to end and its cluster is not asked. A provider with no placement (externalservice.SandboxOffSince: the run that
+// switched sandboxes off saw the last machine gone) has no cluster to ask: the rows left on it are ended and archived
+// here. A provider WITH a placement whose cluster does not answer is not read that way: its error is returned.
 func (j *Job) syncSandboxService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) (int, error) {
 	if j.sandboxFor == nil {
 		return 0, nil
+	}
+	if since, off := es.SandboxOffSince(); off {
+		// No placement (sandboxes switched off): the rows that are left end without a call to any cluster.
+		rows, err := j.cloud.FindByServiceProjectAndType(ctx, es.ID, p.ID, cloud.TypeSandbox)
+		if err != nil || len(rows) == 0 {
+			return 0, err
+		}
+		return sandbox.EndRowsOff(ctx, j.cloud, rows, since, j.now())
 	}
 	if es.IsDisabled() {
 		if rows, err := j.cloud.FindByServiceProjectAndType(ctx, es.ID, p.ID, cloud.TypeSandbox); err == nil && len(rows) == 0 {
