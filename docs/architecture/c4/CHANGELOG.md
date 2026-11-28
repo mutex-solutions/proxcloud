@@ -4,6 +4,28 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-28: the sandbox read no longer rests on a build namespace (drill of v0.12.0-rc.2: E2-B, E3-e)
+
+**What changed:** no new component, container, route or relation. Two functions of the sandbox service and the
+minutely read of the sync job.
+
+- `internal/cloud/sandbox/build.go`: `buildPods` (new) is the one list of pods in `sbx-build`; `ListBuilds`,
+  `ActiveBuildWorkers`, `RegistryRefsInUse` (`service.go`), `ListMirrorPods` and `ListAllMirrorPods` (`mirror.go`) go
+  through it. It reads a 404, and a 403 while `GetNamespace` says the namespace does not exist, as no pods; every
+  other error stands. `ListBuilds` returns nothing without asking when the provider has no `templateRegistry`.
+- `internal/cloud/syncjob/sandboxgate.go`: `syncSandboxService` returns its error and skips a project with no SANDBOX
+  row on a DISABLED provider; `RunSandboxState` logs a failing read once per provider and run (ERROR live, WARN
+  disabled). `job.go`: the 15-minute sync leaves the report of a DISABLED provider's failing read to that line.
+
+**Why:** a managed platform's sandbox provider has no registry and its chart makes no `sbx-build`; on a shared
+cluster the portal's identity holds no right there, so the list of builds answered 403 and `SyncProvider.List`
+failed the whole read of every project, every minute. No ended sandbox was archived and a lost one would have been
+charged until its timeout. A refusal is read as "nothing" only where the namespace is proved absent, because three of
+the callers delete or end things on the word of that list. The read of a DISABLED provider goes on because its
+sandboxes run until they end; it stops per project when no row is left, since after an "off" the cluster is gone.
+
+**Diagrams updated:** none.
+
 ## 2026-11-27: an off of sandboxes leaves nothing behind (#514, drill of v0.12.0-rc.1: Z3-B, Z2-c, Z4-d, Z3-C, Z4-e, Z4-c, Z2-d, Z4-b)
 
 **What changed:** no new component, container, route or relation. One new file in the platform runs, and existing

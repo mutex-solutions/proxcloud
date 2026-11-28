@@ -1301,7 +1301,11 @@ the scheduler.
 **Switching sandboxes off.** The save of `placement: off` is refused (`409
 sandbox_provider_live`) while the sandbox provider is not disabled, and so is the run: every
 running sandbox would end without notice. Disable the provider, let its sandboxes end, then save
-and apply. Once the machines are gone and the pool is empty, the run takes `config.sandbox`, the
+and apply. A disabled provider is still read every minute for the projects that have a sandbox on
+it, so each one is ended and archived when it ends. A sandbox that still ran when the machines
+went keeps its row: the charge ended at its timeout, the row stays in the tenant's list until
+sandboxes are built again, and the API log has one WARN per minute that names the provider
+(`syncjob: reconcile sandboxes`). Once the machines are gone and the pool is empty, the run takes `config.sandbox`, the
 `sandboxCidrs` entry and `secret.sandboxKubeconfig` off the Proxmox provider, writes the
 provider's isolation rules without the range (its DROPs and ACCEPTs go, the tenant pool's stay;
 read back before anything else is recorded), deletes the pool's firewall groups and IP sets from

@@ -591,6 +591,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     object with a finalizer that stays at a delete, a delete a webhook refuses, an Application that reads OutOfSync
     for an object its render no longer names.
 
+- **Managed platform: the sandbox read failed every minute for every project, so no ended sandbox was archived
+  (drill of v0.12.0-rc.2, findings E2-B and E3-e).** Each read of a project's sandboxes also lists its template
+  builds, in the namespace `sbx-build`. A managed platform has no sandbox registry and its sandbox chart makes no
+  such namespace, and on a shared cluster the portal's identity may do nothing in a namespace it did not bind: the
+  list answered 403, and that failed the whole read. On the lab the API log had one ERROR per attached project per
+  minute (`syncjob: reconcile sandboxes ... pods is forbidden ... in the namespace "sbx-build"`), a sandbox that had
+  ended by its timeout still read RUNNING, no sandbox row was archived, and the tenant's list grew by one row per
+  sandbox ever started. A sandbox lost before its timeout would have been charged until its timeout (up to 24
+  hours); the drill did not have that case. An installer's sandbox cluster was not affected.
+  - *The fix:* a provider without a template registry is not asked for builds at all: it has none (a build, an
+    import and a snapshot all push to that registry). With a registry, a build namespace that is not there yet
+    reads as "no builds": a 404, or a 403 when a read of the namespace itself says it does not exist. A 403 in a
+    build namespace that exists is still an error, and so is a refusal in any other namespace: a list that broke
+    never reads as empty. The same rule holds for every list in that namespace (active build workers, the mirror
+    workers of a template update, the images the registry prune keeps); those three still ask a provider that lost
+    its registry.
+  - *What a site that ran v0.12.0-rc.2 gets at the upgrade:* nothing to do by hand. The first read after the
+    upgrade, within a minute, archives every row the failing reads left. A sandbox that ended by its timeout is
+    archived with that time as its end and its charge ends there, not at the time of the upgrade; a deleted one
+    keeps the end of its delete. A sandbox that was lost before its timeout while the reads failed has no recorded
+    end: it ends at its timeout if that has passed, else at the first read.
+  - *A disabled sandbox provider* is still read, so what runs on it is ended when it ends; a project with no
+    sandbox row left on it is no longer read, and neither is its cluster asked. A read that fails is logged once
+    per provider and run with the number of projects, not once per project: an ERROR for a live provider, a WARN
+    for a disabled one (after an "off" its cluster is gone). A row left on a disabled provider whose cluster is
+    gone stays in the list until sandboxes are built again; its charge ended at its timeout.
+  - Shown in unit tests on a fake of the shared cluster's permissions and in an integration test whose cluster
+    refuses the build namespace as the lab's did. Not run on a lab.
 - **A release that changed only the load balancer controller reached no cluster by itself.** The tenant's cluster
   page offered "Platform update available" only when the cluster's chart version differed from the provider's, and
   the operator's **Bump all** skipped every cluster whose chart was the provider's. The controller's image is pinned

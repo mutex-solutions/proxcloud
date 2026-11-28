@@ -879,7 +879,7 @@ func (s *Service) RegistryRefsInUse(ctx context.Context) ([]string, error) {
 			}
 		}
 	}
-	pods, err := s.api.ListPods(ctx, BuildNamespace, "")
+	pods, err := s.buildPods(ctx, "")
 	if err != nil {
 		return nil, err
 	}
