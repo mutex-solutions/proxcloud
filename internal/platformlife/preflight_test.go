@@ -391,6 +391,26 @@ func TestPreflight(t *testing.T) {
 		strings.Contains(c.Message, "pveum acl") {
 		t.Errorf("a boot store that takes ISO images: %+v", c)
 	}
+
+	// Placement separate stored on a platform whose BOM names a tenant cluster chart that builds no sandbox cluster
+	// (0.12.0-rc.2: chart 0.1.19): row spec fails, and says the order that works. The row reads the BOM the platform
+	// is on, and stage 1 of every apply runs this Check, so an apply that would upgrade the platform stops here too
+	// (TestFailedSeparateBuildOnAnOlderChartHasOneWayOut walks the way out).
+	rc2, ok := Lookup(previousSHA256["0.12.0-rc.2"])
+	if !ok {
+		t.Fatal("this build does not embed the 0.12.0-rc.2 BOM")
+	}
+	ref := refOf(rc2)
+	in.Spec.Sandbox, in.Status.BOM = separateSandbox(), &ref
+	c = checkMap(pf.Run(ctx))["spec"]
+	if c.Status != CheckFail || !strings.Contains(c.Message, "spec.sandbox.placement separate: the platform's BOM (release 0.12.0-rc.2) names cluster chart 0.1.19") ||
+		!strings.Contains(c.Message, "Set placement off, or shared") || !strings.Contains(c.Message, "every apply stops at this row while separate is stored") {
+		t.Errorf("row spec for separate on the BOM of 0.12.0-rc.2: %+v", c)
+	}
+	in.Spec.Sandbox = &SandboxSpec{Placement: SandboxOff}
+	if c = checkMap(pf.Run(ctx))["spec"]; c.Status != CheckOK {
+		t.Errorf("row spec with placement off on the BOM of 0.12.0-rc.2: %+v", c)
+	}
 }
 
 // MintScopeOf: the stores of every profile a boot disk may sit on, on every node, with the ISO and import stores, and

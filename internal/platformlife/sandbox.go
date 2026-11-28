@@ -364,10 +364,18 @@ func (in *Installation) SandboxProblems() []string {
 			bom.Release, chart, kamaji.GroupPoolChartVersion)}
 	}
 	// Refused here and not by the run: the run would build the machines and then wait in vain for a cluster that
-	// cannot come up.
+	// cannot come up. The sentence names the one order that works. The upgrade is an apply, and stage 1 of every apply
+	// fails on this row while separate is stored, so off comes first; and once a run has begun the cluster (a build of
+	// 0.12.0-rc.2 that failed), shared is no way on either: the save refuses a change of a begun placement
+	// (sandboxFixed), and only off removes what that run made.
 	if in.Spec.sandboxMode() == SandboxSeparate && !kamaji.ChartHasOperatorTolerations(chart) {
+		first := "Set placement off, or shared, which is built with the platform's own chart"
+		if in.Status.Sandbox != nil {
+			first = "A run has begun one, and it keeps that chart. Set placement off and apply, which deletes its machines, its token and the pool (shared is refused once a run has begun a cluster)"
+		}
 		return []string{fmt.Sprintf("spec.sandbox.placement separate: the platform's BOM (release %s) names cluster chart %s, under which a sandbox cluster never comes up (%s). "+
-			"Upgrade the platform to a release whose BOM names chart %s or newer, or set placement shared", bom.Release, chart, noOperatorTolerations, kamaji.OperatorTolerationsChartVersion)}
+			"%s; then upgrade the platform to a release whose BOM names chart %s or newer; then set placement separate. In that order: the upgrade is an apply, and every apply stops at this row while separate is stored",
+			bom.Release, chart, noOperatorTolerations, first, kamaji.OperatorTolerationsChartVersion)}
 	}
 	// Refused here and not by the run: a run would have built the machines before it met the missing certificate.
 	if t := in.Spec.Sandbox.TLS; t != nil && t.Mode == TLSSecret {

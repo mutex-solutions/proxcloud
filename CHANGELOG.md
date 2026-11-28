@@ -506,8 +506,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     machine of the cluster is Running.
   - *Refused instead of built in vain.* A sandbox cluster is built with the tenant cluster chart the platform's BOM
     names (`tenantCharts.kubernetes`). Under a chart before 0.1.20, `placement: separate` is now refused at the
-    save and in the Check's `spec` row, with the reason and the two ways on: the platform upgrade, or `shared`. The
-    BOMs of v0.12.0-rc.1 and v0.12.0-rc.2 name chart 0.1.19.
+    save and in the Check's `spec` row, with the reason and the order that works: set placement `off` (or `shared`,
+    while no run has begun a sandbox cluster), upgrade the platform, then set `separate`. The order matters. The
+    upgrade is an apply, and stage 1 of every apply runs the Check, whose `spec` row reads the BOM the platform is
+    on: while `separate` is stored the upgrade stops there with `preflight_failed`. And once a run has begun the
+    cluster, `shared` is refused at the save (`409 fixed_fields`), as every change of a begun placement but `off`.
+    The BOMs of v0.12.0-rc.1 and v0.12.0-rc.2 name chart 0.1.19.
   - *A site without sandboxes:* nothing changes. A tenant cluster sets neither value, and chart 0.1.20 then renders
     the objects chart 0.1.19 renders, byte for byte: a test holds the render to the sha256 of what the published
     0.1.19 renders with default values. The installer's ordinary clusters are not touched. This change does not move a pin of the BOM: the release that follows must publish
@@ -516,11 +520,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - *A site that runs v0.12.0-rc.2 with `shared` sandboxes:* nothing changes; `shared` is built with the platform's
     own cluster chart and was not affected.
   - *A site that tried `separate` with v0.12.0-rc.2* has a failed run, two machines that are not Ready and the
-    cluster's Application at chart 0.1.19. A sandbox cluster keeps the chart it was begun with, so an apply after
-    the upgrade does not repair it: the run now stops at once and says so. Set `placement: off` and apply, which
-    is what removes the machines, the token, the pool and the Application; then upgrade the platform and set
-    `separate` again. An off that starts from a failed build of `separate` had not been run on a lab when this was
-    written.
+    cluster's Application at chart 0.1.19. A sandbox cluster keeps the chart it was begun with, so no apply repairs
+    it, and no apply builds in vain any more:
+    - *On a platform that rc.2 installed,* every apply stops at stage 1 (`validate`, `preflight_failed`) on the
+      Check's `spec` row, the apply that would upgrade the platform included. Nothing is asked of Proxmox. The row
+      names chart 0.1.19 and the order: set `placement: off` and apply, which removes the machines, the token, the
+      pool and the Application; upgrade the platform; then set `separate` again. An upgrade that was tried first
+      and stopped at stage 1 has begun all the same: the apply that follows the `off` then goes on to its target,
+      removes the cluster and moves the BOM in one run, and `separate` can be set after it.
+    - *On a platform whose first install failed in that build* no BOM is on record, so the Retry runs under this
+      release's BOM and passes stage 1. It stops at stage `workload-platform` with `component_unhealthy`, before it
+      applies anything of the sandbox cluster, and its message is the render's: "under cluster chart 0.1.19 the
+      sandbox cluster never comes up (...): set placement off, apply, then set separate again".
+    - An `off` after the failed build was run on the lab with v0.12.0-rc.2 (2 min 58 s; machines, token, its six
+      rows, the pool and the Application gone, the ACL byte-equal to before). Under this change it is shown on
+      fakes only, in both orders above.
   - *Not verified:* no cluster was built with this change; the tests render the values and the chart, and the
     rendered values were given to the real Cilium 1.18.16 chart by hand (no test of the repository can: it needs the
     chart from the network), whose operator then carries its own tolerations and the two taints, and the selector

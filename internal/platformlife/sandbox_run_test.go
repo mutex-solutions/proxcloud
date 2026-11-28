@@ -1,11 +1,13 @@
 package platformlife
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
@@ -541,6 +543,194 @@ func TestSeparateSandboxWaitStartsAgainWhenItsMachinesRun(t *testing.T) {
 	p.sandboxIdentities(p.sbx)
 	if end := p.until(10); end != "complete" {
 		t.Fatalf("with the identities: %s: %+v", end, p.stage(stageWorkloadPlatform))
+	}
+}
+
+// A site that tried placement separate with 0.12.0-rc.2, whose BOM names tenant cluster chart 0.1.19: the record holds
+// separate, and a run began the cluster and failed (drill E4-A). The Check's spec row names the one order that works:
+// off and apply, the upgrade, then separate. Both subtests walk it on the fakes, the off's run included (ArgoCD and
+// Cluster API are the fakes' model: an off after the failed build of rc.2 on a real site is
+// v0120-reports/rc2b-drill-E5.md). The second begins with the two shorter ways a reader might try first:
+//
+//   - the upgrade alone: it is an apply, nothing refuses its start, and its stage 1 fails on that same row while
+//     separate is stored (the row is read against the BOM the platform is on, not the one it moves to). The upgrade
+//     has then begun, so the apply that follows the off goes on to its target: it removes the cluster and moves the
+//     BOM in one run;
+//   - shared: a change of a placement a run began, which the save answers 409 fixed_fields (FixedChanges).
+func TestFailedSeparateBuildOnAnOlderChartHasOneWayOut(t *testing.T) {
+	old, ok := Lookup(previousSHA256["0.12.0-rc.2"])
+	if !ok || kamaji.ChartHasOperatorTolerations(old.TenantCharts.Kubernetes.Version) {
+		t.Fatalf("this build embeds the 0.12.0-rc.2 BOM, which names tenant cluster chart 0.1.19: %v %+v", ok, old.TenantCharts.Kubernetes)
+	}
+	sb := separateSandbox()
+	// failed is a platform that 0.12.0-rc.2 installed, with what its failed build of separate left: the record, the
+	// token, the pool and the cluster's Application.
+	failed := func(t *testing.T) (p *platform, from, to BOMRef, confirm string) {
+		cur := separateChart(t)
+		cur.Release = "0.12.0" // main's "-dev" BOM is no target of an upgrade; the pins are the ones under test
+		from, to = refOf(old), refOf(cur)
+		p = newPlatform(t, RunApply)
+		p.mutate(func(run *Run, in *Installation, _ *Secrets) { run.BOM, in.Status.BOM = from, &from })
+		p.upTo(stageSeedPlatform)
+		if end := p.until(30); end != "complete" {
+			t.Fatalf("the installing run: %s", end)
+		}
+		p.mutate(func(_ *Run, in *Installation, sec *Secrets) {
+			in.Spec.Sandbox = sb
+			in.Status.Sandbox = &SandboxStatus{Placement: SandboxSeparate, NodeRange: sb.NodeRange, ProxyAddress: sb.ProxyAddress, Count: 1, Nodes: []string{"pve1"},
+				SystemCount: 1, SystemNodes: []string{"pve2"}, ChartVersion: old.TenantCharts.Kubernetes.Version}
+			sec.Sandbox = &TokenCredential{TokenID: "capmox@pve!" + SandboxClusterName, Secret: "sbx-token-0123456789"}
+		})
+		p.pve.pools, p.pve.tokens = []string{pve.SandboxPool}, []string{"capmox@pve!" + SandboxClusterName}
+		p.seed.put(appsPath+SandboxClusterName, meta(SandboxClusterName, nil))
+		// The Check's spec row, as Preflight.Run fills it (TestPreflight has the real row for this installation).
+		p.r.Preflight = func(_ context.Context, in *Installation) ([]Check, error) {
+			if why := in.SandboxProblems(); len(why) > 0 {
+				return []Check{{ID: "spec", Status: CheckFail, Message: strings.Join(why, "\n")}}, nil
+			}
+			return []Check{{ID: "spec", Status: CheckOK}}, nil
+		}
+		return p, from, to, "upgrade lab to " + cur.Release
+	}
+	stored := func(p *platform) *Installation {
+		_, in, _ := p.state.snapshot()
+		return in
+	}
+	// off saves placement off, which the save takes, and applies it: stage 1 passes, and the run leaves nothing of the
+	// cluster on Proxmox, on the seed or in the record.
+	off := func(t *testing.T, p *platform) {
+		t.Helper()
+		in := stored(p)
+		next := *in
+		next.Spec.Sandbox = &SandboxSpec{Placement: SandboxOff}
+		if fixed, probs := FixedChanges(in, &next), next.SandboxProblems(); len(fixed) != 0 || probs != nil || next.Validate() != nil {
+			t.Fatalf("off: fixed fields %v, problems %v, %v", fixed, probs, next.Validate())
+		}
+		if checks, _ := p.r.Preflight(context.Background(), &next); !OK(checks) {
+			t.Fatalf("the Check with off stored: %+v", checks)
+		}
+		p.mutate(func(_ *Run, in *Installation, _ *Secrets) { in.Spec.Sandbox = next.Spec.Sandbox })
+		p.start(t, "", "") // from the cluster's stage on: stage 1 passes (above), and the fakes hold no image import
+		if end := p.until(40); end != "complete" {
+			t.Fatalf("the off: %s: %+v", end, p.stage(stageCluster))
+		}
+		_, in, sec := p.state.snapshot()
+		if in.Status.Sandbox != nil || sec.Sandbox != nil || len(p.pve.pools)+len(p.pve.tokens) != 0 || p.seed.obj(appsPath+SandboxClusterName) != nil {
+			t.Fatalf("after the off: sandbox %+v, pools %v, tokens %v, Application %v", in.Status.Sandbox, p.pve.pools, p.pve.tokens, p.seed.obj(appsPath+SandboxClusterName) != nil)
+		}
+	}
+	separate := func(p *platform) (fixed, problems []string) {
+		in := stored(p)
+		next := *in
+		next.Spec.Sandbox = sb
+		return FixedChanges(in, &next), next.SandboxProblems()
+	}
+
+	t.Run("the order the row names", func(t *testing.T) {
+		p, from, to, confirm := failed(t)
+		probs := stored(p).SandboxProblems()
+		if len(probs) != 1 {
+			t.Fatalf("the Check's spec row for the failed build: %v", probs)
+		}
+		at := func(part string) int { return strings.Index(probs[0], part) }
+		first, upgrade, again := at("Set placement off and apply"), at("then upgrade the platform to a release whose BOM names chart "+kamaji.OperatorTolerationsChartVersion), at("then set placement separate")
+		if first < 0 || upgrade < first || again < upgrade || at("names cluster chart 0.1.19") < 0 || at("every apply stops at this row while separate is stored") < 0 ||
+			at("shared is refused once a run has begun a cluster") < 0 || strings.Contains(probs[0], "or set placement shared") {
+			t.Fatalf("the row does not name off, the upgrade and separate in that order: %s", probs[0])
+		}
+		// Off and apply, on the BOM the platform is on.
+		off(t, p)
+		if in := stored(p); *in.Status.BOM != from || in.Status.TargetBOM != nil {
+			t.Fatalf("the off moved the platform: %+v, target %+v", in.Status.BOM, in.Status.TargetBOM)
+		}
+		// Not yet separate: the platform is still on the older chart. With nothing begun the row offers shared too.
+		if _, probs := separate(p); len(probs) != 1 || !strings.Contains(probs[0], "Set placement off, or shared, which") {
+			t.Fatalf("separate before the upgrade: %v", probs)
+		}
+		// The upgrade.
+		plan, err := PlanFor(stored(p), to.SHA256)
+		if err != nil || plan.Upgrade == nil || len(plan.Upgrade.Blocking) != 0 || hasMachines(plan.Upgrade.Changes) {
+			t.Fatalf("the plan of the upgrade with off stored: %+v %v", plan.Upgrade, err)
+		}
+		p.start(t, to.SHA256, confirm)
+		if end := p.until(40); end != "complete" || *stored(p).Status.BOM != to {
+			t.Fatalf("the upgrade with off stored: %s: %+v, BOM %+v", end, p.stage(stageCluster), stored(p).Status.BOM)
+		}
+		// Then separate.
+		if fixed, probs := separate(p); len(fixed) != 0 || probs != nil {
+			t.Fatalf("separate after the upgrade: fixed fields %v, problems %v", fixed, probs)
+		}
+	})
+
+	t.Run("the upgrade or shared first", func(t *testing.T) {
+		p, from, to, confirm := failed(t)
+		// The upgrade while separate is stored: it starts, and stops at stage 1 on the row, with nothing asked of Proxmox.
+		var err error
+		p.mutate(func(run *Run, in *Installation, _ *Secrets) {
+			*run = Run{ID: run.ID, InstallationID: in.ID, Kind: RunApply, State: RunQueued}
+			for _, id := range stageIDs(RunApply, "") {
+				run.Stages = append(run.Stages, Stage{ID: id, State: StagePending})
+			}
+			err = startApply(run, in, to.SHA256, confirm, "", SeedBackup{Taken: true}, RollRead{Read: true})
+		})
+		if err != nil {
+			t.Fatalf("the upgrade is refused at its start, not at stage 1: %v", err)
+		}
+		p.jobs = &fakeJobs{}
+		p.r.Jobs = p.jobs
+		writes := len(p.pve.writes)
+		if end := p.until(3); end != "fail:"+CodePreflightFailed || len(p.pve.writes) != writes {
+			t.Fatalf("the upgrade with separate stored: %s, stage %+v, Proxmox writes %v", end, p.stage(StageValidate), p.pve.writes[writes:])
+		}
+		if items := p.stage(StageValidate).Items; len(items) != 1 || items[0].ID != "spec" || !strings.Contains(items[0].Message, "Set placement off and apply") {
+			t.Fatalf("stage 1 of the upgrade: %+v", p.stage(StageValidate))
+		}
+		in := stored(p)
+		if *in.Status.BOM != from || in.Status.TargetBOM == nil || *in.Status.TargetBOM != to || in.Status.Sandbox == nil {
+			t.Fatalf("after the refused upgrade: BOM %+v, target %+v, sandbox %+v", in.Status.BOM, in.Status.TargetBOM, in.Status.Sandbox)
+		}
+		// Shared in its place: refused, the placement of a begun cluster only goes to off.
+		next := *in
+		next.Spec.Sandbox = sharedSandbox()
+		if fixed := FixedChanges(in, &next); !slices.Contains(fixed, "spec.sandbox.placement") {
+			t.Fatalf("shared after a run began the separate cluster: fixed fields %v", fixed)
+		}
+		// Off and apply: the upgrade has begun, so this apply goes on to its target and removes the cluster on the way.
+		off(t, p)
+		if in := stored(p); *in.Status.BOM != to || in.Status.TargetBOM != nil {
+			t.Fatalf("the apply after the off did not finish the upgrade: %+v, target %+v", in.Status.BOM, in.Status.TargetBOM)
+		}
+		if fixed, probs := separate(p); len(fixed) != 0 || probs != nil {
+			t.Fatalf("separate after the upgrade: fixed fields %v, problems %v", fixed, probs)
+		}
+	})
+}
+
+// A first install of 0.12.0-rc.2 that failed in its build of separate has no BOM on record yet, so nothing is upgraded:
+// its Retry runs under this build's BOM. The cluster it began keeps chart 0.1.19 (SandboxStatus.ChartVersion), under
+// which it never comes up: the run stops at stage workload-platform before it applies anything of that cluster, and
+// says the way out, where the run of rc.2 waited the stage's 20 minutes and named a missing Secret.
+func TestRetryOfASeparateBuildBegunOnAnOlderChartSaysTheWayOut(t *testing.T) {
+	sb := separateSandbox()
+	sb.System.Nodes = []string{"pve1"}
+	p := sandboxPlatform(t, RunApply, sb)
+	p.mutate(func(_ *Run, in *Installation, _ *Secrets) {
+		routed(in)
+		in.Status.Sandbox = &SandboxStatus{Placement: SandboxSeparate, NodeRange: sb.NodeRange, ProxyAddress: sb.ProxyAddress, Count: 1, Nodes: []string{"pve1"},
+			SystemCount: 1, SystemNodes: []string{"pve1"}, ChartVersion: "0.1.19"}
+	})
+	if _, in, _ := p.state.snapshot(); in.Status.BOM != nil || in.SandboxProblems() != nil {
+		t.Fatalf("a platform that was never installed is held to this build's BOM: %+v %v", in.Status.BOM, in.SandboxProblems())
+	}
+	p.upTo(stageSeedPlatform)
+	end := p.until(40)
+	s := p.stage(stageWorkloadPlatform)
+	if end != "fail:"+CodeComponentUnhealthy || !strings.Contains(s.Message, "under cluster chart 0.1.19 the sandbox cluster never comes up") ||
+		!strings.Contains(s.Message, "set placement off, apply, then set separate again") {
+		t.Fatalf("end %s, stage %+v", end, s)
+	}
+	if p.seed.obj(appsPath+SandboxClusterName) != nil {
+		t.Error("the run applied the sandbox cluster's Application under a chart it refuses")
 	}
 }
 

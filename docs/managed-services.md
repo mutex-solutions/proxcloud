@@ -1089,6 +1089,15 @@ answer "No agent available". A platform whose BOM names a tenant cluster chart b
 (v0.12.0-rc.1 and v0.12.0-rc.2 name 0.1.19) is refused `placement: separate` at the save: under
 that chart the cluster never comes up.
 
+**After a build of `separate` that failed under v0.12.0-rc.2.** The cluster keeps chart 0.1.19, so
+no apply repairs it. In this order: set `placement: off` and apply (the machines, the token, the
+pool and the Application go); upgrade the platform to a release whose BOM names chart 0.1.20;
+then set `separate` again. The upgrade alone does not work: it is an apply, and stage 1 of every
+apply stops on the Check's `spec` row while `separate` is stored. `shared` does not work either:
+the placement of a cluster a run has begun only goes to `off` (`409 fixed_fields`). If the upgrade
+was tried first, it has begun: the apply after the `off` then finishes it and removes the cluster
+in the same run.
+
 **Changing it.** Nodes, count, sizes, `dns` and `domain` change with an apply. Fixed once a run
 built it (`409 fixed_fields`): `placement`, which goes only to `off`, `nodeRange` and
 `proxyAddress`. From `shared` to `separate`: `off`, apply, then `separate`. With `off` the run

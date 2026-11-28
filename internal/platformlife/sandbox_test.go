@@ -118,8 +118,8 @@ func separateSandbox() *SandboxSpec {
 //
 // Placement separate is taken only on a BOM whose tenant cluster chart lets Cilium's operator start on the sandbox
 // cluster's tainted nodes (0.1.20): a platform that 0.12.0-rc.1 or 0.12.0-rc.2 installed (chart 0.1.19) is refused it
-// at the save, with the upgrade and placement shared as the two ways on, where a run of rc.2 built the machines and
-// then waited for a cluster that could not come up (drill E4-A).
+// at the save, with the order that works (off or shared, the upgrade, then separate), where a run of rc.2 built the
+// machines and then waited for a cluster that could not come up (drill E4-A).
 func TestSandboxIsOffered(t *testing.T) {
 	cur := separateChart(t)
 	c := cur.Feature(FeatureSandbox)
@@ -168,7 +168,8 @@ func TestSandboxIsOffered(t *testing.T) {
 			if sb.Placement == SandboxSeparate && !kamaji.ChartHasOperatorTolerations(chart) {
 				p := in.SandboxProblems()
 				if len(p) != 1 || !strings.Contains(p[0], "spec.sandbox.placement separate") || !strings.Contains(p[0], "(release "+ref.Release+") names cluster chart "+chart) ||
-					!strings.Contains(p[0], "chart "+kamaji.OperatorTolerationsChartVersion+" or newer") || !strings.Contains(p[0], "set placement shared") {
+					!strings.Contains(p[0], "chart "+kamaji.OperatorTolerationsChartVersion+" or newer") || !strings.Contains(p[0], "Set placement off, or shared, which") ||
+					!strings.Contains(p[0], "; then upgrade the platform to a release") || !strings.Contains(p[0], "; then set placement separate. In that order") {
 					t.Errorf("placement separate on %+v (tenant chart %s): %v", ref, chart, p)
 				}
 				refusedSeparate++

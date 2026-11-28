@@ -16,8 +16,8 @@ writers of a sandbox cluster set them.
   `kubernetes.io/os: linux`. Empty, no selector is rendered.
 - `internal/platformlife/sandbox.go`: `SandboxClusterValues` sets it to the two taints a machine of `pc-sandbox`
   joins with (`sandboxJoinTolerations`) and the selector to the system group's label (`sandboxSystemLabel`), and
-  refuses a cluster chart before 0.1.20, the one a cluster keeps from the run that began it included. `sandboxProblems` refuses `placement: separate` at the save on a BOM whose tenant
-  cluster chart is older. `internal/cloud/kamaji/config.go`: `OperatorTolerationsChartVersion`.
+  refuses a cluster chart before 0.1.20, the one a cluster keeps from the run that began it included. `SandboxProblems` refuses `placement: separate` at the save and in the Check's `spec` row on a BOM
+  whose tenant cluster chart is older, and names the order that works (off, the upgrade, then separate). `internal/cloud/kamaji/config.go`: `OperatorTolerationsChartVersion`.
 - `installer/playbooks/templates/sandbox-cluster.yml.j2`: the same tolerations for the installer's sandbox cluster,
   and the selector when it renders the system group (`pc_sandbox_edge_on`).
 - `internal/platformlife/sandbox_run.go`: `sandboxCluster` starts the deadline of stage `workload-platform` again,
