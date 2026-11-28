@@ -22,9 +22,12 @@ trusts changes shape, not place: it is still the one PEM in `status.sandbox.cert
 managed platform, and every command and file call failed: sandbox-proxy served a certificate marked as a certificate
 authority, and the SDK's transport since 2.36.0 (rustls) refuses that from a server. One certificate was kept, rather
 than an authority and a certificate signed by it, because the certificate is handed over as one file that tenants add
-to their trust store: a file that is no authority vouches for the sandbox names only, whoever holds its key, and the
-key is on the machine that runs sandbox-proxy. The detection exists because platforms built by the two release
-candidates hold the refused shape, and the row because a new certificate is a new file for every client.
+to their trust store, and nothing renews a certificate between applies. What the key of that file can sign depends on
+the client's library: OpenSSL, Go and Node accept nothing else signed with it, and rustls accepts whatever it signs (it
+does not read the authority mark of a certificate it is told to trust), as every client did with the certificate of
+rc.2. The key is in the proxy's Secret. An authority whose key stays sealed in the record would close that for rustls
+too; this change does not make one. The detection exists because platforms built by the two release candidates hold
+the refused shape, and the row because a new certificate is a new file for every client.
 
 **Diagrams:** none changed. `c3-components.md` names `sandbox_run.go` under Platform runs already; the trust
 relation (client trusts the published certificate of sandbox-proxy) is the same.

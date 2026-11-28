@@ -482,9 +482,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`). In the drill both the old and the new transport accepted this shape.
   - *Why one certificate and not an authority with a certificate signed by it:* the certificate reaches its users
     as one file (the Ready card's download, `status.sandbox.certificate`) that tenants add to their trust store.
-    A file that is no authority can vouch for the sandbox names and for nothing else. An authority would let a
-    later certificate come without a new file, but nothing renews a certificate between applies and the next one
-    is five years away.
+    An authority would let a later certificate come without a new file, but nothing renews a certificate between
+    applies and the next one is five years away.
+  - *What the key of that file can sign* for a client that trusts the file depends on the client's library.
+    OpenSSL, Go and Node refuse a certificate for another name signed with it ("invalid CA certificate"), where
+    they accepted one signed with the key of rc.2's certificate. rustls does not read the authority mark of a
+    certificate it is told to trust, so the SDK's transport from 2.36.0 on accepts one: for that client the file
+    vouches for whatever its key signs, as rc.2's file did for every client. The key is in the Secret
+    sandbox-proxy reads. Give the file to the programs that call sandboxes, not to a system-wide trust store. An
+    authority whose key stays sealed in the record, with a certificate of its own for the proxy, would close this
+    for rustls too; this release does not make one.
   - *A platform that built sandboxes with 0.12.0-rc.1 or rc.2* holds a certificate of the refused shape. The
     upgrade of the portal changes nothing by itself. The plan then has a row `sandbox-certificate` that says the
     certificate is replaced and that clients must fetch the new one, and the next apply makes it in stage
@@ -492,7 +499,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     certificate and key, sandbox-proxy reads them within a few minutes without a restart, and sandboxes that run
     keep running. No machine, no pool, no ACL row and no token is touched. **Every client must replace the file it
     trusts** with the one on the Ready card: until then its calls to a sandbox fail at the TLS handshake, the old
-    SDK's too. Both are release candidates, so no installation of a released version holds this certificate.
+    SDK's too. The old file must leave the trust store, not stay beside the new one: it is an authority's
+    certificate, and a client that still trusts it accepts whatever its key signed. Both are release candidates,
+    so no installation of a released version holds this certificate.
   - *The end of the certificate:* it lives five years. A run makes a new one when an apply comes within its last
     30 days (or after its end), or when `spec.sandbox.domain` changed; the plan carries the same row from that day
     on. Nothing else renews it: a platform that gets no apply serves the certificate until it ends, and then every
@@ -508,7 +517,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     certificate read as a strict client reads it, with the shape of rc.2 as the control; the names it covers and
     does not), `TestCertificateProblem`, `TestApplyReplacesACertificateOfTheRefusedShape` (both placements: the
     plan row, the apply, nothing else changed, the next apply keeps it), `TestPlanSaysWhenTheSandboxCertificateEnds`.
-    Not run on a lab; no SDK ran against the new certificate outside the drill's local shape test.
+    Not run on a lab, and the SDK has not run against a sandbox behind the new certificate. On a workstation, a
+    server with a certificate this code made, trusted by its own file, was reached at a sandbox name and at the
+    apex by the two transports of the pinned SDK (pyqwest 0.12.0 as e2b 2.63.0 installs it, httpx 0.29.0), by
+    OpenSSL 3.5 and 1.1.1, by Python 3.14 and by Node 22; pyqwest refused the shape of rc.2 with the drill's
+    error.
 
 - **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of
   v0.12.0-rc.1, finding Z2-A).** The provider-wide isolation rules drop the sandbox range towards every blocked

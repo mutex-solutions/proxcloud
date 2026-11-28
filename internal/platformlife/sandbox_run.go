@@ -373,9 +373,15 @@ const (
 //
 // One certificate and not an authority with a certificate signed by it, because of how it reaches its users: one PEM
 // in status.sandbox.certificate, downloaded from the Ready card and handed to tenants, who add it to their trust
-// store. A file that is no authority vouches for the sandbox names and nothing else, whoever holds its key (the key
-// is on the machine that runs sandbox-proxy). An authority would let a later certificate come without a new file,
-// but nothing renews between applies and the next one is five years away, so that buys nothing here.
+// store. An authority would let a later certificate come without a new file, but nothing renews between applies and
+// the next one is five years away.
+//
+// What the key of this file can sign for a client that trusts the file depends on the client's library. OpenSSL, Go
+// and Node refuse a certificate for another name signed with it ("invalid CA certificate"), where they took one
+// signed with the key of rc.2's. rustls does not read the authority mark of a certificate it is told to trust: for
+// the SDK's transport the file vouches for whatever its key signs, as rc.2's did for every client. The key is in the
+// Secret sandbox-proxy reads. An authority whose key stays sealed in the record, with a certificate of its own for
+// the proxy, would close that for rustls too; this function does not make one.
 func selfSignedWildcard(domain string, now time.Time) (certPEM, keyPEM string, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
