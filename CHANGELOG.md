@@ -115,9 +115,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   realm import and for the rest; neither is given `--no-deps`, so the first of the two already brings PostgreSQL
   to the file's state. Compose recreates a container whose image line changed, **on every install, whether or not
   the build it runs is the pinned one**: the container is stopped, removed and started from the pinned image on the
-  same volume. That is a restart of the portal's database and of Keycloak's: for a few seconds the API and Keycloak
-  have no database, and they connect again by themselves. Both builds are PostgreSQL 17.12, so the data directory
-  is read as it is; nothing is dumped and restored.
+  same volume. That is a restart of the portal's database and of Keycloak's, and both connect again by themselves.
+  Measured on a lab at the upgrade from 0.12.0-rc.1 to 0.12.0-rc.2 (one run): the database was away for 1.8 s; the
+  API answered its readiness probe with `503` and two client calls with `500` over 1.9 s; Keycloak answered
+  sign-ins (password grants) with `500` for about 10 s. Later in the same upgrade the API's own image swap took it
+  away for 7 s, as at every upgrade. Both builds are PostgreSQL 17.12, so the data directory is read as it is;
+  nothing is dumped and restored.
   - *What the script's backup covers:* before anything is pulled, `upgrade` writes `pg_dumpall` of the running
     container (both databases, roles included) and a copy of `.env` to `backups/`, and stops if the dump fails. The
     recreate does not touch the volume `<project>_postgres-data`; the dump is for the case that the new container
@@ -467,6 +470,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Not exercised: the write itself, which happens on `main` after the merge.
 
 ### Fixed
+
+- **Managed platform, sandboxes: the stock E2B Python SDK refused the run's certificate (drill of v0.12.0-rc.2,
+  finding E2-A).** The certificate a run makes for the sandbox domain was one self-signed certificate marked as a
+  certificate authority (CA true, key usage keyCertSign), and sandbox-proxy served that same certificate. The
+  SDK's sandbox transport is rustls since e2b 2.36.0, and rustls refuses an authority's certificate from a server:
+  with e2b 2.63.0, the version `test/e2b-compat/requirements.txt` pins, create, list and kill worked and every
+  command and file call failed with "invalid peer certificate: CaUsedAsEndEntity". e2b 2.34.0 (OpenSSL), curl and
+  Go accepted it. `selfsigned` is the only mode of a managed platform, so no managed platform could serve the
+  current SDK.
+  - *The fix:* the run makes a server certificate: not an authority, key usage digitalSignature, extended key
+    usage serverAuth, the names `*.<domain>` and `<domain>` as before, ECDSA P-256, five years. It is still one
+    self-signed certificate, served as it is and trusted by adding the same file to the client's trust store
+    (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`). In the drill both the old and the new transport accepted this shape.
+  - *Why one certificate and not an authority with a certificate signed by it:* the certificate reaches its users
+    as one file (the Ready card's download, `status.sandbox.certificate`) that tenants add to their trust store.
+    An authority would let a later certificate come without a new file, but nothing renews a certificate between
+    applies and the next one is five years away.
+  - *What the key of that file can sign* for a client that trusts the file depends on the client's library.
+    OpenSSL, Go and Node refuse a certificate for another name signed with it ("invalid CA certificate"), where
+    they accepted one signed with the key of rc.2's certificate. rustls does not read the authority mark of a
+    certificate it is told to trust, so the SDK's transport from 2.36.0 on accepts one: for that client the file
+    vouches for whatever its key signs, as rc.2's file did for every client. The key is in the Secret
+    sandbox-proxy reads. Give the file to the programs that call sandboxes, not to a system-wide trust store. An
+    authority whose key stays sealed in the record, with a certificate of its own for the proxy, would close this
+    for rustls too; this release does not make one.
+  - *A platform that built sandboxes with 0.12.0-rc.1 or rc.2* holds a certificate of the refused shape. The
+    upgrade of the portal changes nothing by itself. The plan then has a row `sandbox-certificate` that says the
+    certificate is replaced and that clients must fetch the new one, and the next apply makes it in stage
+    `workload-platform`: the record, `status.sandbox.certificate` and the Secret `sandbox-proxy-tls` get the new
+    certificate and key, sandbox-proxy reads them within a few minutes without a restart, and sandboxes that run
+    keep running. No machine, no pool, no ACL row and no token is touched. **Every client must replace the file it
+    trusts** with the one on the Ready card: until then its calls to a sandbox fail at the TLS handshake, the old
+    SDK's too. The old file must leave the trust store, not stay beside the new one: it is an authority's
+    certificate, and a client that still trusts it accepts whatever its key signed. Both are release candidates,
+    so no installation of a released version holds this certificate.
+  - *The end of the certificate:* it lives five years. A run makes a new one when an apply comes within its last
+    30 days (or after its end), or when `spec.sandbox.domain` changed; the plan carries the same row from that day
+    on. Nothing else renews it: a platform that gets no apply serves the certificate until it ends, and then every
+    client refuses it. Each new certificate is a new file for the clients.
+  - *A platform without sandboxes* gets no row and no write: the code runs only where `spec.sandbox` asks for a
+    placement.
+  - *The installer's sandbox path* (`docs/managed-sandbox.md`, stage 56) is not affected: its `selfsigned` issuer
+    is a cert-manager authority that issues the wildcard, so the proxy never served an authority's certificate
+    there.
+  - *The file name of the Ready card's download* is now `<installation>-sandbox.crt` (it was `-sandbox-ca.crt`,
+    and the file is no authority).
+  - Tests: `TestSandboxCertificateIsAServerCertificate` (a TLS server with the produced pair; the presented
+    certificate read as a strict client reads it, with the shape of rc.2 as the control; the names it covers and
+    does not), `TestCertificateProblem`, `TestApplyReplacesACertificateOfTheRefusedShape` (both placements: the
+    plan row, the apply, nothing else changed, the next apply keeps it), `TestPlanSaysWhenTheSandboxCertificateEnds`.
+    Not run on a lab, and the SDK has not run against a sandbox behind the new certificate. On a workstation, a
+    server with a certificate this code made, trusted by its own file, was reached at a sandbox name and at the
+    apex by the two transports of the pinned SDK (pyqwest 0.12.0 as e2b 2.63.0 installs it, httpx 0.29.0), by
+    OpenSSL 3.5 and 1.1.1, by Python 3.14 and by Node 22; pyqwest refused the shape of rc.2 with the drill's
+    error.
+
+- **Small findings of the drill of v0.12.0-rc.2.** None changes what a site without sandboxes of a managed platform
+  does.
+  - **A platform's sandbox provider is refused "live" while no price rule prices sandbox minutes (E2-c).** The
+    Check's `scheduler` row, the `409` of "live", the install form and the notes said that "the price rule for
+    sandbox minutes holds a placeholder rate until you set one". No such rule exists on a site set up with the
+    Platform setup defaults: their price plan has rules for servers and their traffic, volumes, addresses, images,
+    snapshots and protection, and nothing adds a sandbox rule afterwards (only `deploy/seed/seed-operator.py`, the
+    script an operator runs by hand from a checkout, as the development and chart guides tell, writes the two
+    placeholder rules). The charge rates a resource that no rule
+    matches as nothing, without an error or a log line, so such a site would have given every sandbox minute away
+    without knowing. Now the texts say what is true, and the save that sets the provider live answers `409` until
+    an enabled public price plan that bills the provider has a rule of resource type `sandbox` (any time unit; a
+    rule at 0 counts: that is giving them away knowingly). The answer names the missing rule together with the
+    scheduler and the release gates. We chose the refusal over adding the placeholder rule in the setup defaults:
+    the defaults run once, so no existing site would have got the rule, and a rule added by an upgrade would
+    start charging tenants a rate nobody signed.
+    - *At the upgrade from 0.12.0-rc.2:* a sandbox provider that is DISABLED is refused "live" until the rule
+      exists. A provider that is already live stays live, and its next save (any field) is refused until the rule
+      exists; add the rule under System, Price plans first. Nothing is written by the upgrade itself.
+    - *Not covered:* the installer's sandbox providers (`docs/managed-sandbox.md`) are not asked, as with the
+      scheduler; their documentation now says to check the plan. A plan scoped to single billing profiles is not
+      counted. A rule deleted while the provider is live is noticed at the provider's next save only.
+  - **A provider sync that falls into a sandbox build no longer logs an error (E2-d).** A run writes the sandbox
+    pool on the Proxmox provider at stage `cluster` and the sandbox cluster's kubeconfig at stage `register`,
+    about a quarter of an hour later. A timed sync in between logged one ERROR, "secret.sandboxKubeconfig is
+    missing; the workers stay as they are (tainted)", for a state the run itself creates. While a run of the
+    installation that owns the sandbox settings is not finished, the sync now logs one INFO line and goes on. With
+    no run in flight, on an installer's provider, or when the run cannot be read, it is the ERROR it was. The
+    sync did not write anything in that state before and does not now.
+  - **A run that the sandbox settings refuse leaves the installation's phase as it was (E3-d).** A run refused
+    with `sandbox_refused` ("Nothing was changed.") left the record in phase `failed` until the next successful
+    apply, on a platform that was ready and untouched. The three refusals (sandboxes switched off while their
+    provider is live; another placement than the one a run built; a BOM without the sandbox chart) are now given
+    at stage 1 (`validate`), before the run has written anything, and the installation keeps the phase it had
+    when the run started; the run itself still ends `failed` with the same code and message. Stage 7 asks again,
+    so a provider set live while the run was on its way is still refused there, and that run leaves `failed`
+    like any other failed run, because the stages before it ran. An upgrade's run is left out (its start already
+    recorded the target), and so is every other failure of stage 1: a failed check still ends in `failed`.
+    - *At the upgrade:* a record that reads `failed` from such a refusal stays `failed` until the next successful
+      apply; only runs started by this release keep the phase. A run now carries `fromPhase`.
+    - *Not changed:* an operator's cancel still leaves the record in phase `failed`. A cancelled run may have
+      built machines, and the run does not record whether it changed anything; that needs its own change.
+  - **The upgrade note said "a few seconds" without a database (E1-a).** Measured at the upgrade of the lab:
+    1.9 s for the API and about 10 s of refused sign-ins at Keycloak. The note above and
+    `deploy/compose/README.md` now give the figures.
 
 - **A shared sandbox machine was cut off from its own cluster by the product's own isolation rule (drill of
   v0.12.0-rc.1, finding Z2-A).** The provider-wide isolation rules drop the sandbox range towards every blocked

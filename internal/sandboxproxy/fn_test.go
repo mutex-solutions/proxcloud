@@ -51,6 +51,11 @@ func fnLookup(port int, n *atomic.Int32) FnLookup {
 }
 
 // fnAddr is a pod of f on this host.
+// closedPort is a port of 127.0.0.1 nothing listens on (tcpmux, as the wakers' http://127.0.0.1:1 here). Not a port
+// taken from a listener that was then closed: another test's server can be given that port before it is dialed, and
+// it then answers in the gone instance's place.
+const closedPort = 1
+
 func fnAddr(f Fn) []string { return []string{fmt.Sprintf("127.0.0.1:%d", f.Port)} }
 
 func fnLocal(_ context.Context, f Fn) ([]string, error) { return fnAddr(f), nil }
@@ -188,9 +193,6 @@ func TestFnWakeAndPodAnswers(t *testing.T) {
 	none := func(context.Context, Fn) ([]string, error) { return nil, ErrNotFound }
 	starting := func(context.Context, Fn) ([]string, error) { return nil, ErrNotReady }
 	broken := func(context.Context, Fn) ([]string, error) { return nil, errors.New("boom") }
-	l, _ := net.Listen("tcp", "127.0.0.1:0")
-	closedPort := l.Addr().(*net.TCPAddr).Port
-	l.Close()
 	_, openPort := upstream(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	for _, tc := range []struct {
 		name         string
@@ -352,9 +354,6 @@ func TestFnDoesNotRetryARequestThatWasSent(t *testing.T) {
 // connection. The server closes the connection after such an answer, and it can only tell from
 // the Body of the request it handed out: the proxy must leave that one alone.
 func TestFnUnreadBodyIsNotTheNextRequest(t *testing.T) {
-	l, _ := net.Listen("tcp", "127.0.0.1:0")
-	closedPort := l.Addr().(*net.TCPAddr).Port
-	l.Close()
 	var lookups atomic.Int32
 	s, _ := fnServer(t, fnLookup(closedPort, &lookups), fnLocal, NewWaker("http://127.0.0.1:1", "tok"))
 	c, err := net.Dial("tcp", s.Listener.Addr().String())
@@ -383,9 +382,6 @@ func TestFnUnreadBodyIsNotTheNextRequest(t *testing.T) {
 // One retry, not a loop: when the instance listed after the failure is unreachable too, the
 // answer is the 502.
 func TestFnRetriesOnlyOnce(t *testing.T) {
-	l, _ := net.Listen("tcp", "127.0.0.1:0")
-	closedPort := l.Addr().(*net.TCPAddr).Port
-	l.Close()
 	var lookups, lists atomic.Int32
 	pods := func(_ context.Context, f Fn) ([]string, error) {
 		lists.Add(1)

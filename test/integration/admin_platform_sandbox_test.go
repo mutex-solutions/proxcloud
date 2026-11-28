@@ -16,10 +16,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/admin"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 	"github.com/mutex-solutions/proxcloud/internal/platformlife"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
@@ -265,5 +267,96 @@ func TestPlatformSandboxProviderRows(t *testing.T) {
 	}
 	if raw, _ := repo.FindDoc(ctx, "externalService", id); raw["config"].(map[string]any)["sandbox"].(map[string]any)[externalservice.SandboxOffSinceKey] != nil {
 		t.Fatalf("the adopted row still carries the mark: %v", raw["config"])
+	}
+}
+
+// TestPlatformSandboxProviderNeedsAPriceRule: on a site set up with the Platform setup defaults, whose price plan has
+// no rule for sandboxes, a platform's sandbox provider is refused live with 409 and stays DISABLED: every sandbox
+// minute would be charged nothing, and nothing would say so (lab, v0.12.0-rc.2: the texts promised a placeholder rule
+// that the defaults never added). A rule in a disabled plan, or in a plan that bills another provider only, does not
+// count; with a sandbox rule in the plan that bills the provider (here at 0: given away knowingly) the same save goes
+// through. The installer's sandbox provider is not asked.
+func TestPlatformSandboxProviderNeedsAPriceRule(t *testing.T) {
+	ctx := context.Background()
+	db, defaults := setupDefaultsEnv(t)
+	if code, items := defaults(http.MethodPost, applyAllDefaults); code != http.StatusOK || len(items) != 4 {
+		t.Fatalf("the setup defaults: %d %+v", code, items)
+	}
+	var rules []pgdoc.M
+	if err := db.C("pricePlanRule").Find(ctx, pgdoc.M{"resourceType": "sandbox"}, &rules); err != nil || len(rules) != 0 {
+		t.Fatalf("the setup defaults added %d sandbox rules (%v): the texts and this test say none", len(rules), err)
+	}
+	var plans []pgdoc.M
+	if err := db.C("pricePlan").Find(ctx, nil, &plans); err != nil || len(plans) != 1 {
+		t.Fatalf("price plans: %v %v", plans, err)
+	}
+	planID, _ := plans[0]["_id"].(string)
+
+	sandboxCfg := func(marker string) pgdoc.M {
+		cfg := pgdoc.M{"provider": "sandbox", "region": "lab", "sandbox": pgdoc.M{"templates": pgdoc.M{"base": pgdoc.M{"image": "x@sha256:1", "cpu": 1, "memoryGiB": 1}}}}
+		if marker != "" {
+			cfg[platformlife.ProviderMarker] = marker
+		}
+		return cfg
+	}
+	kubeconfig := pgdoc.M{"kubeconfig": "apiVersion: v1\nclusters: []\n"}
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-sbx", "name": "lab Sandboxes", "type": "CLOUD", "status": "DISABLED", "config": sandboxCfg("pi-1"), "secret": kubeconfig})
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-own", "name": "site Sandboxes", "type": "CLOUD", "status": "DISABLED", "config": sandboxCfg(""), "secret": kubeconfig})
+
+	const iss, cid = "test-iss", "test-cid"
+	h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, pricing.NewRepo(db), nil, nil, nil, nil, nil, "", iss, cid)
+	h.SetJobsScheduler(true)
+	h.SetSandboxGates(func(context.Context, *externalservice.ExternalService) []sandbox.Gate {
+		return []sandbox.Gate{{Name: sandbox.GateFence, OK: true}}
+	})
+	router := chi.NewRouter()
+	h.Routes(router)
+	call := func(method, path, body string) (int, string) {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(httpx.WithRC(req.Context(), &httpx.RequestContext{Sub: "admin-sub", Issuer: iss, Azp: cid}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w.Code, w.Body.String()
+	}
+	status := func(id string) string {
+		var row pgdoc.M
+		if found, err := db.C("externalService").FindOne(ctx, pgdoc.M{"_id": id}, &row); err != nil || !found {
+			t.Fatalf("provider %s: %v", id, err)
+		}
+		s, _ := row["status"].(string)
+		return s
+	}
+	live := func() (int, string) { return call(http.MethodPut, "/admin/service/svc-sbx", `{"status":"PUBLIC"}`) }
+	refused := func(when string) {
+		t.Helper()
+		if code, raw := live(); code != http.StatusConflict || !strings.Contains(raw, "resource type sandbox") || !strings.Contains(raw, "charged nothing") || status("svc-sbx") != "DISABLED" {
+			t.Fatalf("%s: %d %s, stored %s", when, code, raw, status("svc-sbx"))
+		}
+	}
+	refused("live on the setup defaults' price plan")
+
+	sandboxRule := func(plan string) string {
+		return `{"name":"Sandbox minutes","timeUnit":"minute","resourceType":"sandbox","pricePlanId":"` + plan + `","applyMethod":"ADD_TO_TOTAL","prices":[{"attributeName":"vcpus","tiers":[{"from":0,"value":0}]}]}`
+	}
+	// A sandbox rule that bills nobody of this provider: in a disabled plan, and in a plan for another provider only.
+	mustInsert(t, db, "pricePlan", pgdoc.M{"_id": "plan-off", "name": "off", "enabled": false, "accessMode": "PUBLIC"})
+	mustInsert(t, db, "pricePlan", pgdoc.M{"_id": "plan-other", "name": "other", "enabled": true, "accessMode": "PUBLIC", "serviceProviders": []any{pgdoc.M{"serviceId": "svc-elsewhere"}}})
+	for _, plan := range []string{"plan-off", "plan-other"} {
+		if code, raw := call(http.MethodPost, "/admin/price-plan/rule", sandboxRule(plan)); code != http.StatusOK {
+			t.Fatalf("rule in %s: %d %s", plan, code, raw)
+		}
+	}
+	refused("live with sandbox rules only in a disabled plan and in another provider's plan")
+
+	// The installer's sandbox provider goes live as before.
+	if code, raw := call(http.MethodPut, "/admin/service/svc-own", `{"status":"PUBLIC"}`); code != http.StatusOK || status("svc-own") != "PUBLIC" {
+		t.Fatalf("the installer's provider: %d %s", code, raw)
+	}
+
+	if code, raw := call(http.MethodPost, "/admin/price-plan/rule", sandboxRule(planID)); code != http.StatusOK {
+		t.Fatalf("the sandbox rule: %d %s", code, raw)
+	}
+	if code, raw := live(); code != http.StatusOK || status("svc-sbx") != "PUBLIC" {
+		t.Fatalf("live with a sandbox rule in the plan: %d %s, stored %s", code, raw, status("svc-sbx"))
 	}
 }

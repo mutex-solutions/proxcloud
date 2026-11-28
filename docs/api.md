@@ -1053,7 +1053,11 @@ are several, `errors.details.problems`.
   `{cluster, name: "sandbox", from, to, class: "machines", stage: "cluster", impact}` with
   `{name: "sandbox-pool", class: "site"}` and `{name: "sandbox-access", class: "site"}` while `spec.sandbox` differs
   from what a run built (adding lists the machines per node, the pool and the ACL row or token; `to: "off"` lists what
-  is deleted; another placement than the built one is `class: "refused"` with `blocking`), and
+  is deleted; another placement than the built one is `class: "refused"` with `blocking`),
+  `{cluster, name: "sandbox-certificate", from, to, stage: "workload-platform", impact}` (no `class`) while the
+  certificate a run made for sandbox-proxy (`status.sandbox.certificate`) is one the next apply replaces: marked as
+  a certificate authority (made by 0.12.0-rc.1 or rc.2), for another domain than `spec.sandbox.domain`, or within 30
+  days of its end; `impact` gives the reason and says that clients must fetch the new certificate, and
   `{name: "pve-api-rule", to, class: "site", stage: "seed-vm", impact}` while the cluster firewall of
   Proxmox does not hold the rule `proxcloud:pve-api:<installation>` as the settings name it (a platform
   installed by 0.8.x, or a rule deleted or changed by hand): the run writes that one rule in stage 3.
@@ -1199,9 +1203,12 @@ are several, `errors.details.problems`.
   Stage 9 fails with `argocd_address_unavailable` when the spec names an ArgoCD address and MetalLB did not give it
   to the platform cluster's `argocd-server` Service before the wave's deadline; the message names the Service that
   holds it when one does.
-  Stage 7 fails with `sandbox_refused` when the settings ask for another placement than the one a run built or the
-  run's BOM has no sandbox chart, and with `sandbox_access_failed` when Proxmox refuses the pool, the ACL row or the
-  token of the sandbox machines; nothing of the cluster was changed in either case.
+  A run fails with `sandbox_refused` when the settings ask for another placement than the one a run built, the
+  run's BOM has no sandbox chart, or the settings switch sandboxes off while their provider is live. It is refused
+  at stage 1, before anything is written, and the installation keeps the phase it had (`ready` stays `ready`); a
+  provider set live while the run was on its way is refused at stage 7, and the installation reads `failed` like
+  after any other failed run. Stage 7 fails with `sandbox_access_failed` when Proxmox refuses the pool, the ACL row
+  or the token of the sandbox machines; nothing of the cluster was changed in either case.
   An upgrade run has `fromBom`; its codes `unexpected_rollout`, `capacity_short` and `rollout_stalled` (stage 7) and
   `tenants_unhealthy` (stage 9, and stage 7 between two units of a replacement of machines) are in
   [managed-services.md](managed-services.md#upgrade-between-boms).

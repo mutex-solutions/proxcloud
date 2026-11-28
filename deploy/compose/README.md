@@ -370,9 +370,10 @@ checkout. PostgreSQL is pinned to its minor release and to one build of it, by d
 (`postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73`): the
 publisher rebuilds a version's tag, and by the tag alone a container made later would be another
 build than the one that ran. An upgrade restarts the database only when the release changes that
-line, and then it does: `upgrade` recreates the PostgreSQL container (a few seconds without a
-database for the API and Keycloak, which connect again by themselves; the volume and its data
-stay), after the backup it always takes first. A new PostgreSQL major version needs a dump and
+line, and then it does: `upgrade` recreates the PostgreSQL container, after the backup it always
+takes first. The API and Keycloak connect again by themselves; the volume and its data stay.
+Measured once on a lab: the database was away for about 2 seconds, the API answered errors for
+about 2 seconds, and Keycloak refused sign-ins for about 10 seconds. A new PostgreSQL major version needs a dump and
 restore, not just a new image.
 
 ### Uninstall

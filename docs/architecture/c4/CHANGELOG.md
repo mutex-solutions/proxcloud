@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-28: a sandbox provider with no placement (drill of v0.12.0-rc.2: E5-A, E3-B)
+## 2026-11-28: a sandbox provider with no placement (#524, drill of v0.12.0-rc.2: E5-A, E3-B)
 
 **What changed:** no new component, container or route. One new relation inside the API: the platform run tells the
 admin handler when the sandbox provider's placement ends, and the API makes one pass over the sandbox providers when
@@ -36,7 +36,7 @@ will visit again. No route detaches a project from a provider; that stays out of
 
 **Diagrams updated:** none.
 
-## 2026-11-28: the sandbox read no longer rests on a build namespace (drill of v0.12.0-rc.2: E2-B, E3-e)
+## 2026-11-28: the sandbox read no longer rests on a build namespace (#524, drill of v0.12.0-rc.2: E2-B, E3-e)
 
 **What changed:** no new component, container, route or relation. Two functions of the sandbox service and the
 minutely read of the sync job.
@@ -57,6 +57,66 @@ the callers delete or end things on the word of that list. The read of a DISABLE
 sandboxes run until they end; it stops per project when no row is left, since after an "off" the cluster is gone.
 
 **Diagrams updated:** none.
+
+## 2026-11-28: the run's certificate for sandbox-proxy is a server certificate, and a run replaces one that is not (#523, drill of v0.12.0-rc.2: E2-A)
+
+**What changed:** no new component, container, route or relation. What a client of a managed platform's sandboxes
+trusts changes shape, not place: it is still the one PEM in `status.sandbox.certificate`.
+
+- `internal/platformlife/sandbox_run.go`: `selfSignedWildcard` makes one self-signed server certificate (CA false,
+  key usage digitalSignature, serverAuth, `*.<domain>` and `<domain>`, five years) instead of one marked as a
+  certificate authority. `certificateProblem` (it replaces `certificateFor`) says why a run does not keep a stored
+  certificate: marked as an authority, another domain, or within 30 days of its end. `applySandboxTLS` makes a new
+  one then, for both placements, and logs that it did.
+- `internal/platformlife/sandbox.go`: `sandboxCertificateChange`, the plan row `sandbox-certificate` (stage
+  `workload-platform`, no class), from the same reading.
+- `web/admin/src/pages/platform/PlatformPage.tsx`: the download is named `<installation>-sandbox.crt`.
+
+**Why:** the drill of v0.12.0-rc.2 ran the E2B Python SDK at the version the repository pins (2.63.0) against a
+managed platform, and every command and file call failed: sandbox-proxy served a certificate marked as a certificate
+authority, and the SDK's transport since 2.36.0 (rustls) refuses that from a server. One certificate was kept, rather
+than an authority and a certificate signed by it, because the certificate is handed over as one file that tenants add
+to their trust store, and nothing renews a certificate between applies. What the key of that file can sign depends on
+the client's library: OpenSSL, Go and Node accept nothing else signed with it, and rustls accepts whatever it signs (it
+does not read the authority mark of a certificate it is told to trust), as every client did with the certificate of
+rc.2. The key is in the proxy's Secret. An authority whose key stays sealed in the record would close that for rustls
+too; this change does not make one. The detection exists because platforms built by the two release candidates hold
+the refused shape, and the row because a new certificate is a new file for every client.
+
+**Diagrams:** none changed. `c3-components.md` names `sandbox_run.go` under Platform runs already; the trust
+relation (client trusts the published certificate of sandbox-proxy) is the same.
+
+## 2026-11-28: small findings of the drill of v0.12.0-rc.2 (#522, E2-c price rule, E2-d sync log, E3-d phase, E1-a wording)
+
+**What changed and why**, one finding of the lab drill each. No new component, container or route.
+
+- **E2-c, a sandbox price rule before "live".** `internal/platform/admin/platform_sandbox.go`, `sandboxprovider.go`:
+  `sandboxUnpriced` refuses a platform's sandbox provider "live" (`409`, in the answer of `checkSandboxGoLive`, beside
+  the scheduler and the release gates) while no enabled public price plan that bills the provider has a rule of
+  resource type `sandbox`. It reads the plans as the unpriced flavors guard does
+  (`pricing.SelectPricePlansForService`, `ApplicableRules`). The texts that promised a placeholder rule
+  (`sandboxNeedsScheduler`, `platformlife.SchedulerOffSandboxNote`, the install form, the docs) say that the Platform
+  setup defaults add none. *Why:* a site set up with those defaults has no sandbox rule, the charge rates an unmatched
+  resource as nothing without a word, and three texts said a placeholder rule existed. Saying the truth and refusing
+  "live" is the smallest change that leaves no managed site charging nothing unknowingly: the defaults run once, so a
+  rule added there reaches no existing site, and a rule added at an upgrade would charge a rate nobody signed.
+- **E2-d, the sync during a sandbox build.** `internal/cloud/syncjob/sandboxfw.go`, `job.go`, `cmd/api/main.go`:
+  `logSandboxWorkers` logs the sandbox pass's missing kubeconfig (`errSandboxKubeconfigMissing`) as INFO while a run of
+  the owning installation is not finished, and as the ERROR it was otherwise. One new relation inside the API process:
+  the provider sync asks the platform runs (`Job.WithPlatformRunActive`, wired to `platformlife.Store.ActiveRun`).
+  *Why:* a run writes the sandbox pool at stage `cluster` and the kubeconfig at stage `register`, so every build passes
+  through that state, and a timed sync logged an ERROR for it.
+- **E3-d, the phase after a refused run.** `internal/platformlife/sandbox_run.go`, `stages.go`, `runner.go`, `run.go`,
+  `job.go`: `sandboxRefusal` holds the three refusals of the sandbox settings; stage `validate` asks it before the
+  preflight and stage `cluster` asks it again (`sandboxAccess`). `Run.FromPhase` records the installation's phase at
+  `StartRun`; `finish` puts it back for a run that `validate` refused this way and that is not an upgrade's. *Why:* a
+  refused run that changed nothing left a ready platform's record in phase `failed`. Refusing at the first stage,
+  which writes nothing, is what makes "nothing was changed" true for the whole run and not only for stage 7.
+- **E1-a, wording.** The upgrade note's "a few seconds" without a database is replaced by the lab's figures
+  (`CHANGELOG.md`, `deploy/compose/README.md`). No code.
+
+**Diagrams updated:** none (no element or relation of the model's diagrams changed; the new call stays inside the API
+container).
 
 ## 2026-11-27: an off of sandboxes leaves nothing behind (#514, drill of v0.12.0-rc.1: Z3-B, Z2-c, Z4-d, Z3-C, Z4-e, Z4-c, Z2-d, Z4-b)
 

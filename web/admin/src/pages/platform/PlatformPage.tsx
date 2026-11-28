@@ -345,7 +345,7 @@ function SandboxProviderItem({ id, label, row, installation, canManage }: { id: 
     const url = URL.createObjectURL(new Blob([sb?.certificate ?? ""], { type: "application/x-pem-file" }))
     const a = document.createElement("a")
     a.href = url
-    a.download = `${installation.name}-sandbox-ca.crt`
+    a.download = `${installation.name}-sandbox.crt`
     a.click()
     URL.revokeObjectURL(url)
   }

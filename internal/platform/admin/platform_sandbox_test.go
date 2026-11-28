@@ -107,7 +107,8 @@ func TestPlatformSandboxProviderNeedsTheScheduler(t *testing.T) {
 	}
 	h := &Handler{}
 	h.SetSandboxGates(gates)
-	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC", "pi-1")); herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "job scheduler is off") || !strings.Contains(herr.Msg, "placeholder rate") {
+	// No text promises a price rule any more: the Platform setup defaults add none for sandboxes (lab, v0.12.0-rc.2).
+	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC", "pi-1")); herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "job scheduler is off") || strings.Contains(herr.Msg, "placeholder") {
 		t.Fatalf("live with the scheduler off: %+v", herr)
 	}
 	// The same answer names the gates that fail as well (lab, 2026-11-26: with the scheduler off the 409 named none,
@@ -133,7 +134,51 @@ func TestPlatformSandboxProviderNeedsTheScheduler(t *testing.T) {
 		t.Fatalf("the installer's provider was asked for the scheduler: %+v", herr)
 	}
 	h.SetJobsScheduler(true)
-	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC", "pi-1")); herr != nil && strings.Contains(herr.Msg, "scheduler") {
+	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC", "pi-1")); herr != nil && strings.Contains(herr.Msg, "scheduler is off") {
 		t.Fatalf("live with the scheduler on: %+v", herr)
+	}
+}
+
+// A platform's sandbox provider is refused live while no price rule prices sandbox minutes: the charge rates a
+// resource no rule matches as nothing, and the default plan of the Platform setup defaults has no sandbox rule. Here
+// without a plan store (no rule can be read: refused); TestPlatformSandboxProviderNeedsAPriceRule in test/integration
+// runs it against stored plans. The same answer names the scheduler and the gates; the installer's is not asked.
+func TestPlatformSandboxProviderUnpricedIsRefused(t *testing.T) {
+	ctx := context.Background()
+	doc := func(status, marker string) pgdoc.M {
+		cfg := map[string]any{"provider": "sandbox", "region": "az1", "sandbox": map[string]any{"templates": map[string]any{"base": map[string]any{"image": "x@sha256:1", "cpu": 1, "memoryGiB": 1}}}}
+		if marker != "" {
+			cfg[platformlife.ProviderMarker] = marker
+		}
+		return pgdoc.M{"_id": "sbx", "status": status, "config": cfg, "secret": map[string]any{"kubeconfig": "apiVersion: v1\nclusters: []\n"}}
+	}
+	h := &Handler{}
+	h.SetJobsScheduler(true)
+	h.SetSandboxGates(func(context.Context, *externalservice.ExternalService) []sandbox.Gate {
+		return []sandbox.Gate{{Name: sandbox.GateFence, OK: true}}
+	})
+	herr := h.checkSandboxGoLive(ctx, doc("PUBLIC", "pi-1"))
+	if herr == nil || herr.Status != http.StatusConflict || !strings.Contains(herr.Msg, "resource type sandbox") || !strings.Contains(herr.Msg, "charged nothing") || !strings.Contains(herr.Msg, "a rule at 0") {
+		t.Fatalf("live with no sandbox price rule: %+v", herr)
+	}
+	if herr := h.checkSandboxGoLive(ctx, doc("DISABLED", "pi-1")); herr != nil {
+		t.Fatalf("stored disabled: %+v", herr)
+	}
+	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC", "")); herr != nil {
+		t.Fatalf("the installer's provider was asked for a price rule: %+v", herr)
+	}
+	// With the scheduler off and a gate failing, one answer carries all three.
+	h.SetJobsScheduler(false)
+	h.SetSandboxGates(func(context.Context, *externalservice.ExternalService) []sandbox.Gate {
+		return []sandbox.Gate{{Name: sandbox.GateFence, Detail: "no worker is open to sandboxes yet"}}
+	})
+	herr = h.checkSandboxGoLive(ctx, doc("PUBLIC", "pi-1"))
+	if herr == nil || !strings.Contains(herr.Msg, "job scheduler is off") || !strings.Contains(herr.Msg, "charged nothing") || !strings.Contains(herr.Msg, "fence: no worker is open to sandboxes yet") {
+		t.Fatalf("scheduler off, unpriced, a gate failing: %+v", herr)
+	}
+	h.SetJobsScheduler(true)
+	herr = h.checkSandboxGoLive(ctx, doc("PUBLIC", "pi-1"))
+	if herr == nil || !strings.Contains(herr.Msg, "charged nothing") || !strings.Contains(herr.Msg, "fence: no worker is open to sandboxes yet") {
+		t.Fatalf("unpriced and a gate failing: %+v", herr)
 	}
 }

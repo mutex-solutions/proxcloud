@@ -966,9 +966,11 @@ first run.
    written its VM firewall and taken its `unsecured` taint off. **Check the release gates** on
    the Ready card reads the four gates without changing anything
    ([The sandbox provider](#the-sandbox-provider)).
-7. **Go live.** On the provider's page under **Cloud providers**, set a price for sandbox
-   minutes, choose a status other than Disabled and save: the save is refused while a gate does
-   not hold, or while the scheduler is off. Attach the provider to projects as the two others.
+7. **Go live.** Add a price rule for sandbox minutes to the price plan (**System**, **Price
+   plans**, resource type `sandbox`; the Platform setup defaults add none, see below). Then, on
+   the provider's page under **Cloud providers**, choose a status other than Disabled and save:
+   the save is refused while a gate does not hold, while the scheduler is off, or while no rule
+   prices sandbox minutes. Attach the provider to projects as the two others.
    The self-signed certificate of `*.<domain>` is on the Ready card for clients to trust.
 
 **What a tenant sees.** Nothing until the provider is live and attached to the tenant's project.
@@ -1024,7 +1026,7 @@ warns until the next apply writes it again.
 | `dns` | Up to three resolvers of the sandbox machines; none takes the platform network's. |
 | `proxyAddress` | Where sandbox-proxy answers. `shared`: an address of `metallbRange` (not ArgoCD's). `separate`: a host address of the platform network outside every range, which the sandbox cluster's own MetalLB announces. |
 | `domain` | A sandbox answers at `https://<port>-<id>.<domain>`. |
-| `tls.mode` | `selfsigned` (also what an absent block means): the run makes one certificate for `*.<domain>`, keeps its key sealed and shows the certificate in `status.sandbox.certificate`. `secret` (the operator's certificate) is refused at the save: no route stores one yet. |
+| `tls.mode` | `selfsigned` (also what an absent block means): the run makes one server certificate for `*.<domain>` (five years; replaced by an apply in its last 30 days, see "The certificate" below), keeps its key sealed and shows the certificate in `status.sandbox.certificate`. `secret` (the operator's certificate) is refused at the save: no route stores one yet. |
 | `system` | `separate` only, and required there: the machines for sandbox-proxy and the sandbox controller, which never share a machine with a sandbox. |
 
 **How many sandboxes a machine holds.** By CPU a machine of n cores holds about n-1 sandboxes of
@@ -1294,17 +1296,30 @@ afterwards. So a platform's sandbox provider is refused "live" while the schedul
 (`409`), the Check's `scheduler` row says so while the settings ask for sandboxes, and the Ready
 card repeats it. That `409` names the scheduler and, in the same answer, every release gate that
 does not hold with its reason (or says that none fails), so turning the scheduler on is not
-followed by a second refusal you could not see coming. The same switch starts charging usage: the price rule for sandbox minutes holds a
-placeholder rate until you set one (or 0). The installer's sandbox providers are not asked for
-the scheduler.
+followed by a second refusal you could not see coming. The same switch starts charging usage. The
+installer's sandbox providers are not asked for the scheduler.
+
+**The price of a sandbox minute.** The price plan that the Platform setup defaults create has no
+rule for sandboxes: it prices servers and their traffic, volumes, addresses, images, snapshots
+and protection, and nothing adds a sandbox rule later. A resource that no rule matches is charged nothing, and no log
+line or bill says so. So a platform's sandbox provider is refused "live" (`409`, in the same
+answer as the scheduler and the gates) until an enabled public price plan that bills the provider
+has a rule of resource type `sandbox`. Add it under **System**, **Price plans**:
+[pricing-rate-card.md](pricing-rate-card.md) lists the default plan's rates per vCPU and per GB
+per minute, which are placeholders and not signed prices; a rule at 0 gives sandbox minutes away
+knowingly. A plan that is scoped to single billing profiles is not counted, and a rule deleted
+later is noticed at the provider's next save, not before. The installer's sandbox providers are
+not asked: check their price plan yourself ([managed-sandbox.md](managed-sandbox.md), Billing).
 
 **Switching sandboxes off.** The save of `placement: off` is refused (`409
 sandbox_provider_live`) while the sandbox provider is not disabled, and so is the run: every
-running sandbox would end without notice. Disable the provider, let its sandboxes end, then save
-and apply. A disabled provider is still read every minute for the projects that have a sandbox on
-it, so each one is ended and archived when it ends. Once the machines are gone and the pool is
-empty, the run takes the sandbox provider's placement away (below, "What an off does to the
-projects attached to the sandbox provider"), then takes `config.sandbox`, the
+running sandbox would end without notice. Such a run ends `failed` with `sandbox_refused` at its
+first stage, has changed nothing, and leaves the installation in the phase it had. Disable the
+provider, let its sandboxes end, then save and apply. A disabled provider is still read every
+minute for the projects that have a sandbox on it, so each one is ended and archived when it
+ends. Once the machines are gone and the pool is empty, the run takes the sandbox provider's
+placement away (below, "What an off does to the projects attached to the sandbox provider"), then
+takes `config.sandbox`, the
 `sandboxCidrs` entry and `secret.sandboxKubeconfig` off the Proxmox provider, writes the
 provider's isolation rules without the range (its DROPs and ACCEPTs go, the tenant pool's stay;
 read back before anything else is recorded), deletes the pool's firewall groups and IP sets from
@@ -1417,6 +1432,24 @@ projects' namespaces, which are inside `pc-sandbox`.
 (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` for the JavaScript SDK). `*.<domain>` must resolve to the
 proxy address where clients are: a DNS zone, a resolver entry on a workstation, or a wildcard
 service that maps a name to the address it contains.
+
+It is one server certificate, not a certificate authority: sandbox-proxy serves it as it is, and
+the file a client trusts is that same certificate, for `*.<domain>` and `<domain>`. A client
+built on OpenSSL, Go or Node accepts nothing else that was signed with its key. A client built on
+rustls (the E2B Python SDK from 2.36.0 on) does not read that mark on a certificate it is told to
+trust and accepts whatever the key signs. The key is in the Secret
+`sandbox-system/sandbox-proxy-tls`: give the file to the programs that call sandboxes, not to a
+system-wide trust store. It lives **five years**, and **nothing renews it but an apply**:
+a run makes a new one when it finds the stored one within 30 days of its end, made for another
+domain, or of the shape 0.12.0-rc.1 and rc.2 made (marked as an authority, which the E2B Python
+SDK from 2.36.0 on refuses from a server). The plan says so beforehand with the row
+`sandbox-certificate`. A platform that gets no apply in that time serves the certificate until
+it ends, and every client refuses it from then on: look at the plan before the five years are
+over. A new certificate is a new file: sandbox-proxy reads it within a few minutes without a
+restart and sandboxes keep running, but **every client must fetch the new file** from the Ready
+card, and its calls to a sandbox fail at the TLS handshake until it has. A file of 0.12.0-rc.1 or
+rc.2 must leave the client's trust store then: it is an authority's certificate, and a client
+that still trusts it accepts whatever its key signed.
 
 **Not in this release's code:** an operator's own certificate (`tls.mode secret` is refused at the
 save); waking a paused sandbox through sandbox-proxy (no wake URL is set); a sandbox registry,
@@ -1971,7 +2004,7 @@ stage is still trying.
 | `platform_disabled` | start | The switch, or template updates, is off | `--managed-services` |
 | `stage_unavailable` | any | A run recorded by another release names a stage this one does not have | No action in this release |
 | `tenants_exist` | Remove | Tenant clusters or databases still run on the platform (the message names up to five) | Delete them, **Remove again** |
-| `sandbox_refused` | 7 | The settings ask for another sandbox placement than the one a run built, or the run's BOM has no sandbox chart (a platform an earlier release installed, before its upgrade). Nothing was changed | Set `placement: off`, apply, then the other placement; or leave `spec.sandbox` out |
+| `sandbox_refused` | 1, 7 | The settings ask for another sandbox placement than the one a run built, the run's BOM has no sandbox chart (a platform an earlier release installed, before its upgrade), or they switch sandboxes off while the sandbox provider is live. Refused at stage 1, before anything is written: nothing was changed, and the installation keeps the phase it had. At stage 7 only when the provider was set live while the run was on its way, or its Proxmox provider fences another sandbox pool; the installation then reads `failed` | Set `placement: off`, apply, then the other placement; or leave `spec.sandbox` out; or disable the provider first |
 | `sandbox_access_failed` | 7 | Proxmox refused pool `proxcloud-sbx`, the ACL row of the sandbox group or the token of the sandbox cluster. The portal token writes them with the rights the setup scripts gave it. Nothing of the cluster was changed | The Check's `sandbox` row names what is missing: run the managed-services script again as root on a node, then **Retry** |
 | `machine_delete_stuck` | Remove | Cluster API is still deleting machines after 45 minutes, or (missing seed) a tagged VM could not be stopped or deleted | Delete the VM the message names in Proxmox, **Remove again** |
 | `volume_delete_failed` | Remove | A recorded volume could not be deleted with the CSI token | Check `csi@pve!csi` and the storage the message names, **Remove again** |

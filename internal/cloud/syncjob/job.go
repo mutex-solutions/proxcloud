@@ -65,6 +65,7 @@ type Job struct {
 	incidents     PVEIncidentRecorder
 	sdnLock       *lock.ShedLock
 	installedOn   func(ctx context.Context, serviceID string) (bool, error)
+	runActive     func(ctx context.Context, installationID string) (bool, error)
 	shareAccess   func(ctx context.Context, projectID string) error
 	staleSeeds    func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	loadBalancers func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
@@ -116,6 +117,14 @@ func (j *Job) WithSDNLock(l *lock.ShedLock) *Job { j.sdnLock = l; return j }
 // Only such a provider gets the provider-level isolation write; nil (the platform feature is off) = none does.
 func (j *Job) WithPlatformInstallations(f func(ctx context.Context, serviceID string) (bool, error)) *Job {
 	j.installedOn = f
+	return j
+}
+
+// WithPlatformRunActive wires whether a run of a managed-services installation is not finished. The sandbox pass asks
+// it to tell a provider whose sandboxes a run is still building from one that lost its kubeconfig (logSandboxWorkers);
+// nil = every missing kubeconfig is an error.
+func (j *Job) WithPlatformRunActive(f func(ctx context.Context, installationID string) (bool, error)) *Job {
+	j.runActive = f
 	return j
 }
 
@@ -286,7 +295,7 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 		}
 		j.startAtBoot(ctx, ps, es)
 		if err := j.reconcileSandboxWorkers(ctx, ps, es, !untrusted); err != nil {
-			j.log.Error("syncjob: sandbox workers", "serviceId", es.ID, "err", err)
+			j.logSandboxWorkers(ctx, es, err)
 		}
 	}
 }
