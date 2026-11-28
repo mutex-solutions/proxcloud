@@ -374,6 +374,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every previous BOM as an installation without sandboxes does, and `TestSandboxIsOffered` holds that a platform on
   it is taken `spec.sandbox` while one on a BOM from before 0.12.0 is refused it. No apply on such a platform was
   run on a lab by this change.
+- **The platform BOM on `main` is `0.12.0-dev` again, and the build carries the BOM of `0.12.0-rc.2`**
+  (`deploy/platform/platform-bom.yaml`, `deploy/platform/previous/0.12.0-rc.2.yaml`, sha256
+  `f45d5dd6e516798a5d178b01f81dd74dea4ec6df409eab1ceae8b99fd72c48a5`, the file of the tag byte for byte). The
+  candidate's commit left the BOM at `0.12.0-rc.2`, and the release gate refuses only `-dev`. A platform moved to
+  that BOM (the second candidate's drill) is not refused (`bom_unsupported`) under a later build while the file is
+  carried. Its pins are those of `main` and of `0.12.0-rc.1`, so the plan from it has one change, the release,
+  record only. `TestPreviousBOMsMoveCertManager` states that answer, and `TestUpgradeRollsNoMachine` compares
+  sixteen of the twenty-five previous BOMs with the BOM on `main`, none of them rolling. It names the sandbox chart
+  as `0.12.0-rc.1` does, so `TestSandboxIsOffered` holds that a platform on it is taken `spec.sandbox`. No apply on
+  such a platform was run on a lab by this change.
 
 - **Fourteen dependency updates (November)**, the open Dependabot pull requests taken together. Go modules:
   `aws-sdk-go-v2/service/s3` 1.116.0, `aws-sdk-go-v2/service/ecr` 1.69.0, `aws-sdk-go-v2/credentials` 1.21.3,
@@ -830,6 +840,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     certificate issued under its own name by another key passes the upload's check. No guest was given an MD2
     signature. A signature over another short digest that neither Go nor this check names (MD4, RSA-PSS with MD5
     or with RIPEMD-160) is taken: OpenSSL 3.5 signs none of them, so no HAProxy was asked. Not run on a lab.
+
+## [0.12.0-rc.2] - 2026-11-27
+
+The second release candidate of 0.12.0, published as a prerelease and never as `latest`. It is not the release:
+`v0.11.1` stays the current stable release, and the chart, the installer's ProxCloud pin and the Compose default
+still name it. It exists because of the drill of `v0.12.0-rc.1` (one lab, 2026-11-26), which found that candidate
+not fit to become 0.12.0: three defects of the sandbox code, no placement that reached "live", and no sandbox
+started. It holds what is under Unreleased above, which is what `main` held at `e8094012`, where its notes were
+closed: the fixes of the three defects (#515), what an off left behind and the writes a run repeated (#514), the
+load balancer fixes #486 to #492, the four follow-ups of the `v0.11.1` drills (#485), eight dependency updates
+(#517), two changes of CI (#499, #516), the kept BOM of the first candidate (#500), serverless function code that is
+switched off (#494, #496, #497, #513), and everything the first candidate held. A pull request merged after that
+commit and before the tag has its entry under Unreleased above and is not in the notes. The entries above are not
+repeated here. None of the fixes has run on a lab: the candidate exists for the second drill. Not for a production
+site.
+
+### Changed
+
+- **The platform BOM's release is `0.12.0-rc.2`** (`deploy/platform/platform-bom.yaml`), with the pins `main` had,
+  which are those of `0.12.0-rc.1`: the file differs from the first candidate's in the `release` line alone. No chart
+  of the product differs from its newest tag
+  (`git diff proxmox-kamaji-cluster-v0.1.19 -- deploy/charts/proxmox-kamaji-cluster`,
+  `git diff database-cluster-v0.5.2 -- deploy/charts/database-cluster`,
+  `git diff proxcloud-platform-v0.1.3 -- deploy/charts/proxcloud-platform` and
+  `git diff proxcloud-sandbox-v0.1.0 -- deploy/charts/proxcloud-sandbox` print nothing), so no chart tag is needed.
+  It is a release BOM, and the release gate passes on it and on the twenty-four previous BOMs.
+- **The plan from each previous BOM** (`PlanFor`, one control plane machine and one machine per group). From
+  0.12.0-rc.1 one change, the release, record only; allowed, with no part, no seed row, no machines row and no seed
+  backup; phrase `upgrade <name> to 0.12.0-rc.2`; the same one change for an installation that built `shared` or
+  `separate` under 0.12.0-rc.1, with nothing more in its settings plan. From 0.11.1 and its five candidates three
+  changes: the release (record only), `seed/pc-platform` 0.1.16 to 0.1.19 (class chart, stage `cluster`, wave 3) and
+  `workload/sandbox` to 0.1.0 (class added, stage `workload-platform`, wave 4); allowed, with no part. From 0.11.0,
+  0.11.0-rc.1 and 0.11.0-rc.2 four: those and `tenantCharts.kubernetes` 0.1.17 to 0.1.19, record only. From 0.10.2
+  and 0.10.2-rc.1 the same four (the tenant chart from 0.1.16). From 0.10.1, 0.10.1-rc.1 and 0.10.1-rc.2 six: those
+  and `cert-manager` v1.20.2 to v1.21.3 on the seed and on the platform cluster. From the nine BOMs on Kubernetes
+  1.35.10 a refusal by the pair gate (22 changes from 0.10.0 and 0.10.0-rc.1, 23 from the four of 0.9, 26 from the
+  three of 0.8).
+- **What an installed site gets at the upgrade** is under Unreleased above, Upgrade notes. From `v0.11.1`: the
+  database container of a Compose install is recreated once; every cluster with a load balancer controller is
+  offered an update of it; a project's delete is refused while the scheduler is off; a certificate signed over
+  SHA-1, MD5, MD2 or RIPEMD-160 is refused at the upload; a site with sandbox workers answers `503` on sandbox
+  creates until the first provider sync; an `ssh-dss` key is refused. From `v0.12.0-rc.1` also: on a platform that
+  built `shared` under it the `fence` gate fails, with the rule named, until one apply writes the ACCEPTs of the
+  machines' own cluster; a platform whose sandboxes were switched off under it keeps what that off left.
+- **A candidate moves nothing a final moves.** The app chart, the installer's ProxCloud pin and `DEFAULT_VERSION`
+  stay on `v0.11.1`.
+
+### Verified on a lab
+
+Nothing of this candidate. On `v0.12.0-rc.1`, on one lab of three Proxmox nodes (2026-11-26): the portal upgrade
+from `v0.11.1` in 26 s with the tag's digests, no Sandboxes block and a `400` on a platform of 0.11.1; the three-row
+plan and the move to the BOM with the rollout check on a real ArgoCD, in 56 s, with no machine, template, control
+plane or pod modified or deleted; the `capacity` row failing before any apply; `shared` built twice (the one ACL row
+taken from the portal token, only the sandbox group's templates new, the VM in the pool at an address of its range,
+the chart Healthy with the run's certificate, the node setup on the sandbox node only, `base` and `code-interpreter`
+pulled ahead at the pinned digests) and `separate` for ten minutes (the token minted and used for clone and start,
+the control plane as a pod on the `kamaji` machine); the pool, the ACL row and the token made and removed exactly,
+with Proxmox's access list byte-equal before and after; the provider sync fencing only the pool's VM, and from that
+machine 62 private targets with three tries each, 0 handshakes in 186, while the defect also cut the machine off its
+own cluster; the admission refusals, a runtime class fault failing `fence` in 0.13 s, "live" refused with the
+scheduler off and with gates failing; a load balancer smoke of a pair with TCP and UDP, twelve senders over ten
+cycles, none left unanswered. No placement reached "live" and no sandbox ever started on a lab.
+
+### Not verified
+
+- Everything this candidate fixes: the ACCEPTs on a real Proxmox, on a node with `bridge-nf-call-iptables` at 1 and
+  on one at 0; the run writing the isolation rules and reading them back; a timed sync during a build; an off with
+  the scheduler off and the apply after it; the port list `1:24,26:65535` on Proxmox, 25 closed and 587 open; an
+  off that leaves nothing; the pool, the row and the token written once.
+- The upgrade from `v0.12.0-rc.1`: the one-row move, the `fence` gate failing with the new text on a platform that
+  built `shared` under it, and one apply repairing it.
+- Go-live; a sandbox started through the E2B-compatible API or the native one; packets from inside a sandbox; the
+  pod and service addresses a sandbox machine reaches through the pod tunnel, which the sandbox chart's Cilium
+  policy alone decides; `separate` beyond its build; a switch of placement; a machine-replacing upgrade refused; a
+  new install; Remove.
+- The `503` window of a live sandbox site; the database container recreated once with the product's stack; the
+  controller update offer; the load balancer fixes and the follow-ups of #485; the sandbox invoice line on a sent
+  bill.
+- The candidate's images and its tag's workflows: they do not exist before the tag.
+
+### Known issues
+
+- With `shared`, code that escapes a sandbox is root on a machine of the platform cluster, beside every tenant's
+  control plane and database; the pod network is open to it. `separate` limits the same escape to the sandbox
+  cluster.
+- A private address on the platform bridge that is in no blocked network of the provider (the MetalLB range, another
+  site's or an older cluster's network, the metadata address) is closed to a sandbox machine by its VM firewall
+  alone; the cluster firewall has no rule for it.
+- A site with a live sandbox provider answers `503` on sandbox creates from the upgrade to the first provider sync.
+- With a Proxmox node that does not report its networks, a run waits at the step that writes the isolation rules,
+  the off included. An off whose rule write Proxmox refuses between its adds and its deletes leaves both rule sets,
+  and the rules must then be deleted by hand.
+- A sandbox resolver inside a blocked network is dropped, and no Check reads it.
+- Seen in the first drill and still true: switching `shared` on or off replaces the proxmox-csi node plugin's pods
+  on the other machines once; the disabled provider row keeps the mode and domain of the placement that is gone;
+  the off's plan does not name the provider settings and firewall objects it removes; the token of `separate` lives
+  until its Application is gone; an operator's cancel leaves the record in phase `failed`; switching the scheduler
+  on bills the whole current cycle at its first run; a waiting stage `cluster` can end its message with the
+  Application's last, old operation message.
+- The limits of the first candidate stand: a machine of 2 cores holds one sandbox of one vCPU; no sandbox registry,
+  custom templates or snapshots; no entry appliance; a self-signed certificate only; placeholder prices; the fixed
+  pool and token names.
+- Of the known issues of 0.11.1, five are answered (#488, #489, #490, #491, #492) and the project delete with the
+  scheduler off (#485); the others stand.
+- The full list is in `docs/releases/v0.12.0-rc.2.md`.
 
 ## [0.12.0-rc.1] - 2026-11-26
 
