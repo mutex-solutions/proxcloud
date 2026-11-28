@@ -93,7 +93,10 @@ func (h *Handler) PlatformSandboxOffRun(ctx context.Context, installationID stri
 //
 // A run records status.sandbox before it makes the first sandbox machine and takes it away after the last one is gone,
 // and stores a kubeconfig only in between: a provider with built sandboxes is never touched here, and neither is one
-// that is not DISABLED. It answers the ids of the rows it wrote.
+// that is not DISABLED. Nor is a row that carries the mark already: an off of this release, or this pass, wrote it,
+// and a kubeconfig that stands beside it was set by hand since, which is a placement (SandboxOffSince). Without that
+// the pass would take such a kubeconfig away at every start and the rows of what runs on its cluster would be ended.
+// It answers the ids of the rows it wrote.
 // ponytail: once at the start; a pass that fails is logged and waits for the next start.
 func (h *Handler) PlatformSandboxOffRepair(ctx context.Context) ([]string, error) {
 	if h.platform == nil {
@@ -108,6 +111,9 @@ func (h *Handler) PlatformSandboxOffRepair(ctx context.Context) ([]string, error
 		cfg, _ := row["config"].(map[string]any)
 		installationID, _ := cfg[platformlife.ProviderMarker].(string)
 		if cfg["provider"] != "sandbox" || installationID == "" || row["status"] != externalservice.StatusDisabled {
+			continue
+		}
+		if sb, _ := cfg["sandbox"].(map[string]any); sb[externalservice.SandboxOffSinceKey] != nil {
 			continue
 		}
 		in, err := h.platform.Get(ctx, installationID)

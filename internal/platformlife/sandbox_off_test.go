@@ -566,13 +566,17 @@ func TestSandboxProviderOffAndAdoptedAgain(t *testing.T) {
 	if since, _ := es().SandboxOffSince(); !since.Equal(at) {
 		t.Fatalf("the time of the off moved to %s", since)
 	}
-	// A kubeconfig set by hand on such a row is an identity again: the next off takes it away, the time stays.
+	// A kubeconfig set by hand on such a row is an identity again: the next off takes it away, and the time is that
+	// off's, since the row had a placement until then.
 	row["secret"].(map[string]any)["kubeconfig"] = "by-hand"
 	if _, off := es().SandboxOffSince(); off {
 		t.Fatal("a row with a kubeconfig reads as having no placement")
 	}
 	if !SandboxProviderOff(row, at.Add(time.Hour)) || dig(row, "secret", "kubeconfig") != nil {
 		t.Fatalf("a kubeconfig set by hand stays: %v", row["secret"])
+	}
+	if since, off := es().SandboxOffSince(); !off || !since.Equal(at.Add(time.Hour)) {
+		t.Fatalf("the off of a row that held a kubeconfig beside the mark: no placement since %s (%v), the off was at %s", since, off, at.Add(time.Hour))
 	}
 	// Rows that are not a sandbox provider's are never touched.
 	other := map[string]any{"config": map[string]any{"provider": "kamaji", ProviderMarker: "pi-1"}, "secret": map[string]any{"kubeconfig": "sealed"}}

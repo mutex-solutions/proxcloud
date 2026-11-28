@@ -182,8 +182,10 @@ var sandboxIdentityKeys = []string{"kubeconfig", "rotationKubeconfig", "proxyWak
 // cluster, or a node group, that is gone) and writes config.sandbox.offSince, which externalservice.SandboxOffSince
 // reads. From then on the provider's rows are ended without a call and a project attached to it can be deleted
 // (v0.12.0-rc.2, drill E5-A: the off left the row its dead kubeconfig, every teardown answered 401 and no attached
-// project could be deleted). false = the row is not a sandbox provider's, or says so already: the time of the first
-// off stays. The next build adopts the row and gives it a kubeconfig again (AdoptProvider takes the mark off).
+// project could be deleted). false = the row is not a sandbox provider's, or says so already: the time of that off
+// stays. A row that holds an identity beside the mark (a kubeconfig set by hand since) had a placement until now, so
+// the time is this off's: with the older one, the rows of what ran on that cluster would end before they began. The
+// next build adopts the row and gives it a kubeconfig again (AdoptProvider takes the mark off).
 func SandboxProviderOff(row map[string]any, at time.Time) bool {
 	cfg, _ := row["config"].(map[string]any)
 	if str(cfg, "provider") != "sandbox" {
@@ -202,7 +204,7 @@ func SandboxProviderOff(row map[string]any, at time.Time) bool {
 		sb = map[string]any{}
 		cfg["sandbox"] = sb
 	}
-	if str(sb, externalservice.SandboxOffSinceKey) == "" {
+	if held || str(sb, externalservice.SandboxOffSinceKey) == "" {
 		sb[externalservice.SandboxOffSinceKey] = at.UTC().Format(time.RFC3339)
 	}
 	return true

@@ -309,4 +309,12 @@ func TestProjectDeleteAfterSandboxesWereSwitchedOff(t *testing.T) {
 	if out := logs.String(); f.row(kept.ID) == nil || strings.Count(out, "level=WARN") != 1 {
 		t.Fatalf("a row with a kubeconfig beside the mark was read as having no placement: row %v, log\n%s", f.row(kept.ID), out)
 	}
+	// The API starts again. That row is not what rc.2 left (it carries the mark): the pass leaves it its kubeconfig,
+	// and its cluster is still the one that is asked.
+	if ids, err := adminH.PlatformSandboxOffRepair(ctx); err != nil || len(ids) != 0 {
+		t.Fatalf("the start-up pass took a kubeconfig set beside the mark: %v %v", ids, err)
+	}
+	if es, err := f.es.Get(ctx, "sbx"); err != nil || es.SandboxConfig().Kubeconfig != kubeconfig {
+		t.Fatalf("the kubeconfig beside the mark after the pass: %v", err)
+	}
 }
